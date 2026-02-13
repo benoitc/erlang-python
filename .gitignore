@@ -1,0 +1,41 @@
+# Rebar3
+_build/
+_checkouts/
+rebar.lock
+
+# NIF artifacts
+c_src/*.o
+priv/*.so
+priv/*.dll
+
+# Erlang
+*.beam
+*.plt
+erl_crash.dump
+*.ez
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+logs/
+log/
+ct_run.*
