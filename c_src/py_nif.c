@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#include <unistd.h>
+#include <pthread.h>
 
 /* ============================================================================
  * Timeout support
@@ -79,6 +81,11 @@ typedef struct {
     PyObject *globals;      /* Global namespace for this worker */
     PyObject *locals;       /* Local namespace */
     bool owns_gil;
+    /* Callback support */
+    int callback_pipe[2];   /* Pipe for callback IPC: [read, write] */
+    ErlNifPid callback_handler;
+    bool has_callback_handler;
+    ErlNifEnv *callback_env;  /* Env for building callback messages */
 } py_worker_t;
 
 static ErlNifResourceType *WORKER_RESOURCE_TYPE = NULL;
@@ -92,6 +99,10 @@ typedef struct {
 /* Global state */
 static bool g_python_initialized = false;
 static PyThreadState *g_main_thread_state = NULL;
+
+/* Thread-local callback context (set before Python execution) */
+static __thread py_worker_t *tl_current_worker = NULL;
+static __thread ErlNifEnv *tl_callback_env = NULL;
 
 /* Atoms */
 static ERL_NIF_TERM ATOM_OK;
@@ -107,6 +118,7 @@ static ERL_NIF_TERM ATOM_TIMEOUT;
 static ERL_NIF_TERM ATOM_NAN;
 static ERL_NIF_TERM ATOM_INFINITY;
 static ERL_NIF_TERM ATOM_NEG_INFINITY;
+static ERL_NIF_TERM ATOM_ERLANG_CALLBACK;
 
 /* ============================================================================
  * Forward declarations
@@ -116,6 +128,8 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj);
 static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term);
 static ERL_NIF_TERM make_error(ErlNifEnv *env, const char *reason);
 static ERL_NIF_TERM make_py_error(ErlNifEnv *env);
+static int create_erlang_module(void);
+static PyObject *erlang_call_impl(PyObject *self, PyObject *args);
 
 /* ============================================================================
  * Resource callbacks
@@ -123,6 +137,14 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env);
 
 static void worker_destructor(ErlNifEnv *env, void *obj) {
     py_worker_t *worker = (py_worker_t *)obj;
+
+    /* Close callback pipes */
+    if (worker->callback_pipe[0] >= 0) {
+        close(worker->callback_pipe[0]);
+    }
+    if (worker->callback_pipe[1] >= 0) {
+        close(worker->callback_pipe[1]);
+    }
 
     if (worker->thread_state != NULL) {
         PyEval_RestoreThread(worker->thread_state);
@@ -178,6 +200,13 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
 
     g_python_initialized = true;
 
+    /* Create the 'erlang' module for callbacks */
+    if (create_erlang_module() < 0) {
+        Py_Finalize();
+        g_python_initialized = false;
+        return make_error(env, "erlang_module_creation_failed");
+    }
+
     /* Save main thread state and release GIL for other threads */
     g_main_thread_state = PyEval_SaveThread();
 
@@ -230,7 +259,20 @@ static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     PyObject *builtins = PyEval_GetBuiltins();
     PyDict_SetItemString(worker->globals, "__builtins__", builtins);
 
+    /* Import erlang module into worker's namespace for callbacks */
+    PyObject *erlang_module = PyImport_ImportModule("erlang");
+    if (erlang_module != NULL) {
+        PyDict_SetItemString(worker->globals, "erlang", erlang_module);
+        Py_DECREF(erlang_module);
+    }
+
     worker->owns_gil = false;
+
+    /* Initialize callback state */
+    worker->callback_pipe[0] = -1;
+    worker->callback_pipe[1] = -1;
+    worker->has_callback_handler = false;
+    worker->callback_env = NULL;
 
     PyGILState_Release(gstate);
 
@@ -284,6 +326,10 @@ static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM
 
     /* Acquire GIL */
     PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Set thread-local worker context for callbacks */
+    tl_current_worker = worker;
+    tl_callback_env = env;
 
     /* Convert module name to C string */
     char *module_name = enif_alloc(module_bin.size + 1);
@@ -399,6 +445,10 @@ static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     }
 
 cleanup:
+    /* Clear thread-local context */
+    tl_current_worker = NULL;
+    tl_callback_env = NULL;
+
     enif_free(module_name);
     enif_free(func_name);
     PyGILState_Release(gstate);
@@ -423,6 +473,10 @@ static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     }
 
     PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Set thread-local worker context for callbacks */
+    tl_current_worker = worker;
+    tl_callback_env = env;
 
     /* Convert code to C string */
     char *code = enif_alloc(code_bin.size + 1);
@@ -486,6 +540,10 @@ static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM
         }
     }
 
+    /* Clear thread-local context */
+    tl_current_worker = NULL;
+    tl_callback_env = NULL;
+
     enif_free(code);
     PyGILState_Release(gstate);
 
@@ -508,6 +566,10 @@ static ERL_NIF_TERM nif_worker_exec(ErlNifEnv *env, int argc, const ERL_NIF_TERM
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
+    /* Set thread-local worker context for callbacks */
+    tl_current_worker = worker;
+    tl_callback_env = env;
+
     char *code = enif_alloc(code_bin.size + 1);
     memcpy(code, code_bin.data, code_bin.size);
     code[code_bin.size] = '\0';
@@ -528,6 +590,10 @@ static ERL_NIF_TERM nif_worker_exec(ErlNifEnv *env, int argc, const ERL_NIF_TERM
             result = ATOM_OK;
         }
     }
+
+    /* Clear thread-local context */
+    tl_current_worker = NULL;
+    tl_callback_env = NULL;
 
     enif_free(code);
     PyGILState_Release(gstate);
@@ -1174,6 +1240,260 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
 }
 
 /* ============================================================================
+ * Erlang callback module for Python
+ * ============================================================================ */
+
+/**
+ * Python implementation of erlang.call(name, *args)
+ *
+ * This function allows Python code to call registered Erlang functions.
+ * It sends a message to the callback handler and blocks until it receives
+ * a response via the callback pipe.
+ */
+static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
+    if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
+        PyErr_SetString(PyExc_RuntimeError, "No callback handler registered");
+        return NULL;
+    }
+
+    Py_ssize_t nargs = PyTuple_Size(args);
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
+        return NULL;
+    }
+
+    /* Get function name (first arg) */
+    PyObject *name_obj = PyTuple_GetItem(args, 0);
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+        return NULL;
+    }
+    const char *func_name = PyUnicode_AsUTF8(name_obj);
+    if (func_name == NULL) {
+        return NULL;
+    }
+
+    /* Build args list (remaining args) */
+    PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
+    if (call_args == NULL) {
+        return NULL;
+    }
+
+    /* Convert args to Erlang term */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    ERL_NIF_TERM func_term;
+    {
+        size_t len = strlen(func_name);
+        unsigned char *buf = enif_make_new_binary(msg_env, len, &func_term);
+        memcpy(buf, func_name, len);
+    }
+
+    ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
+    Py_DECREF(call_args);
+
+    /* Create callback reference */
+    uint64_t callback_id = (uint64_t)pthread_self();  /* Use thread ID as callback ID */
+    ERL_NIF_TERM id_term = enif_make_uint64(msg_env, callback_id);
+
+    /* Send message: {erlang_callback, CallbackId, FuncName, Args} */
+    ERL_NIF_TERM msg = enif_make_tuple4(msg_env,
+        ATOM_ERLANG_CALLBACK,
+        id_term,
+        func_term,
+        args_term);
+
+    /* Variables for response */
+    uint32_t response_len = 0;
+    ssize_t n;
+    char *response_data = NULL;
+
+    /* Release GIL before sending and waiting */
+    Py_BEGIN_ALLOW_THREADS
+
+    enif_send(NULL, &tl_current_worker->callback_handler, msg_env, msg);
+    enif_free_env(msg_env);
+
+    /* Wait for response by reading from pipe */
+    /* Response format: 4-byte length + msgpack/term data */
+    n = read(tl_current_worker->callback_pipe[0], &response_len, sizeof(response_len));
+
+    Py_END_ALLOW_THREADS
+
+    if (n != sizeof(response_len)) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response length");
+        return NULL;
+    }
+
+    /* Read response data */
+    response_data = enif_alloc(response_len);
+    if (response_data == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate response buffer");
+        return NULL;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    n = read(tl_current_worker->callback_pipe[0], response_data, response_len);
+    Py_END_ALLOW_THREADS
+
+    if (n != (ssize_t)response_len) {
+        enif_free(response_data);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response data");
+        return NULL;
+    }
+
+    /* Parse response: first byte is status (0=ok, 1=error), rest is the value */
+    uint8_t status = response_data[0];
+
+    /* Decode the binary response into an Erlang term, then to Python */
+    /* For simplicity, we use a simple encoding: status byte + string representation */
+    /* TODO: Use a more efficient binary encoding */
+
+    if (response_len < 2) {
+        enif_free(response_data);
+        if (status == 0) {
+            Py_RETURN_NONE;
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "Erlang callback failed");
+            return NULL;
+        }
+    }
+
+    /* Parse the result as a Python expression (simple approach) */
+    /* The response is: status_byte + python_repr_string */
+    char *result_str = response_data + 1;
+    size_t result_len = response_len - 1;
+
+    PyObject *result = NULL;
+    if (status == 0) {
+        /* Try to evaluate the result string as Python literal */
+        PyObject *ast_module = PyImport_ImportModule("ast");
+        if (ast_module != NULL) {
+            PyObject *literal_eval = PyObject_GetAttrString(ast_module, "literal_eval");
+            if (literal_eval != NULL) {
+                PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
+                if (arg != NULL) {
+                    result = PyObject_CallFunctionObjArgs(literal_eval, arg, NULL);
+                    Py_DECREF(arg);
+                    if (result == NULL) {
+                        /* If literal_eval fails, return as string */
+                        PyErr_Clear();
+                        result = PyUnicode_FromStringAndSize(result_str, result_len);
+                    }
+                }
+                Py_DECREF(literal_eval);
+            }
+            Py_DECREF(ast_module);
+        }
+        if (result == NULL) {
+            result = PyUnicode_FromStringAndSize(result_str, result_len);
+        }
+    } else {
+        /* Error case */
+        PyErr_SetString(PyExc_RuntimeError, result_str);
+    }
+
+    enif_free(response_data);
+    return result;
+}
+
+/* Python method definitions for erlang module */
+static PyMethodDef ErlangModuleMethods[] = {
+    {"call", erlang_call_impl, METH_VARARGS,
+     "Call a registered Erlang function.\n\n"
+     "Usage: erlang.call('func_name', arg1, arg2, ...)\n"
+     "Returns: The result from the Erlang function."},
+    {NULL, NULL, 0, NULL}
+};
+
+/* Module definition */
+static struct PyModuleDef ErlangModuleDef = {
+    PyModuleDef_HEAD_INIT,
+    "erlang",                           /* Module name */
+    "Interface for calling Erlang functions from Python.",  /* Docstring */
+    -1,                                 /* Size of per-interpreter state (-1 = global) */
+    ErlangModuleMethods                 /* Methods */
+};
+
+/**
+ * Create and register the 'erlang' module in Python.
+ * Called during Python initialization.
+ */
+static int create_erlang_module(void) {
+    PyObject *module = PyModule_Create(&ErlangModuleDef);
+    if (module == NULL) {
+        return -1;
+    }
+
+    /* Add module to sys.modules */
+    PyObject *sys_modules = PyImport_GetModuleDict();
+    if (PyDict_SetItemString(sys_modules, "erlang", module) < 0) {
+        Py_DECREF(module);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * NIF: Set callback handler for a worker.
+ * Args: WorkerRef, CallbackHandlerPid
+ */
+static ERL_NIF_TERM nif_set_callback_handler(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    py_worker_t *worker;
+
+    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
+        return make_error(env, "invalid_worker");
+    }
+
+    if (!enif_get_local_pid(env, argv[1], &worker->callback_handler)) {
+        return make_error(env, "invalid_pid");
+    }
+
+    /* Create pipe for callback responses */
+    if (pipe(worker->callback_pipe) < 0) {
+        return make_error(env, "pipe_failed");
+    }
+
+    worker->has_callback_handler = true;
+
+    /* Return the write end of the pipe as a file descriptor for Erlang to use */
+    return enif_make_tuple2(env, ATOM_OK,
+        enif_make_int(env, worker->callback_pipe[1]));
+}
+
+/**
+ * NIF: Send callback response to a worker.
+ * This is called by Erlang after executing the callback.
+ * Args: Fd, ResponseBinary
+ */
+static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    int fd;
+    ErlNifBinary response;
+
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    if (!enif_inspect_binary(env, argv[1], &response)) {
+        return make_error(env, "invalid_response");
+    }
+
+    /* Write length then data */
+    uint32_t len = (uint32_t)response.size;
+    ssize_t n = write(fd, &len, sizeof(len));
+    if (n != sizeof(len)) {
+        return make_error(env, "write_length_failed");
+    }
+
+    n = write(fd, response.data, response.size);
+    if (n != (ssize_t)response.size) {
+        return make_error(env, "write_data_failed");
+    }
+
+    return ATOM_OK;
+}
+
+/* ============================================================================
  * NIF setup
  * ============================================================================ */
 
@@ -1205,6 +1525,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_NAN = enif_make_atom(env, "nan");
     ATOM_INFINITY = enif_make_atom(env, "infinity");
     ATOM_NEG_INFINITY = enif_make_atom(env, "neg_infinity");
+    ATOM_ERLANG_CALLBACK = enif_make_atom(env, "erlang_callback");
 
     return 0;
 }
@@ -1250,7 +1571,11 @@ static ErlNifFunc nif_funcs[] = {
     {"gc", 1, nif_gc, 0},
     {"tracemalloc_start", 0, nif_tracemalloc_start, 0},
     {"tracemalloc_start", 1, nif_tracemalloc_start, 0},
-    {"tracemalloc_stop", 0, nif_tracemalloc_stop, 0}
+    {"tracemalloc_stop", 0, nif_tracemalloc_stop, 0},
+
+    /* Callback support */
+    {"set_callback_handler", 2, nif_set_callback_handler, 0},
+    {"send_callback_response", 2, nif_send_callback_response, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

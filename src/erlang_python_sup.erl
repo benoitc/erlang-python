@@ -10,6 +10,16 @@ start_link() ->
 init([]) ->
     NumWorkers = application:get_env(erlang_python, num_workers, 4),
 
+    %% Callback registry - must start before pool
+    CallbackSpec = #{
+        id => py_callback,
+        start => {py_callback, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_callback]
+    },
+
     PoolSpec = #{
         id => py_pool,
         start => {py_pool, start_link, [NumWorkers]},
@@ -20,6 +30,6 @@ init([]) ->
     },
 
     {ok, {
-        #{strategy => one_for_one, intensity => 5, period => 10},
-        [PoolSpec]
+        #{strategy => one_for_all, intensity => 5, period => 10},
+        [CallbackSpec, PoolSpec]
     }}.

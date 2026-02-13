@@ -43,7 +43,10 @@
     gc/1,
     tracemalloc_start/0,
     tracemalloc_start/1,
-    tracemalloc_stop/0
+    tracemalloc_stop/0,
+    register_function/2,
+    register_function/3,
+    unregister_function/1
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -249,3 +252,25 @@ tracemalloc_start(NFrame) when is_integer(NFrame), NFrame > 0 ->
 -spec tracemalloc_stop() -> ok | {error, term()}.
 tracemalloc_stop() ->
     py_nif:tracemalloc_stop().
+
+%%% ============================================================================
+%%% Erlang Function Registration
+%%% ============================================================================
+
+%% @doc Register an Erlang function to be callable from Python.
+%% Python code can then call: erlang.call('name', arg1, arg2, ...)
+%% The function should accept a list of arguments and return a term.
+-spec register_function(Name :: atom() | binary(), Fun :: fun((list()) -> term())) -> ok.
+register_function(Name, Fun) when is_function(Fun, 1) ->
+    py_callback:register(Name, Fun).
+
+%% @doc Register an Erlang module:function to be callable from Python.
+%% The function will be called as Module:Function(Args).
+-spec register_function(Name :: atom() | binary(), Module :: atom(), Function :: atom()) -> ok.
+register_function(Name, Module, Function) when is_atom(Module), is_atom(Function) ->
+    py_callback:register(Name, {Module, Function}).
+
+%% @doc Unregister a previously registered function.
+-spec unregister_function(Name :: atom() | binary()) -> ok.
+unregister_function(Name) ->
+    py_callback:unregister(Name).

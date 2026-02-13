@@ -22,7 +22,8 @@
     test_error_handling/1,
     test_version/1,
     test_memory_stats/1,
-    test_gc/1
+    test_gc/1,
+    test_erlang_callback/1
 ]).
 
 all() ->
@@ -39,7 +40,8 @@ all() ->
         test_error_handling,
         test_version,
         test_memory_stats,
-        test_gc
+        test_gc,
+        test_erlang_callback
     ].
 
 init_per_suite(Config) ->
@@ -212,5 +214,18 @@ test_gc(_Config) ->
 
     {ok, Collected2} = py:gc(2),
     true = is_integer(Collected2),
+
+    ok.
+
+test_erlang_callback(_Config) ->
+    %% Register a simple function that adds two numbers
+    py:register_function(add, fun([A, B]) -> A + B end),
+
+    %% Call from Python - erlang module is auto-imported
+    {ok, Result1} = py:eval(<<"erlang.call('add', 5, 7)">>),
+    12 = Result1,
+
+    %% Unregister
+    py:unregister_function(add),
 
     ok.

@@ -28,7 +28,9 @@
     gc/1,
     tracemalloc_start/0,
     tracemalloc_start/1,
-    tracemalloc_stop/0
+    tracemalloc_stop/0,
+    set_callback_handler/2,
+    send_callback_response/2
 ]).
 
 -on_load(load_nif/0).
@@ -203,4 +205,19 @@ tracemalloc_start(_NFrame) ->
 %% @doc Stop memory tracing.
 -spec tracemalloc_stop() -> ok | {error, term()}.
 tracemalloc_stop() ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Callback Support
+%%% ============================================================================
+
+%% @doc Set callback handler process for a worker.
+%% Returns {ok, Fd} where Fd is the file descriptor for sending responses.
+-spec set_callback_handler(reference(), pid()) -> {ok, integer()} | {error, term()}.
+set_callback_handler(_WorkerRef, _HandlerPid) ->
+    ?NIF_STUB.
+
+%% @doc Send a callback response to a worker via file descriptor.
+-spec send_callback_response(integer(), binary()) -> ok | {error, term()}.
+send_callback_response(_Fd, _Response) ->
     ?NIF_STUB.

@@ -41,24 +41,52 @@ init(Parent) ->
     %% Create worker context
     case py_nif:worker_new() of
         {ok, WorkerRef} ->
-            Parent ! {self(), ready},
-            loop(WorkerRef, Parent);
+            %% Spawn a separate callback handler process
+            CallbackHandler = spawn_link(fun() -> callback_handler_loop() end),
+            %% Set up callback handler with the separate process
+            case py_nif:set_callback_handler(WorkerRef, CallbackHandler) of
+                {ok, CallbackFd} ->
+                    CallbackHandler ! {set_fd, CallbackFd},
+                    Parent ! {self(), ready},
+                    loop(WorkerRef, Parent, CallbackFd);
+                {error, Reason} ->
+                    exit(CallbackHandler, kill),
+                    Parent ! {self(), {error, Reason}}
+            end;
         {error, Reason} ->
             Parent ! {self(), {error, Reason}}
     end.
 
-loop(WorkerRef, _Parent) ->
+%% Separate process that handles callbacks from Python
+callback_handler_loop() ->
+    receive
+        {set_fd, CallbackFd} ->
+            callback_handler_loop(CallbackFd)
+    end.
+
+callback_handler_loop(CallbackFd) ->
+    receive
+        {erlang_callback, _CallbackId, FuncName, Args} ->
+            handle_callback(CallbackFd, FuncName, Args),
+            callback_handler_loop(CallbackFd);
+        shutdown ->
+            ok;
+        _Other ->
+            callback_handler_loop(CallbackFd)
+    end.
+
+loop(WorkerRef, _Parent, _CallbackFd) ->
     receive
         {py_request, Request} ->
             handle_request(WorkerRef, Request),
-            loop(WorkerRef, _Parent);
+            loop(WorkerRef, _Parent, _CallbackFd);
 
         shutdown ->
             py_nif:worker_destroy(WorkerRef),
             ok;
 
         _Other ->
-            loop(WorkerRef, _Parent)
+            loop(WorkerRef, _Parent, _CallbackFd)
     end.
 
 %%% ============================================================================
@@ -138,6 +166,104 @@ stream_chunks(WorkerRef, GenRef, Ref, Caller) ->
         {error, Error} ->
             Caller ! {py_error, Ref, Error}
     end.
+
+%%% ============================================================================
+%%% Callback Handling
+%%% ============================================================================
+
+handle_callback(CallbackFd, FuncName, Args) ->
+    %% Convert Args from tuple to list if needed
+    ArgsList = case Args of
+        T when is_tuple(T) -> tuple_to_list(T);
+        L when is_list(L) -> L;
+        _ -> [Args]
+    end,
+    %% Execute the registered function
+    case py_callback:execute(FuncName, ArgsList) of
+        {ok, Result} ->
+            %% Encode result as Python-parseable string
+            %% Format: status_byte (0=ok) + python_repr
+            ResultStr = term_to_python_repr(Result),
+            Response = <<0, ResultStr/binary>>,
+            py_nif:send_callback_response(CallbackFd, Response);
+        {error, {not_found, Name}} ->
+            ErrMsg = iolist_to_binary(io_lib:format("Function '~s' not registered", [Name])),
+            Response = <<1, ErrMsg/binary>>,
+            py_nif:send_callback_response(CallbackFd, Response);
+        {error, {Class, Reason, _Stack}} ->
+            ErrMsg = iolist_to_binary(io_lib:format("~p: ~p", [Class, Reason])),
+            Response = <<1, ErrMsg/binary>>,
+            py_nif:send_callback_response(CallbackFd, Response)
+    end.
+
+%% Convert Erlang term to Python-parseable string representation
+term_to_python_repr(Term) when is_integer(Term) ->
+    integer_to_binary(Term);
+term_to_python_repr(Term) when is_float(Term) ->
+    float_to_binary(Term, [{decimals, 17}, compact]);
+term_to_python_repr(true) ->
+    <<"True">>;
+term_to_python_repr(false) ->
+    <<"False">>;
+term_to_python_repr(none) ->
+    <<"None">>;
+term_to_python_repr(nil) ->
+    <<"None">>;
+term_to_python_repr(undefined) ->
+    <<"None">>;
+term_to_python_repr(Term) when is_atom(Term) ->
+    %% Convert atom to Python string
+    AtomStr = atom_to_binary(Term, utf8),
+    <<"\"", AtomStr/binary, "\"">>;
+term_to_python_repr(Term) when is_binary(Term) ->
+    %% Escape binary as Python string
+    Escaped = escape_string(Term),
+    <<"\"", Escaped/binary, "\"">>;
+term_to_python_repr(Term) when is_list(Term) ->
+    %% Check if it's a string (list of integers)
+    case io_lib:printable_list(Term) of
+        true ->
+            Bin = list_to_binary(Term),
+            Escaped = escape_string(Bin),
+            <<"\"", Escaped/binary, "\"">>;
+        false ->
+            Items = [term_to_python_repr(E) || E <- Term],
+            Joined = join_binaries(Items, <<", ">>),
+            <<"[", Joined/binary, "]">>
+    end;
+term_to_python_repr(Term) when is_tuple(Term) ->
+    Items = [term_to_python_repr(E) || E <- tuple_to_list(Term)],
+    Joined = join_binaries(Items, <<", ">>),
+    case length(Items) of
+        1 -> <<"(", Joined/binary, ",)">>;
+        _ -> <<"(", Joined/binary, ")">>
+    end;
+term_to_python_repr(Term) when is_map(Term) ->
+    Items = maps:fold(fun(K, V, Acc) ->
+        KeyRepr = term_to_python_repr(K),
+        ValRepr = term_to_python_repr(V),
+        [<<KeyRepr/binary, ": ", ValRepr/binary>> | Acc]
+    end, [], Term),
+    Joined = join_binaries(Items, <<", ">>),
+    <<"{", Joined/binary, "}">>;
+term_to_python_repr(_Term) ->
+    %% Fallback - return None for unsupported types
+    <<"None">>.
+
+escape_string(Bin) ->
+    %% Escape special characters for Python string
+    binary:replace(
+        binary:replace(
+            binary:replace(
+                binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
+                <<"\"">>, <<"\\\"">>, [global]),
+            <<"\n">>, <<"\\n">>, [global]),
+        <<"\r">>, <<"\\r">>, [global]).
+
+join_binaries([], _Sep) -> <<>>;
+join_binaries([H], _Sep) -> H;
+join_binaries([H|T], Sep) ->
+    lists:foldl(fun(E, Acc) -> <<Acc/binary, Sep/binary, E/binary>> end, H, T).
 
 %%% ============================================================================
 %%% Internal Functions
