@@ -22,7 +22,13 @@
     worker_recv/2,
     import_module/2,
     get_attr/3,
-    version/0
+    version/0,
+    memory_stats/0,
+    gc/0,
+    gc/1,
+    tracemalloc_start/0,
+    tracemalloc_start/1,
+    tracemalloc_stop/0
 ]).
 
 -on_load(load_nif/0).
@@ -158,4 +164,43 @@ get_attr(_WorkerRef, _ObjRef, _AttrName) ->
 %% @doc Get Python version info.
 -spec version() -> {ok, binary()} | {error, term()}.
 version() ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Memory and GC
+%%% ============================================================================
+
+%% @doc Get Python memory statistics.
+%% Returns a map with gc_stats, gc_count, gc_threshold, and optionally
+%% traced_memory_current and traced_memory_peak if tracemalloc is enabled.
+-spec memory_stats() -> {ok, map()} | {error, term()}.
+memory_stats() ->
+    ?NIF_STUB.
+
+%% @doc Force Python garbage collection.
+%% Returns the number of unreachable objects collected.
+-spec gc() -> {ok, integer()} | {error, term()}.
+gc() ->
+    ?NIF_STUB.
+
+%% @doc Force garbage collection of a specific generation.
+%% Generation: 0, 1, or 2 (default 2 = full collection).
+-spec gc(0..2) -> {ok, integer()} | {error, term()}.
+gc(_Generation) ->
+    ?NIF_STUB.
+
+%% @doc Start memory tracing with tracemalloc.
+%% This allows tracking memory allocations.
+-spec tracemalloc_start() -> ok | {error, term()}.
+tracemalloc_start() ->
+    ?NIF_STUB.
+
+%% @doc Start memory tracing with specified number of frames.
+-spec tracemalloc_start(pos_integer()) -> ok | {error, term()}.
+tracemalloc_start(_NFrame) ->
+    ?NIF_STUB.
+
+%% @doc Stop memory tracing.
+-spec tracemalloc_stop() -> ok | {error, term()}.
+tracemalloc_stop() ->
     ?NIF_STUB.

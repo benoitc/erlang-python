@@ -678,6 +678,202 @@ static ERL_NIF_TERM nif_version(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     return enif_make_tuple2(env, ATOM_OK, version_bin);
 }
 
+/**
+ * Get Python memory statistics.
+ * Returns a map with memory stats.
+ */
+static ERL_NIF_TERM nif_memory_stats(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    if (!g_python_initialized) {
+        return make_error(env, "python_not_initialized");
+    }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Import gc module */
+    PyObject *gc_module = PyImport_ImportModule("gc");
+    if (gc_module == NULL) {
+        PyGILState_Release(gstate);
+        return make_error(env, "gc_import_failed");
+    }
+
+    /* Get gc.get_stats() */
+    PyObject *stats = PyObject_CallMethod(gc_module, "get_stats", NULL);
+
+    ERL_NIF_TERM result_map = enif_make_new_map(env);
+
+    if (stats != NULL && PyList_Check(stats)) {
+        /* gc.get_stats() returns a list of dicts for each generation */
+        Py_ssize_t num_gens = PyList_Size(stats);
+        ERL_NIF_TERM *gen_stats = enif_alloc(sizeof(ERL_NIF_TERM) * num_gens);
+
+        for (Py_ssize_t i = 0; i < num_gens; i++) {
+            PyObject *gen = PyList_GetItem(stats, i);
+            gen_stats[i] = py_to_term(env, gen);
+        }
+
+        ERL_NIF_TERM gc_stats_list = enif_make_list_from_array(env, gen_stats, num_gens);
+        enif_free(gen_stats);
+
+        enif_make_map_put(env, result_map,
+            enif_make_atom(env, "gc_stats"), gc_stats_list, &result_map);
+
+        Py_DECREF(stats);
+    }
+
+    /* Get gc.get_count() */
+    PyObject *counts = PyObject_CallMethod(gc_module, "get_count", NULL);
+    if (counts != NULL && PyTuple_Check(counts)) {
+        ERL_NIF_TERM count_term = py_to_term(env, counts);
+        enif_make_map_put(env, result_map,
+            enif_make_atom(env, "gc_count"), count_term, &result_map);
+        Py_DECREF(counts);
+    }
+
+    /* Get gc.get_threshold() */
+    PyObject *threshold = PyObject_CallMethod(gc_module, "get_threshold", NULL);
+    if (threshold != NULL && PyTuple_Check(threshold)) {
+        ERL_NIF_TERM threshold_term = py_to_term(env, threshold);
+        enif_make_map_put(env, result_map,
+            enif_make_atom(env, "gc_threshold"), threshold_term, &result_map);
+        Py_DECREF(threshold);
+    }
+
+    Py_DECREF(gc_module);
+
+    /* Try to get tracemalloc stats if available */
+    PyObject *tracemalloc = PyImport_ImportModule("tracemalloc");
+    if (tracemalloc != NULL) {
+        /* Check if tracing is enabled */
+        PyObject *is_tracing = PyObject_CallMethod(tracemalloc, "is_tracing", NULL);
+        if (is_tracing != NULL && PyObject_IsTrue(is_tracing)) {
+            PyObject *current_traced = PyObject_CallMethod(tracemalloc, "get_traced_memory", NULL);
+            if (current_traced != NULL && PyTuple_Check(current_traced)) {
+                ERL_NIF_TERM current = py_to_term(env, PyTuple_GetItem(current_traced, 0));
+                ERL_NIF_TERM peak = py_to_term(env, PyTuple_GetItem(current_traced, 1));
+                enif_make_map_put(env, result_map,
+                    enif_make_atom(env, "traced_memory_current"), current, &result_map);
+                enif_make_map_put(env, result_map,
+                    enif_make_atom(env, "traced_memory_peak"), peak, &result_map);
+                Py_DECREF(current_traced);
+            }
+        }
+        Py_XDECREF(is_tracing);
+        Py_DECREF(tracemalloc);
+    }
+    PyErr_Clear();  /* Clear any import errors */
+
+    PyGILState_Release(gstate);
+
+    return enif_make_tuple2(env, ATOM_OK, result_map);
+}
+
+/**
+ * Force Python garbage collection.
+ * Returns the number of unreachable objects collected.
+ */
+static ERL_NIF_TERM nif_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    if (!g_python_initialized) {
+        return make_error(env, "python_not_initialized");
+    }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Import gc module and call gc.collect() */
+    PyObject *gc_module = PyImport_ImportModule("gc");
+    if (gc_module == NULL) {
+        PyGILState_Release(gstate);
+        return make_error(env, "gc_import_failed");
+    }
+
+    /* Optional generation argument */
+    int generation = 2;  /* Full collection by default */
+    if (argc > 0) {
+        enif_get_int(env, argv[0], &generation);
+    }
+
+    PyObject *result = PyObject_CallMethod(gc_module, "collect", "i", generation);
+    Py_DECREF(gc_module);
+
+    ERL_NIF_TERM ret;
+    if (result == NULL) {
+        ret = make_py_error(env);
+    } else {
+        long collected = PyLong_AsLong(result);
+        Py_DECREF(result);
+        ret = enif_make_tuple2(env, ATOM_OK, enif_make_long(env, collected));
+    }
+
+    PyGILState_Release(gstate);
+    return ret;
+}
+
+/**
+ * Start memory tracing.
+ */
+static ERL_NIF_TERM nif_tracemalloc_start(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    if (!g_python_initialized) {
+        return make_error(env, "python_not_initialized");
+    }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    PyObject *tracemalloc = PyImport_ImportModule("tracemalloc");
+    if (tracemalloc == NULL) {
+        PyGILState_Release(gstate);
+        return make_error(env, "tracemalloc_import_failed");
+    }
+
+    int nframe = 1;
+    if (argc > 0) {
+        enif_get_int(env, argv[0], &nframe);
+    }
+
+    PyObject *result = PyObject_CallMethod(tracemalloc, "start", "i", nframe);
+    Py_DECREF(tracemalloc);
+
+    ERL_NIF_TERM ret;
+    if (result == NULL) {
+        ret = make_py_error(env);
+    } else {
+        Py_DECREF(result);
+        ret = ATOM_OK;
+    }
+
+    PyGILState_Release(gstate);
+    return ret;
+}
+
+/**
+ * Stop memory tracing.
+ */
+static ERL_NIF_TERM nif_tracemalloc_stop(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    if (!g_python_initialized) {
+        return make_error(env, "python_not_initialized");
+    }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    PyObject *tracemalloc = PyImport_ImportModule("tracemalloc");
+    if (tracemalloc == NULL) {
+        PyGILState_Release(gstate);
+        return make_error(env, "tracemalloc_import_failed");
+    }
+
+    PyObject *result = PyObject_CallMethod(tracemalloc, "stop", NULL);
+    Py_DECREF(tracemalloc);
+
+    ERL_NIF_TERM ret;
+    if (result == NULL) {
+        ret = make_py_error(env);
+    } else {
+        Py_DECREF(result);
+        ret = ATOM_OK;
+    }
+
+    PyGILState_Release(gstate);
+    return ret;
+}
+
 /* ============================================================================
  * Type conversion: Python -> Erlang
  * ============================================================================ */
@@ -1046,7 +1242,15 @@ static ErlNifFunc nif_funcs[] = {
     {"get_attr", 3, nif_get_attr, ERL_NIF_DIRTY_JOB_IO_BOUND},
 
     /* Info */
-    {"version", 0, nif_version, 0}
+    {"version", 0, nif_version, 0},
+
+    /* Memory and GC */
+    {"memory_stats", 0, nif_memory_stats, 0},
+    {"gc", 0, nif_gc, 0},
+    {"gc", 1, nif_gc, 0},
+    {"tracemalloc_start", 0, nif_tracemalloc_start, 0},
+    {"tracemalloc_start", 1, nif_tracemalloc_start, 0},
+    {"tracemalloc_stop", 0, nif_tracemalloc_stop, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

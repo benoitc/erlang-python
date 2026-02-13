@@ -20,7 +20,9 @@
     test_special_floats/1,
     test_streaming/1,
     test_error_handling/1,
-    test_version/1
+    test_version/1,
+    test_memory_stats/1,
+    test_gc/1
 ]).
 
 all() ->
@@ -35,7 +37,9 @@ all() ->
         test_special_floats,
         test_streaming,
         test_error_handling,
-        test_version
+        test_version,
+        test_memory_stats,
+        test_gc
     ].
 
 init_per_suite(Config) ->
@@ -172,4 +176,41 @@ test_version(_Config) ->
     {ok, Version} = py:version(),
     true = is_binary(Version),
     true = byte_size(Version) > 0,
+    ok.
+
+test_memory_stats(_Config) ->
+    {ok, Stats} = py:memory_stats(),
+    true = is_map(Stats),
+    %% Check that we have GC stats
+    true = maps:is_key(gc_stats, Stats),
+    true = maps:is_key(gc_count, Stats),
+    true = maps:is_key(gc_threshold, Stats),
+
+    %% Test tracemalloc
+    ok = py:tracemalloc_start(),
+    %% Allocate some memory
+    {ok, _} = py:eval(<<"[x**2 for x in range(1000)]">>),
+    {ok, StatsWithTrace} = py:memory_stats(),
+    true = maps:is_key(traced_memory_current, StatsWithTrace),
+    true = maps:is_key(traced_memory_peak, StatsWithTrace),
+    ok = py:tracemalloc_stop(),
+
+    ok.
+
+test_gc(_Config) ->
+    %% Test basic GC
+    {ok, Collected} = py:gc(),
+    true = is_integer(Collected),
+    true = Collected >= 0,
+
+    %% Test generation-specific GC
+    {ok, Collected0} = py:gc(0),
+    true = is_integer(Collected0),
+
+    {ok, Collected1} = py:gc(1),
+    true = is_integer(Collected1),
+
+    {ok, Collected2} = py:gc(2),
+    true = is_integer(Collected2),
+
     ok.

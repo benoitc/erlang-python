@@ -37,7 +37,13 @@
     stream/4,
     stream_eval/1,
     stream_eval/2,
-    version/0
+    version/0,
+    memory_stats/0,
+    gc/0,
+    gc/1,
+    tracemalloc_start/0,
+    tracemalloc_start/1,
+    tracemalloc_stop/0
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -195,3 +201,51 @@ stream_eval(Code, Locals) ->
 -spec version() -> {ok, binary()} | {error, term()}.
 version() ->
     py_nif:version().
+
+%%% ============================================================================
+%%% Memory and GC
+%%% ============================================================================
+
+%% @doc Get Python memory statistics.
+%% Returns a map containing:
+%% - gc_stats: List of per-generation GC statistics
+%% - gc_count: Tuple of object counts per generation
+%% - gc_threshold: Collection thresholds per generation
+%% - traced_memory_current: Current traced memory (if tracemalloc enabled)
+%% - traced_memory_peak: Peak traced memory (if tracemalloc enabled)
+-spec memory_stats() -> {ok, map()} | {error, term()}.
+memory_stats() ->
+    py_nif:memory_stats().
+
+%% @doc Force Python garbage collection.
+%% Performs a full collection (all generations).
+%% Returns the number of unreachable objects collected.
+-spec gc() -> {ok, integer()} | {error, term()}.
+gc() ->
+    py_nif:gc().
+
+%% @doc Force garbage collection of a specific generation.
+%% Generation 0 collects only the youngest objects.
+%% Generation 1 collects generations 0 and 1.
+%% Generation 2 (default) performs a full collection.
+-spec gc(0..2) -> {ok, integer()} | {error, term()}.
+gc(Generation) when Generation >= 0, Generation =< 2 ->
+    py_nif:gc(Generation).
+
+%% @doc Start memory allocation tracing.
+%% After starting, memory_stats() will include traced_memory_current
+%% and traced_memory_peak values.
+-spec tracemalloc_start() -> ok | {error, term()}.
+tracemalloc_start() ->
+    py_nif:tracemalloc_start().
+
+%% @doc Start memory tracing with specified frame depth.
+%% Higher frame counts provide more detailed tracebacks but use more memory.
+-spec tracemalloc_start(pos_integer()) -> ok | {error, term()}.
+tracemalloc_start(NFrame) when is_integer(NFrame), NFrame > 0 ->
+    py_nif:tracemalloc_start(NFrame).
+
+%% @doc Stop memory allocation tracing.
+-spec tracemalloc_stop() -> ok | {error, term()}.
+tracemalloc_stop() ->
+    py_nif:tracemalloc_stop().
