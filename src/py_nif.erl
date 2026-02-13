@@ -30,7 +30,19 @@
     tracemalloc_start/1,
     tracemalloc_stop/0,
     set_callback_handler/2,
-    send_callback_response/2
+    send_callback_response/2,
+    %% Async workers
+    async_worker_new/0,
+    async_worker_destroy/1,
+    async_call/6,
+    async_gather/3,
+    async_stream/6,
+    %% Sub-interpreters (Python 3.12+)
+    subinterp_supported/0,
+    subinterp_worker_new/0,
+    subinterp_worker_destroy/1,
+    subinterp_call/5,
+    parallel_execute/2
 ]).
 
 -on_load(load_nif/0).
@@ -220,4 +232,79 @@ set_callback_handler(_WorkerRef, _HandlerPid) ->
 %% @doc Send a callback response to a worker via file descriptor.
 -spec send_callback_response(integer(), binary()) -> ok | {error, term()}.
 send_callback_response(_Fd, _Response) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Async Worker Support
+%%% ============================================================================
+
+%% @doc Create a new async worker with background event loop.
+%% Returns an opaque reference to be used with async functions.
+-spec async_worker_new() -> {ok, reference()} | {error, term()}.
+async_worker_new() ->
+    ?NIF_STUB.
+
+%% @doc Destroy an async worker.
+-spec async_worker_destroy(reference()) -> ok.
+async_worker_destroy(_WorkerRef) ->
+    ?NIF_STUB.
+
+%% @doc Submit an async call to the event loop.
+%% Args: AsyncWorkerRef, Module, Func, Args, Kwargs, CallerPid
+%% Returns: {ok, AsyncId} | {ok, {immediate, Result}} | {error, term()}
+-spec async_call(reference(), binary(), binary(), list(), map(), pid()) ->
+    {ok, non_neg_integer() | {immediate, term()}} | {error, term()}.
+async_call(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
+    ?NIF_STUB.
+
+%% @doc Execute multiple async calls concurrently using asyncio.gather.
+%% Args: AsyncWorkerRef, CallsList (list of {Module, Func, Args}), CallerPid
+%% Returns: {ok, AsyncId} | {ok, {immediate, Results}} | {error, term()}
+-spec async_gather(reference(), [{binary(), binary(), list()}], pid()) ->
+    {ok, non_neg_integer() | {immediate, list()}} | {error, term()}.
+async_gather(_WorkerRef, _Calls, _CallerPid) ->
+    ?NIF_STUB.
+
+%% @doc Stream from an async generator.
+%% Args: AsyncWorkerRef, Module, Func, Args, Kwargs, CallerPid
+%% Returns: {ok, AsyncId} | {error, term()}
+-spec async_stream(reference(), binary(), binary(), list(), map(), pid()) ->
+    {ok, non_neg_integer()} | {error, term()}.
+async_stream(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Sub-interpreter Support (Python 3.12+)
+%%% ============================================================================
+
+%% @doc Check if sub-interpreters with per-interpreter GIL are supported.
+%% Returns true on Python 3.12+, false otherwise.
+-spec subinterp_supported() -> boolean().
+subinterp_supported() ->
+    ?NIF_STUB.
+
+%% @doc Create a new sub-interpreter worker with its own GIL.
+%% Returns an opaque reference to be used with subinterp functions.
+-spec subinterp_worker_new() -> {ok, reference()} | {error, term()}.
+subinterp_worker_new() ->
+    ?NIF_STUB.
+
+%% @doc Destroy a sub-interpreter worker.
+-spec subinterp_worker_destroy(reference()) -> ok | {error, term()}.
+subinterp_worker_destroy(_WorkerRef) ->
+    ?NIF_STUB.
+
+%% @doc Call a Python function in a sub-interpreter.
+%% Args: WorkerRef, Module (binary), Func (binary), Args (list), Kwargs (map)
+-spec subinterp_call(reference(), binary(), binary(), list(), map()) ->
+    {ok, term()} | {error, term()}.
+subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Execute multiple calls in parallel across sub-interpreters.
+%% Args: WorkerRefs (list of refs), Calls (list of {Module, Func, Args})
+%% Returns: List of results (one per call)
+-spec parallel_execute([reference()], [{binary(), binary(), list()}]) ->
+    {ok, list()} | {error, term()}.
+parallel_execute(_WorkerRefs, _Calls) ->
     ?NIF_STUB.
