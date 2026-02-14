@@ -122,8 +122,16 @@ if(APPLE)
     )
     # Add CoreFoundation framework
     target_link_libraries(py_nif PRIVATE "-framework CoreFoundation")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR
+       CMAKE_SYSTEM_NAME STREQUAL "NetBSD" OR
+       CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
+    # BSD systems
+    target_link_options(py_nif PRIVATE
+        -Wl,--export-dynamic
+    )
+    # No need to link libdl on BSD - dlopen is in libc
 elseif(UNIX)
-    # Linux/FreeBSD/etc
+    # Linux
     target_link_options(py_nif PRIVATE
         -Wl,--export-dynamic
     )

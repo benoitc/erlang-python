@@ -41,8 +41,9 @@
 #include <math.h>
 #include <unistd.h>
 #include <pthread.h>
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 #include <dlfcn.h>
+#define NEED_DLOPEN_GLOBAL 1
 #endif
 
 /* ============================================================================
@@ -465,18 +466,24 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         return ATOM_OK;
     }
 
-#ifdef __linux__
-    /* On Linux, we need to load libpython with RTLD_GLOBAL so that Python
+#ifdef NEED_DLOPEN_GLOBAL
+    /* On Linux/FreeBSD/etc, we need to load libpython with RTLD_GLOBAL so that Python
      * extension modules can find Python symbols when dynamically loaded.
      * Without this, modules like _socket.so fail with "undefined symbol: PyByteArray_Type" */
     {
         char libpython[256];
-        snprintf(libpython, sizeof(libpython), "libpython%d.%d.so.1.0",
-                 PY_MAJOR_VERSION, PY_MINOR_VERSION);
-        void *handle = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
-        if (!handle) {
-            /* Try without .1.0 suffix */
-            snprintf(libpython, sizeof(libpython), "libpython%d.%d.so",
+        void *handle = NULL;
+
+        /* Try various library name patterns */
+        const char *patterns[] = {
+            "libpython%d.%d.so.1.0",  /* Linux with full version */
+            "libpython%d.%d.so",      /* Linux/FreeBSD */
+            "libpython%d.%d.so.1",    /* Some systems */
+            NULL
+        };
+
+        for (int i = 0; patterns[i] && !handle; i++) {
+            snprintf(libpython, sizeof(libpython), patterns[i],
                      PY_MAJOR_VERSION, PY_MINOR_VERSION);
             handle = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
         }
