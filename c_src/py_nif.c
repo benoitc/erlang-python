@@ -627,7 +627,15 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         g_main_thread_state = NULL;
     }
 
+    /* For embedded Python, Py_Finalize() can cause issues with threading module
+     * shutdown when executor threads have used PyGILState_Ensure/Release.
+     * The process will clean up resources on exit, so we skip finalization.
+     *
+     * Note: If explicit cleanup is needed in the future, consider using
+     * Py_FinalizeEx() or manually clearing atexit handlers before finalize. */
+#if 0
     Py_Finalize();
+#endif
     g_python_initialized = false;
 
     return ATOM_OK;
