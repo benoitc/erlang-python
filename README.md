@@ -1,28 +1,35 @@
 # erlang_python
 
-Execute Python from Erlang/Elixir using dirty NIFs with support for free-threaded Python.
+**Combine Python's ML/AI ecosystem with Erlang's concurrency.**
+
+Run Python code from Erlang or Elixir with true parallelism, async/await support,
+and seamless integration. Build AI-powered applications that scale.
 
 ## Overview
 
-This library embeds a Python interpreter into the Erlang VM and provides a
-clean API for calling Python functions, evaluating expressions, and streaming
-results from generators. It works seamlessly with both Erlang and Elixir.
+erlang_python embeds Python into the BEAM VM, letting you call Python functions,
+evaluate expressions, and stream from generators - all without blocking Erlang
+schedulers.
+
+**Three paths to parallelism:**
+- **Sub-interpreters** (Python 3.12+) - Each interpreter has its own GIL
+- **Free-threaded Python** (3.13+) - No GIL at all
+- **BEAM processes** - Fan out work across lightweight Erlang processes
 
 Key features:
-- **Dirty NIF execution** - Python code runs on dirty schedulers, not blocking the BEAM
-- **Multiple execution modes** - Free-threaded (3.13+), sub-interpreters (3.12+), or multi-executor
+- **Async/await** - Call Python async functions, gather results, stream from async generators
+- **Dirty NIF execution** - Python runs on dirty schedulers, never blocking the BEAM
 - **Elixir support** - Works seamlessly from Elixir via the `:py` module
-- **Erlang callbacks** - Register Erlang/Elixir functions callable from Python
+- **Bidirectional calls** - Python can call back into registered Erlang/Elixir functions
 - **Type conversion** - Automatic conversion between Erlang and Python types
-- **Streaming** - Support for Python generators with chunk-by-chunk delivery
+- **Streaming** - Iterate over Python generators chunk-by-chunk
 - **Virtual environments** - Activate venvs for dependency isolation
-- **Rate limiting** - ETS-based semaphore prevents overload
 - **AI/ML ready** - Examples for embeddings, semantic search, RAG, and LLMs
 
 ## Requirements
 
-- Erlang/OTP 24+
-- Python 3.8+ (3.12+ recommended, 3.13+ for free-threading)
+- Erlang/OTP 27+
+- Python 3.12+ (3.13+ for free-threading)
 - C compiler (gcc, clang)
 
 ## Building
@@ -108,6 +115,41 @@ end)
 {:ok, 3628800} = :py.eval("__import__('erlang').call('factorial', 10)")
 ```
 
+## Async/Await Support
+
+Call Python async functions without blocking:
+
+```erlang
+%% Call an async function
+Ref = py:async_call(aiohttp, get, [<<"https://api.example.com/data">>]),
+{ok, Response} = py:async_await(Ref).
+
+%% Gather multiple async calls concurrently
+{ok, Results} = py:async_gather([
+    {aiohttp, get, [<<"https://api.example.com/users">>]},
+    {aiohttp, get, [<<"https://api.example.com/posts">>]},
+    {aiohttp, get, [<<"https://api.example.com/comments">>]}
+]).
+
+%% Stream from async generators
+{ok, Chunks} = py:async_stream(mymodule, async_generator, [args]).
+```
+
+## Parallel Execution with Sub-interpreters
+
+True parallelism without GIL contention using Python 3.12+ sub-interpreters:
+
+```erlang
+%% Execute multiple calls in parallel across sub-interpreters
+{ok, Results} = py:parallel([
+    {math, factorial, [100]},
+    {math, factorial, [200]},
+    {math, factorial, [300]},
+    {math, factorial, [400]}
+]).
+%% Each call runs in its own interpreter with its own GIL
+```
+
 ## Parallel Processing with BEAM Processes
 
 Leverage Erlang's lightweight processes for massive parallelism:
@@ -134,12 +176,14 @@ end).
 ).
 ```
 
-**Performance:**
+**Benchmark Results** (from `examples/erlang_concurrency.erl`):
 ```
-Sequential (10 items × 100ms): 1.01 seconds
-Parallel (10 BEAM processes):  0.10 seconds
-Speedup: 10x faster!
+Sequential: 10 Python calls × 100ms each = 1.01 seconds
+Parallel:   10 BEAM processes calling Python = 0.10 seconds
 ```
+
+The speedup is linear with the number of items when work is I/O-bound or
+distributed across sub-interpreters.
 
 ## Virtual Environment Support
 
