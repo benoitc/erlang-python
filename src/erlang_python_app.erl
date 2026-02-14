@@ -12,6 +12,8 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
+%%% @doc Application callback module for erlang_python.
+%%% @private
 -module(erlang_python_app).
 -behaviour(application).
 

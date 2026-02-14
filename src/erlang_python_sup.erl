@@ -12,6 +12,16 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
+%%% @doc Top-level supervisor for erlang_python.
+%%%
+%%% Manages the worker pools for Python execution:
+%%% <ul>
+%%%   <li>py_callback - Callback registry for Python to Erlang calls</li>
+%%%   <li>py_pool - Main worker pool for synchronous Python calls</li>
+%%%   <li>py_async_pool - Worker pool for asyncio coroutines</li>
+%%%   <li>py_subinterp_pool - Worker pool for sub-interpreter parallelism</li>
+%%% </ul>
+%%% @private
 -module(erlang_python_sup).
 -behaviour(supervisor).
 
