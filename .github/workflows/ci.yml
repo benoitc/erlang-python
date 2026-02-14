@@ -96,7 +96,7 @@ jobs:
           release: "14.1"
           usesh: true
           prepare: |
-            pkg install -y erlang python311 gmake gcc
+            pkg install -y erlang python311 cmake
           run: |
             # Set up environment
             export PYTHON_CONFIG=python3.11-config
@@ -112,7 +112,7 @@ jobs:
             fetch https://github.com/erlang/rebar3/releases/download/3.24.0/rebar3 -o rebar3
             chmod +x rebar3
 
-            # Compile and test
+            # Compile and test (uses CMake-based build)
             ./rebar3 compile
             ./rebar3 ct --readable=compact
             ./rebar3 dialyzer
