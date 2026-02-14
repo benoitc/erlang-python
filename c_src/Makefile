@@ -20,7 +20,8 @@ ifeq ($(UNAME_S),Darwin)
     LDFLAGS += -undefined dynamic_lookup -flat_namespace
     SO_EXT = .so
 else ifeq ($(UNAME_S),Linux)
-    LDFLAGS += -Wl,-rpath,'$$ORIGIN'
+    # Export Python symbols for extension modules, set rpath for runtime
+    LDFLAGS += -Wl,--export-dynamic -Wl,-rpath,'$$ORIGIN'
     SO_EXT = .so
 else
     SO_EXT = .dll
