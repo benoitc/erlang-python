@@ -41,6 +41,9 @@
 #include <math.h>
 #include <unistd.h>
 #include <pthread.h>
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
 
 /* ============================================================================
  * Timeout support
@@ -461,6 +464,25 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     if (g_python_initialized) {
         return ATOM_OK;
     }
+
+#ifdef __linux__
+    /* On Linux, we need to load libpython with RTLD_GLOBAL so that Python
+     * extension modules can find Python symbols when dynamically loaded.
+     * Without this, modules like _socket.so fail with "undefined symbol: PyByteArray_Type" */
+    {
+        char libpython[256];
+        snprintf(libpython, sizeof(libpython), "libpython%d.%d.so.1.0",
+                 PY_MAJOR_VERSION, PY_MINOR_VERSION);
+        void *handle = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
+        if (!handle) {
+            /* Try without .1.0 suffix */
+            snprintf(libpython, sizeof(libpython), "libpython%d.%d.so",
+                     PY_MAJOR_VERSION, PY_MINOR_VERSION);
+            handle = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
+        }
+        /* It's OK if this fails - the symbols might already be global */
+    }
+#endif
 
     /* Initialize Python with thread support */
     PyConfig config;
