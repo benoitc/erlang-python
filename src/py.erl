@@ -78,7 +78,17 @@
     venv_info/0,
     %% Execution info
     execution_mode/0,
-    num_executors/0
+    num_executors/0,
+    %% Shared state (accessible from Python workers)
+    state_fetch/1,
+    state_store/2,
+    state_remove/1,
+    state_keys/0,
+    state_clear/0,
+    state_incr/1,
+    state_incr/2,
+    state_decr/1,
+    state_decr/2
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -513,3 +523,54 @@ execution_mode() ->
 -spec num_executors() -> pos_integer().
 num_executors() ->
     py_nif:num_executors().
+
+%%% ============================================================================
+%%% Shared State
+%%% ============================================================================
+
+%% @doc Fetch a value from shared state.
+%% This state is accessible from Python workers via state_get('key').
+-spec state_fetch(term()) -> {ok, term()} | {error, not_found}.
+state_fetch(Key) ->
+    py_state:fetch(Key).
+
+%% @doc Store a value in shared state.
+%% This state is accessible from Python workers via state_set('key', value).
+-spec state_store(term(), term()) -> ok.
+state_store(Key, Value) ->
+    py_state:store(Key, Value).
+
+%% @doc Remove a key from shared state.
+-spec state_remove(term()) -> ok.
+state_remove(Key) ->
+    py_state:remove(Key).
+
+%% @doc Get all keys in shared state.
+-spec state_keys() -> [term()].
+state_keys() ->
+    py_state:keys().
+
+%% @doc Clear all shared state.
+-spec state_clear() -> ok.
+state_clear() ->
+    py_state:clear().
+
+%% @doc Atomically increment a counter by 1.
+-spec state_incr(term()) -> integer().
+state_incr(Key) ->
+    py_state:incr(Key).
+
+%% @doc Atomically increment a counter by Amount.
+-spec state_incr(term(), integer()) -> integer().
+state_incr(Key, Amount) ->
+    py_state:incr(Key, Amount).
+
+%% @doc Atomically decrement a counter by 1.
+-spec state_decr(term()) -> integer().
+state_decr(Key) ->
+    py_state:decr(Key).
+
+%% @doc Atomically decrement a counter by Amount.
+-spec state_decr(term(), integer()) -> integer().
+state_decr(Key, Amount) ->
+    py_state:decr(Key, Amount).

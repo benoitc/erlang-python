@@ -42,12 +42,16 @@ Embeddings convert text into numerical vectors, enabling semantic search, cluste
 ### Using sentence-transformers
 
 ```erlang
-%% Load a model (do this once at startup)
+%% Load a model - NOTE: This loads in one worker only.
+%% Each worker will lazy-load the model on first use.
 init_embedding_model() ->
     py:exec(<<"
 from sentence_transformers import SentenceTransformer
 model = SentenceTransformer('all-MiniLM-L6-v2')
 ">>).
+
+%% Better pattern: use a module that lazy-loads
+%% and cache embeddings in shared state
 
 %% Generate embedding for a single text
 embed(Text) ->
@@ -575,7 +579,44 @@ model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
 ">>).
 ```
 
-### 4. Monitor Rate Limits
+### 4. Cache Embeddings in Shared State
+
+Avoid recomputing embeddings for the same text:
+
+```erlang
+%% Check cache before computing
+embed_cached(Text) ->
+    Key = <<"emb:", (crypto:hash(md5, Text))/binary>>,
+    case py:state_fetch(Key) of
+        {ok, Embedding} ->
+            {ok, Embedding};
+        {error, not_found} ->
+            {ok, Embedding} = py:eval(
+                <<"model.encode(text).tolist()">>,
+                #{text => Text}
+            ),
+            py:state_store(Key, Embedding),
+            {ok, Embedding}
+    end.
+```
+
+Or from Python:
+
+```python
+from erlang import state_get, state_set
+import hashlib
+
+def embed_cached(text):
+    key = f"emb:{hashlib.md5(text.encode()).hexdigest()}"
+    cached = state_get(key)
+    if cached is not None:
+        return cached
+    embedding = model.encode(text).tolist()
+    state_set(key, embedding)
+    return embedding
+```
+
+### 5. Monitor Rate Limits
 
 ```erlang
 %% Check current load before heavy operations

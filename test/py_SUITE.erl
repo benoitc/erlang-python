@@ -45,7 +45,8 @@
     test_semaphore_concurrent/1,
     test_semaphore_timeout/1,
     test_semaphore_rate_limiting/1,
-    test_overload_protection/1
+    test_overload_protection/1,
+    test_shared_state/1
 ]).
 
 all() ->
@@ -85,7 +86,8 @@ all() ->
         test_semaphore_concurrent,
         test_semaphore_timeout,
         test_semaphore_rate_limiting,
-        test_overload_protection
+        test_overload_protection,
+        test_shared_state
     ].
 
 init_per_suite(Config) ->
@@ -813,5 +815,79 @@ test_overload_protection(_Config) ->
     %% Cleanup
     ok = py_semaphore:release(),
     ok = py_semaphore:set_max_concurrent(OrigMax),
+
+    ok.
+
+test_shared_state(_Config) ->
+    %% Test shared state from Erlang side
+    ok = py:state_store(<<"test_key">>, #{value => 42}),
+    {ok, #{value := 42}} = py:state_fetch(<<"test_key">>),
+
+    %% Test from Python side - set from Python, read from Erlang
+    ok = py:exec(<<"
+from erlang import state_set
+state_set('python_key', {'message': 'hello from python', 'numbers': [1, 2, 3]})
+">>),
+    {ok, Result} = py:state_fetch(<<"python_key">>),
+    ct:pal("State from Python: ~p~n", [Result]),
+    #{<<"message">> := <<"hello from python">>, <<"numbers">> := [1, 2, 3]} = Result,
+
+    %% Test from Python side - read state set from Erlang
+    ok = py:state_store(<<"erlang_key">>, #{count => 100}),
+    ok = py:exec(<<"
+from erlang import state_get
+data = state_get('erlang_key')
+assert data == {'count': 100}, f'Expected {{count: 100}}, got {data}'
+">>),
+
+    %% Test state_keys from Python
+    ok = py:exec(<<"
+from erlang import state_keys
+keys = state_keys()
+assert 'test_key' in keys, f'Expected test_key in {keys}'
+assert 'python_key' in keys, f'Expected python_key in {keys}'
+assert 'erlang_key' in keys, f'Expected erlang_key in {keys}'
+">>),
+
+    %% Test state_delete from Python
+    ok = py:exec(<<"
+from erlang import state_delete
+state_delete('python_key')
+">>),
+    {error, not_found} = py:state_fetch(<<"python_key">>),
+
+    %% Test state_clear
+    ok = py:state_clear(),
+    [] = py:state_keys(),
+
+    %% Test atomic counters from Erlang
+    1 = py:state_incr(<<"counter">>),
+    2 = py:state_incr(<<"counter">>),
+    12 = py:state_incr(<<"counter">>, 10),
+    11 = py:state_decr(<<"counter">>),
+    6 = py:state_decr(<<"counter">>, 5),
+
+    %% Test atomic counters from Python
+    ok = py:exec(<<"
+from erlang import state_incr, state_decr
+
+# Increment
+val = state_incr('py_counter')
+assert val == 1, f'Expected 1, got {val}'
+
+val = state_incr('py_counter', 5)
+assert val == 6, f'Expected 6, got {val}'
+
+# Decrement
+val = state_decr('py_counter')
+assert val == 5, f'Expected 5, got {val}'
+
+val = state_decr('py_counter', 3)
+assert val == 2, f'Expected 2, got {val}'
+">>),
+    {ok, 2} = py:state_fetch(<<"py_counter">>),
+
+    %% Cleanup
+    ok = py:state_clear(),
 
     ok.

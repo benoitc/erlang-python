@@ -32,6 +32,8 @@ When running on a free-threaded Python build (compiled with `--disable-gil`), er
 
 Uses Python's sub-interpreter feature with per-interpreter GIL. Each sub-interpreter has its own GIL, allowing true parallel execution across interpreters.
 
+**Note:** Each sub-interpreter has isolated state. Use the [Shared State](#shared-state) API to share data between workers.
+
 ### Multi-Executor Mode (Python < 3.12)
 
 Runs N executor threads that share the GIL. Requests are distributed round-robin across executors. Good for I/O-bound workloads where Python releases the GIL during I/O operations.
@@ -199,6 +201,34 @@ io:format("Mode: ~p, Executors: ~p~n", [Mode, Executors]).
 {ok, Stats} = py:memory_stats(),
 io:format("GC stats: ~p~n", [maps:get(gc_stats, Stats)]).
 ```
+
+## Shared State
+
+Since workers (and sub-interpreters) have isolated namespaces, erlang_python provides
+ETS-backed shared state accessible from both Python and Erlang:
+
+```python
+from erlang import state_set, state_get, state_incr, state_decr
+
+# Share configuration across workers
+config = state_get('app_config')
+
+# Thread-safe metrics
+state_incr('requests_total')
+state_incr('bytes_processed', len(data))
+```
+
+```erlang
+%% Set config that all workers can read
+py:state_store(<<"app_config">>, #{model => <<"gpt-4">>, timeout => 30000}).
+
+%% Read metrics
+{ok, Total} = py:state_fetch(<<"requests_total">>).
+```
+
+The state is backed by ETS with `{write_concurrency, true}`, making atomic
+counter operations fast and lock-free. See [Getting Started](getting-started.md#shared-state)
+for the full API.
 
 ## See Also
 

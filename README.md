@@ -155,6 +155,54 @@ result = erlang.call('my_func', 10, 20)
 All three methods are equivalent. The import and attribute syntaxes provide
 a more natural Python experience.
 
+## Shared State Between Workers
+
+Python workers don't share namespace state, but you can share data via the
+built-in state API:
+
+### From Python
+
+```python
+from erlang import state_set, state_get, state_delete, state_keys
+from erlang import state_incr, state_decr
+
+# Store data (survives across calls, shared between workers)
+state_set('my_key', {'data': [1, 2, 3], 'count': 42})
+
+# Retrieve data
+value = state_get('my_key')  # {'data': [1, 2, 3], 'count': 42}
+
+# Atomic counters (thread-safe, great for metrics)
+state_incr('requests')       # returns 1
+state_incr('requests', 10)   # returns 11
+state_decr('requests')       # returns 10
+
+# List keys
+keys = state_keys()  # ['my_key', 'requests', ...]
+
+# Delete
+state_delete('my_key')
+```
+
+### From Erlang/Elixir
+
+```erlang
+%% Store and fetch
+py:state_store(<<"my_key">>, #{value => 42}).
+{ok, #{value := 42}} = py:state_fetch(<<"my_key">>).
+
+%% Atomic counters
+1 = py:state_incr(<<"hits">>).
+11 = py:state_incr(<<"hits">>, 10).
+10 = py:state_decr(<<"hits">>).
+
+%% List keys and clear
+Keys = py:state_keys().
+py:state_clear().
+```
+
+This is backed by ETS with `{write_concurrency, true}`, so counters are atomic and fast.
+
 ## Async/Await Support
 
 Call Python async functions without blocking:

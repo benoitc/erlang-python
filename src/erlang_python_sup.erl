@@ -17,6 +17,7 @@
 %%% Manages the worker pools for Python execution:
 %%% <ul>
 %%%   <li>py_callback - Callback registry for Python to Erlang calls</li>
+%%%   <li>py_state - Shared state storage accessible from Python</li>
 %%%   <li>py_pool - Main worker pool for synchronous Python calls</li>
 %%%   <li>py_async_pool - Worker pool for asyncio coroutines</li>
 %%%   <li>py_subinterp_pool - Worker pool for sub-interpreter parallelism</li>
@@ -41,6 +42,12 @@ init([]) ->
 
     %% Initialize callback registry ETS table (owned by supervisor for resilience)
     ok = py_callback:init_tab(),
+
+    %% Initialize shared state ETS table (owned by supervisor for resilience)
+    ok = py_state:init_tab(),
+
+    %% Register state functions as callbacks for Python access
+    ok = py_state:register_callbacks(),
 
     %% Callback registry - must start before pool
     CallbackSpec = #{

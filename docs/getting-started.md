@@ -65,7 +65,8 @@ def roll_dice(sides=6):
 ```
 
 Note: Definitions made with `exec` are local to the worker that executes them.
-Subsequent calls may go to different workers.
+Subsequent calls may go to different workers. Use [Shared State](#shared-state) to
+share data between workers.
 
 ## Working with Timeouts
 
@@ -103,6 +104,57 @@ Python generators can be streamed efficiently:
 
 %% Stream from a generator function (if defined)
 {ok, Chunks} = py:stream(mymodule, generate_data, [arg1, arg2]).
+```
+
+## Shared State
+
+Python workers don't share namespace state, but you can share data via the
+built-in state API:
+
+```erlang
+%% Store from Erlang
+py:state_store(<<"config">>, #{api_key => <<"secret">>, timeout => 5000}).
+
+%% Read from Python
+ok = py:exec(<<"
+from erlang import state_get
+config = state_get('config')
+print(config['api_key'])
+">>).
+```
+
+### From Python
+
+```python
+from erlang import state_set, state_get, state_delete, state_keys
+from erlang import state_incr, state_decr
+
+# Key-value storage
+state_set('my_key', {'data': [1, 2, 3]})
+value = state_get('my_key')
+
+# Atomic counters (thread-safe)
+state_incr('requests')       # +1, returns new value
+state_incr('requests', 10)   # +10
+state_decr('requests')       # -1
+
+# Management
+keys = state_keys()
+state_delete('my_key')
+```
+
+### From Erlang
+
+```erlang
+py:state_store(Key, Value).
+{ok, Value} = py:state_fetch(Key).
+py:state_remove(Key).
+Keys = py:state_keys().
+
+%% Atomic counters
+1 = py:state_incr(<<"hits">>).
+11 = py:state_incr(<<"hits">>, 10).
+10 = py:state_decr(<<"hits">>).
 ```
 
 ## Type Conversions
