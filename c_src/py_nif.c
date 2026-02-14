@@ -474,13 +474,26 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         char libpython[256];
         void *handle = NULL;
 
-        /* Try various library name patterns */
+#ifdef Py_GIL_DISABLED
+        /* Free-threaded Python has 't' suffix in library name (e.g., libpython3.13t.so) */
+        const char *patterns[] = {
+            "libpython%d.%dt.so.1.0",  /* Linux free-threaded with full version */
+            "libpython%d.%dt.so",      /* Linux/FreeBSD free-threaded */
+            "libpython%d.%dt.so.1",    /* Some systems free-threaded */
+            "libpython%d.%d.so.1.0",   /* Fallback: Linux with full version */
+            "libpython%d.%d.so",       /* Fallback: Linux/FreeBSD */
+            "libpython%d.%d.so.1",     /* Fallback: Some systems */
+            NULL
+        };
+#else
+        /* Standard Python library names */
         const char *patterns[] = {
             "libpython%d.%d.so.1.0",  /* Linux with full version */
             "libpython%d.%d.so",      /* Linux/FreeBSD */
             "libpython%d.%d.so.1",    /* Some systems */
             NULL
         };
+#endif
 
         for (int i = 0; patterns[i] && !handle; i++) {
             snprintf(libpython, sizeof(libpython), patterns[i],
