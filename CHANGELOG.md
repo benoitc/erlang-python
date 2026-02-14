@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.1.0 (Unreleased)
+
+### Added
+
+- **Shared State API** - ETS-backed storage for sharing data between Python workers
+  - `state_set/get/delete/keys/clear` accessible from Python via `from erlang import ...`
+  - `py:state_store/fetch/remove/keys/clear` from Erlang
+  - Atomic counters with `state_incr/decr` (Python) and `py:state_incr/decr` (Erlang)
+  - New example: `examples/shared_state_example.erl`
+
+- **Native Python Import Syntax** for Erlang callbacks
+  - `from erlang import my_func; my_func(args)` - most Pythonic
+  - `erlang.my_func(args)` - attribute-style access
+  - `erlang.call('my_func', args)` - legacy syntax still works
+
+- **Documentation improvements**
+  - Added shared state section to getting-started, scalability, and ai-integration guides
+  - Added embedding caching example using shared state
+  - Added hex.pm badges to README
+
+### Fixed
+
+- **Memory safety** - Added NULL checks to all `enif_alloc()` calls in NIF code
+- **Worker resilience** - Fixed crash in `py_subinterp_pool:terminate/2` when workers undefined
+- **Streaming example** - Fixed to work with worker pool design (workers don't share namespace)
+- **ETS table ownership** - Moved `py_callbacks` table creation to supervisor for resilience
+
+### Changed
+
+- Created `py_util` module to consolidate duplicate code (`to_binary/1`, `send_response/3`, `normalize_timeout/1-2`)
+- Consolidated `async_await/2` to call `await/2` reducing duplication
+
 ## 1.0.0 (2026-02-14)
 
 Initial release of erlang_python - Execute Python from Erlang/Elixir using dirty NIFs.
