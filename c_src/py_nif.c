@@ -1824,6 +1824,17 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return result;
     }
 
+    /* Handle numpy arrays by converting to list first */
+    if (PyObject_HasAttrString(obj, "tolist") && PyObject_HasAttrString(obj, "ndim")) {
+        PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
+        if (tolist != NULL) {
+            ERL_NIF_TERM result = py_to_term(env, tolist);
+            Py_DECREF(tolist);
+            return result;
+        }
+        PyErr_Clear();
+    }
+
     if (PyTuple_Check(obj)) {
         Py_ssize_t len = PyTuple_Size(obj);
         ERL_NIF_TERM *items = enif_alloc(sizeof(ERL_NIF_TERM) * len);
@@ -1915,15 +1926,12 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return PyFloat_FromDouble(d_val);
     }
 
-    /* Binary/String */
+    /* Binary/String - check binary first, but NOT iolist (which would flatten lists) */
     if (enif_inspect_binary(env, term, &bin)) {
         return PyUnicode_FromStringAndSize((char *)bin.data, bin.size);
     }
-    if (enif_inspect_iolist_as_binary(env, term, &bin)) {
-        return PyUnicode_FromStringAndSize((char *)bin.data, bin.size);
-    }
 
-    /* List */
+    /* List - must check before iolist to preserve list structure */
     if (enif_get_list_length(env, term, &list_len)) {
         PyObject *list = PyList_New(list_len);
         ERL_NIF_TERM head, tail = term;

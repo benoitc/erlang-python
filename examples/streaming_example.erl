@@ -1,12 +1,19 @@
 #!/usr/bin/env escript
 %%% @doc Streaming example - demonstrates Python generators.
 %%%
-%%% Run with: escript examples/streaming_example.erl
+%%% Prerequisites: rebar3 compile
+%%% Run from project root: escript examples/streaming_example.erl
 
 -mode(compile).
 
 main(_) ->
-    ok = application:start(erlang_python),
+    %% Add the compiled beam files to the code path
+    ScriptDir = filename:dirname(escript:script_name()),
+    ProjectRoot = filename:dirname(ScriptDir),
+    EbinDir = filename:join([ProjectRoot, "_build", "default", "lib", "erlang_python", "ebin"]),
+    true = code:add_pathz(EbinDir),
+
+    {ok, _} = application:ensure_all_started(erlang_python),
 
     io:format("~n=== Streaming from Python Generators ===~n~n"),
 

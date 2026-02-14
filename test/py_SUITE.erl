@@ -27,7 +27,8 @@
     test_asyncio_call/1,
     test_asyncio_gather/1,
     test_subinterp_supported/1,
-    test_parallel_execution/1
+    test_parallel_execution/1,
+    test_venv/1
 ]).
 
 all() ->
@@ -49,7 +50,8 @@ all() ->
         test_asyncio_call,
         test_asyncio_gather,
         test_subinterp_supported,
-        test_parallel_execution
+        test_parallel_execution,
+        test_venv
     ].
 
 init_per_suite(Config) ->
@@ -262,4 +264,41 @@ test_parallel_execution(_Config) ->
     %% TODO: Sub-interpreter pool temporarily disabled for GIL debugging
     %% Skip this test for now
     ct:pal("Parallel execution tests skipped - subinterp pool disabled~n"),
+    ok.
+
+test_venv(_Config) ->
+    %% Test venv_info when no venv is active
+    {ok, #{<<"active">> := false}} = py:venv_info(),
+
+    %% Create a fake venv structure for testing (faster than real venv)
+    TmpDir = <<"/tmp/erlang_python_test_venv">>,
+
+    %% Get Python version for site-packages path
+    {ok, PyVer} = py:eval(<<"f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'">>),
+
+    %% Create minimal venv structure using os.makedirs
+    SitePackages = <<TmpDir/binary, "/lib/", PyVer/binary, "/site-packages">>,
+    {ok, _} = py:call(os, makedirs, [SitePackages], #{exist_ok => true}),
+
+    %% Activate it
+    ok = py:activate_venv(TmpDir),
+
+    %% Check venv_info
+    {ok, Info} = py:venv_info(),
+    true = maps:get(<<"active">>, Info),
+    true = is_binary(maps:get(<<"venv_path">>, Info)),
+    true = is_binary(maps:get(<<"site_packages">>, Info)),
+
+    %% Deactivate
+    ok = py:deactivate_venv(),
+
+    %% Verify deactivated
+    {ok, #{<<"active">> := false}} = py:venv_info(),
+
+    %% Test error case - invalid path
+    {error, _} = py:activate_venv(<<"/nonexistent/path">>),
+
+    %% Cleanup
+    {ok, _} = py:call(shutil, rmtree, [TmpDir], #{ignore_errors => true}),
+
     ok.

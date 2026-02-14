@@ -57,7 +57,11 @@
     async_stream/4,
     %% Parallel execution (Python 3.12+ sub-interpreters)
     parallel/1,
-    subinterp_supported/0
+    subinterp_supported/0,
+    %% Virtual environment
+    activate_venv/1,
+    deactivate_venv/0,
+    venv_info/0
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -407,3 +411,67 @@ parallel(Calls) when is_list(Calls) ->
         false ->
             {error, subinterpreters_not_supported}
     end.
+
+%%% ============================================================================
+%%% Virtual Environment Support
+%%% ============================================================================
+
+%% @doc Activate a Python virtual environment.
+%% This modifies sys.path to use packages from the specified venv.
+%% The venv path should be the root directory (containing bin/lib folders).
+%%
+%% Example:
+%% ```
+%% ok = py:activate_venv(<<"/path/to/myenv">>).
+%% {ok, _} = py:call(sentence_transformers, 'SentenceTransformer', [<<"all-MiniLM-L6-v2">>]).
+%% '''
+-spec activate_venv(string() | binary()) -> ok | {error, term()}.
+activate_venv(VenvPath) ->
+    VenvBin = ensure_binary(VenvPath),
+    %% Build site-packages path based on platform
+    {ok, SitePackages} = eval(<<"__import__('os').path.join(vp, 'Lib' if __import__('sys').platform == 'win32' else 'lib', '' if __import__('sys').platform == 'win32' else f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}', 'site-packages')">>, #{vp => VenvBin}),
+    %% Verify site-packages exists
+    case eval(<<"__import__('os').path.isdir(sp)">>, #{sp => SitePackages}) of
+        {ok, true} ->
+            %% Save original path if not already saved
+            _ = eval(<<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>),
+            %% Set venv info
+            _ = eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
+            _ = eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{sp => SitePackages}),
+            %% Add to sys.path
+            _ = eval(<<"__import__('sys').path.insert(0, sp) if sp not in __import__('sys').path else None">>, #{sp => SitePackages}),
+            ok;
+        {ok, false} ->
+            {error, {invalid_venv, SitePackages}};
+        Error ->
+            Error
+    end.
+
+%% @doc Deactivate the current virtual environment.
+%% Restores sys.path to its original state.
+-spec deactivate_venv() -> ok | {error, term()}.
+deactivate_venv() ->
+    case eval(<<"hasattr(__import__('sys'), '_original_path')">>) of
+        {ok, true} ->
+            _ = eval(<<"__import__('sys').path.clear(); __import__('sys').path.extend(__import__('sys')._original_path)">>),
+            _ = eval(<<"delattr(__import__('sys'), '_original_path')">>),
+            _ = eval(<<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>),
+            _ = eval(<<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>),
+            ok;
+        {ok, false} ->
+            ok;
+        Error ->
+            Error
+    end.
+
+%% @doc Get information about the currently active virtual environment.
+%% Returns a map with venv_path and site_packages, or none if no venv is active.
+-spec venv_info() -> {ok, map() | none} | {error, term()}.
+venv_info() ->
+    Code = <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if hasattr(__import__('sys'), '_active_venv') else {'active': False})">>,
+    eval(Code).
+
+%% @private
+ensure_binary(S) when is_binary(S) -> S;
+ensure_binary(S) when is_list(S) -> list_to_binary(S);
+ensure_binary(S) when is_atom(S) -> atom_to_binary(S, utf8).

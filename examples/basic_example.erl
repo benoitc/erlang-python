@@ -1,13 +1,20 @@
 #!/usr/bin/env escript
 %%% @doc Basic example of using erlang_python.
 %%%
-%%% Run with: escript examples/basic_example.erl
+%%% Prerequisites: rebar3 compile
+%%% Run from project root: escript examples/basic_example.erl
 
 -mode(compile).
 
 main(_) ->
+    %% Add the compiled beam files to the code path
+    ScriptDir = filename:dirname(escript:script_name()),
+    ProjectRoot = filename:dirname(ScriptDir),
+    EbinDir = filename:join([ProjectRoot, "_build", "default", "lib", "erlang_python", "ebin"]),
+    true = code:add_pathz(EbinDir),
+
     %% Start the application
-    ok = application:start(erlang_python),
+    {ok, _} = application:ensure_all_started(erlang_python),
 
     io:format("~n=== Basic Python Calls ===~n~n"),
 
@@ -15,8 +22,8 @@ main(_) ->
     {ok, Result1} = py:call(math, sqrt, [16]),
     io:format("math.sqrt(16) = ~p~n", [Result1]),
 
-    %% String operations
-    {ok, Result2} = py:call(str, upper, [<<"hello world">>]),
+    %% String operations (using eval since str methods are on objects, not a module)
+    {ok, Result2} = py:eval(<<"'hello world'.upper()">>),
     io:format("'hello world'.upper() = ~s~n", [Result2]),
 
     %% JSON encoding
