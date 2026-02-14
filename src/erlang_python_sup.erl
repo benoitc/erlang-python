@@ -39,6 +39,7 @@ init([]) ->
         modules => [py_callback]
     },
 
+    %% Main worker pool
     PoolSpec = #{
         id => py_pool,
         start => {py_pool, start_link, [NumWorkers]},
@@ -58,13 +59,17 @@ init([]) ->
         modules => [py_async_pool]
     },
 
-    %% Base children (async pool disabled for now - GIL threading issues)
-    %% TODO: Fix async event loop GIL management
-    BaseChildren = [CallbackSpec, PoolSpec],  %% AsyncPoolSpec temporarily disabled
+    %% Sub-interpreter pool (for true parallelism with per-interpreter GIL)
+    SubinterpPoolSpec = #{
+        id => py_subinterp_pool,
+        start => {py_subinterp_pool, start_link, [NumSubinterpWorkers]},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_subinterp_pool]
+    },
 
-    %% Sub-interpreter pool also temporarily disabled for testing
-    %% TODO: Fix sub-interpreter GIL management
-    Children = BaseChildren,
+    Children = [CallbackSpec, PoolSpec, AsyncPoolSpec, SubinterpPoolSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},
