@@ -184,6 +184,8 @@ handle_info({'EXIT', Pid, Reason}, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
+terminate(_Reason, #state{workers = undefined}) ->
+    ok;
 terminate(_Reason, State) ->
     Workers = queue:to_list(State#state.workers),
     lists:foreach(fun(W) -> W ! shutdown end, Workers),
@@ -199,9 +201,5 @@ start_workers(Sup, N) ->
 
 extract_ref_caller({call, Ref, Caller, _, _, _, _}) -> {Ref, Caller, call}.
 
-to_binary(Atom) when is_atom(Atom) ->
-    atom_to_binary(Atom, utf8);
-to_binary(List) when is_list(List) ->
-    list_to_binary(List);
-to_binary(Bin) when is_binary(Bin) ->
-    Bin.
+to_binary(Term) ->
+    py_util:to_binary(Term).

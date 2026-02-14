@@ -131,16 +131,8 @@ handle_request(WorkerRef, {async_stream, Ref, Caller, Module, Func, Args, Kwargs
 %%% Internal Functions
 %%% ============================================================================
 
-send_response(Caller, Ref, {ok, Value}) ->
-    Caller ! {py_response, Ref, {ok, Value}};
-send_response(Caller, Ref, {error, Error}) ->
-    Caller ! {py_error, Ref, Error};
-send_response(Caller, Ref, ok) ->
-    Caller ! {py_response, Ref, {ok, none}}.
+send_response(Caller, Ref, Result) ->
+    py_util:send_response(Caller, Ref, Result).
 
-to_binary(Atom) when is_atom(Atom) ->
-    atom_to_binary(Atom, utf8);
-to_binary(List) when is_list(List) ->
-    list_to_binary(List);
-to_binary(Bin) when is_binary(Bin) ->
-    Bin.
+to_binary(Term) ->
+    py_util:to_binary(Term).

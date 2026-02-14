@@ -127,11 +127,7 @@ call(Module, Func, Args, Kwargs, Timeout) ->
 %% @private
 do_call(Module, Func, Args, Kwargs, Timeout) ->
     Ref = make_ref(),
-    TimeoutMs = case Timeout of
-        infinity -> 0;
-        Ms when is_integer(Ms), Ms > 0 -> Ms;
-        _ -> ?DEFAULT_TIMEOUT
-    end,
+    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
     py_pool:request({call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs}),
     await(Ref, Timeout).
 
@@ -150,11 +146,7 @@ eval(Code, Locals) ->
 -spec eval(string() | binary(), map(), timeout()) -> py_result().
 eval(Code, Locals, Timeout) ->
     Ref = make_ref(),
-    TimeoutMs = case Timeout of
-        infinity -> 0;
-        Ms when is_integer(Ms), Ms > 0 -> Ms;
-        _ -> ?DEFAULT_TIMEOUT
-    end,
+    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
     py_pool:request({eval, Ref, self(), Code, Locals, TimeoutMs}),
     await(Ref, Timeout).
 
@@ -348,17 +340,13 @@ async_call(Module, Func, Args, Kwargs) ->
 %% @doc Wait for an async call to complete.
 -spec async_await(py_ref()) -> py_result().
 async_await(Ref) ->
-    async_await(Ref, ?DEFAULT_TIMEOUT).
+    await(Ref, ?DEFAULT_TIMEOUT).
 
 %% @doc Wait for an async call with timeout.
+%% Note: Identical to await/2 - provided for API symmetry with async_call.
 -spec async_await(py_ref(), timeout()) -> py_result().
 async_await(Ref, Timeout) ->
-    receive
-        {py_response, Ref, Result} -> Result;
-        {py_error, Ref, Error} -> {error, Error}
-    after Timeout ->
-        {error, timeout}
-    end.
+    await(Ref, Timeout).
 
 %% @doc Execute multiple async calls concurrently using asyncio.gather.
 %% Takes a list of {Module, Func, Args} tuples and executes them all
@@ -503,9 +491,8 @@ venv_info() ->
     eval(Code).
 
 %% @private
-ensure_binary(S) when is_binary(S) -> S;
-ensure_binary(S) when is_list(S) -> list_to_binary(S);
-ensure_binary(S) when is_atom(S) -> atom_to_binary(S, utf8).
+ensure_binary(S) ->
+    py_util:to_binary(S).
 
 %%% ============================================================================
 %%% Execution Info
