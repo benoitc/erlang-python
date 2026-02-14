@@ -131,17 +131,96 @@ typedef struct {
 } py_subinterp_worker_t;
 #endif
 
+/* Python object wrapper for preventing GC - forward declaration needed for py_request_t */
+typedef struct {
+    PyObject *obj;
+} py_object_t;
+
+/* ============================================================================
+ * Executor thread for GIL management (PyO3-style)
+ *
+ * All Python operations are routed through a single executor thread to ensure
+ * consistent thread state. This prevents TLS corruption when C extensions like
+ * PyTorch maintain thread-local state.
+ * ============================================================================ */
+
+/* Request types for the executor */
+typedef enum {
+    PY_REQ_CALL,
+    PY_REQ_EVAL,
+    PY_REQ_EXEC,
+    PY_REQ_NEXT,
+    PY_REQ_IMPORT,
+    PY_REQ_GETATTR,
+    PY_REQ_MEMORY_STATS,
+    PY_REQ_GC,
+    PY_REQ_SHUTDOWN
+} py_request_type_t;
+
+/* Request structure for executor */
+typedef struct py_request {
+    py_request_type_t type;
+
+    /* Synchronization - caller waits on this */
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    volatile bool completed;
+
+    /* Request parameters */
+    py_worker_t *worker;           /* Worker context (optional, for worker ops) */
+    ErlNifEnv *env;                /* Caller's env for term conversion */
+
+    /* For call/eval/exec */
+    ErlNifBinary module_bin;       /* Module name (for call/import) */
+    ErlNifBinary func_bin;         /* Function name (for call) */
+    ErlNifBinary code_bin;         /* Code string (for eval/exec) */
+    ERL_NIF_TERM args_term;        /* Arguments list */
+    ERL_NIF_TERM kwargs_term;      /* Keyword arguments map */
+    ERL_NIF_TERM locals_term;      /* Locals map (for eval) */
+    unsigned long timeout_ms;       /* Timeout in milliseconds */
+
+    /* For next */
+    py_object_t *gen_wrapper;      /* Generator wrapper */
+
+    /* For getattr */
+    py_object_t *obj_wrapper;      /* Object wrapper */
+    ErlNifBinary attr_bin;         /* Attribute name */
+
+    /* For gc */
+    int gc_generation;
+
+    /* Result */
+    ERL_NIF_TERM result;           /* Result term */
+
+    /* Queue linkage */
+    struct py_request *next;
+} py_request_t;
+
+/* Global executor state */
+static pthread_t g_executor_thread;
+static pthread_mutex_t g_executor_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_executor_cond = PTHREAD_COND_INITIALIZER;
+static py_request_t *g_executor_queue_head = NULL;
+static py_request_t *g_executor_queue_tail = NULL;
+static volatile bool g_executor_running = false;
+static volatile bool g_executor_shutdown = false;
+
+/* Forward declarations for executor */
+static void *executor_thread_main(void *arg);
+static void executor_enqueue(py_request_t *req);
+static void executor_wait(py_request_t *req);
+static void process_request(py_request_t *req);
+static void request_init(py_request_t *req);
+static void request_cleanup(py_request_t *req);
+static int executor_start(void);
+static void executor_stop(void);
+
 static ErlNifResourceType *WORKER_RESOURCE_TYPE = NULL;
 static ErlNifResourceType *PYOBJ_RESOURCE_TYPE = NULL;
 static ErlNifResourceType *ASYNC_WORKER_RESOURCE_TYPE = NULL;
 #ifdef HAVE_SUBINTERPRETERS
 static ErlNifResourceType *SUBINTERP_WORKER_RESOURCE_TYPE = NULL;
 #endif
-
-/* Python object wrapper for preventing GC */
-typedef struct {
-    PyObject *obj;
-} py_object_t;
 
 /* Global state */
 static bool g_python_initialized = false;
@@ -196,7 +275,8 @@ static void worker_destructor(ErlNifEnv *env, void *obj) {
         close(worker->callback_pipe[1]);
     }
 
-    if (worker->thread_state != NULL) {
+    /* Only clean up Python state if Python is still initialized */
+    if (worker->thread_state != NULL && g_python_initialized) {
         PyEval_RestoreThread(worker->thread_state);
         Py_XDECREF(worker->globals);
         Py_XDECREF(worker->locals);
@@ -330,6 +410,15 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     /* Save main thread state and release GIL for other threads */
     g_main_thread_state = PyEval_SaveThread();
 
+    /* Start the executor thread for GIL management */
+    if (executor_start() < 0) {
+        PyEval_RestoreThread(g_main_thread_state);
+        g_main_thread_state = NULL;
+        Py_Finalize();
+        g_python_initialized = false;
+        return make_error(env, "executor_start_failed");
+    }
+
     return ATOM_OK;
 }
 
@@ -337,6 +426,9 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     if (!g_python_initialized) {
         return ATOM_OK;
     }
+
+    /* Stop the executor thread first */
+    executor_stop();
 
     /* Restore main thread state before finalizing */
     if (g_main_thread_state != NULL) {
@@ -426,153 +518,41 @@ static ERL_NIF_TERM nif_worker_destroy(ErlNifEnv *env, int argc, const ERL_NIF_T
  */
 static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
-    ErlNifBinary module_bin, func_bin;
-    unsigned long timeout_ms = 0;  /* 0 = no timeout */
 
     if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
         return make_error(env, "invalid_worker");
     }
-    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
+
+    /* Build request and route to executor */
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_CALL;
+    req.worker = worker;
+    req.env = env;
+
+    if (!enif_inspect_binary(env, argv[1], &req.module_bin)) {
+        request_cleanup(&req);
         return make_error(env, "invalid_module");
     }
-    if (!enif_inspect_binary(env, argv[2], &func_bin)) {
+    if (!enif_inspect_binary(env, argv[2], &req.func_bin)) {
+        request_cleanup(&req);
         return make_error(env, "invalid_func");
     }
 
-    /* Get timeout from argv[5] if provided (6-arity call) */
+    req.args_term = argv[3];
+    req.kwargs_term = (argc > 4) ? argv[4] : 0;
+    req.timeout_ms = 0;
+
     if (argc > 5) {
-        enif_get_ulong(env, argv[5], &timeout_ms);
+        enif_get_ulong(env, argv[5], &req.timeout_ms);
     }
 
-    /* Acquire GIL */
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    /* Submit to executor and wait */
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    /* Set thread-local worker context for callbacks */
-    tl_current_worker = worker;
-    tl_callback_env = env;
-
-    /* Convert module name to C string */
-    char *module_name = enif_alloc(module_bin.size + 1);
-    memcpy(module_name, module_bin.data, module_bin.size);
-    module_name[module_bin.size] = '\0';
-
-    char *func_name = enif_alloc(func_bin.size + 1);
-    memcpy(func_name, func_bin.data, func_bin.size);
-    func_name[func_bin.size] = '\0';
-
-    ERL_NIF_TERM result;
-    PyObject *func = NULL;
-
-    /* Special handling for __main__ - look in worker's namespace */
-    if (strcmp(module_name, "__main__") == 0) {
-        /* First check locals, then globals */
-        func = PyDict_GetItemString(worker->locals, func_name);
-        if (func == NULL) {
-            func = PyDict_GetItemString(worker->globals, func_name);
-        }
-        if (func != NULL) {
-            Py_INCREF(func);  /* GetItemString returns borrowed ref */
-        } else {
-            PyErr_Format(PyExc_NameError, "name '%s' is not defined", func_name);
-            result = make_py_error(env);
-            goto cleanup;
-        }
-    } else {
-        /* Import module */
-        PyObject *module = PyImport_ImportModule(module_name);
-        if (module == NULL) {
-            result = make_py_error(env);
-            goto cleanup;
-        }
-
-        /* Get function */
-        func = PyObject_GetAttrString(module, func_name);
-        Py_DECREF(module);
-    }
-
-    if (func == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Convert args list to Python tuple */
-    unsigned int args_len;
-    if (!enif_get_list_length(env, argv[3], &args_len)) {
-        Py_DECREF(func);
-        result = make_error(env, "invalid_args");
-        goto cleanup;
-    }
-
-    PyObject *args = PyTuple_New(args_len);
-    ERL_NIF_TERM head, tail = argv[3];
-    for (unsigned int i = 0; i < args_len; i++) {
-        enif_get_list_cell(env, tail, &head, &tail);
-        PyObject *arg = term_to_py(env, head);
-        if (arg == NULL) {
-            Py_DECREF(args);
-            Py_DECREF(func);
-            result = make_error(env, "arg_conversion_failed");
-            goto cleanup;
-        }
-        PyTuple_SET_ITEM(args, i, arg);  /* Steals reference */
-    }
-
-    /* Convert kwargs map to Python dict */
-    PyObject *kwargs = NULL;
-    if (argc > 4 && enif_is_map(env, argv[4])) {
-        kwargs = term_to_py(env, argv[4]);
-    }
-
-    /* Start timeout if specified */
-    start_timeout(timeout_ms);
-
-    /* Call the function */
-    PyObject *py_result = PyObject_Call(func, args, kwargs);
-
-    /* Stop timeout */
-    stop_timeout();
-
-    Py_DECREF(func);
-    Py_DECREF(args);
-    Py_XDECREF(kwargs);
-
-    if (py_result == NULL) {
-        /* Check for timeout */
-        if (check_timeout_error()) {
-            PyErr_Clear();
-            result = enif_make_tuple2(env, ATOM_ERROR, ATOM_TIMEOUT);
-        } else {
-            result = make_py_error(env);
-        }
-        goto cleanup;
-    }
-
-    /* Check if result is a generator */
-    if (PyGen_Check(py_result) || PyIter_Check(py_result)) {
-        /* Wrap generator in a resource so it persists */
-        py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-        wrapper->obj = py_result;  /* Takes ownership */
-        ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
-        enif_release_resource(wrapper);
-
-        result = enif_make_tuple2(env, ATOM_OK,
-            enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
-    } else {
-        /* Convert result to Erlang term */
-        ERL_NIF_TERM term_result = py_to_term(env, py_result);
-        Py_DECREF(py_result);
-        result = enif_make_tuple2(env, ATOM_OK, term_result);
-    }
-
-cleanup:
-    /* Clear thread-local context */
-    tl_current_worker = NULL;
-    tl_callback_env = NULL;
-
-    enif_free(module_name);
-    enif_free(func_name);
-    PyGILState_Release(gstate);
-
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
     return result;
 }
 
@@ -582,91 +562,33 @@ cleanup:
  */
 static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
-    ErlNifBinary code_bin;
-    unsigned long timeout_ms = 0;  /* 0 = no timeout */
 
     if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
         return make_error(env, "invalid_worker");
     }
-    if (!enif_inspect_binary(env, argv[1], &code_bin)) {
+
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_EVAL;
+    req.worker = worker;
+    req.env = env;
+
+    if (!enif_inspect_binary(env, argv[1], &req.code_bin)) {
+        request_cleanup(&req);
         return make_error(env, "invalid_code");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Set thread-local worker context for callbacks */
-    tl_current_worker = worker;
-    tl_callback_env = env;
-
-    /* Convert code to C string */
-    char *code = enif_alloc(code_bin.size + 1);
-    memcpy(code, code_bin.data, code_bin.size);
-    code[code_bin.size] = '\0';
-
-    /* Update locals from argv[2] if provided */
-    if (argc > 2 && enif_is_map(env, argv[2])) {
-        PyObject *new_locals = term_to_py(env, argv[2]);
-        if (new_locals != NULL && PyDict_Check(new_locals)) {
-            PyDict_Update(worker->locals, new_locals);
-            Py_DECREF(new_locals);
-        }
-    }
-
-    /* Get timeout from argv[3] if provided */
+    req.locals_term = (argc > 2) ? argv[2] : 0;
+    req.timeout_ms = 0;
     if (argc > 3) {
-        enif_get_ulong(env, argv[3], &timeout_ms);
+        enif_get_ulong(env, argv[3], &req.timeout_ms);
     }
 
-    /* Start timeout if specified */
-    start_timeout(timeout_ms);
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    /* Compile and evaluate */
-    PyObject *compiled = Py_CompileString(code, "<erlang>", Py_eval_input);
-    ERL_NIF_TERM result;
-
-    if (compiled == NULL) {
-        stop_timeout();
-        result = make_py_error(env);
-    } else {
-        PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->locals);
-        Py_DECREF(compiled);
-
-        stop_timeout();
-
-        if (py_result == NULL) {
-            /* Check for timeout */
-            if (check_timeout_error()) {
-                PyErr_Clear();
-                result = enif_make_tuple2(env, ATOM_ERROR, ATOM_TIMEOUT);
-            } else {
-                result = make_py_error(env);
-            }
-        } else {
-            /* Check if result is a generator */
-            if (PyGen_Check(py_result) || PyIter_Check(py_result)) {
-                /* Wrap generator in a resource so it persists */
-                py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-                wrapper->obj = py_result;  /* Takes ownership */
-                ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
-                enif_release_resource(wrapper);
-
-                result = enif_make_tuple2(env, ATOM_OK,
-                    enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
-            } else {
-                ERL_NIF_TERM term_result = py_to_term(env, py_result);
-                Py_DECREF(py_result);
-                result = enif_make_tuple2(env, ATOM_OK, term_result);
-            }
-        }
-    }
-
-    /* Clear thread-local context */
-    tl_current_worker = NULL;
-    tl_callback_env = NULL;
-
-    enif_free(code);
-    PyGILState_Release(gstate);
-
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
     return result;
 }
 
@@ -675,49 +597,27 @@ static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM
  */
 static ERL_NIF_TERM nif_worker_exec(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
-    ErlNifBinary code_bin;
 
     if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
         return make_error(env, "invalid_worker");
     }
-    if (!enif_inspect_binary(env, argv[1], &code_bin)) {
+
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_EXEC;
+    req.worker = worker;
+    req.env = env;
+
+    if (!enif_inspect_binary(env, argv[1], &req.code_bin)) {
+        request_cleanup(&req);
         return make_error(env, "invalid_code");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    /* Set thread-local worker context for callbacks */
-    tl_current_worker = worker;
-    tl_callback_env = env;
-
-    char *code = enif_alloc(code_bin.size + 1);
-    memcpy(code, code_bin.data, code_bin.size);
-    code[code_bin.size] = '\0';
-
-    PyObject *compiled = Py_CompileString(code, "<erlang>", Py_file_input);
-    ERL_NIF_TERM result;
-
-    if (compiled == NULL) {
-        result = make_py_error(env);
-    } else {
-        PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->locals);
-        Py_DECREF(compiled);
-
-        if (py_result == NULL) {
-            result = make_py_error(env);
-        } else {
-            Py_DECREF(py_result);
-            result = ATOM_OK;
-        }
-    }
-
-    /* Clear thread-local context */
-    tl_current_worker = NULL;
-    tl_callback_env = NULL;
-
-    enif_free(code);
-    PyGILState_Release(gstate);
-
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
     return result;
 }
 
@@ -736,40 +636,18 @@ static ERL_NIF_TERM nif_worker_next(ErlNifEnv *env, int argc, const ERL_NIF_TERM
         return make_error(env, "invalid_generator");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_NEXT;
+    req.worker = worker;
+    req.env = env;
+    req.gen_wrapper = gen_wrapper;
 
-    PyObject *item = PyIter_Next(gen_wrapper->obj);
-    ERL_NIF_TERM result;
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    if (item == NULL) {
-        if (PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
-                PyErr_Clear();
-                result = enif_make_tuple2(env, ATOM_ERROR, ATOM_STOP_ITERATION);
-            } else {
-                result = make_py_error(env);
-            }
-        } else {
-            /* No error, just end of iteration */
-            result = enif_make_tuple2(env, ATOM_ERROR, ATOM_STOP_ITERATION);
-        }
-    } else {
-        /* Check if item is itself a generator */
-        if (PyGen_Check(item) || PyIter_Check(item)) {
-            py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-            wrapper->obj = item;
-            ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
-            enif_release_resource(wrapper);
-            result = enif_make_tuple2(env, ATOM_OK,
-                enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
-        } else {
-            ERL_NIF_TERM term_result = py_to_term(env, item);
-            Py_DECREF(item);
-            result = enif_make_tuple2(env, ATOM_OK, term_result);
-        }
-    }
-
-    PyGILState_Release(gstate);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
     return result;
 }
 
@@ -778,36 +656,27 @@ static ERL_NIF_TERM nif_worker_next(ErlNifEnv *env, int argc, const ERL_NIF_TERM
  */
 static ERL_NIF_TERM nif_import_module(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
-    ErlNifBinary module_bin;
 
     if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
         return make_error(env, "invalid_worker");
     }
-    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
+
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_IMPORT;
+    req.worker = worker;
+    req.env = env;
+
+    if (!enif_inspect_binary(env, argv[1], &req.module_bin)) {
+        request_cleanup(&req);
         return make_error(env, "invalid_module");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    char *module_name = enif_alloc(module_bin.size + 1);
-    memcpy(module_name, module_bin.data, module_bin.size);
-    module_name[module_bin.size] = '\0';
-
-    PyObject *module = PyImport_ImportModule(module_name);
-    enif_free(module_name);
-
-    ERL_NIF_TERM result;
-    if (module == NULL) {
-        result = make_py_error(env);
-    } else {
-        py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-        wrapper->obj = module;
-        ERL_NIF_TERM mod_ref = enif_make_resource(env, wrapper);
-        enif_release_resource(wrapper);
-        result = enif_make_tuple2(env, ATOM_OK, mod_ref);
-    }
-
-    PyGILState_Release(gstate);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
     return result;
 }
 
@@ -817,7 +686,6 @@ static ERL_NIF_TERM nif_import_module(ErlNifEnv *env, int argc, const ERL_NIF_TE
 static ERL_NIF_TERM nif_get_attr(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
     py_object_t *obj_wrapper;
-    ErlNifBinary attr_bin;
 
     if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
         return make_error(env, "invalid_worker");
@@ -825,29 +693,24 @@ static ERL_NIF_TERM nif_get_attr(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     if (!enif_get_resource(env, argv[1], PYOBJ_RESOURCE_TYPE, (void **)&obj_wrapper)) {
         return make_error(env, "invalid_object");
     }
-    if (!enif_inspect_binary(env, argv[2], &attr_bin)) {
+
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_GETATTR;
+    req.worker = worker;
+    req.env = env;
+    req.obj_wrapper = obj_wrapper;
+
+    if (!enif_inspect_binary(env, argv[2], &req.attr_bin)) {
+        request_cleanup(&req);
         return make_error(env, "invalid_attr");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    char *attr_name = enif_alloc(attr_bin.size + 1);
-    memcpy(attr_name, attr_bin.data, attr_bin.size);
-    attr_name[attr_bin.size] = '\0';
-
-    PyObject *attr = PyObject_GetAttrString(obj_wrapper->obj, attr_name);
-    enif_free(attr_name);
-
-    ERL_NIF_TERM result;
-    if (attr == NULL) {
-        result = make_py_error(env);
-    } else {
-        ERL_NIF_TERM term_result = py_to_term(env, attr);
-        Py_DECREF(attr);
-        result = enif_make_tuple2(env, ATOM_OK, term_result);
-    }
-
-    PyGILState_Release(gstate);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
     return result;
 }
 
@@ -873,84 +736,17 @@ static ERL_NIF_TERM nif_memory_stats(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "python_not_initialized");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_MEMORY_STATS;
+    req.env = env;
 
-    /* Import gc module */
-    PyObject *gc_module = PyImport_ImportModule("gc");
-    if (gc_module == NULL) {
-        PyGILState_Release(gstate);
-        return make_error(env, "gc_import_failed");
-    }
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    /* Get gc.get_stats() */
-    PyObject *stats = PyObject_CallMethod(gc_module, "get_stats", NULL);
-
-    ERL_NIF_TERM result_map = enif_make_new_map(env);
-
-    if (stats != NULL && PyList_Check(stats)) {
-        /* gc.get_stats() returns a list of dicts for each generation */
-        Py_ssize_t num_gens = PyList_Size(stats);
-        ERL_NIF_TERM *gen_stats = enif_alloc(sizeof(ERL_NIF_TERM) * num_gens);
-
-        for (Py_ssize_t i = 0; i < num_gens; i++) {
-            PyObject *gen = PyList_GetItem(stats, i);
-            gen_stats[i] = py_to_term(env, gen);
-        }
-
-        ERL_NIF_TERM gc_stats_list = enif_make_list_from_array(env, gen_stats, num_gens);
-        enif_free(gen_stats);
-
-        enif_make_map_put(env, result_map,
-            enif_make_atom(env, "gc_stats"), gc_stats_list, &result_map);
-
-        Py_DECREF(stats);
-    }
-
-    /* Get gc.get_count() */
-    PyObject *counts = PyObject_CallMethod(gc_module, "get_count", NULL);
-    if (counts != NULL && PyTuple_Check(counts)) {
-        ERL_NIF_TERM count_term = py_to_term(env, counts);
-        enif_make_map_put(env, result_map,
-            enif_make_atom(env, "gc_count"), count_term, &result_map);
-        Py_DECREF(counts);
-    }
-
-    /* Get gc.get_threshold() */
-    PyObject *threshold = PyObject_CallMethod(gc_module, "get_threshold", NULL);
-    if (threshold != NULL && PyTuple_Check(threshold)) {
-        ERL_NIF_TERM threshold_term = py_to_term(env, threshold);
-        enif_make_map_put(env, result_map,
-            enif_make_atom(env, "gc_threshold"), threshold_term, &result_map);
-        Py_DECREF(threshold);
-    }
-
-    Py_DECREF(gc_module);
-
-    /* Try to get tracemalloc stats if available */
-    PyObject *tracemalloc = PyImport_ImportModule("tracemalloc");
-    if (tracemalloc != NULL) {
-        /* Check if tracing is enabled */
-        PyObject *is_tracing = PyObject_CallMethod(tracemalloc, "is_tracing", NULL);
-        if (is_tracing != NULL && PyObject_IsTrue(is_tracing)) {
-            PyObject *current_traced = PyObject_CallMethod(tracemalloc, "get_traced_memory", NULL);
-            if (current_traced != NULL && PyTuple_Check(current_traced)) {
-                ERL_NIF_TERM current = py_to_term(env, PyTuple_GetItem(current_traced, 0));
-                ERL_NIF_TERM peak = py_to_term(env, PyTuple_GetItem(current_traced, 1));
-                enif_make_map_put(env, result_map,
-                    enif_make_atom(env, "traced_memory_current"), current, &result_map);
-                enif_make_map_put(env, result_map,
-                    enif_make_atom(env, "traced_memory_peak"), peak, &result_map);
-                Py_DECREF(current_traced);
-            }
-        }
-        Py_XDECREF(is_tracing);
-        Py_DECREF(tracemalloc);
-    }
-    PyErr_Clear();  /* Clear any import errors */
-
-    PyGILState_Release(gstate);
-
-    return enif_make_tuple2(env, ATOM_OK, result_map);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
+    return result;
 }
 
 /**
@@ -962,35 +758,21 @@ static ERL_NIF_TERM nif_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
         return make_error(env, "python_not_initialized");
     }
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Import gc module and call gc.collect() */
-    PyObject *gc_module = PyImport_ImportModule("gc");
-    if (gc_module == NULL) {
-        PyGILState_Release(gstate);
-        return make_error(env, "gc_import_failed");
-    }
-
-    /* Optional generation argument */
-    int generation = 2;  /* Full collection by default */
+    py_request_t req;
+    request_init(&req);
+    req.type = PY_REQ_GC;
+    req.env = env;
+    req.gc_generation = 2;  /* Full collection by default */
     if (argc > 0) {
-        enif_get_int(env, argv[0], &generation);
+        enif_get_int(env, argv[0], &req.gc_generation);
     }
 
-    PyObject *result = PyObject_CallMethod(gc_module, "collect", "i", generation);
-    Py_DECREF(gc_module);
+    executor_enqueue(&req);
+    executor_wait(&req);
 
-    ERL_NIF_TERM ret;
-    if (result == NULL) {
-        ret = make_py_error(env);
-    } else {
-        long collected = PyLong_AsLong(result);
-        Py_DECREF(result);
-        ret = enif_make_tuple2(env, ATOM_OK, enif_make_long(env, collected));
-    }
-
-    PyGILState_Release(gstate);
-    return ret;
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
+    return result;
 }
 
 /**
@@ -1143,22 +925,33 @@ static void *async_event_loop_thread(void *arg) {
 
     worker->loop_running = true;
 
-    /* Run the event loop using run_forever with periodic checks */
+    /* Run the event loop with proper GIL management */
     while (!worker->shutdown) {
-        /* Run event loop for a short time, then check pending futures */
-        PyObject *run_result = PyObject_CallMethod(loop, "run_until_complete",
-            "O", PyObject_CallMethod(loop, "create_task",
-                "O", PyObject_CallMethod(PyImport_ImportModule("asyncio"), "sleep", "d", 0.01)));
+        /* Release GIL while sleeping (allow other Python threads to run) */
+        Py_BEGIN_ALLOW_THREADS
+        usleep(10000);  /* 10ms sleep without holding GIL */
+        Py_END_ALLOW_THREADS
 
-        if (run_result == NULL) {
-            if (PyErr_Occurred()) {
-                PyErr_Clear();
+        /* Run one iteration of the event loop with GIL held */
+        PyObject *asyncio_mod = PyImport_ImportModule("asyncio");
+        if (asyncio_mod != NULL) {
+            PyObject *sleep_coro = PyObject_CallMethod(asyncio_mod, "sleep", "d", 0.0);
+            if (sleep_coro != NULL) {
+                PyObject *task = PyObject_CallMethod(loop, "create_task", "O", sleep_coro);
+                Py_DECREF(sleep_coro);
+                if (task != NULL) {
+                    PyObject *run_result = PyObject_CallMethod(loop, "run_until_complete", "O", task);
+                    Py_DECREF(task);
+                    Py_XDECREF(run_result);
+                }
             }
-        } else {
-            Py_DECREF(run_result);
+            Py_DECREF(asyncio_mod);
+        }
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
         }
 
-        /* Check for completed futures */
+        /* Check for completed futures (GIL held) */
         pthread_mutex_lock(&worker->queue_mutex);
         async_pending_t *prev = NULL;
         async_pending_t *p = worker->pending_head;
@@ -1663,6 +1456,10 @@ static ERL_NIF_TERM nif_subinterp_supported(ErlNifEnv *env, int argc, const ERL_
 
 /**
  * Create a new sub-interpreter with its own GIL.
+ *
+ * For sub-interpreters with per-interpreter GIL (Python 3.12+), we need
+ * careful thread state management since Py_NewInterpreterFromConfig
+ * automatically switches to the new interpreter's thread state.
  */
 static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     if (!g_python_initialized) {
@@ -1675,8 +1472,11 @@ static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL
         return make_error(env, "alloc_failed");
     }
 
-    /* Need the GIL to create sub-interpreter */
+    /* Need the main GIL to create sub-interpreter */
     PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Save current thread state so we can restore it after creating sub-interp */
+    PyThreadState *main_tstate = PyThreadState_Get();
 
     /* Configure sub-interpreter with its own GIL */
     PyInterpreterConfig config = {
@@ -1693,11 +1493,16 @@ static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL
     PyStatus status = Py_NewInterpreterFromConfig(&tstate, &config);
 
     if (PyStatus_Exception(status) || tstate == NULL) {
+        /* We're still in main interpreter on error */
         PyGILState_Release(gstate);
         enif_release_resource(worker);
         return make_error(env, "subinterp_create_failed");
     }
 
+    /*
+     * Py_NewInterpreterFromConfig has switched us to the new sub-interpreter.
+     * We're now holding the sub-interpreter's GIL (since it has OWN_GIL).
+     */
     worker->interp = PyThreadState_GetInterpreter(tstate);
     worker->tstate = tstate;
 
@@ -1709,8 +1514,16 @@ static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL
     PyObject *builtins = PyEval_GetBuiltins();
     PyDict_SetItemString(worker->globals, "__builtins__", builtins);
 
-    /* Switch back to main interpreter */
+    /*
+     * Switch back to main interpreter:
+     * 1. Detach from sub-interpreter (swap to NULL)
+     * 2. Re-attach to main interpreter (swap to main_tstate)
+     * This properly releases the sub-interpreter's GIL and reacquires main GIL.
+     */
     PyThreadState_Swap(NULL);
+    PyThreadState_Swap(main_tstate);
+
+    /* Now we're back in main interpreter, release main GIL properly */
     PyGILState_Release(gstate);
 
     ERL_NIF_TERM result = enif_make_resource(env, worker);
@@ -1736,6 +1549,9 @@ static ERL_NIF_TERM nif_subinterp_worker_destroy(ErlNifEnv *env, int argc, const
 /**
  * Call a function in a sub-interpreter.
  * Args: WorkerRef, Module (binary), Func (binary), Args (list), Kwargs (map)
+ *
+ * Sub-interpreters with per-interpreter GIL (Python 3.12+) require proper
+ * thread state management. We don't mix PyGILState with PyThreadState_Swap.
  */
 static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_subinterp_worker_t *worker;
@@ -1751,8 +1567,17 @@ static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "invalid_func");
     }
 
-    /* Switch to sub-interpreter's thread state */
-    PyThreadState *old_tstate = PyThreadState_Swap(worker->tstate);
+    /*
+     * Properly enter the sub-interpreter:
+     * 1. Save current thread state (may be NULL if no current interpreter)
+     * 2. Swap to NULL (detach from current interpreter)
+     * 3. Swap to sub-interpreter's thread state (attach to sub-interpreter)
+     *
+     * For sub-interpreters with own GIL, we acquire that GIL by swapping
+     * to its thread state.
+     */
+    PyThreadState *saved_tstate = PyThreadState_Swap(NULL);
+    PyThreadState_Swap(worker->tstate);
 
     char *module_name = enif_alloc(module_bin.size + 1);
     memcpy(module_name, module_bin.data, module_bin.size);
@@ -1825,8 +1650,15 @@ cleanup:
     enif_free(module_name);
     enif_free(func_name);
 
-    /* Switch back to previous thread state */
-    PyThreadState_Swap(old_tstate);
+    /*
+     * Exit the sub-interpreter:
+     * 1. Swap to NULL (detach from sub-interpreter)
+     * 2. Swap back to saved thread state (may be NULL)
+     */
+    PyThreadState_Swap(NULL);
+    if (saved_tstate != NULL) {
+        PyThreadState_Swap(saved_tstate);
+    }
 
     return result;
 }
@@ -2458,6 +2290,545 @@ static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const E
     }
 
     return ATOM_OK;
+}
+
+/* ============================================================================
+ * Executor thread implementation
+ *
+ * The executor thread owns the Python GIL and processes all Python operations.
+ * This ensures consistent thread state for C extensions with TLS.
+ * ============================================================================ */
+
+/**
+ * Process a single request in the executor thread (GIL held).
+ */
+static void process_request(py_request_t *req) {
+    ErlNifEnv *env = req->env;
+    py_worker_t *worker = req->worker;
+
+    switch (req->type) {
+    case PY_REQ_CALL: {
+        /* Set thread-local worker context for callbacks */
+        tl_current_worker = worker;
+        tl_callback_env = env;
+
+        char *module_name = enif_alloc(req->module_bin.size + 1);
+        memcpy(module_name, req->module_bin.data, req->module_bin.size);
+        module_name[req->module_bin.size] = '\0';
+
+        char *func_name = enif_alloc(req->func_bin.size + 1);
+        memcpy(func_name, req->func_bin.data, req->func_bin.size);
+        func_name[req->func_bin.size] = '\0';
+
+        PyObject *func = NULL;
+
+        /* Special handling for __main__ - look in worker's namespace */
+        if (strcmp(module_name, "__main__") == 0) {
+            func = PyDict_GetItemString(worker->locals, func_name);
+            if (func == NULL) {
+                func = PyDict_GetItemString(worker->globals, func_name);
+            }
+            if (func != NULL) {
+                Py_INCREF(func);
+            } else {
+                PyErr_Format(PyExc_NameError, "name '%s' is not defined", func_name);
+                req->result = make_py_error(env);
+                goto call_cleanup;
+            }
+        } else {
+            PyObject *module = PyImport_ImportModule(module_name);
+            if (module == NULL) {
+                req->result = make_py_error(env);
+                goto call_cleanup;
+            }
+            func = PyObject_GetAttrString(module, func_name);
+            Py_DECREF(module);
+        }
+
+        if (func == NULL) {
+            req->result = make_py_error(env);
+            goto call_cleanup;
+        }
+
+        /* Convert args list to Python tuple */
+        unsigned int args_len;
+        if (!enif_get_list_length(env, req->args_term, &args_len)) {
+            Py_DECREF(func);
+            req->result = make_error(env, "invalid_args");
+            goto call_cleanup;
+        }
+
+        PyObject *args = PyTuple_New(args_len);
+        ERL_NIF_TERM head, tail = req->args_term;
+        for (unsigned int i = 0; i < args_len; i++) {
+            enif_get_list_cell(env, tail, &head, &tail);
+            PyObject *arg = term_to_py(env, head);
+            if (arg == NULL) {
+                Py_DECREF(args);
+                Py_DECREF(func);
+                req->result = make_error(env, "arg_conversion_failed");
+                goto call_cleanup;
+            }
+            PyTuple_SET_ITEM(args, i, arg);
+        }
+
+        /* Convert kwargs map to Python dict */
+        PyObject *kwargs = NULL;
+        if (enif_is_map(env, req->kwargs_term)) {
+            kwargs = term_to_py(env, req->kwargs_term);
+        }
+
+        /* Start timeout if specified */
+        start_timeout(req->timeout_ms);
+
+        /* Call the function */
+        PyObject *py_result = PyObject_Call(func, args, kwargs);
+
+        /* Stop timeout */
+        stop_timeout();
+
+        Py_DECREF(func);
+        Py_DECREF(args);
+        Py_XDECREF(kwargs);
+
+        if (py_result == NULL) {
+            if (check_timeout_error()) {
+                PyErr_Clear();
+                req->result = enif_make_tuple2(env, ATOM_ERROR, ATOM_TIMEOUT);
+            } else {
+                req->result = make_py_error(env);
+            }
+        } else if (PyGen_Check(py_result) || PyIter_Check(py_result)) {
+            py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
+            wrapper->obj = py_result;
+            ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
+            enif_release_resource(wrapper);
+            req->result = enif_make_tuple2(env, ATOM_OK,
+                enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+        } else {
+            ERL_NIF_TERM term_result = py_to_term(env, py_result);
+            Py_DECREF(py_result);
+            req->result = enif_make_tuple2(env, ATOM_OK, term_result);
+        }
+
+    call_cleanup:
+        tl_current_worker = NULL;
+        tl_callback_env = NULL;
+        enif_free(module_name);
+        enif_free(func_name);
+        break;
+    }
+
+    case PY_REQ_EVAL: {
+        tl_current_worker = worker;
+        tl_callback_env = env;
+
+        char *code = enif_alloc(req->code_bin.size + 1);
+        memcpy(code, req->code_bin.data, req->code_bin.size);
+        code[req->code_bin.size] = '\0';
+
+        /* Update locals if provided */
+        if (enif_is_map(env, req->locals_term)) {
+            PyObject *new_locals = term_to_py(env, req->locals_term);
+            if (new_locals != NULL && PyDict_Check(new_locals)) {
+                PyDict_Update(worker->locals, new_locals);
+                Py_DECREF(new_locals);
+            }
+        }
+
+        /* Start timeout if specified */
+        start_timeout(req->timeout_ms);
+
+        /* Compile and evaluate */
+        PyObject *compiled = Py_CompileString(code, "<erlang>", Py_eval_input);
+
+        if (compiled == NULL) {
+            stop_timeout();
+            req->result = make_py_error(env);
+        } else {
+            PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->locals);
+            Py_DECREF(compiled);
+            stop_timeout();
+
+            if (py_result == NULL) {
+                if (check_timeout_error()) {
+                    PyErr_Clear();
+                    req->result = enif_make_tuple2(env, ATOM_ERROR, ATOM_TIMEOUT);
+                } else {
+                    req->result = make_py_error(env);
+                }
+            } else if (PyGen_Check(py_result) || PyIter_Check(py_result)) {
+                py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
+                wrapper->obj = py_result;
+                ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
+                enif_release_resource(wrapper);
+                req->result = enif_make_tuple2(env, ATOM_OK,
+                    enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+            } else {
+                ERL_NIF_TERM term_result = py_to_term(env, py_result);
+                Py_DECREF(py_result);
+                req->result = enif_make_tuple2(env, ATOM_OK, term_result);
+            }
+        }
+
+        tl_current_worker = NULL;
+        tl_callback_env = NULL;
+        enif_free(code);
+        break;
+    }
+
+    case PY_REQ_EXEC: {
+        tl_current_worker = worker;
+        tl_callback_env = env;
+
+        char *code = enif_alloc(req->code_bin.size + 1);
+        memcpy(code, req->code_bin.data, req->code_bin.size);
+        code[req->code_bin.size] = '\0';
+
+        PyObject *compiled = Py_CompileString(code, "<erlang>", Py_file_input);
+
+        if (compiled == NULL) {
+            req->result = make_py_error(env);
+        } else {
+            PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->locals);
+            Py_DECREF(compiled);
+
+            if (py_result == NULL) {
+                req->result = make_py_error(env);
+            } else {
+                Py_DECREF(py_result);
+                req->result = ATOM_OK;
+            }
+        }
+
+        tl_current_worker = NULL;
+        tl_callback_env = NULL;
+        enif_free(code);
+        break;
+    }
+
+    case PY_REQ_NEXT: {
+        PyObject *item = PyIter_Next(req->gen_wrapper->obj);
+
+        if (item == NULL) {
+            if (PyErr_Occurred()) {
+                if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    PyErr_Clear();
+                    req->result = enif_make_tuple2(env, ATOM_ERROR, ATOM_STOP_ITERATION);
+                } else {
+                    req->result = make_py_error(env);
+                }
+            } else {
+                req->result = enif_make_tuple2(env, ATOM_ERROR, ATOM_STOP_ITERATION);
+            }
+        } else if (PyGen_Check(item) || PyIter_Check(item)) {
+            py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
+            wrapper->obj = item;
+            ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
+            enif_release_resource(wrapper);
+            req->result = enif_make_tuple2(env, ATOM_OK,
+                enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+        } else {
+            ERL_NIF_TERM term_result = py_to_term(env, item);
+            Py_DECREF(item);
+            req->result = enif_make_tuple2(env, ATOM_OK, term_result);
+        }
+        break;
+    }
+
+    case PY_REQ_IMPORT: {
+        char *module_name = enif_alloc(req->module_bin.size + 1);
+        memcpy(module_name, req->module_bin.data, req->module_bin.size);
+        module_name[req->module_bin.size] = '\0';
+
+        PyObject *module = PyImport_ImportModule(module_name);
+        enif_free(module_name);
+
+        if (module == NULL) {
+            req->result = make_py_error(env);
+        } else {
+            py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
+            wrapper->obj = module;
+            ERL_NIF_TERM mod_ref = enif_make_resource(env, wrapper);
+            enif_release_resource(wrapper);
+            req->result = enif_make_tuple2(env, ATOM_OK, mod_ref);
+        }
+        break;
+    }
+
+    case PY_REQ_GETATTR: {
+        char *attr_name = enif_alloc(req->attr_bin.size + 1);
+        memcpy(attr_name, req->attr_bin.data, req->attr_bin.size);
+        attr_name[req->attr_bin.size] = '\0';
+
+        PyObject *attr = PyObject_GetAttrString(req->obj_wrapper->obj, attr_name);
+        enif_free(attr_name);
+
+        if (attr == NULL) {
+            req->result = make_py_error(env);
+        } else {
+            ERL_NIF_TERM term_result = py_to_term(env, attr);
+            Py_DECREF(attr);
+            req->result = enif_make_tuple2(env, ATOM_OK, term_result);
+        }
+        break;
+    }
+
+    case PY_REQ_MEMORY_STATS: {
+        /* Import gc module */
+        PyObject *gc_module = PyImport_ImportModule("gc");
+        if (gc_module == NULL) {
+            req->result = make_error(env, "gc_import_failed");
+            break;
+        }
+
+        ERL_NIF_TERM result_map = enif_make_new_map(env);
+
+        PyObject *stats = PyObject_CallMethod(gc_module, "get_stats", NULL);
+        if (stats != NULL && PyList_Check(stats)) {
+            Py_ssize_t num_gens = PyList_Size(stats);
+            ERL_NIF_TERM *gen_stats = enif_alloc(sizeof(ERL_NIF_TERM) * num_gens);
+            for (Py_ssize_t i = 0; i < num_gens; i++) {
+                PyObject *gen = PyList_GetItem(stats, i);
+                gen_stats[i] = py_to_term(env, gen);
+            }
+            ERL_NIF_TERM gc_stats_list = enif_make_list_from_array(env, gen_stats, num_gens);
+            enif_free(gen_stats);
+            enif_make_map_put(env, result_map,
+                enif_make_atom(env, "gc_stats"), gc_stats_list, &result_map);
+            Py_DECREF(stats);
+        }
+
+        PyObject *counts = PyObject_CallMethod(gc_module, "get_count", NULL);
+        if (counts != NULL && PyTuple_Check(counts)) {
+            ERL_NIF_TERM count_term = py_to_term(env, counts);
+            enif_make_map_put(env, result_map,
+                enif_make_atom(env, "gc_count"), count_term, &result_map);
+            Py_DECREF(counts);
+        }
+
+        PyObject *threshold = PyObject_CallMethod(gc_module, "get_threshold", NULL);
+        if (threshold != NULL && PyTuple_Check(threshold)) {
+            ERL_NIF_TERM threshold_term = py_to_term(env, threshold);
+            enif_make_map_put(env, result_map,
+                enif_make_atom(env, "gc_threshold"), threshold_term, &result_map);
+            Py_DECREF(threshold);
+        }
+
+        Py_DECREF(gc_module);
+
+        /* Try to get tracemalloc stats if available */
+        PyObject *tracemalloc = PyImport_ImportModule("tracemalloc");
+        if (tracemalloc != NULL) {
+            PyObject *is_tracing = PyObject_CallMethod(tracemalloc, "is_tracing", NULL);
+            if (is_tracing != NULL && PyObject_IsTrue(is_tracing)) {
+                PyObject *current_traced = PyObject_CallMethod(tracemalloc, "get_traced_memory", NULL);
+                if (current_traced != NULL && PyTuple_Check(current_traced)) {
+                    ERL_NIF_TERM current = py_to_term(env, PyTuple_GetItem(current_traced, 0));
+                    ERL_NIF_TERM peak = py_to_term(env, PyTuple_GetItem(current_traced, 1));
+                    enif_make_map_put(env, result_map,
+                        enif_make_atom(env, "traced_memory_current"), current, &result_map);
+                    enif_make_map_put(env, result_map,
+                        enif_make_atom(env, "traced_memory_peak"), peak, &result_map);
+                    Py_DECREF(current_traced);
+                }
+            }
+            Py_XDECREF(is_tracing);
+            Py_DECREF(tracemalloc);
+        }
+        PyErr_Clear();
+
+        req->result = enif_make_tuple2(env, ATOM_OK, result_map);
+        break;
+    }
+
+    case PY_REQ_GC: {
+        PyObject *gc_module = PyImport_ImportModule("gc");
+        if (gc_module == NULL) {
+            req->result = make_error(env, "gc_import_failed");
+            break;
+        }
+
+        PyObject *result = PyObject_CallMethod(gc_module, "collect", "i", req->gc_generation);
+        Py_DECREF(gc_module);
+
+        if (result == NULL) {
+            req->result = make_py_error(env);
+        } else {
+            long collected = PyLong_AsLong(result);
+            Py_DECREF(result);
+            req->result = enif_make_tuple2(env, ATOM_OK, enif_make_long(env, collected));
+        }
+        break;
+    }
+
+    case PY_REQ_SHUTDOWN:
+        /* Signal to exit the loop - nothing to do here */
+        break;
+    }
+}
+
+/**
+ * Main function for the executor thread.
+ * Acquires GIL and processes requests until shutdown.
+ */
+static void *executor_thread_main(void *arg) {
+    (void)arg;
+
+    /* Acquire GIL for this thread */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    g_executor_running = true;
+
+    /*
+     * Main processing loop.
+     * We continue processing until we receive a PY_REQ_SHUTDOWN request.
+     * The shutdown flag is used to stop waiting when the queue is empty.
+     */
+    bool should_exit = false;
+    while (!should_exit) {
+        py_request_t *req = NULL;
+
+        /* Release GIL while waiting for work (like PyO3 allow_threads) */
+        Py_BEGIN_ALLOW_THREADS
+
+        pthread_mutex_lock(&g_executor_mutex);
+        while (g_executor_queue_head == NULL && !g_executor_shutdown) {
+            pthread_cond_wait(&g_executor_cond, &g_executor_mutex);
+        }
+
+        /* Dequeue request if available */
+        if (g_executor_queue_head != NULL) {
+            req = g_executor_queue_head;
+            g_executor_queue_head = req->next;
+            if (g_executor_queue_head == NULL) {
+                g_executor_queue_tail = NULL;
+            }
+            req->next = NULL;
+        } else if (g_executor_shutdown) {
+            /* Queue is empty and shutdown requested - exit */
+            should_exit = true;
+        }
+        pthread_mutex_unlock(&g_executor_mutex);
+
+        Py_END_ALLOW_THREADS
+
+        if (req != NULL) {
+            if (req->type == PY_REQ_SHUTDOWN) {
+                /* Signal completion and exit */
+                pthread_mutex_lock(&req->mutex);
+                req->completed = true;
+                pthread_cond_signal(&req->cond);
+                pthread_mutex_unlock(&req->mutex);
+                should_exit = true;
+            } else {
+                /* Process the request with GIL held */
+                process_request(req);
+
+                /* Signal completion */
+                pthread_mutex_lock(&req->mutex);
+                req->completed = true;
+                pthread_cond_signal(&req->cond);
+                pthread_mutex_unlock(&req->mutex);
+            }
+        }
+    }
+
+    g_executor_running = false;
+    PyGILState_Release(gstate);
+
+    return NULL;
+}
+
+/**
+ * Enqueue a request to the executor thread.
+ */
+static void executor_enqueue(py_request_t *req) {
+    pthread_mutex_lock(&g_executor_mutex);
+    req->next = NULL;
+    if (g_executor_queue_tail == NULL) {
+        g_executor_queue_head = req;
+        g_executor_queue_tail = req;
+    } else {
+        g_executor_queue_tail->next = req;
+        g_executor_queue_tail = req;
+    }
+    pthread_cond_signal(&g_executor_cond);
+    pthread_mutex_unlock(&g_executor_mutex);
+}
+
+/**
+ * Wait for a request to complete.
+ */
+static void executor_wait(py_request_t *req) {
+    pthread_mutex_lock(&req->mutex);
+    while (!req->completed) {
+        pthread_cond_wait(&req->cond, &req->mutex);
+    }
+    pthread_mutex_unlock(&req->mutex);
+}
+
+/**
+ * Initialize a request structure.
+ */
+static void request_init(py_request_t *req) {
+    memset(req, 0, sizeof(py_request_t));
+    pthread_mutex_init(&req->mutex, NULL);
+    pthread_cond_init(&req->cond, NULL);
+    req->completed = false;
+}
+
+/**
+ * Clean up a request structure.
+ */
+static void request_cleanup(py_request_t *req) {
+    pthread_mutex_destroy(&req->mutex);
+    pthread_cond_destroy(&req->cond);
+}
+
+/**
+ * Start the executor thread.
+ * Called during Python initialization.
+ */
+static int executor_start(void) {
+    g_executor_shutdown = false;
+    g_executor_queue_head = NULL;
+    g_executor_queue_tail = NULL;
+
+    if (pthread_create(&g_executor_thread, NULL, executor_thread_main, NULL) != 0) {
+        return -1;
+    }
+
+    /* Wait for executor to be ready */
+    int max_wait = 100;  /* 1 second max */
+    while (!g_executor_running && max_wait-- > 0) {
+        usleep(10000);  /* 10ms */
+    }
+
+    return g_executor_running ? 0 : -1;
+}
+
+/**
+ * Stop the executor thread.
+ * Called during Python finalization.
+ */
+static void executor_stop(void) {
+    if (!g_executor_running) {
+        return;
+    }
+
+    /* Send shutdown request */
+    py_request_t shutdown_req;
+    request_init(&shutdown_req);
+    shutdown_req.type = PY_REQ_SHUTDOWN;
+
+    g_executor_shutdown = true;
+    executor_enqueue(&shutdown_req);
+    executor_wait(&shutdown_req);
+    request_cleanup(&shutdown_req);
+
+    /* Wait for thread to finish */
+    pthread_join(g_executor_thread, NULL);
 }
 
 /* ============================================================================
