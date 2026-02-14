@@ -44,6 +44,11 @@ The application starts a pool of Python worker processes that handle requests.
 
 %% With local variables
 {ok, 100} = py:eval(<<"x * y">>, #{x => 10, y => 10}).
+
+%% Note: Python locals aren't accessible in nested scopes (lambda/comprehensions).
+%% Use default arguments to capture values:
+{ok, [2, 4, 6]} = py:eval(<<"list(map(lambda x, m=multiplier: x * m, items))">>,
+                          #{items => [1, 2, 3], multiplier => 2}).
 ```
 
 ### Executing Statements

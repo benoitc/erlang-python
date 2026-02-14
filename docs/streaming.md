@@ -54,8 +54,18 @@ def fibonacci(n):
         a, b = b, a + b
 ">>).
 
-%% Stream from it (note: must be same worker)
+%% Stream from it
+%% Note: Functions defined with exec are local to the worker that executes them.
+%% Subsequent calls may go to different workers in the pool.
 {ok, Fib} = py:stream('__main__', fibonacci, [10]).
+%% Fib = [0,1,1,2,3,5,8,13,21,34]
+```
+
+For reliable inline generators, use lambda with walrus operator (Python 3.8+):
+
+```erlang
+%% Fibonacci using inline lambda - works reliably across workers
+{ok, Fib} = py:stream_eval(<<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>).
 %% Fib = [0,1,1,2,3,5,8,13,21,34]
 ```
 

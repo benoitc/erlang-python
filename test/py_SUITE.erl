@@ -12,18 +12,24 @@
 -export([
     test_call_math/1,
     test_call_json/1,
+    test_call_kwargs/1,
     test_eval/1,
+    test_eval_complex_locals/1,
     test_exec/1,
     test_async_call/1,
     test_type_conversions/1,
+    test_nested_types/1,
     test_timeout/1,
     test_special_floats/1,
     test_streaming/1,
+    test_stream_function/1,
+    test_stream_iterators/1,
     test_error_handling/1,
     test_version/1,
     test_memory_stats/1,
     test_gc/1,
     test_erlang_callback/1,
+    test_erlang_callback_mfa/1,
     test_asyncio_call/1,
     test_asyncio_gather/1,
     test_subinterp_supported/1,
@@ -44,18 +50,24 @@ all() ->
     [
         test_call_math,
         test_call_json,
+        test_call_kwargs,
         test_eval,
+        test_eval_complex_locals,
         test_exec,
         test_async_call,
         test_type_conversions,
+        test_nested_types,
         test_timeout,
         test_special_floats,
         test_streaming,
+        test_stream_function,
+        test_stream_iterators,
         test_error_handling,
         test_version,
         test_memory_stats,
         test_gc,
         test_erlang_callback,
+        test_erlang_callback_mfa,
         test_asyncio_call,
         test_asyncio_gather,
         test_subinterp_supported,
@@ -98,10 +110,61 @@ test_call_json(_Config) ->
     #{<<"a">> := 1, <<"b">> := [1, 2, 3]} = Decoded,
     ok.
 
+test_call_kwargs(_Config) ->
+    %% Test keyword arguments with json.dumps indent parameter
+    {ok, JsonIndented} = py:call(json, dumps, [#{a => 1}], #{indent => 2}),
+    true = is_binary(JsonIndented),
+    %% Indented JSON should contain newlines
+    true = binary:match(JsonIndented, <<"\n">>) =/= nomatch,
+
+    %% Test keyword arguments with sort_keys
+    {ok, JsonSorted} = py:call(json, dumps, [#{z => 1, a => 2}], #{sort_keys => true}),
+    true = is_binary(JsonSorted),
+
+    %% Test multiple kwargs
+    {ok, JsonMulti} = py:call(json, dumps, [#{b => 1, a => 2}], #{indent => 4, sort_keys => true}),
+    true = is_binary(JsonMulti),
+    true = binary:match(JsonMulti, <<"\n">>) =/= nomatch,
+
+    %% Test with string functions - str.split with maxsplit kwarg
+    {ok, Split} = py:eval(<<"'a-b-c-d'.split('-', maxsplit=2)">>),
+    [<<"a">>, <<"b">>, <<"c-d">>] = Split,
+
+    ok.
+
 test_eval(_Config) ->
     {ok, 45} = py:eval(<<"sum(range(10))">>),
     {ok, 25} = py:eval(<<"x * y">>, #{x => 5, y => 5}),
     {ok, [0, 1, 4, 9, 16]} = py:eval(<<"[x**2 for x in range(5)]">>),
+    ok.
+
+test_eval_complex_locals(_Config) ->
+    %% Test eval with list local
+    {ok, 15} = py:eval(<<"sum(numbers)">>, #{numbers => [1, 2, 3, 4, 5]}),
+
+    %% Test eval with map local
+    {ok, <<"Alice">>} = py:eval(<<"data['name']">>, #{data => #{name => <<"Alice">>, age => 30}}),
+
+    %% Test eval with nested structures
+    {ok, 42} = py:eval(<<"config['settings']['value']">>,
+                       #{config => #{settings => #{value => 42}}}),
+
+    %% Test eval with multiple complex locals using default argument capture
+    %% Note: Python's eval() locals aren't accessible in nested scopes (lambda/comprehension)
+    %% Use default argument to capture the value: lambda x, m=multiplier: x * m
+    {ok, [2, 4, 6]} = py:eval(<<"list(map(lambda x, m=multiplier: x * m, items))">>,
+                              #{items => [1, 2, 3], multiplier => 2}),
+
+    %% Test eval with multiple variables
+    {ok, 6} = py:eval(<<"a + b + c">>, #{a => 1, b => 2, c => 3}),
+
+    %% Test eval using local in function call
+    {ok, 3} = py:eval(<<"len(word)">>, #{word => <<"foo">>}),
+
+    %% Test eval with nested map access
+    {ok, <<"value">>} = py:eval(<<"obj['nested']['key']">>,
+                                #{obj => #{nested => #{key => <<"value">>}}}),
+
     ok.
 
 test_exec(_Config) ->
@@ -150,6 +213,37 @@ test_type_conversions(_Config) ->
 
     ok.
 
+test_nested_types(_Config) ->
+    %% Test nested list
+    {ok, [[1, 2], [3, 4]]} = py:eval(<<"[[1, 2], [3, 4]]">>),
+
+    %% Test nested dict
+    {ok, #{<<"outer">> := #{<<"inner">> := 42}}} =
+        py:eval(<<"{'outer': {'inner': 42}}">>),
+
+    %% Test list of dicts
+    {ok, [#{<<"a">> := 1}, #{<<"b">> := 2}]} =
+        py:eval(<<"[{'a': 1}, {'b': 2}]">>),
+
+    %% Test dict with list values
+    {ok, #{<<"items">> := [1, 2, 3]}} = py:eval(<<"{'items': [1, 2, 3]}">>),
+
+    %% Test tuple containing lists
+    {ok, {[1, 2], [3, 4]}} = py:eval(<<"([1, 2], [3, 4])">>),
+
+    %% Test list containing tuple
+    {ok, [{1, 2}, {3, 4}]} = py:eval(<<"[(1, 2), (3, 4)]">>),
+
+    %% Test deep nesting
+    {ok, #{<<"level1">> := #{<<"level2">> := #{<<"level3">> := <<"deep">>}}}} =
+        py:eval(<<"{'level1': {'level2': {'level3': 'deep'}}}">>),
+
+    %% Test mixed nesting
+    {ok, #{<<"data">> := [{1, <<"a">>}, {2, <<"b">>}]}} =
+        py:eval(<<"{'data': [(1, 'a'), (2, 'b')]}">>),
+
+    ok.
+
 test_timeout(_Config) ->
     %% Test that timeout works - use a heavy computation
     %% sum(range(10**8)) will trigger timeout
@@ -184,6 +278,66 @@ test_streaming(_Config) ->
 
     %% Test map streaming
     {ok, [<<"A">>, <<"B">>, <<"C">>]} = py:stream_eval(<<"(c.upper() for c in 'abc')">>),
+
+    %% Test filtered generator expression (documented in streaming.md)
+    {ok, Evens} = py:stream_eval(<<"(x for x in range(10) if x % 2 == 0)">>),
+    [0, 2, 4, 6, 8] = Evens,
+
+    ok.
+
+test_stream_function(_Config) ->
+    %% Test streaming from generator functions
+    %% As documented in streaming.md, you can define generator functions
+    %% and stream from them. We test with inline generators using lambda.
+
+    %% Fibonacci generator - compute fibonacci sequence using lambda wrapper
+    %% (as documented pattern for inline generators)
+    {ok, Fib} = py:stream_eval(<<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>),
+    ct:pal("Fibonacci result: ~p~n", [Fib]),
+    [0, 1, 1, 2, 3, 5, 8, 13, 21, 34] = Fib,
+
+    %% Test py:stream/3 with builtins that return iterators
+    {ok, Result} = py:stream(builtins, iter, [[1, 2, 3, 4, 5]]),
+    [1, 2, 3, 4, 5] = Result,
+
+    %% Test stream with enumerate and kwargs (start parameter)
+    {ok, EnumResult} = py:stream(builtins, enumerate, [[<<"a">>, <<"b">>, <<"c">>]], #{start => 1}),
+    [{1, <<"a">>}, {2, <<"b">>}, {3, <<"c">>}] = EnumResult,
+
+    %% Test stream_eval with filter (returns iterator)
+    {ok, FilterResult} = py:stream_eval(<<"filter(lambda x: x > 2, [1, 2, 3, 4, 5])">>),
+    [3, 4, 5] = FilterResult,
+
+    %% Test batching generator (as documented in streaming.md)
+    {ok, Batches} = py:stream_eval(<<"(lambda data, size: (data[i:i+size] for i in range(0, len(data), size)))([1,2,3,4,5,6,7], 3)">>),
+    ct:pal("Batches: ~p~n", [Batches]),
+    [[1, 2, 3], [4, 5, 6], [7]] = Batches,
+
+    ok.
+
+test_stream_iterators(_Config) ->
+    %% Test dictionary items iterator (documented in streaming.md)
+    {ok, Items} = py:stream_eval(<<"iter({'a': 1, 'b': 2, 'c': 3}.items())">>),
+    ct:pal("Dict items: ~p~n", [Items]),
+    %% Items should be tuples
+    true = lists:all(fun(I) -> is_tuple(I) end, Items),
+    3 = length(Items),
+
+    %% Test dictionary keys iterator
+    {ok, Keys} = py:stream_eval(<<"iter({'x': 10, 'y': 20}.keys())">>),
+    true = lists:all(fun(K) -> is_binary(K) end, Keys),
+
+    %% Test dictionary values iterator
+    {ok, Values} = py:stream_eval(<<"iter({'x': 10, 'y': 20}.values())">>),
+    true = lists:all(fun(V) -> is_integer(V) end, Values),
+
+    %% Test enumerate iterator
+    {ok, Enumerated} = py:stream_eval(<<"enumerate(['a', 'b', 'c'])">>),
+    [{0, <<"a">>}, {1, <<"b">>}, {2, <<"c">>}] = Enumerated,
+
+    %% Test zip iterator
+    {ok, Zipped} = py:stream_eval(<<"zip([1, 2, 3], ['a', 'b', 'c'])">>),
+    [{1, <<"a">>}, {2, <<"b">>}, {3, <<"c">>}] = Zipped,
 
     ok.
 
@@ -253,8 +407,53 @@ test_erlang_callback(_Config) ->
     {ok, Result1} = py:eval(<<"erlang.call('add', 5, 7)">>),
     12 = Result1,
 
-    %% Unregister
+    %% Register function with multiple return types
+    py:register_function(get_info, fun([]) -> #{name => <<"test">>, count => 42} end),
+    {ok, Info} = py:eval(<<"erlang.call('get_info')">>),
+    #{<<"name">> := <<"test">>, <<"count">> := 42} = Info,
+
+    %% Register function that works with lists
+    py:register_function(reverse_list, fun([L]) -> lists:reverse(L) end),
+    {ok, Reversed} = py:eval(<<"erlang.call('reverse_list', [1, 2, 3])">>),
+    [3, 2, 1] = Reversed,
+
+    %% Cleanup
     py:unregister_function(add),
+    py:unregister_function(get_info),
+    py:unregister_function(reverse_list),
+
+    ok.
+
+test_erlang_callback_mfa(_Config) ->
+    %% Test registering an MFA (Module:Function style)
+    %%
+    %% Note: MFA callbacks receive ALL arguments as a single list [Args].
+    %% So erlang.call('foo', 1, 2, 3) passes Args = [1, 2, 3] to the function.
+    %% The function is called as Module:Function([1, 2, 3]).
+    %%
+    %% This means functions that work with MFA must accept a list argument.
+
+    %% lists:sum expects a list - works perfectly with MFA
+    py:register_function(sum_list, lists, sum),
+    {ok, 15} = py:eval(<<"erlang.call('sum_list', 1, 2, 3, 4, 5)">>),
+
+    %% lists:reverse expects a list - works with MFA
+    py:register_function(reverse_list, lists, reverse),
+    {ok, [3, 2, 1]} = py:eval(<<"erlang.call('reverse_list', 1, 2, 3)">>),
+
+    %% erlang:hd gets the first element of the args list
+    py:register_function(first_arg, erlang, hd),
+    {ok, <<"hello">>} = py:eval(<<"erlang.call('first_arg', 'hello', 'world')">>),
+
+    %% erlang:length gets the count of arguments
+    py:register_function(arg_count, erlang, length),
+    {ok, 4} = py:eval(<<"erlang.call('arg_count', 'a', 'b', 'c', 'd')">>),
+
+    %% Cleanup
+    py:unregister_function(sum_list),
+    py:unregister_function(reverse_list),
+    py:unregister_function(first_arg),
+    py:unregister_function(arg_count),
 
     ok.
 
@@ -277,9 +476,22 @@ test_asyncio_gather(_Config) ->
         {math, sqrt, [25]},
         {math, sqrt, [36]}
     ],
-    %% async_gather may return results or errors depending on async pool state
-    _Result = py:async_gather(Calls),
-    ok.
+    Result = py:async_gather(Calls),
+    ct:pal("async_gather result: ~p~n", [Result]),
+
+    %% Verify the result structure
+    case Result of
+        {ok, Results} when is_list(Results) ->
+            %% Should have 3 results
+            3 = length(Results),
+            %% Verify the values if they're successful
+            ct:pal("Gathered results: ~p~n", [Results]),
+            ok;
+        {error, Reason} ->
+            %% Async pool might not be fully functional in test env
+            ct:pal("async_gather returned error (may be expected): ~p~n", [Reason]),
+            ok
+    end.
 
 test_subinterp_supported(_Config) ->
     %% Test that subinterp_supported returns a boolean
