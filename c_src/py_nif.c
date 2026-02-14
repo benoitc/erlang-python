@@ -350,6 +350,7 @@ static ERL_NIF_TERM make_error(ErlNifEnv *env, const char *reason);
 static ERL_NIF_TERM make_py_error(ErlNifEnv *env);
 static int create_erlang_module(void);
 static PyObject *erlang_call_impl(PyObject *self, PyObject *args);
+static PyObject *erlang_module_getattr(PyObject *module, PyObject *name);
 static void *async_event_loop_thread(void *arg);
 
 /* ============================================================================
@@ -2249,6 +2250,46 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
  * Erlang callback module for Python
  * ============================================================================ */
 
+/* ErlangFunction - callable wrapper for registered Erlang functions */
+typedef struct {
+    PyObject_HEAD
+    PyObject *name;  /* Function name as Python string */
+} ErlangFunctionObject;
+
+static void ErlangFunction_dealloc(ErlangFunctionObject *self) {
+    Py_XDECREF(self->name);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+/* Forward declaration - implemented after erlang_call_impl */
+static PyObject *ErlangFunction_call(ErlangFunctionObject *self, PyObject *args, PyObject *kwds);
+
+static PyObject *ErlangFunction_repr(ErlangFunctionObject *self) {
+    return PyUnicode_FromFormat("<erlang function '%U'>", self->name);
+}
+
+static PyTypeObject ErlangFunctionType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang.Function",
+    .tp_doc = "Wrapper for registered Erlang function",
+    .tp_basicsize = sizeof(ErlangFunctionObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)ErlangFunction_dealloc,
+    .tp_call = (ternaryfunc)ErlangFunction_call,
+    .tp_repr = (reprfunc)ErlangFunction_repr,
+};
+
+/* Helper to create ErlangFunction instance */
+static PyObject *ErlangFunction_New(PyObject *name) {
+    ErlangFunctionObject *self = PyObject_New(ErlangFunctionObject, &ErlangFunctionType);
+    if (self != NULL) {
+        Py_INCREF(name);
+        self->name = name;
+    }
+    return (PyObject *)self;
+}
+
 /**
  * Python implementation of erlang.call(name, *args)
  *
@@ -2402,6 +2443,43 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     return result;
 }
 
+/**
+ * ErlangFunction.__call__ - forward to erlang_call_impl
+ */
+static PyObject *ErlangFunction_call(ErlangFunctionObject *self, PyObject *args, PyObject *kwds) {
+    (void)kwds;  /* Unused */
+
+    /* Build new args tuple: (name, *args) */
+    Py_ssize_t nargs = PyTuple_Size(args);
+    PyObject *new_args = PyTuple_New(nargs + 1);
+    if (new_args == NULL) {
+        return NULL;
+    }
+
+    Py_INCREF(self->name);
+    PyTuple_SET_ITEM(new_args, 0, self->name);
+
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject *item = PyTuple_GET_ITEM(args, i);
+        Py_INCREF(item);
+        PyTuple_SET_ITEM(new_args, i + 1, item);
+    }
+
+    /* Call existing erlang_call_impl */
+    PyObject *result = erlang_call_impl(NULL, new_args);
+    Py_DECREF(new_args);
+    return result;
+}
+
+/**
+ * Module __getattr__ - enables "from erlang import func_name" and "erlang.func_name()"
+ */
+static PyObject *erlang_module_getattr(PyObject *module, PyObject *name) {
+    (void)module;  /* Unused */
+    /* Return an ErlangFunction wrapper for any attribute access */
+    return ErlangFunction_New(name);
+}
+
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
     {"call", erlang_call_impl, METH_VARARGS,
@@ -2409,6 +2487,12 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Usage: erlang.call('func_name', arg1, arg2, ...)\n"
      "Returns: The result from the Erlang function."},
     {NULL, NULL, 0, NULL}
+};
+
+/* Module __getattr__ method definition (for adding to module dict) */
+static PyMethodDef getattr_method = {
+    "__getattr__", erlang_module_getattr, METH_O,
+    "Get an Erlang function wrapper by name."
 };
 
 /* Module definition */
@@ -2425,8 +2509,34 @@ static struct PyModuleDef ErlangModuleDef = {
  * Called during Python initialization.
  */
 static int create_erlang_module(void) {
+    /* Initialize ErlangFunction type */
+    if (PyType_Ready(&ErlangFunctionType) < 0) {
+        return -1;
+    }
+
     PyObject *module = PyModule_Create(&ErlangModuleDef);
     if (module == NULL) {
+        return -1;
+    }
+
+    /* Add ErlangFunction type to module (for introspection) */
+    Py_INCREF(&ErlangFunctionType);
+    if (PyModule_AddObject(module, "Function", (PyObject *)&ErlangFunctionType) < 0) {
+        Py_DECREF(&ErlangFunctionType);
+        Py_DECREF(module);
+        return -1;
+    }
+
+    /* Add __getattr__ to enable "from erlang import name" and "erlang.name()" syntax
+     * Module __getattr__ (PEP 562) needs to be set as an attribute on the module dict */
+    PyObject *getattr_func = PyCFunction_New(&getattr_method, module);
+    if (getattr_func == NULL) {
+        Py_DECREF(module);
+        return -1;
+    }
+    if (PyModule_AddObject(module, "__getattr__", getattr_func) < 0) {
+        Py_DECREF(getattr_func);
+        Py_DECREF(module);
         return -1;
     }
 

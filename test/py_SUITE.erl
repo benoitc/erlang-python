@@ -30,6 +30,8 @@
     test_gc/1,
     test_erlang_callback/1,
     test_erlang_callback_mfa/1,
+    test_erlang_import_syntax/1,
+    test_erlang_attr_syntax/1,
     test_asyncio_call/1,
     test_asyncio_gather/1,
     test_subinterp_supported/1,
@@ -68,6 +70,8 @@ all() ->
         test_gc,
         test_erlang_callback,
         test_erlang_callback_mfa,
+        test_erlang_import_syntax,
+        test_erlang_attr_syntax,
         test_asyncio_call,
         test_asyncio_gather,
         test_subinterp_supported,
@@ -454,6 +458,65 @@ test_erlang_callback_mfa(_Config) ->
     py:unregister_function(reverse_list),
     py:unregister_function(first_arg),
     py:unregister_function(arg_count),
+
+    ok.
+
+test_erlang_import_syntax(_Config) ->
+    %% Test "from erlang import func_name" syntax
+    %% This test mirrors test_erlang_callback but uses the new import syntax
+    %%
+    %% Note: We use assert statements to verify results within the exec block
+    %% because workers may change between py:exec and py:eval calls.
+    py:register_function(add, fun([A, B]) -> A + B end),
+    py:register_function(greet, fun([Name]) -> <<"Hello, ", Name/binary>> end),
+
+    %% Test basic import - will fail with AssertionError if result is wrong
+    ok = py:exec(<<"
+from erlang import add
+result = add(10, 20)
+assert result == 30, f'Expected 30, got {result}'
+">>),
+
+    %% Test import with alias
+    ok = py:exec(<<"
+from erlang import add as my_add
+result = my_add(40, 60)
+assert result == 100, f'Expected 100, got {result}'
+">>),
+
+    %% Test importing and using a string function
+    %% Note: Erlang binary comes back as Python str (due to conversion)
+    ok = py:exec(<<"
+from erlang import greet
+result = greet('World')
+assert result == 'Hello, World' or result == b'Hello, World', f'Expected \"Hello, World\", got {result}'
+">>),
+
+    %% Cleanup
+    py:unregister_function(add),
+    py:unregister_function(greet),
+
+    ok.
+
+test_erlang_attr_syntax(_Config) ->
+    %% Test "erlang.func_name()" syntax (via __getattr__)
+    %% This test mirrors test_erlang_callback but uses the new attribute syntax
+    %% Note: erlang module is auto-imported, no need for "import erlang"
+    py:register_function(multiply, fun([A, B]) -> A * B end),
+    py:register_function(get_data, fun([]) -> #{value => 42} end),
+
+    %% Test direct attribute access call (erlang is auto-imported)
+    {ok, 50} = py:eval(<<"erlang.multiply(5, 10)">>),
+
+    %% Test no-arg function via attr syntax
+    {ok, #{<<"value">> := 42}} = py:eval(<<"erlang.get_data()">>),
+
+    %% Verify backward compatibility - erlang.call() still works
+    {ok, 100} = py:eval(<<"erlang.call('multiply', 10, 10)">>),
+
+    %% Cleanup
+    py:unregister_function(multiply),
+    py:unregister_function(get_data),
 
     ok.
 

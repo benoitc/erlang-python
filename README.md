@@ -99,9 +99,18 @@ Register Erlang or Elixir functions that Python code can call back into:
 %% Register a function
 py:register_function(my_func, fun([X, Y]) -> X + Y end).
 
-%% Call from Python
-{ok, Result} = py:eval(<<"__import__('erlang').call('my_func', 10, 20)">>).
+%% Call from Python - native import syntax (recommended)
+{ok, Result} = py:exec(<<"
+from erlang import my_func
+result = my_func(10, 20)
+">>).
 %% Result = 30
+
+%% Or use attribute-style access
+{ok, 30} = py:eval(<<"erlang.my_func(10, 20)">>).
+
+%% Legacy syntax still works
+{ok, 30} = py:eval(<<"erlang.call('my_func', 10, 20)">>).
 
 %% Unregister when done
 py:unregister_function(my_func).
@@ -115,9 +124,36 @@ py:unregister_function(my_func).
   Enum.reduce(1..n, 1, &*/2)
 end)
 
-# Call from Python
-{:ok, 3628800} = :py.eval("__import__('erlang').call('factorial', 10)")
+# Call from Python - native import syntax
+{:ok, 3628800} = :py.exec("""
+from erlang import factorial
+result = factorial(10)
+""")
+
+# Or use attribute-style access
+{:ok, 3628800} = :py.eval("erlang.factorial(10)")
 ```
+
+### Python Calling Syntax
+
+From Python code, registered Erlang functions can be called in three ways:
+
+```python
+# 1. Import syntax (most Pythonic)
+from erlang import my_func
+result = my_func(10, 20)
+
+# 2. Attribute syntax
+import erlang
+result = erlang.my_func(10, 20)
+
+# 3. Explicit call (legacy)
+import erlang
+result = erlang.call('my_func', 10, 20)
+```
+
+All three methods are equivalent. The import and attribute syntaxes provide
+a more natural Python experience.
 
 ## Async/Await Support
 
