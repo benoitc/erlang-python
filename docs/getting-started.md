@@ -8,7 +8,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {erlang_python, {git, "https://github.com/benoitc/erlang-python.git", {tag, "v0.1.0"}}}
+    {erlang_python, {git, "https://github.com/benoitc/erlang-python.git", {tag, "v1.0.0"}}}
 ]}.
 ```
 

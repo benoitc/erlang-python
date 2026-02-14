@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: OTP ${{ matrix.otp }} / Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux with different OTP/Python combinations
+          - os: ubuntu-24.04
+            otp: "27.0"
+            python: "3.12"
+          - os: ubuntu-24.04
+            otp: "27.0"
+            python: "3.13"
+          # macOS
+          - os: macos-14
+            otp: "27"
+            python: "3.12"
+          - os: macos-14
+            otp: "27"
+            python: "3.13"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up Erlang (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: "3.24"
+
+      - name: Set up Erlang (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew install erlang rebar3
+
+      - name: Verify versions
+        run: |
+          echo "Erlang/OTP version:"
+          erl -eval 'erlang:display(erlang:system_info(otp_release)), halt().' -noshell
+          echo "Python version:"
+          python3 --version
+          echo "Python config:"
+          python3-config --cflags | head -c 100
+          echo "..."
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Run tests
+        run: rebar3 ct --readable=compact
+
+      - name: Run dialyzer
+        run: rebar3 dialyzer
+        continue-on-error: true
+
+  # Test with free-threaded Python (experimental, no GIL)
+  test-free-threaded:
+    name: Free-threaded Python 3.13t
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Set up free-threaded Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13t"
+
+      - name: Verify free-threading is enabled
+        run: |
+          python3 --version
+          python3 -c "import sys; print('GIL enabled:', sys._is_gil_enabled())"
+          python3 -c "import sysconfig; print('Py_GIL_DISABLED:', sysconfig.get_config_var('Py_GIL_DISABLED'))"
+
+      - name: Compile
+        env:
+          PYTHON_GIL: "0"
+        run: rebar3 compile
+
+      - name: Run tests
+        env:
+          PYTHON_GIL: "0"
+        run: rebar3 ct --readable=compact
+
+      - name: Verify execution mode
+        env:
+          PYTHON_GIL: "0"
+        run: |
+          erl -pa _build/default/lib/erlang_python/ebin -noshell -eval '
+            application:ensure_all_started(erlang_python),
+            Mode = py:execution_mode(),
+            io:format("Execution mode: ~p~n", [Mode]),
+            case Mode of
+              free_threaded -> io:format("SUCCESS: Running in free-threaded mode~n");
+              _ -> io:format("NOTE: Running in ~p mode~n", [Mode])
+            end,
+            halt().
+          '
+    continue-on-error: true  # Free-threading is experimental
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Check formatting (xref)
+        run: rebar3 xref
+        continue-on-error: true
