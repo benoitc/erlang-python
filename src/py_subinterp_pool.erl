@@ -39,7 +39,7 @@
 -record(state, {
     workers :: queue:queue(pid()) | undefined,
     worker_refs :: [reference()],  %% NIF refs for parallel_execute
-    num_workers :: pos_integer(),
+    num_workers :: non_neg_integer(),
     pending :: non_neg_integer(),
     worker_sup :: pid() | undefined,
     supported :: boolean()  %% whether subinterpreters are supported

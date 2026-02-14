@@ -83,8 +83,17 @@ jobs:
 
   # FreeBSD test using cross-platform action
   test-freebsd:
-    name: FreeBSD 14
+    name: FreeBSD 14 / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.11"
+            python_pkg: "python311"
+          - python: "3.12"
+            python_pkg: "python312"
 
     steps:
       - name: Checkout
@@ -96,17 +105,17 @@ jobs:
           release: "14.1"
           usesh: true
           prepare: |
-            pkg install -y erlang python311 cmake
+            pkg install -y erlang ${{ matrix.python_pkg }} cmake
           run: |
             # Set up environment
-            export PYTHON_CONFIG=python3.11-config
+            export PYTHON_CONFIG=python${{ matrix.python }}-config
             export PATH="/usr/local/bin:$PATH"
 
             # Verify versions
             echo "Erlang version:"
             erl -eval 'io:format("~s~n", [erlang:system_info(otp_release)]), halt().' -noshell
             echo "Python version:"
-            python3.11 --version
+            python${{ matrix.python }} --version
 
             # Build with rebar3
             fetch https://github.com/erlang/rebar3/releases/download/3.24.0/rebar3 -o rebar3
