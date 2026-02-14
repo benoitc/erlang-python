@@ -217,7 +217,6 @@ stream_collect(Ref, Acc) ->
 
 %% @doc Stream results from a Python generator expression.
 %% Evaluates the expression and if it returns a generator, streams all values.
-%% Example: py:stream_eval(<<"(x**2 for x in range(10))">>) returns {ok, [0,1,4,9,...]}
 -spec stream_eval(string() | binary()) -> py_result().
 stream_eval(Code) ->
     stream_eval(Code, #{}).

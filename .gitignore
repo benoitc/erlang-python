@@ -3,6 +3,9 @@ _build/
 _checkouts/
 rebar.lock
 
+# Generated docs (source in docs/)
+doc/
+
 # NIF artifacts
 c_src/*.o
 priv/*.so

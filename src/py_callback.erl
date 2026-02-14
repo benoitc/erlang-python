@@ -1,7 +1,7 @@
-%%% @doc Callback registry for Python -> Erlang function calls.
+%%% @doc Callback registry for Python to Erlang function calls.
 %%%
 %%% This module manages registered Erlang functions that can be called
-%%% from Python code via the `erlang.call()` function.
+%%% from Python code via the erlang.call() function.
 %%%
 %%% @private
 -module(py_callback).
