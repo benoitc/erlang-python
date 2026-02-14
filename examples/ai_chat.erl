@@ -14,7 +14,7 @@
 %%%
 %%% For Ollama (recommended, free, local):
 %%%   - Install: https://ollama.ai
-%%%   - Run: ollama pull llama2
+%%%   - Run: ollama pull llama3.2
 %%%
 %%% For OpenAI:
 %%%   - Set OPENAI_API_KEY environment variable
@@ -50,7 +50,7 @@ main(Args) ->
             io:format("~nNo LLM available!~n~n"),
             io:format("Setup options:~n"),
             io:format("  1. Install Ollama: https://ollama.ai~n"),
-            io:format("     Then run: ollama pull llama2~n~n"),
+            io:format("     Then run: ollama pull llama3.2~n~n"),
             io:format("  2. Set OPENAI_API_KEY environment variable~n"),
             io:format("     And: pip install openai~n~n"),
             cleanup(),
@@ -81,18 +81,15 @@ activate_venv(VenvPath) ->
     end.
 
 init_ai_helpers() ->
-    %% Add examples directory to Python path and import module
+    %% Add examples directory to Python path
     ScriptDir = filename:dirname(escript:script_name()),
     ProjectRoot = filename:dirname(ScriptDir),
     ExamplesDir = list_to_binary(filename:join(ProjectRoot, "examples")),
-    {ok, _} = py:eval(<<"
-(lambda p: (__import__('sys').path.insert(0, p) if p not in __import__('sys').path else None, __import__('importlib').import_module('ai_helpers')))[1]
-">>, #{p => ExamplesDir}),
+    {ok, _} = py:eval(<<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>, #{path => ExamplesDir}),
     ok.
 
 get_llm_type() ->
-    {ok, Type} = py:eval(<<"__import__('ai_helpers').get_llm_type()">>),
-    {ok, Type}.
+    py:call(ai_helpers, get_llm_type, []).
 
 chat_loop(History) ->
     case io:get_line("You: ") of
@@ -120,10 +117,7 @@ chat_loop(History) ->
 
                     %% Get response
                     io:format("~nAssistant: "),
-                    {ok, Response} = py:eval(
-                        <<"__import__('ai_helpers').chat(messages)">>,
-                        #{messages => NewHistory}
-                    ),
+                    {ok, Response} = py:call(ai_helpers, chat, [NewHistory]),
                     io:format("~s~n~n", [Response]),
 
                     %% Add assistant message to history

@@ -14,7 +14,7 @@
 %%%
 %%% For real LLM (optional):
 %%%   - Install Ollama: https://ollama.ai
-%%%   - Run: ollama pull llama2
+%%%   - Run: ollama pull llama3.2
 %%%   - Or set OPENAI_API_KEY and pip install openai
 %%%
 %%% Run from project root:
@@ -38,10 +38,14 @@ main(Args) ->
         error -> halt(1)
     end,
 
-    %% Initialize
+    %% Initialize - add examples dir to Python path
+    ExamplesDir = examples_dir(),
+    ok = add_to_python_path(ExamplesDir),
+
+    %% Load model and check LLM
     io:format("Initializing RAG system...~n"),
-    ok = init_ai_helpers(),
-    {ok, LLMType} = get_llm_type(),
+    {ok, _Info} = py:call(ai_helpers, model_info, []),
+    {ok, LLMType} = py:call(ai_helpers, get_llm_type, []),
     io:format("Using LLM: ~s~n", [LLMType]),
     io:format("RAG system ready!~n~n"),
 
@@ -98,6 +102,11 @@ setup_paths() ->
     EbinDir = filename:join([ProjectRoot, "_build", "default", "lib", "erlang_python", "ebin"]),
     true = code:add_pathz(EbinDir).
 
+examples_dir() ->
+    ScriptDir = filename:dirname(escript:script_name()),
+    ProjectRoot = filename:dirname(ScriptDir),
+    list_to_binary(filename:join(ProjectRoot, "examples")).
+
 activate_venv(VenvPath) ->
     io:format("Activating venv: ~s~n", [VenvPath]),
     case py:activate_venv(list_to_binary(VenvPath)) of
@@ -112,28 +121,16 @@ activate_venv(VenvPath) ->
             error
     end.
 
-init_ai_helpers() ->
-    %% Add examples directory to Python path and import module
-    ScriptDir = filename:dirname(escript:script_name()),
-    ProjectRoot = filename:dirname(ScriptDir),
-    ExamplesDir = list_to_binary(filename:join(ProjectRoot, "examples")),
-    {ok, _} = py:eval(<<"
-(lambda p: (__import__('sys').path.insert(0, p) if p not in __import__('sys').path else None, __import__('importlib').import_module('ai_helpers')))[1]
-">>, #{p => ExamplesDir}),
-    %% Trigger model load
-    {ok, _} = py:eval(<<"__import__('ai_helpers').model_info()">>),
+add_to_python_path(Dir) ->
+    {ok, _} = py:eval(<<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>, #{path => Dir}),
     ok.
 
-get_llm_type() ->
-    {ok, Type} = py:eval(<<"__import__('ai_helpers').get_llm_type()">>),
-    {ok, Type}.
-
 build_index(Documents) ->
-    {ok, Embeddings} = py:eval(<<"__import__('ai_helpers').embed_texts(docs)">>, #{docs => Documents}),
+    {ok, Embeddings} = py:call(ai_helpers, embed_texts, [Documents]),
     lists:zip(Documents, Embeddings).
 
 retrieve(Query, Index, TopK) ->
-    {ok, QueryEmb} = py:eval(<<"__import__('ai_helpers').embed_single(q)">>, #{q => Query}),
+    {ok, QueryEmb} = py:call(ai_helpers, embed_single, [Query]),
     Scored = [{cosine_similarity(QueryEmb, Emb), Text}
               || {Text, Emb} <- Index],
     Sorted = lists:reverse(lists:sort(Scored)),
@@ -143,10 +140,7 @@ generate_answer(Question, Context) ->
     ContextText = iolist_to_binary(
         lists:join(<<"\n">>, [Text || {_, Text} <- Context])
     ),
-    {ok, Answer} = py:eval(
-        <<"__import__('ai_helpers').generate(question, context)">>,
-        #{question => Question, context => ContextText}
-    ),
+    {ok, Answer} = py:call(ai_helpers, generate, [Question, ContextText]),
     Answer.
 
 cosine_similarity(Vec1, Vec2) ->
