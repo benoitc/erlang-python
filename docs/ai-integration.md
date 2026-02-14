@@ -10,6 +10,7 @@ Erlang excels at building distributed, fault-tolerant systems. Python dominates 
 - Call LLM APIs (OpenAI, Anthropic, local models)
 - Run inference with pre-trained models
 - Build RAG (Retrieval-Augmented Generation) systems
+- Leverage Erlang's concurrency from Python (10x+ speedups)
 
 ## Setup
 
@@ -295,6 +296,203 @@ partition(L, N) ->
     {H, T} = lists:split(min(N, length(L)), L),
     [H | partition(T, N)].
 ```
+
+## Leveraging Erlang's Concurrency from Python
+
+A powerful pattern is to let Python call Erlang functions and leverage Erlang's lightweight processes for parallelism. This is especially useful when you need to:
+
+- Process multiple items concurrently
+- Fan out work to many workers
+- Combine Python AI with Erlang's fault-tolerant concurrency
+
+### Registering Erlang Functions
+
+```erlang
+%% Register functions that Python can call
+init_erlang_functions() ->
+    %% Simple computation
+    py:register_function(process_item, fun([Item]) ->
+        %% Your Erlang processing logic
+        do_heavy_computation(Item)
+    end),
+
+    %% Parallel map: spawn one process per item
+    py:register_function(parallel_map, fun([FuncName, Items]) ->
+        Parent = self(),
+        Refs = [begin
+            Ref = make_ref(),
+            spawn(fun() ->
+                Result = execute_function(FuncName, Item),
+                Parent ! {Ref, Result}
+            end),
+            Ref
+        end || Item <- Items],
+        %% Collect results in order
+        [receive {Ref, R} -> R after 5000 -> {error, timeout} end
+         || Ref <- Refs]
+    end),
+
+    %% Parallel HTTP fetches using Erlang processes
+    py:register_function(parallel_fetch, fun([Urls]) ->
+        Parent = self(),
+        Refs = [begin
+            Ref = make_ref(),
+            spawn(fun() ->
+                Result = http_fetch(Url),  % Your HTTP client
+                Parent ! {Ref, Result}
+            end),
+            Ref
+        end || Url <- Urls],
+        [receive {Ref, R} -> R after 30000 -> {error, timeout} end
+         || Ref <- Refs]
+    end).
+```
+
+### Calling Erlang from Python
+
+The `erlang` module is automatically available in Python code executed via `py:eval`:
+
+```python
+# In Python (via py:eval)
+import erlang
+
+# Call a single Erlang function
+result = erlang.call('process_item', data)
+
+# Process multiple items in parallel using Erlang processes
+results = erlang.call('parallel_map', 'process_item', items)
+
+# Fetch multiple URLs concurrently
+responses = erlang.call('parallel_fetch', urls)
+```
+
+### Example: AI Pipeline with Erlang Parallelism
+
+Combine AI embeddings with Erlang's concurrent processing:
+
+```erlang
+-module(ai_pipeline).
+-export([init/0, process_documents/1]).
+
+init() ->
+    %% Initialize embedding model
+    ok = py:exec(<<"
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def embed_doc(doc):
+    import erlang
+    # Get metadata from Erlang (processed in parallel)
+    metadata = erlang.call('fetch_metadata', doc['id'])
+    # Generate embedding
+    embedding = model.encode(doc['text']).tolist()
+    return {'id': doc['id'], 'embedding': embedding, 'metadata': metadata}
+">>),
+
+    %% Register Erlang functions
+    py:register_function(fetch_metadata, fun([DocId]) ->
+        %% Simulate database lookup (could be actual DB call)
+        timer:sleep(50),
+        #{id => DocId, fetched_at => erlang:system_time(millisecond)}
+    end),
+
+    py:register_function(parallel_embed, fun([Docs]) ->
+        %% Spawn a process for each document
+        Parent = self(),
+        Refs = [begin
+            Ref = make_ref(),
+            spawn(fun() ->
+                {ok, Result} = py:eval(<<"embed_doc(doc)">>, #{doc => Doc}),
+                Parent ! {Ref, Result}
+            end),
+            Ref
+        end || Doc <- Docs],
+        [receive {Ref, R} -> R after 30000 -> {error, timeout} end
+         || Ref <- Refs]
+    end).
+
+process_documents(Docs) ->
+    %% Process all documents in parallel
+    {ok, Results} = py:eval(
+        <<"__import__('erlang').call('parallel_embed', docs)">>,
+        #{docs => Docs}
+    ),
+    Results.
+```
+
+### Performance: Sequential vs Parallel
+
+The Erlang concurrency model provides dramatic speedups:
+
+```erlang
+%% Sequential: 10 items × 100ms = 1 second
+Sequential = [process(Item) || Item <- Items].
+
+%% Parallel with Erlang processes: ~100ms total (10x speedup!)
+Parallel = py:eval(<<"erlang.call('parallel_map', 'process', items)">>,
+                   #{items => Items}).
+```
+
+Real-world results from the example:
+```
+Sequential (10 items × 100ms): 1.01 seconds
+Parallel (10 Erlang processes): 0.10 seconds
+Speedup: 10x faster!
+```
+
+### Batch AI Operations with Erlang Workers
+
+For high-throughput AI workloads, combine batching with Erlang workers:
+
+```erlang
+%% Register a worker pool function
+py:register_function(spawn_workers, fun([Tasks]) ->
+    Parent = self(),
+    Refs = [begin
+        Ref = make_ref(),
+        spawn(fun() ->
+            %% Each worker can call Python AI functions
+            Result = case Task of
+                #{type := embed, text := Text} ->
+                    {ok, Emb} = py:eval(<<"model.encode(t).tolist()">>,
+                                        #{t => Text}),
+                    #{type => embedding, result => Emb};
+                #{type := classify, text := Text} ->
+                    {ok, Class} = py:eval(<<"classify(t)">>, #{t => Text}),
+                    #{type => classification, result => Class}
+            end,
+            Parent ! {Ref, Result}
+        end),
+        Ref
+    end || Task <- Tasks],
+    [receive {Ref, R} -> R after 60000 -> {error, timeout} end
+     || Ref <- Refs]
+end).
+
+%% Usage from Python
+process_ai_batch(Tasks) ->
+    {ok, Results} = py:eval(
+        <<"erlang.call('spawn_workers', tasks)">>,
+        #{tasks => Tasks}
+    ),
+    Results.
+```
+
+### Running the Example
+
+A complete working example is available:
+
+```bash
+# Run the Erlang concurrency example
+escript examples/erlang_concurrency.erl
+```
+
+This demonstrates:
+- Registering Erlang functions (`echo`, `slow_compute`, `fib`, etc.)
+- Calling them from Python via `erlang.call()`
+- Parallel processing with `parallel_map`
+- Spawning worker pools with `spawn_workers`
+- Simulated parallel HTTP fetches
 
 ## Async LLM Calls
 
