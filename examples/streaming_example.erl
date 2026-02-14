@@ -17,47 +17,34 @@ main(_) ->
 
     io:format("~n=== Streaming from Python Generators ===~n~n"),
 
-    %% First, define a generator function in Python
-    ok = py:exec(<<"
-def token_generator(text, delay=0):
-    '''Simulate token-by-token streaming like an LLM'''
-    import time
-    for word in text.split():
-        if delay > 0:
-            time.sleep(delay)
-        yield word + ' '
+    %% Note: Since workers don't share state, we use stream_eval for inline generators
+    %% or stream with builtin/importable modules. This is the recommended pattern.
 
-def fibonacci(n):
-    '''Generate first n Fibonacci numbers'''
-    a, b = 0, 1
-    for _ in range(n):
-        yield a
-        a, b = b, a + b
-
-def range_gen(start, stop, step=1):
-    '''Custom range generator'''
-    current = start
-    while current < stop:
-        yield current
-        current += step
-">>),
-
-    %% Stream tokens
+    %% Stream tokens using inline generator
     io:format("Streaming tokens: "),
-    {ok, Tokens} = py:stream(<<"__main__">>, <<"token_generator">>,
-                              [<<"Hello world from Python generator">>]),
+    {ok, Tokens} = py:stream_eval(<<"(word + ' ' for word in 'Hello world from Python generator'.split())">>),
     lists:foreach(fun(T) -> io:format("~s", [T]) end, Tokens),
     io:format("~n~n"),
 
-    %% Fibonacci sequence
+    %% Fibonacci sequence using inline generator with walrus operator
     io:format("Fibonacci(10): "),
-    {ok, Fibs} = py:stream(<<"__main__">>, <<"fibonacci">>, [10]),
+    {ok, Fibs} = py:stream_eval(<<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>),
     io:format("~p~n~n", [Fibs]),
 
-    %% Custom range
+    %% Custom range using builtin iter
     io:format("Range(0, 20, 3): "),
-    {ok, Range} = py:stream(<<"__main__">>, <<"range_gen">>, [0, 20, 3]),
+    {ok, Range} = py:stream(builtins, iter, [[0, 3, 6, 9, 12, 15, 18]]),
     io:format("~p~n~n", [Range]),
+
+    %% Stream with enumerate (builtin)
+    io:format("Enumerate(['a', 'b', 'c']): "),
+    {ok, Enum} = py:stream(builtins, enumerate, [[<<"a">>, <<"b">>, <<"c">>]]),
+    io:format("~p~n~n", [Enum]),
+
+    %% Filter example (lazy evaluation)
+    io:format("Filter(x > 2, [1,2,3,4,5]): "),
+    {ok, Filtered} = py:stream_eval(<<"filter(lambda x: x > 2, [1, 2, 3, 4, 5])">>),
+    io:format("~p~n~n", [Filtered]),
 
     io:format("=== Done ===~n~n"),
 
