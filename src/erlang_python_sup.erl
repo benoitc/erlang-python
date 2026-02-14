@@ -12,6 +12,9 @@ init([]) ->
     NumAsyncWorkers = application:get_env(erlang_python, num_async_workers, 2),
     NumSubinterpWorkers = application:get_env(erlang_python, num_subinterp_workers, 4),
 
+    %% Initialize the semaphore ETS table for rate limiting
+    ok = py_semaphore:init(),
+
     %% Callback registry - must start before pool
     CallbackSpec = #{
         id => py_callback,

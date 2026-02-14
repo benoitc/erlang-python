@@ -123,8 +123,25 @@ Values are automatically converted between Erlang and Python:
 {ok, none} = py:eval(<<"None">>).
 ```
 
+## Execution Mode and Scalability
+
+Check the current execution mode:
+
+```erlang
+%% See how Python is being executed
+py:execution_mode().
+%% => free_threaded | subinterp | multi_executor
+
+%% Check rate limiting status
+py_semaphore:max_concurrent().  %% Maximum concurrent calls
+py_semaphore:current().         %% Currently executing
+```
+
+See [Scalability](scalability.md) for details on execution modes and performance tuning.
+
 ## Next Steps
 
 - See [Type Conversion](type-conversion.md) for detailed type mapping
 - See [Streaming](streaming.md) for working with generators
 - See [Memory Management](memory.md) for GC and debugging
+- See [Scalability](scalability.md) for parallelism and performance

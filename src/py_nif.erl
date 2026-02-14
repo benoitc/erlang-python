@@ -42,7 +42,10 @@
     subinterp_worker_new/0,
     subinterp_worker_destroy/1,
     subinterp_call/5,
-    parallel_execute/2
+    parallel_execute/2,
+    %% Execution mode info
+    execution_mode/0,
+    num_executors/0
 ]).
 
 -on_load(load_nif/0).
@@ -307,4 +310,24 @@ subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
 -spec parallel_execute([reference()], [{binary(), binary(), list()}]) ->
     {ok, list()} | {error, term()}.
 parallel_execute(_WorkerRefs, _Calls) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Execution Mode Info
+%%% ============================================================================
+
+%% @doc Get the current execution mode.
+%% Returns one of: free_threaded | subinterp | multi_executor
+%% - free_threaded: Python 3.13+ with no GIL (Py_GIL_DISABLED)
+%% - subinterp: Python 3.12+ with per-interpreter GIL
+%% - multi_executor: Traditional Python with N executor threads
+-spec execution_mode() -> free_threaded | subinterp | multi_executor.
+execution_mode() ->
+    ?NIF_STUB.
+
+%% @doc Get the number of executor threads.
+%% For multi_executor mode, this is the number of executor threads.
+%% For other modes, returns 1.
+-spec num_executors() -> pos_integer().
+num_executors() ->
     ?NIF_STUB.

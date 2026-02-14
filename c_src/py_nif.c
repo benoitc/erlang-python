@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
@@ -121,6 +122,77 @@ typedef struct {
 #if PY_VERSION_HEX >= 0x030C0000
 #define HAVE_SUBINTERPRETERS 1
 #endif
+
+/* Check for Python 3.13+ free-threaded build (no GIL) */
+#if PY_VERSION_HEX >= 0x030D0000
+#ifdef Py_GIL_DISABLED
+#define HAVE_FREE_THREADED 1
+#endif
+#endif
+
+/* ============================================================================
+ * Execution mode support
+ *
+ * Three execution modes based on Python version and build:
+ * - FREE_THREADED: Python 3.13+ with Py_GIL_DISABLED (no GIL)
+ * - SUBINTERP: Python 3.12+ with per-interpreter GIL
+ * - MULTI_EXECUTOR: Traditional Python with N executor threads
+ * ============================================================================ */
+
+typedef enum {
+    PY_MODE_FREE_THREADED,   /* Python 3.13+ free-threaded build (no GIL) */
+    PY_MODE_SUBINTERP,       /* Python 3.12+ with per-interpreter GIL */
+    PY_MODE_MULTI_EXECUTOR   /* Traditional Python with N executors */
+} py_execution_mode_t;
+
+static py_execution_mode_t g_execution_mode = PY_MODE_MULTI_EXECUTOR;
+static int g_num_executors = 4;  /* Number of executor threads for MULTI_EXECUTOR mode */
+
+/* Multi-executor pool for MULTI_EXECUTOR mode */
+#define MAX_EXECUTORS 16
+
+/* Forward declaration for request type used in executor */
+struct py_request;
+
+typedef struct {
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    struct py_request *queue_head;
+    struct py_request *queue_tail;
+    volatile bool running;
+    volatile bool shutdown;
+    int id;
+} executor_t;
+
+static executor_t g_executors[MAX_EXECUTORS];
+static _Atomic int g_next_executor = 0;  /* Round-robin counter */
+static bool g_multi_executor_initialized = false;
+
+/* Forward declarations for multi-executor */
+static void *multi_executor_thread_main(void *arg);
+static int multi_executor_start(int num_executors);
+static void multi_executor_stop(void);
+static int select_executor(void);
+static void multi_executor_enqueue(int exec_id, struct py_request *req);
+
+/* Detect execution mode based on Python version and build */
+static void detect_execution_mode(void) {
+#ifdef HAVE_FREE_THREADED
+    /* Python 3.13+ with free-threading enabled */
+    g_execution_mode = PY_MODE_FREE_THREADED;
+    return;
+#endif
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* Python 3.12+ supports per-interpreter GIL */
+    g_execution_mode = PY_MODE_SUBINTERP;
+    return;
+#endif
+
+    /* Fallback: multi-executor with shared GIL */
+    g_execution_mode = PY_MODE_MULTI_EXECUTOR;
+}
 
 #ifdef HAVE_SUBINTERPRETERS
 typedef struct {
@@ -407,11 +479,47 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         return make_error(env, "erlang_module_creation_failed");
     }
 
+    /* Detect execution mode based on Python version and build */
+    detect_execution_mode();
+
     /* Save main thread state and release GIL for other threads */
     g_main_thread_state = PyEval_SaveThread();
 
-    /* Start the executor thread for GIL management */
-    if (executor_start() < 0) {
+    /* Start executors based on execution mode */
+    int executor_result = 0;
+    switch (g_execution_mode) {
+        case PY_MODE_FREE_THREADED:
+            /* No executor needed - direct execution */
+            break;
+
+        case PY_MODE_SUBINTERP:
+            /* Use single executor for coordinator operations */
+            executor_result = executor_start();
+            break;
+
+        case PY_MODE_MULTI_EXECUTOR:
+        default:
+            /* Start multiple executors for GIL contention mode */
+            {
+                int num_exec = 4;  /* Default */
+                /* Check for config */
+                if (argc > 0 && enif_is_map(env, argv[0])) {
+                    ERL_NIF_TERM key = enif_make_atom(env, "num_executors");
+                    ERL_NIF_TERM value;
+                    if (enif_get_map_value(env, argv[0], key, &value)) {
+                        enif_get_int(env, value, &num_exec);
+                    }
+                }
+                executor_result = multi_executor_start(num_exec);
+                if (executor_result < 0) {
+                    /* Fallback to single executor */
+                    executor_result = executor_start();
+                }
+            }
+            break;
+    }
+
+    if (executor_result < 0) {
         PyEval_RestoreThread(g_main_thread_state);
         g_main_thread_state = NULL;
         Py_Finalize();
@@ -427,8 +535,25 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return ATOM_OK;
     }
 
-    /* Stop the executor thread first */
-    executor_stop();
+    /* Stop executors based on mode */
+    switch (g_execution_mode) {
+        case PY_MODE_FREE_THREADED:
+            /* No executor to stop */
+            break;
+
+        case PY_MODE_SUBINTERP:
+            executor_stop();
+            break;
+
+        case PY_MODE_MULTI_EXECUTOR:
+        default:
+            if (g_multi_executor_initialized) {
+                multi_executor_stop();
+            } else {
+                executor_stop();
+            }
+            break;
+    }
 
     /* Restore main thread state before finalizing */
     if (g_main_thread_state != NULL) {
@@ -2840,6 +2965,245 @@ static void executor_stop(void) {
 }
 
 /* ============================================================================
+ * Multi-executor pool implementation
+ *
+ * For MULTI_EXECUTOR mode (traditional Python), we run N executor threads
+ * that each hold the GIL in turn. This allows GIL contention-based parallelism
+ * similar to PyO3's multi-executor pattern.
+ * ============================================================================ */
+
+/**
+ * Main function for a multi-executor thread.
+ * Each executor has its own queue and processes requests independently.
+ */
+static void *multi_executor_thread_main(void *arg) {
+    executor_t *exec = (executor_t *)arg;
+
+    /* Acquire GIL for this thread */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    exec->running = true;
+
+    while (!exec->shutdown) {
+        py_request_t *req = NULL;
+
+        /* Release GIL while waiting for work */
+        Py_BEGIN_ALLOW_THREADS
+
+        pthread_mutex_lock(&exec->mutex);
+        while (exec->queue_head == NULL && !exec->shutdown) {
+            pthread_cond_wait(&exec->cond, &exec->mutex);
+        }
+
+        /* Dequeue request if available */
+        if (exec->queue_head != NULL) {
+            req = exec->queue_head;
+            exec->queue_head = req->next;
+            if (exec->queue_head == NULL) {
+                exec->queue_tail = NULL;
+            }
+            req->next = NULL;
+        }
+        pthread_mutex_unlock(&exec->mutex);
+
+        Py_END_ALLOW_THREADS
+
+        if (req != NULL) {
+            if (req->type == PY_REQ_SHUTDOWN) {
+                pthread_mutex_lock(&req->mutex);
+                req->completed = true;
+                pthread_cond_signal(&req->cond);
+                pthread_mutex_unlock(&req->mutex);
+                break;
+            } else {
+                /* Process the request with GIL held */
+                process_request(req);
+
+                /* Signal completion */
+                pthread_mutex_lock(&req->mutex);
+                req->completed = true;
+                pthread_cond_signal(&req->cond);
+                pthread_mutex_unlock(&req->mutex);
+            }
+        }
+    }
+
+    exec->running = false;
+    PyGILState_Release(gstate);
+
+    return NULL;
+}
+
+/**
+ * Select an executor using round-robin.
+ */
+static int select_executor(void) {
+    int idx = atomic_fetch_add(&g_next_executor, 1) % g_num_executors;
+    return idx;
+}
+
+/**
+ * Enqueue a request to a specific executor.
+ */
+static void multi_executor_enqueue(int exec_id, py_request_t *req) {
+    executor_t *exec = &g_executors[exec_id];
+
+    pthread_mutex_lock(&exec->mutex);
+    req->next = NULL;
+    if (exec->queue_tail == NULL) {
+        exec->queue_head = req;
+        exec->queue_tail = req;
+    } else {
+        exec->queue_tail->next = req;
+        exec->queue_tail = req;
+    }
+    pthread_cond_signal(&exec->cond);
+    pthread_mutex_unlock(&exec->mutex);
+}
+
+/**
+ * Start the multi-executor pool.
+ */
+static int multi_executor_start(int num_executors) {
+    if (g_multi_executor_initialized) {
+        return 0;
+    }
+
+    if (num_executors <= 0) {
+        num_executors = 4;
+    }
+    if (num_executors > MAX_EXECUTORS) {
+        num_executors = MAX_EXECUTORS;
+    }
+
+    g_num_executors = num_executors;
+
+    for (int i = 0; i < num_executors; i++) {
+        executor_t *exec = &g_executors[i];
+        exec->id = i;
+        exec->queue_head = NULL;
+        exec->queue_tail = NULL;
+        exec->running = false;
+        exec->shutdown = false;
+        pthread_mutex_init(&exec->mutex, NULL);
+        pthread_cond_init(&exec->cond, NULL);
+
+        if (pthread_create(&exec->thread, NULL, multi_executor_thread_main, exec) != 0) {
+            /* Cleanup already created threads */
+            for (int j = 0; j < i; j++) {
+                g_executors[j].shutdown = true;
+                pthread_cond_signal(&g_executors[j].cond);
+                pthread_join(g_executors[j].thread, NULL);
+                pthread_mutex_destroy(&g_executors[j].mutex);
+                pthread_cond_destroy(&g_executors[j].cond);
+            }
+            return -1;
+        }
+    }
+
+    /* Wait for all executors to be ready */
+    int max_wait = 100;
+    bool all_ready = false;
+    while (!all_ready && max_wait-- > 0) {
+        all_ready = true;
+        for (int i = 0; i < num_executors; i++) {
+            if (!g_executors[i].running) {
+                all_ready = false;
+                break;
+            }
+        }
+        if (!all_ready) {
+            usleep(10000);
+        }
+    }
+
+    g_multi_executor_initialized = all_ready;
+    return all_ready ? 0 : -1;
+}
+
+/**
+ * Stop the multi-executor pool.
+ */
+static void multi_executor_stop(void) {
+    if (!g_multi_executor_initialized) {
+        return;
+    }
+
+    /* Signal shutdown and send shutdown requests to all executors */
+    for (int i = 0; i < g_num_executors; i++) {
+        executor_t *exec = &g_executors[i];
+        exec->shutdown = true;
+
+        py_request_t *shutdown_req = enif_alloc(sizeof(py_request_t));
+        request_init(shutdown_req);
+        shutdown_req->type = PY_REQ_SHUTDOWN;
+
+        multi_executor_enqueue(i, shutdown_req);
+    }
+
+    /* Wait for all executors to finish */
+    for (int i = 0; i < g_num_executors; i++) {
+        executor_t *exec = &g_executors[i];
+        pthread_join(exec->thread, NULL);
+        pthread_mutex_destroy(&exec->mutex);
+        pthread_cond_destroy(&exec->cond);
+    }
+
+    g_multi_executor_initialized = false;
+}
+
+/* ============================================================================
+ * Free-threaded execution (Python 3.13+ nogil)
+ *
+ * In free-threaded mode, we execute directly without routing to an executor.
+ * Each call simply attaches to the interpreter (no GIL to acquire).
+ * ============================================================================ */
+
+#ifdef HAVE_FREE_THREADED
+/**
+ * Execute a request directly in free-threaded mode.
+ * No GIL management needed - Python handles synchronization internally.
+ */
+static ERL_NIF_TERM execute_direct(ErlNifEnv *env, py_request_t *req) {
+    /* In free-threaded mode, PyGILState functions still work but are essentially no-ops */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    process_request(req);
+
+    PyGILState_Release(gstate);
+    return req->result;
+}
+#endif
+
+/**
+ * NIF to get the current execution mode.
+ * Returns: free_threaded | subinterp | multi_executor
+ */
+static ERL_NIF_TERM nif_execution_mode(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    const char *mode_str;
+    switch (g_execution_mode) {
+        case PY_MODE_FREE_THREADED:
+            mode_str = "free_threaded";
+            break;
+        case PY_MODE_SUBINTERP:
+            mode_str = "subinterp";
+            break;
+        case PY_MODE_MULTI_EXECUTOR:
+        default:
+            mode_str = "multi_executor";
+            break;
+    }
+    return enif_make_atom(env, mode_str);
+}
+
+/**
+ * NIF to get the number of executors.
+ */
+static ERL_NIF_TERM nif_num_executors(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    return enif_make_int(env, g_num_executors);
+}
+
+/* ============================================================================
  * NIF setup
  * ============================================================================ */
 
@@ -2955,7 +3319,11 @@ static ErlNifFunc nif_funcs[] = {
     {"subinterp_worker_new", 0, nif_subinterp_worker_new, 0},
     {"subinterp_worker_destroy", 1, nif_subinterp_worker_destroy, 0},
     {"subinterp_call", 5, nif_subinterp_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"parallel_execute", 2, nif_parallel_execute, ERL_NIF_DIRTY_JOB_CPU_BOUND}
+    {"parallel_execute", 2, nif_parallel_execute, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+
+    /* Execution mode info */
+    {"execution_mode", 0, nif_execution_mode, 0},
+    {"num_executors", 0, nif_num_executors, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

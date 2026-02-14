@@ -61,7 +61,10 @@
     %% Virtual environment
     activate_venv/1,
     deactivate_venv/0,
-    venv_info/0
+    venv_info/0,
+    %% Execution info
+    execution_mode/0,
+    num_executors/0
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -92,8 +95,23 @@ call(Module, Func, Args, Kwargs) ->
 
 %% @doc Call a Python function with keyword arguments and custom timeout.
 %% Timeout is in milliseconds. Use `infinity' for no timeout.
+%% Rate limited via ETS-based semaphore to prevent overload.
 -spec call(py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
 call(Module, Func, Args, Kwargs, Timeout) ->
+    %% Acquire semaphore slot before making the call
+    case py_semaphore:acquire(Timeout) of
+        ok ->
+            try
+                do_call(Module, Func, Args, Kwargs, Timeout)
+            after
+                py_semaphore:release()
+            end;
+        {error, max_concurrent} ->
+            {error, {overloaded, py_semaphore:current(), py_semaphore:max_concurrent()}}
+    end.
+
+%% @private
+do_call(Module, Func, Args, Kwargs, Timeout) ->
     Ref = make_ref(),
     TimeoutMs = case Timeout of
         infinity -> 0;
@@ -475,3 +493,23 @@ venv_info() ->
 ensure_binary(S) when is_binary(S) -> S;
 ensure_binary(S) when is_list(S) -> list_to_binary(S);
 ensure_binary(S) when is_atom(S) -> atom_to_binary(S, utf8).
+
+%%% ============================================================================
+%%% Execution Info
+%%% ============================================================================
+
+%% @doc Get the current execution mode.
+%% Returns one of:
+%% - `free_threaded': Python 3.13+ with no GIL (Py_GIL_DISABLED)
+%% - `subinterp': Python 3.12+ with per-interpreter GIL
+%% - `multi_executor': Traditional Python with N executor threads
+-spec execution_mode() -> free_threaded | subinterp | multi_executor.
+execution_mode() ->
+    py_nif:execution_mode().
+
+%% @doc Get the number of executor threads.
+%% For `multi_executor' mode, this is the number of executor threads.
+%% For other modes, returns 1.
+-spec num_executors() -> pos_integer().
+num_executors() ->
+    py_nif:num_executors().

@@ -28,7 +28,16 @@
     test_asyncio_gather/1,
     test_subinterp_supported/1,
     test_parallel_execution/1,
-    test_venv/1
+    test_venv/1,
+    %% New scalability tests
+    test_execution_mode/1,
+    test_num_executors/1,
+    test_semaphore_basic/1,
+    test_semaphore_acquire_release/1,
+    test_semaphore_concurrent/1,
+    test_semaphore_timeout/1,
+    test_semaphore_rate_limiting/1,
+    test_overload_protection/1
 ]).
 
 all() ->
@@ -51,7 +60,16 @@ all() ->
         test_asyncio_gather,
         test_subinterp_supported,
         test_parallel_execution,
-        test_venv
+        test_venv,
+        %% Scalability tests
+        test_execution_mode,
+        test_num_executors,
+        test_semaphore_basic,
+        test_semaphore_acquire_release,
+        test_semaphore_concurrent,
+        test_semaphore_timeout,
+        test_semaphore_rate_limiting,
+        test_overload_protection
     ].
 
 init_per_suite(Config) ->
@@ -300,5 +318,193 @@ test_venv(_Config) ->
 
     %% Cleanup
     {ok, _} = py:call(shutil, rmtree, [TmpDir], #{ignore_errors => true}),
+
+    ok.
+
+%%% ============================================================================
+%%% Scalability Tests
+%%% ============================================================================
+
+test_execution_mode(_Config) ->
+    %% Test that execution_mode returns a valid mode
+    Mode = py:execution_mode(),
+    ct:pal("Execution mode: ~p~n", [Mode]),
+    true = lists:member(Mode, [free_threaded, subinterp, multi_executor]),
+    ok.
+
+test_num_executors(_Config) ->
+    %% Test that num_executors returns a positive integer
+    Num = py:num_executors(),
+    ct:pal("Number of executors: ~p~n", [Num]),
+    true = is_integer(Num),
+    true = Num > 0,
+    ok.
+
+test_semaphore_basic(_Config) ->
+    %% Test semaphore initialization and basic getters
+    Max = py_semaphore:max_concurrent(),
+    Current = py_semaphore:current(),
+
+    ct:pal("Semaphore - Max: ~p, Current: ~p~n", [Max, Current]),
+
+    true = is_integer(Max),
+    true = Max > 0,
+    true = is_integer(Current),
+    true = Current >= 0,
+    ok.
+
+test_semaphore_acquire_release(_Config) ->
+    %% Test basic acquire/release cycle
+    Initial = py_semaphore:current(),
+
+    %% Acquire
+    ok = py_semaphore:acquire(1000),
+    After1 = py_semaphore:current(),
+    true = After1 > Initial,
+
+    %% Release
+    ok = py_semaphore:release(),
+    After2 = py_semaphore:current(),
+    After2 = Initial,
+
+    ok.
+
+test_semaphore_concurrent(_Config) ->
+    %% Test concurrent acquire/release from multiple processes
+    Parent = self(),
+    NumProcs = 20,
+
+    %% Spawn processes that each acquire, sleep, and release
+    Pids = [spawn_link(fun() ->
+        ok = py_semaphore:acquire(5000),
+        timer:sleep(10),
+        ok = py_semaphore:release(),
+        Parent ! {done, self()}
+    end) || _ <- lists:seq(1, NumProcs)],
+
+    %% Wait for all to complete
+    [receive {done, Pid} -> ok after 10000 -> ct:fail({timeout, Pid}) end || Pid <- Pids],
+
+    %% Current should be back to 0 (or initial state)
+    timer:sleep(50),
+    Current = py_semaphore:current(),
+    ct:pal("After concurrent test - Current: ~p~n", [Current]),
+    true = Current =:= 0,
+
+    ok.
+
+test_semaphore_timeout(_Config) ->
+    %% Save original max
+    OrigMax = py_semaphore:max_concurrent(),
+
+    %% Set a very low limit
+    ok = py_semaphore:set_max_concurrent(1),
+    1 = py_semaphore:max_concurrent(),
+
+    %% First acquire should succeed
+    ok = py_semaphore:acquire(1000),
+
+    %% Second acquire should timeout (we're at max)
+    Parent = self(),
+    spawn_link(fun() ->
+        Result = py_semaphore:acquire(100),
+        Parent ! {acquire_result, Result}
+    end),
+
+    Result = receive
+        {acquire_result, R} -> R
+    after 2000 ->
+        ct:fail(timeout_waiting_for_result)
+    end,
+
+    %% Should have gotten error
+    {error, max_concurrent} = Result,
+
+    %% Release and restore
+    ok = py_semaphore:release(),
+    ok = py_semaphore:set_max_concurrent(OrigMax),
+
+    ok.
+
+test_semaphore_rate_limiting(_Config) ->
+    %% Test that the semaphore properly limits concurrent operations
+    OrigMax = py_semaphore:max_concurrent(),
+
+    %% Set limit to 3
+    ok = py_semaphore:set_max_concurrent(3),
+
+    Parent = self(),
+    Counter = atomics:new(1, [{signed, false}]),
+
+    %% Track max concurrent
+    MaxSeen = atomics:new(1, [{signed, false}]),
+
+    NumProcs = 10,
+    Pids = [spawn_link(fun() ->
+        ok = py_semaphore:acquire(10000),
+        atomics:add(Counter, 1, 1),
+        Cur = atomics:get(Counter, 1),
+
+        %% Update max seen
+        OldMax = atomics:get(MaxSeen, 1),
+        case Cur > OldMax of
+            true -> atomics:put(MaxSeen, 1, Cur);
+            false -> ok
+        end,
+
+        timer:sleep(50),
+        atomics:sub(Counter, 1, 1),
+        ok = py_semaphore:release(),
+        Parent ! {done, self()}
+    end) || _ <- lists:seq(1, NumProcs)],
+
+    %% Wait for all
+    [receive {done, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- Pids],
+
+    %% Check that max concurrent never exceeded limit
+    MaxConcurrent = atomics:get(MaxSeen, 1),
+    ct:pal("Max concurrent seen: ~p (limit was 3)~n", [MaxConcurrent]),
+    true = MaxConcurrent =< 3,
+
+    %% Restore
+    ok = py_semaphore:set_max_concurrent(OrigMax),
+
+    ok.
+
+test_overload_protection(_Config) ->
+    %% Test that py:call returns overload error when semaphore is exhausted
+    OrigMax = py_semaphore:max_concurrent(),
+
+    %% Set very low limit
+    ok = py_semaphore:set_max_concurrent(1),
+
+    %% Acquire the only slot
+    ok = py_semaphore:acquire(1000),
+
+    %% Now py:call should fail with overload
+    Parent = self(),
+    spawn_link(fun() ->
+        Result = py:call(math, sqrt, [4], #{}, 100),
+        Parent ! {call_result, Result}
+    end),
+
+    Result = receive
+        {call_result, R} -> R
+    after 2000 ->
+        ct:fail(timeout_waiting_for_result)
+    end,
+
+    ct:pal("Overload result: ~p~n", [Result]),
+
+    %% Should be overloaded error
+    case Result of
+        {error, {overloaded, _, _}} -> ok;
+        {error, timeout} -> ok;  %% Also acceptable
+        Other -> ct:fail({unexpected_result, Other})
+    end,
+
+    %% Cleanup
+    ok = py_semaphore:release(),
+    ok = py_semaphore:set_max_concurrent(OrigMax),
 
     ok.
