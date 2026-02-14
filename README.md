@@ -1,26 +1,28 @@
 # erlang_python
 
-Execute Python applications from Erlang using dirty NIFs.
+Execute Python from Erlang/Elixir using dirty NIFs with support for free-threaded Python.
 
 ## Overview
 
 This library embeds a Python interpreter into the Erlang VM and provides a
 clean API for calling Python functions, evaluating expressions, and streaming
-results from generators.
+results from generators. It works seamlessly with both Erlang and Elixir.
 
 Key features:
-- **Dirty NIF execution** - Python code runs on dirty I/O schedulers, not blocking the BEAM
-- **GIL-aware** - Releases GIL while waiting for Erlang messages
+- **Dirty NIF execution** - Python code runs on dirty schedulers, not blocking the BEAM
+- **Multiple execution modes** - Free-threaded (3.13+), sub-interpreters (3.12+), or multi-executor
+- **Elixir support** - Works seamlessly from Elixir via the `:py` module
+- **Erlang callbacks** - Register Erlang/Elixir functions callable from Python
 - **Type conversion** - Automatic conversion between Erlang and Python types
 - **Streaming** - Support for Python generators with chunk-by-chunk delivery
-- **Worker pool** - Multiple Python workers for concurrent execution
-- **Timeout support** - Configurable execution timeouts per call
-- **Memory monitoring** - Access to Python GC stats and tracemalloc
+- **Virtual environments** - Activate venvs for dependency isolation
+- **Rate limiting** - ETS-based semaphore prevents overload
+- **AI/ML ready** - Examples for embeddings, semantic search, RAG, and LLMs
 
 ## Requirements
 
 - Erlang/OTP 24+
-- Python 3.8+
+- Python 3.8+ (3.12+ recommended, 3.13+ for free-threading)
 - C compiler (gcc, clang)
 
 ## Building
@@ -31,9 +33,11 @@ rebar3 compile
 
 ## Quick Start
 
+### Erlang
+
 ```erlang
 %% Start the application
-ok = application:start(erlang_python).
+application:ensure_all_started(erlang_python).
 
 %% Call a Python function
 {ok, 4.0} = py:call(math, sqrt, [16]).
@@ -47,19 +51,147 @@ ok = application:start(erlang_python).
 %% Evaluate with local variables
 {ok, 25} = py:eval(<<"x * y">>, #{x => 5, y => 5}).
 
-%% Execute statements (defines persist per-worker)
-ok = py:exec(<<"
-def my_func(x):
-    return x * 2
-">>).
-
 %% Async calls
 Ref = py:call_async(math, factorial, [100]),
-%% ... do other work ...
 {ok, Result} = py:await(Ref).
 
 %% Streaming from generators
 {ok, [0,1,4,9,16]} = py:stream_eval(<<"(x**2 for x in range(5))">>).
+```
+
+### Elixir
+
+```elixir
+# Start the application
+{:ok, _} = Application.ensure_all_started(:erlang_python)
+
+# Call Python functions
+{:ok, 4.0} = :py.call(:math, :sqrt, [16])
+
+# Evaluate expressions
+{:ok, result} = :py.eval("2 + 2")
+
+# With variables
+{:ok, 100} = :py.eval("x * y", %{x: 10, y: 10})
+
+# Call with keyword arguments
+{:ok, json} = :py.call(:json, :dumps, [%{name: "Elixir"}], %{indent: 2})
+```
+
+## Erlang/Elixir Functions Callable from Python
+
+Register Erlang or Elixir functions that Python code can call back into:
+
+### Erlang
+
+```erlang
+%% Register a function
+py:register_function(my_func, fun([X, Y]) -> X + Y end).
+
+%% Call from Python
+{ok, Result} = py:eval(<<"__import__('erlang').call('my_func', 10, 20)">>).
+%% Result = 30
+
+%% Unregister when done
+py:unregister_function(my_func).
+```
+
+### Elixir
+
+```elixir
+# Register an Elixir function
+:py.register_function(:factorial, fn [n] ->
+  Enum.reduce(1..n, 1, &*/2)
+end)
+
+# Call from Python
+{:ok, 3628800} = :py.eval("__import__('erlang').call('factorial', 10)")
+```
+
+## Parallel Processing with BEAM Processes
+
+Leverage Erlang's lightweight processes for massive parallelism:
+
+```erlang
+%% Register parallel map function
+py:register_function(parallel_map, fun([FuncName, Items]) ->
+    Parent = self(),
+    Refs = [begin
+        Ref = make_ref(),
+        spawn(fun() ->
+            Result = execute(FuncName, Item),
+            Parent ! {Ref, Result}
+        end),
+        Ref
+    end || Item <- Items],
+    [receive {Ref, R} -> R after 5000 -> timeout end || Ref <- Refs]
+end).
+
+%% Call from Python - processes 10 items in parallel
+{ok, Results} = py:eval(
+    <<"__import__('erlang').call('parallel_map', 'compute', items)">>,
+    #{items => lists:seq(1, 10)}
+).
+```
+
+**Performance:**
+```
+Sequential (10 items × 100ms): 1.01 seconds
+Parallel (10 BEAM processes):  0.10 seconds
+Speedup: 10x faster!
+```
+
+## Virtual Environment Support
+
+```erlang
+%% Activate a venv
+ok = py:activate_venv(<<"/path/to/venv">>).
+
+%% Use packages from venv
+{ok, Model} = py:call(sentence_transformers, 'SentenceTransformer', [<<"all-MiniLM-L6-v2">>]).
+
+%% Deactivate when done
+ok = py:deactivate_venv().
+```
+
+## Examples
+
+The `examples/` directory contains runnable demonstrations:
+
+### Semantic Search
+```bash
+# Setup
+python3 -m venv /tmp/ai-venv
+/tmp/ai-venv/bin/pip install sentence-transformers numpy
+
+# Run
+escript examples/semantic_search.erl
+```
+
+### RAG (Retrieval-Augmented Generation)
+```bash
+# Setup (also install Ollama and pull a model)
+/tmp/ai-venv/bin/pip install sentence-transformers numpy requests
+ollama pull llama3.2
+
+# Run
+escript examples/rag_example.erl
+```
+
+### AI Chat
+```bash
+escript examples/ai_chat.erl
+```
+
+### Erlang Concurrency from Python
+```bash
+# Demonstrates 10x speedup with BEAM processes
+escript examples/erlang_concurrency.erl
+```
+
+### Elixir Integration
+```bash
+elixir --erl "-pa _build/default/lib/erlang_python/ebin" examples/elixir_example.exs
 ```
 
 ## API Reference
@@ -67,15 +199,11 @@ Ref = py:call_async(math, factorial, [100]),
 ### Function Calls
 
 ```erlang
-%% Basic call
 {ok, Result} = py:call(Module, Function, Args).
 {ok, Result} = py:call(Module, Function, Args, KwArgs).
+{ok, Result} = py:call(Module, Function, Args, KwArgs, Timeout).
 
-%% With timeout (milliseconds)
-{ok, Result} = py:call(Module, Function, Args, KwArgs, 5000).
-{error, timeout} = py:call(slow_module, slow_func, [], #{}, 100).
-
-%% Async call
+%% Async
 Ref = py:call_async(Module, Function, Args).
 {ok, Result} = py:await(Ref).
 {ok, Result} = py:await(Ref, Timeout).
@@ -84,98 +212,33 @@ Ref = py:call_async(Module, Function, Args).
 ### Expression Evaluation
 
 ```erlang
-%% Simple eval
 {ok, 42} = py:eval(<<"21 * 2">>).
-
-%% With local variables
 {ok, 100} = py:eval(<<"x * y">>, #{x => 10, y => 10}).
-
-%% With timeout
-{ok, 45} = py:eval(<<"sum(range(10))">>, #{}, 5000).
-{error, timeout} = py:eval(<<"sum(range(10**9))">>, #{}, 100).
-```
-
-### Statement Execution
-
-```erlang
-%% Execute Python statements
-ok = py:exec(<<"x = 42">>).
-ok = py:exec(<<"
-def hello(name):
-    return f'Hello, {name}!'
-">>).
+{ok, Result} = py:eval(Expression, Locals, Timeout).
 ```
 
 ### Streaming
 
 ```erlang
-%% Stream from generator function
 {ok, Chunks} = py:stream(Module, GeneratorFunc, Args).
-{ok, Chunks} = py:stream(Module, GeneratorFunc, Args, KwArgs).
-
-%% Stream from generator expression
 {ok, [0,1,4,9,16]} = py:stream_eval(<<"(x**2 for x in range(5))">>).
-{ok, [<<"A">>,<<"B">>,<<"C">>]} = py:stream_eval(<<"(c.upper() for c in 'abc')">>).
+```
+
+### Callbacks
+
+```erlang
+py:register_function(Name, fun([Args]) -> Result end).
+py:register_function(Name, Module, Function).
+py:unregister_function(Name).
 ```
 
 ### Memory and GC
 
 ```erlang
-%% Get memory statistics
 {ok, Stats} = py:memory_stats().
-%% Stats contains: gc_stats, gc_count, gc_threshold
-%% And if tracemalloc enabled: traced_memory_current, traced_memory_peak
-
-%% Force garbage collection
-{ok, Collected} = py:gc().        %% Full collection
-{ok, Collected} = py:gc(0).       %% Generation 0 only
-{ok, Collected} = py:gc(1).       %% Generations 0 and 1
-{ok, Collected} = py:gc(2).       %% Full collection
-
-%% Memory tracing (for debugging)
+{ok, Collected} = py:gc().
 ok = py:tracemalloc_start().
-%% ... do work ...
-{ok, Stats} = py:memory_stats().  %% Now includes traced_memory_*
 ok = py:tracemalloc_stop().
-```
-
-### Info
-
-```erlang
-%% Get Python version
-{ok, <<"3.12.1 ...">>} = py:version().
-```
-
-## Architecture
-
-```
-+-------------------------------------------------------------------+
-|                        BEAM VM                                     |
-|  +------------+    +------------+    +------------+               |
-|  | Erlang     |    | Erlang     |    | Erlang     |               |
-|  | Process    |    | Process    |    | Process    |               |
-|  +-----+------+    +-----+------+    +-----+------+               |
-|        |                 |                 |                       |
-|        +--------+--------+--------+--------+                       |
-|                 v                 v                                |
-|              +---------------------------+                         |
-|              |    py_pool (gen_server)   |  Round-robin routing    |
-|              +-------------+-------------+                         |
-|                            |                                       |
-+----------------------------+---------------------------------------+
-| Dirty IO Scheduler Pool    |                                       |
-|  +---------------------+   |   +---------------------+             |
-|  | py_worker           |<--+-->| py_worker           |             |
-|  | - GIL acquired      |       | - GIL acquired      |             |
-|  | - Timeout support   |       | - Timeout support   |             |
-|  +----------+----------+       +----------+----------+             |
-|             |                             |                        |
-|             v                             v                        |
-|     +-------------+               +-------------+                  |
-|     | Python      |               | Python      |                  |
-|     | Interpreter |               | Interpreter |                  |
-|     +-------------+               +-------------+                  |
-+--------------------------------------------------------------------+
 ```
 
 ## Type Mappings
@@ -187,9 +250,9 @@ ok = py:tracemalloc_stop().
 | `integer()` | `int` |
 | `float()` | `float` |
 | `binary()` | `str` |
-| `atom()` (except special) | `str` |
+| `atom()` | `str` |
 | `true` / `false` | `True` / `False` |
-| `none` / `nil` / `undefined` | `None` |
+| `none` / `nil` | `None` |
 | `list()` | `list` |
 | `tuple()` | `tuple` |
 | `map()` | `dict` |
@@ -200,9 +263,6 @@ ok = py:tracemalloc_stop().
 |--------|--------|
 | `int` | `integer()` |
 | `float` | `float()` |
-| `float('nan')` | `nan` (atom) |
-| `float('inf')` | `infinity` (atom) |
-| `float('-inf')` | `neg_infinity` (atom) |
 | `str` | `binary()` |
 | `bytes` | `binary()` |
 | `True` / `False` | `true` / `false` |
@@ -210,30 +270,50 @@ ok = py:tracemalloc_stop().
 | `list` | `list()` |
 | `tuple` | `tuple()` |
 | `dict` | `map()` |
-| generator | `{generator, Ref}` (internal) |
 
 ## Configuration
 
-In `sys.config`:
-
 ```erlang
+%% sys.config
 [
   {erlang_python, [
-    {num_workers, 4}            %% Number of Python workers (default: 4)
+    {num_workers, 4},           %% Python worker pool size
+    {max_concurrent, 17},       %% Max concurrent operations (default: schedulers * 2 + 1)
+    {num_executors, 4}          %% Executor threads (multi-executor mode)
   ]}
 ].
 ```
 
-## Error Handling
+## Execution Modes
 
-Python exceptions are converted to Erlang error tuples:
+The library auto-detects the best execution mode:
+
+| Mode | Python Version | Parallelism |
+|------|----------------|-------------|
+| Free-threaded | 3.13+ (nogil) | True parallel, no GIL |
+| Sub-interpreter | 3.12+ | Per-interpreter GIL |
+| Multi-executor | Any | GIL contention |
+
+Check current mode:
+```erlang
+py:execution_mode().  %% => free_threaded | subinterp | multi_executor
+```
+
+## Error Handling
 
 ```erlang
 {error, {'NameError', "name 'x' is not defined"}} = py:eval(<<"x">>).
 {error, {'ZeroDivisionError', "division by zero"}} = py:eval(<<"1/0">>).
-{error, {'ModuleNotFoundError', "..."}} = py:call(nonexistent, func, []).
 {error, timeout} = py:eval(<<"sum(range(10**9))">>, #{}, 100).
 ```
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md)
+- [AI Integration Guide](docs/ai-integration.md)
+- [Type Conversion](docs/type-conversion.md)
+- [Scalability](docs/scalability.md)
+- [Streaming](docs/streaming.md)
 
 ## License
 
