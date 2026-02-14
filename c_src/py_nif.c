@@ -471,34 +471,42 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
      * extension modules can find Python symbols when dynamically loaded.
      * Without this, modules like _socket.so fail with "undefined symbol: PyByteArray_Type" */
     {
-        char libpython[256];
         void *handle = NULL;
 
-#ifdef Py_GIL_DISABLED
-        /* Free-threaded Python has 't' suffix in library name (e.g., libpython3.13t.so) */
-        const char *patterns[] = {
-            "libpython%d.%dt.so.1.0",  /* Linux free-threaded with full version */
-            "libpython%d.%dt.so",      /* Linux/FreeBSD free-threaded */
-            "libpython%d.%dt.so.1",    /* Some systems free-threaded */
-            "libpython%d.%d.so.1.0",   /* Fallback: Linux with full version */
-            "libpython%d.%d.so",       /* Fallback: Linux/FreeBSD */
-            "libpython%d.%d.so.1",     /* Fallback: Some systems */
-            NULL
-        };
-#else
-        /* Standard Python library names */
-        const char *patterns[] = {
-            "libpython%d.%d.so.1.0",  /* Linux with full version */
-            "libpython%d.%d.so",      /* Linux/FreeBSD */
-            "libpython%d.%d.so.1",    /* Some systems */
-            NULL
-        };
+#ifdef PYTHON_LIBRARY_PATH
+        /* Use CMake-discovered library path (most reliable) */
+        handle = dlopen(PYTHON_LIBRARY_PATH, RTLD_NOW | RTLD_GLOBAL);
 #endif
 
-        for (int i = 0; patterns[i] && !handle; i++) {
-            snprintf(libpython, sizeof(libpython), patterns[i],
-                     PY_MAJOR_VERSION, PY_MINOR_VERSION);
-            handle = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
+        /* Fallback: try pattern-based discovery if CMake path didn't work */
+        if (!handle) {
+            char libpython[256];
+#ifdef Py_GIL_DISABLED
+            /* Free-threaded Python has 't' suffix in library name (e.g., libpython3.13t.so) */
+            const char *patterns[] = {
+                "libpython%d.%dt.so.1.0",  /* Linux free-threaded with full version */
+                "libpython%d.%dt.so",      /* Linux/FreeBSD free-threaded */
+                "libpython%d.%dt.so.1",    /* Some systems free-threaded */
+                "libpython%d.%d.so.1.0",   /* Fallback: Linux with full version */
+                "libpython%d.%d.so",       /* Fallback: Linux/FreeBSD */
+                "libpython%d.%d.so.1",     /* Fallback: Some systems */
+                NULL
+            };
+#else
+            /* Standard Python library names */
+            const char *patterns[] = {
+                "libpython%d.%d.so.1.0",  /* Linux with full version */
+                "libpython%d.%d.so",      /* Linux/FreeBSD */
+                "libpython%d.%d.so.1",    /* Some systems */
+                NULL
+            };
+#endif
+
+            for (int i = 0; patterns[i] && !handle; i++) {
+                snprintf(libpython, sizeof(libpython), patterns[i],
+                         PY_MAJOR_VERSION, PY_MINOR_VERSION);
+                handle = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
+            }
         }
         /* It's OK if this fails - the symbols might already be global */
     }

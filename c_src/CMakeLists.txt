@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 
 project(ErlangPythonNIF C)
 
@@ -51,49 +51,40 @@ endif()
 include(FindErlang)
 include_directories(${ERLANG_ERTS_INCLUDE_PATH})
 
-# Find Python - use the PYTHON_CONFIG env variable if set
+# Find Python using CMake's built-in FindPython3
+# Use PYTHON_CONFIG env variable to hint which Python to use
 if(DEFINED ENV{PYTHON_CONFIG})
-    set(Python3_CONFIG "$ENV{PYTHON_CONFIG}")
+    # Extract prefix from python-config for hinting
     execute_process(
-        COMMAND ${Python3_CONFIG} --prefix
-        OUTPUT_VARIABLE Python3_PREFIX
+        COMMAND $ENV{PYTHON_CONFIG} --prefix
+        OUTPUT_VARIABLE Python3_ROOT_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    execute_process(
-        COMMAND ${Python3_CONFIG} --includes
-        OUTPUT_VARIABLE Python3_INCLUDE_FLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    execute_process(
-        COMMAND ${Python3_CONFIG} --ldflags --embed
-        OUTPUT_VARIABLE Python3_LINK_FLAGS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE Python3_EMBED_RESULT
-    )
-    if(NOT Python3_EMBED_RESULT EQUAL 0)
-        execute_process(
-            COMMAND ${Python3_CONFIG} --ldflags
-            OUTPUT_VARIABLE Python3_LINK_FLAGS
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-    endif()
-
-    # Extract include directories from flags
-    string(REGEX MATCHALL "-I[^ ]+" Python3_INCLUDE_DIRS_LIST "${Python3_INCLUDE_FLAGS}")
-    string(REGEX REPLACE "-I" "" Python3_INCLUDE_DIRS_LIST "${Python3_INCLUDE_DIRS_LIST}")
-
-    message(STATUS "Using Python config: ${Python3_CONFIG}")
-    message(STATUS "Python includes: ${Python3_INCLUDE_FLAGS}")
-    message(STATUS "Python link flags: ${Python3_LINK_FLAGS}")
-else()
-    # Use CMake's FindPython3
-    find_package(Python3 REQUIRED COMPONENTS Development)
-    set(Python3_INCLUDE_DIRS_LIST ${Python3_INCLUDE_DIRS})
-    set(Python3_LINK_FLAGS "${Python3_LIBRARIES}")
+    set(Python3_FIND_STRATEGY LOCATION)
 endif()
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+
+message(STATUS "Python3 executable: ${Python3_EXECUTABLE}")
+message(STATUS "Python3 version: ${Python3_VERSION}")
+message(STATUS "Python3 include dirs: ${Python3_INCLUDE_DIRS}")
+message(STATUS "Python3 libraries: ${Python3_LIBRARIES}")
+message(STATUS "Python3 library: ${Python3_LIBRARY}")
 
 # Create the NIF shared library
 add_library(py_nif MODULE py_nif.c)
+
+# Pass Python library path to NIF for dlopen
+# Python3_LIBRARY is the full path to the Python shared library
+if(Python3_LIBRARY)
+    target_compile_definitions(py_nif PRIVATE PYTHON_LIBRARY_PATH="${Python3_LIBRARY}")
+    message(STATUS "Using Python library path for dlopen: ${Python3_LIBRARY}")
+elseif(Python3_LIBRARIES)
+    # Fallback to first library in the list
+    list(GET Python3_LIBRARIES 0 Python3_FIRST_LIB)
+    target_compile_definitions(py_nif PRIVATE PYTHON_LIBRARY_PATH="${Python3_FIRST_LIB}")
+    message(STATUS "Using Python library path for dlopen: ${Python3_FIRST_LIB}")
+endif()
 
 # Set output name
 set_target_properties(py_nif PROPERTIES
@@ -104,7 +95,7 @@ set_target_properties(py_nif PROPERTIES
 # Include directories
 target_include_directories(py_nif PRIVATE
     ${ERLANG_ERTS_INCLUDE_PATH}
-    ${Python3_INCLUDE_DIRS_LIST}
+    ${Python3_INCLUDE_DIRS}
 )
 
 # Compiler flags
@@ -140,13 +131,7 @@ elseif(UNIX)
 endif()
 
 # Link Python
-if(DEFINED ENV{PYTHON_CONFIG})
-    # Parse the link flags and add them properly
-    separate_arguments(Python3_LINK_FLAGS_LIST UNIX_COMMAND "${Python3_LINK_FLAGS}")
-    target_link_libraries(py_nif PRIVATE ${Python3_LINK_FLAGS_LIST})
-else()
-    target_link_libraries(py_nif PRIVATE Python3::Python)
-endif()
+target_link_libraries(py_nif PRIVATE Python3::Python)
 
 # Threads
 find_package(Threads REQUIRED)
