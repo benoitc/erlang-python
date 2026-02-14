@@ -39,6 +39,9 @@ init([]) ->
     %% Initialize the semaphore ETS table for rate limiting
     ok = py_semaphore:init(),
 
+    %% Initialize callback registry ETS table (owned by supervisor for resilience)
+    ok = py_callback:init_tab(),
+
     %% Callback registry - must start before pool
     CallbackSpec = #{
         id => py_callback,

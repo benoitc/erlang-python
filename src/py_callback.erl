@@ -24,6 +24,7 @@
 
 -export([
     start_link/0,
+    init_tab/0,
     register/2,
     unregister/1,
     lookup/1,
@@ -47,6 +48,18 @@
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+%% @doc Initialize the ETS table for callbacks.
+%% Called by supervisor for resilience - table survives gen_server restarts.
+-spec init_tab() -> ok.
+init_tab() ->
+    ?TABLE = ets:new(?TABLE, [
+        named_table,
+        public,
+        set,
+        {read_concurrency, true}
+    ]),
+    ok.
 
 %% @doc Register a function to be callable from Python.
 -spec register(Name :: atom() | binary(), Fun :: fun((list()) -> term()) | {atom(), atom()}) -> ok.
@@ -100,13 +113,6 @@ execute(Name, Args) ->
 %%% ============================================================================
 
 init([]) ->
-    %% Create ETS table for registered functions
-    ?TABLE = ets:new(?TABLE, [
-        named_table,
-        public,
-        set,
-        {read_concurrency, true}
-    ]),
     {ok, #{}}.
 
 handle_call(_Request, _From, State) ->
