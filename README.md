@@ -1,5 +1,9 @@
 # erlang_python
 
+[![Hex.pm](https://img.shields.io/hexpm/v/erlang_python.svg)](https://hex.pm/packages/erlang_python)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/erlang_python)
+[![License](https://img.shields.io/hexpm/l/erlang_python.svg)](https://github.com/benoitc/erlang-python/blob/main/LICENSE)
+
 **Combine Python's ML/AI ecosystem with Erlang's concurrency.**
 
 Run Python code from Erlang or Elixir with true parallelism, async/await support,
