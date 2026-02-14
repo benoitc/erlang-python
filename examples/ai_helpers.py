@@ -111,7 +111,7 @@ def generate(question, context):
         import requests
         resp = requests.post(
             'http://localhost:11434/api/generate',
-            json={'model': 'llama2', 'prompt': prompt, 'stream': False},
+            json={'model': 'llama3.2', 'prompt': prompt, 'stream': False},
             timeout=60
         )
         return resp.json()['response'].strip()
@@ -154,7 +154,7 @@ def chat(messages):
         prompt += '\nassistant:'
         resp = requests.post(
             'http://localhost:11434/api/generate',
-            json={'model': 'llama2', 'prompt': prompt, 'stream': False},
+            json={'model': 'llama3.2', 'prompt': prompt, 'stream': False},
             timeout=120
         )
         return resp.json()['response'].strip()
