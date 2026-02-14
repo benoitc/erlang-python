@@ -36,10 +36,11 @@
 ]).
 
 -record(state, {
-    workers :: queue:queue(pid()),
-    num_workers :: pos_integer(),
+    workers :: queue:queue(pid()) | undefined,
+    num_workers :: non_neg_integer(),
     pending :: non_neg_integer(),
-    worker_sup :: pid()
+    worker_sup :: pid() | undefined,
+    supported :: boolean()  %% whether async workers are supported
 }).
 
 %%% ============================================================================
@@ -70,26 +71,48 @@ init([NumWorkers]) ->
     %% Start worker supervisor
     {ok, WorkerSup} = py_async_worker_sup:start_link(),
 
-    %% Start workers
-    Workers = start_workers(WorkerSup, NumWorkers),
-
-    {ok, #state{
-        workers = queue:from_list(Workers),
-        num_workers = NumWorkers,
-        pending = 0,
-        worker_sup = WorkerSup
-    }}.
+    %% Try to start workers - may fail on free-threaded Python
+    case start_workers(WorkerSup, NumWorkers) of
+        {ok, Workers} ->
+            {ok, #state{
+                workers = queue:from_list(Workers),
+                num_workers = NumWorkers,
+                pending = 0,
+                worker_sup = WorkerSup,
+                supported = true
+            }};
+        {error, _Reason} ->
+            %% Async workers not supported (e.g., free-threaded Python)
+            %% Pool starts but all requests will return an error
+            {ok, #state{
+                workers = undefined,
+                num_workers = 0,
+                pending = 0,
+                worker_sup = WorkerSup,
+                supported = false
+            }}
+    end.
 
 handle_call(get_stats, _From, State) ->
+    AvailWorkers = case State#state.workers of
+        undefined -> 0;
+        Q -> queue:len(Q)
+    end,
     Stats = #{
         num_workers => State#state.num_workers,
         pending_requests => State#state.pending,
-        available_workers => queue:len(State#state.workers)
+        available_workers => AvailWorkers,
+        supported => State#state.supported
     },
     {reply, Stats, State};
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+handle_cast({request, Request}, #state{supported = false} = State) ->
+    {Ref, Caller, _} = extract_ref_caller(Request),
+    Caller ! {py_error, Ref, async_not_supported},
+    {noreply, State};
 
 handle_cast({request, Request}, State) ->
     case queue:out(State#state.workers) of
@@ -115,17 +138,27 @@ handle_cast(_Msg, State) ->
 handle_info({worker_done, _WorkerPid}, State) ->
     {noreply, State#state{pending = max(0, State#state.pending - 1)}};
 
+handle_info({'EXIT', _Pid, _Reason}, #state{supported = false} = State) ->
+    {noreply, State};
+
 handle_info({'EXIT', Pid, Reason}, State) ->
     error_logger:error_msg("py_async_pool: worker ~p died: ~p~n", [Pid, Reason]),
     %% Remove dead worker from queue and start a new one
     Workers = queue:filter(fun(W) -> W =/= Pid end, State#state.workers),
-    NewWorker = py_async_worker_sup:start_worker(State#state.worker_sup),
-    NewWorkers = queue:in(NewWorker, Workers),
-    {noreply, State#state{workers = NewWorkers}};
+    case py_async_worker_sup:start_worker(State#state.worker_sup) of
+        {ok, NewWorker} ->
+            NewWorkers = queue:in(NewWorker, Workers),
+            {noreply, State#state{workers = NewWorkers}};
+        {error, _} ->
+            %% Can't restart worker, continue with remaining workers
+            {noreply, State#state{workers = Workers}}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
+terminate(_Reason, #state{workers = undefined}) ->
+    ok;
 terminate(_Reason, State) ->
     %% Shutdown all workers
     Workers = queue:to_list(State#state.workers),
@@ -137,7 +170,19 @@ terminate(_Reason, State) ->
 %%% ============================================================================
 
 start_workers(Sup, N) ->
-    [py_async_worker_sup:start_worker(Sup) || _ <- lists:seq(1, N)].
+    start_workers(Sup, N, []).
+
+start_workers(_Sup, 0, Acc) ->
+    {ok, lists:reverse(Acc)};
+start_workers(Sup, N, Acc) ->
+    case py_async_worker_sup:start_worker(Sup) of
+        {ok, Pid} ->
+            start_workers(Sup, N - 1, [Pid | Acc]);
+        {error, Reason} ->
+            %% Failed to start worker, shutdown any already started
+            lists:foreach(fun(W) -> W ! shutdown end, Acc),
+            {error, Reason}
+    end.
 
 extract_ref_caller({async_call, Ref, Caller, _, _, _, _}) -> {Ref, Caller, async_call};
 extract_ref_caller({async_gather, Ref, Caller, _}) -> {Ref, Caller, async_gather};

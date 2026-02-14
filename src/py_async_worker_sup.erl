@@ -28,8 +28,10 @@ start_link() ->
     supervisor:start_link(?MODULE, []).
 
 start_worker(Sup) ->
-    {ok, Pid} = supervisor:start_child(Sup, []),
-    Pid.
+    case supervisor:start_child(Sup, []) of
+        {ok, Pid} -> {ok, Pid};
+        {error, Reason} -> {error, Reason}
+    end.
 
 init([]) ->
     WorkerSpec = #{
