@@ -37,11 +37,12 @@
 ]).
 
 -record(state, {
-    workers :: queue:queue(pid()),
+    workers :: queue:queue(pid()) | undefined,
     worker_refs :: [reference()],  %% NIF refs for parallel_execute
     num_workers :: pos_integer(),
     pending :: non_neg_integer(),
-    worker_sup :: pid()
+    worker_sup :: pid() | undefined,
+    supported :: boolean()  %% whether subinterpreters are supported
 }).
 
 %%% ============================================================================
@@ -90,19 +91,37 @@ init([NumWorkers]) ->
                 worker_refs = WorkerRefs,
                 num_workers = NumWorkers,
                 pending = 0,
-                worker_sup = WorkerSup
+                worker_sup = WorkerSup,
+                supported = true
             }};
         false ->
-            {stop, {error, subinterpreters_not_supported}}
+            %% Sub-interpreters not supported, but pool still starts
+            %% All requests will return an error
+            {ok, #state{
+                workers = undefined,
+                worker_refs = [],
+                num_workers = 0,
+                pending = 0,
+                worker_sup = undefined,
+                supported = false
+            }}
     end.
 
 handle_call(get_stats, _From, State) ->
+    AvailWorkers = case State#state.workers of
+        undefined -> 0;
+        Q -> queue:len(Q)
+    end,
     Stats = #{
         num_workers => State#state.num_workers,
         pending_requests => State#state.pending,
-        available_workers => queue:len(State#state.workers)
+        available_workers => AvailWorkers,
+        supported => State#state.supported
     },
     {reply, Stats, State};
+
+handle_call({parallel, _Calls}, _From, #state{supported = false} = State) ->
+    {reply, {error, subinterpreters_not_supported}, State};
 
 handle_call({parallel, Calls}, From, State) ->
     %% For parallel execution, we use the NIF refs directly
@@ -119,6 +138,11 @@ handle_call({parallel, Calls}, From, State) ->
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+handle_cast({request, Request}, #state{supported = false} = State) ->
+    {Ref, Caller, _} = extract_ref_caller(Request),
+    Caller ! {py_error, Ref, subinterpreters_not_supported},
+    {noreply, State};
 
 handle_cast({request, Request}, State) ->
     case queue:out(State#state.workers) of
