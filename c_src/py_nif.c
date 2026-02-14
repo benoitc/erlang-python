@@ -2940,9 +2940,44 @@ static void *executor_thread_main(void *arg) {
 }
 
 /**
- * Enqueue a request to the executor thread.
+ * Enqueue a request to the appropriate executor based on execution mode.
+ * Routes to multi-executor pool, single executor, or executes directly.
  */
 static void executor_enqueue(py_request_t *req) {
+    switch (g_execution_mode) {
+#ifdef HAVE_FREE_THREADED
+        case PY_MODE_FREE_THREADED:
+            /* Execute directly in free-threaded mode - no executor needed */
+            {
+                PyGILState_STATE gstate = PyGILState_Ensure();
+                process_request(req);
+                PyGILState_Release(gstate);
+                /* Signal completion immediately */
+                pthread_mutex_lock(&req->mutex);
+                req->completed = true;
+                pthread_cond_signal(&req->cond);
+                pthread_mutex_unlock(&req->mutex);
+            }
+            return;
+#endif
+
+        case PY_MODE_MULTI_EXECUTOR:
+            if (g_multi_executor_initialized) {
+                /* Route to multi-executor pool */
+                int exec_id = select_executor();
+                multi_executor_enqueue(exec_id, req);
+                return;
+            }
+            /* Fall through to single executor if multi not initialized */
+            break;
+
+        case PY_MODE_SUBINTERP:
+        default:
+            /* Use single executor */
+            break;
+    }
+
+    /* Single executor queue */
     pthread_mutex_lock(&g_executor_mutex);
     req->next = NULL;
     if (g_executor_queue_tail == NULL) {
