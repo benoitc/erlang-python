@@ -15,6 +15,7 @@ priv/*.dll
 *.beam
 *.plt
 erl_crash.dump
+rebar3.crashdump
 *.ez
 
 # Python
