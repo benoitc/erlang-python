@@ -139,9 +139,82 @@ py_semaphore:current().         %% Currently executing
 
 See [Scalability](scalability.md) for details on execution modes and performance tuning.
 
+## Using from Elixir
+
+erlang_python works seamlessly with Elixir. The `:py` module can be called directly:
+
+```elixir
+# Start the application
+{:ok, _} = Application.ensure_all_started(:erlang_python)
+
+# Call Python functions
+{:ok, 4.0} = :py.call(:math, :sqrt, [16])
+
+# Evaluate expressions
+{:ok, result} = :py.eval("2 + 2")
+
+# With variables
+{:ok, 100} = :py.eval("x * y", %{x: 10, y: 10})
+
+# Call with keyword arguments
+{:ok, json} = :py.call(:json, :dumps, [%{name: "Elixir"}], %{indent: 2})
+```
+
+### Register Elixir Functions for Python
+
+```elixir
+# Register an Elixir function
+:py.register_function(:factorial, fn [n] ->
+  Enum.reduce(1..n, 1, &*/2)
+end)
+
+# Call from Python
+{:ok, 3628800} = :py.eval("__import__('erlang').call('factorial', 10)")
+
+# Cleanup
+:py.unregister_function(:factorial)
+```
+
+### Parallel Processing with BEAM
+
+```elixir
+# Register parallel map using BEAM processes
+:py.register_function(:parallel_map, fn [func_name, items] ->
+  parent = self()
+
+  refs = Enum.map(items, fn item ->
+    ref = make_ref()
+    spawn(fn ->
+      result = apply_function(func_name, item)
+      send(parent, {ref, result})
+    end)
+    ref
+  end)
+
+  Enum.map(refs, fn ref ->
+    receive do
+      {^ref, result} -> result
+    after
+      5000 -> {:error, :timeout}
+    end
+  end)
+end)
+```
+
+### Running the Elixir Example
+
+A complete working example is available:
+
+```bash
+elixir --erl "-pa _build/default/lib/erlang_python/ebin" examples/elixir_example.exs
+```
+
+This demonstrates basic calls, data conversion, callbacks, parallel processing (10x speedup), and AI integration.
+
 ## Next Steps
 
 - See [Type Conversion](type-conversion.md) for detailed type mapping
 - See [Streaming](streaming.md) for working with generators
 - See [Memory Management](memory.md) for GC and debugging
 - See [Scalability](scalability.md) for parallelism and performance
+- See [AI Integration](ai-integration.md) for ML/AI examples

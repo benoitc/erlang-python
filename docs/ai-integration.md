@@ -672,6 +672,71 @@ cosine_sim(A, B) ->
     Dot / (NormA * NormB).
 ```
 
+## Using from Elixir
+
+All AI examples work seamlessly from Elixir:
+
+```elixir
+# Start erlang_python
+{:ok, _} = Application.ensure_all_started(:erlang_python)
+
+# Activate venv with AI libraries
+:ok = :py.activate_venv("/path/to/ai_venv")
+
+# Generate embeddings using ai_helpers module
+{:ok, embeddings} = :py.call(:ai_helpers, :embed_texts, [
+  ["Elixir is functional", "Python does ML", "BEAM is concurrent"]
+])
+
+# Semantic search
+{:ok, query_emb} = :py.call(:ai_helpers, :embed_single, ["concurrent programming"])
+
+# Calculate similarity in Elixir
+similarities = Enum.zip(texts, embeddings)
+|> Enum.map(fn {text, emb} -> {text, cosine_similarity(query_emb, emb)} end)
+|> Enum.sort_by(fn {_, score} -> score end, :desc)
+```
+
+### Parallel AI with BEAM Processes
+
+```elixir
+# Register parallel embedding function
+:py.register_function(:parallel_embed, fn [texts] ->
+  parent = self()
+
+  refs = Enum.map(texts, fn text ->
+    ref = make_ref()
+    spawn(fn ->
+      {:ok, emb} = :py.call(:ai_helpers, :embed_single, [text])
+      send(parent, {ref, emb})
+    end)
+    ref
+  end)
+
+  Enum.map(refs, fn ref ->
+    receive do
+      {^ref, result} -> result
+    after
+      30_000 -> {:error, :timeout}
+    end
+  end)
+end)
+```
+
+### Running the Elixir AI Example
+
+```bash
+# Full Elixir example with AI integration
+elixir --erl "-pa _build/default/lib/erlang_python/ebin" examples/elixir_example.exs
+```
+
+The example demonstrates:
+- Basic Python calls from Elixir
+- Data type conversion
+- Registering Elixir callbacks for Python
+- Parallel processing (10x speedup)
+- Semantic search with embeddings
+
 ## See Also
 
 - [Getting Started](getting-started.md) - Basic usage
