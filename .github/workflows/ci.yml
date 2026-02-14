@@ -61,15 +61,25 @@ jobs:
           python3-config --cflags | head -c 100
           echo "..."
 
-      - name: Compile
-        run: rebar3 compile
+      - name: Set Python library path (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Clean and compile
+        run: |
+          rebar3 clean
+          rebar3 compile
 
       - name: Run tests
         run: rebar3 ct --readable=compact
 
       - name: Run dialyzer
         run: rebar3 dialyzer
-        continue-on-error: true
+
+      - name: Run xref
+        run: rebar3 xref
 
   # Test with free-threaded Python (experimental, no GIL)
   test-free-threaded:
@@ -97,10 +107,17 @@ jobs:
           python3 -c "import sys; print('GIL enabled:', sys._is_gil_enabled())"
           python3 -c "import sysconfig; print('Py_GIL_DISABLED:', sysconfig.get_config_var('Py_GIL_DISABLED'))"
 
-      - name: Compile
+      - name: Set Python library path
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Clean and compile
         env:
           PYTHON_GIL: "0"
-        run: rebar3 compile
+        run: |
+          rebar3 clean
+          rebar3 compile
 
       - name: Run tests
         env:
@@ -142,9 +159,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set Python library path
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
       - name: Compile
         run: rebar3 compile
 
-      - name: Check formatting (xref)
+      - name: Run xref
         run: rebar3 xref
-        continue-on-error: true
+
+      - name: Run dialyzer
+        run: rebar3 dialyzer

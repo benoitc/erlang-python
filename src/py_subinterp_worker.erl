@@ -85,9 +85,7 @@ handle_request(WorkerRef, {call, Ref, Caller, Module, Func, Args, Kwargs}) ->
 send_response(Caller, Ref, {ok, Value}) ->
     Caller ! {py_response, Ref, {ok, Value}};
 send_response(Caller, Ref, {error, Error}) ->
-    Caller ! {py_error, Ref, Error};
-send_response(Caller, Ref, ok) ->
-    Caller ! {py_response, Ref, {ok, none}}.
+    Caller ! {py_error, Ref, Error}.
 
 to_binary(Atom) when is_atom(Atom) ->
     atom_to_binary(Atom, utf8);
