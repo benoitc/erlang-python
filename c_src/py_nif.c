@@ -353,6 +353,20 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args);
 static PyObject *erlang_module_getattr(PyObject *module, PyObject *name);
 static void *async_event_loop_thread(void *arg);
 
+/**
+ * Helper to convert ErlNifBinary to null-terminated C string.
+ * Caller must call enif_free() on the result.
+ * Returns NULL on allocation failure.
+ */
+static char *binary_to_string(const ErlNifBinary *bin) {
+    char *str = enif_alloc(bin->size + 1);
+    if (str != NULL) {
+        memcpy(str, bin->data, bin->size);
+        str[bin->size] = '\0';
+    }
+    return str;
+}
+
 /* ============================================================================
  * Resource callbacks
  * ============================================================================ */
@@ -1305,13 +1319,14 @@ static ERL_NIF_TERM nif_async_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
     /* Convert module/func names */
-    char *module_name = enif_alloc(module_bin.size + 1);
-    memcpy(module_name, module_bin.data, module_bin.size);
-    module_name[module_bin.size] = '\0';
-
-    char *func_name = enif_alloc(func_bin.size + 1);
-    memcpy(func_name, func_bin.data, func_bin.size);
-    func_name[func_bin.size] = '\0';
+    char *module_name = binary_to_string(&module_bin);
+    char *func_name = binary_to_string(&func_bin);
+    if (module_name == NULL || func_name == NULL) {
+        enif_free(module_name);  /* safe even if NULL */
+        enif_free(func_name);
+        PyGILState_Release(gstate);
+        return make_error(env, "alloc_failed");
+    }
 
     ERL_NIF_TERM result;
 
@@ -1405,6 +1420,11 @@ static ERL_NIF_TERM nif_async_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     uint64_t async_id = __sync_fetch_and_add(&g_async_id_counter, 1);
 
     async_pending_t *pending = enif_alloc(sizeof(async_pending_t));
+    if (pending == NULL) {
+        Py_DECREF(future);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     pending->id = async_id;
     pending->future = future;
     pending->caller = caller;
@@ -1605,6 +1625,11 @@ static ERL_NIF_TERM nif_async_gather(ErlNifEnv *env, int argc, const ERL_NIF_TER
     uint64_t async_id = __sync_fetch_and_add(&g_async_id_counter, 1);
 
     async_pending_t *pending = enif_alloc(sizeof(async_pending_t));
+    if (pending == NULL) {
+        Py_DECREF(future);
+        PyGILState_Release(gstate);
+        return make_error(env, "alloc_failed");
+    }
     pending->id = async_id;
     pending->future = future;
     pending->caller = caller;
@@ -1779,13 +1804,14 @@ static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_T
     PyThreadState *saved_tstate = PyThreadState_Swap(NULL);
     PyThreadState_Swap(worker->tstate);
 
-    char *module_name = enif_alloc(module_bin.size + 1);
-    memcpy(module_name, module_bin.data, module_bin.size);
-    module_name[module_bin.size] = '\0';
-
-    char *func_name = enif_alloc(func_bin.size + 1);
-    memcpy(func_name, func_bin.data, func_bin.size);
-    func_name[func_bin.size] = '\0';
+    char *module_name = binary_to_string(&module_bin);
+    char *func_name = binary_to_string(&func_bin);
+    if (module_name == NULL || func_name == NULL) {
+        enif_free(module_name);
+        enif_free(func_name);
+        PyThreadState_Swap(saved_tstate);
+        return make_error(env, "alloc_failed");
+    }
 
     ERL_NIF_TERM result;
 
@@ -1891,6 +1917,9 @@ static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF
      * so they don't block each other on the GIL. */
 
     ERL_NIF_TERM *results = enif_alloc(sizeof(ERL_NIF_TERM) * calls_len);
+    if (results == NULL) {
+        return make_error(env, "alloc_failed");
+    }
     ERL_NIF_TERM worker_head, worker_tail = argv[0];
     ERL_NIF_TERM call_head, call_tail = argv[1];
 
@@ -2014,7 +2043,13 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
 
     if (PyList_Check(obj)) {
         Py_ssize_t len = PyList_Size(obj);
+        if (len == 0) {
+            return enif_make_list(env, 0);
+        }
         ERL_NIF_TERM *items = enif_alloc(sizeof(ERL_NIF_TERM) * len);
+        if (items == NULL) {
+            return ATOM_ERROR;
+        }
         for (Py_ssize_t i = 0; i < len; i++) {
             PyObject *item = PyList_GetItem(obj, i);  /* Borrowed ref */
             items[i] = py_to_term(env, item);
@@ -2037,7 +2072,13 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
 
     if (PyTuple_Check(obj)) {
         Py_ssize_t len = PyTuple_Size(obj);
+        if (len == 0) {
+            return enif_make_tuple(env, 0);
+        }
         ERL_NIF_TERM *items = enif_alloc(sizeof(ERL_NIF_TERM) * len);
+        if (items == NULL) {
+            return ATOM_ERROR;
+        }
         for (Py_ssize_t i = 0; i < len; i++) {
             PyObject *item = PyTuple_GetItem(obj, i);  /* Borrowed ref */
             items[i] = py_to_term(env, item);
@@ -2629,13 +2670,14 @@ static void process_request(py_request_t *req) {
         tl_current_worker = worker;
         tl_callback_env = env;
 
-        char *module_name = enif_alloc(req->module_bin.size + 1);
-        memcpy(module_name, req->module_bin.data, req->module_bin.size);
-        module_name[req->module_bin.size] = '\0';
-
-        char *func_name = enif_alloc(req->func_bin.size + 1);
-        memcpy(func_name, req->func_bin.data, req->func_bin.size);
-        func_name[req->func_bin.size] = '\0';
+        char *module_name = binary_to_string(&req->module_bin);
+        char *func_name = binary_to_string(&req->func_bin);
+        if (module_name == NULL || func_name == NULL) {
+            enif_free(module_name);
+            enif_free(func_name);
+            req->result = make_error(env, "alloc_failed");
+            break;
+        }
 
         PyObject *func = NULL;
 
@@ -2740,9 +2782,11 @@ static void process_request(py_request_t *req) {
         tl_current_worker = worker;
         tl_callback_env = env;
 
-        char *code = enif_alloc(req->code_bin.size + 1);
-        memcpy(code, req->code_bin.data, req->code_bin.size);
-        code[req->code_bin.size] = '\0';
+        char *code = binary_to_string(&req->code_bin);
+        if (code == NULL) {
+            req->result = make_error(env, "alloc_failed");
+            break;
+        }
 
         /* Update locals if provided */
         if (enif_is_map(env, req->locals_term)) {
@@ -2798,9 +2842,11 @@ static void process_request(py_request_t *req) {
         tl_current_worker = worker;
         tl_callback_env = env;
 
-        char *code = enif_alloc(req->code_bin.size + 1);
-        memcpy(code, req->code_bin.data, req->code_bin.size);
-        code[req->code_bin.size] = '\0';
+        char *code = binary_to_string(&req->code_bin);
+        if (code == NULL) {
+            req->result = make_error(env, "alloc_failed");
+            break;
+        }
 
         PyObject *compiled = Py_CompileString(code, "<erlang>", Py_file_input);
 
@@ -2854,9 +2900,11 @@ static void process_request(py_request_t *req) {
     }
 
     case PY_REQ_IMPORT: {
-        char *module_name = enif_alloc(req->module_bin.size + 1);
-        memcpy(module_name, req->module_bin.data, req->module_bin.size);
-        module_name[req->module_bin.size] = '\0';
+        char *module_name = binary_to_string(&req->module_bin);
+        if (module_name == NULL) {
+            req->result = make_error(env, "alloc_failed");
+            break;
+        }
 
         PyObject *module = PyImport_ImportModule(module_name);
         enif_free(module_name);
@@ -2874,9 +2922,11 @@ static void process_request(py_request_t *req) {
     }
 
     case PY_REQ_GETATTR: {
-        char *attr_name = enif_alloc(req->attr_bin.size + 1);
-        memcpy(attr_name, req->attr_bin.data, req->attr_bin.size);
-        attr_name[req->attr_bin.size] = '\0';
+        char *attr_name = binary_to_string(&req->attr_bin);
+        if (attr_name == NULL) {
+            req->result = make_error(env, "alloc_failed");
+            break;
+        }
 
         PyObject *attr = PyObject_GetAttrString(req->obj_wrapper->obj, attr_name);
         enif_free(attr_name);
@@ -2904,15 +2954,19 @@ static void process_request(py_request_t *req) {
         PyObject *stats = PyObject_CallMethod(gc_module, "get_stats", NULL);
         if (stats != NULL && PyList_Check(stats)) {
             Py_ssize_t num_gens = PyList_Size(stats);
-            ERL_NIF_TERM *gen_stats = enif_alloc(sizeof(ERL_NIF_TERM) * num_gens);
-            for (Py_ssize_t i = 0; i < num_gens; i++) {
-                PyObject *gen = PyList_GetItem(stats, i);
-                gen_stats[i] = py_to_term(env, gen);
+            if (num_gens > 0) {
+                ERL_NIF_TERM *gen_stats = enif_alloc(sizeof(ERL_NIF_TERM) * num_gens);
+                if (gen_stats != NULL) {
+                    for (Py_ssize_t i = 0; i < num_gens; i++) {
+                        PyObject *gen = PyList_GetItem(stats, i);
+                        gen_stats[i] = py_to_term(env, gen);
+                    }
+                    ERL_NIF_TERM gc_stats_list = enif_make_list_from_array(env, gen_stats, num_gens);
+                    enif_free(gen_stats);
+                    enif_make_map_put(env, result_map,
+                        enif_make_atom(env, "gc_stats"), gc_stats_list, &result_map);
+                }
             }
-            ERL_NIF_TERM gc_stats_list = enif_make_list_from_array(env, gen_stats, num_gens);
-            enif_free(gen_stats);
-            enif_make_map_put(env, result_map,
-                enif_make_atom(env, "gc_stats"), gc_stats_list, &result_map);
             Py_DECREF(stats);
         }
 
@@ -3354,10 +3408,13 @@ static void multi_executor_stop(void) {
         exec->shutdown = true;
 
         py_request_t *shutdown_req = enif_alloc(sizeof(py_request_t));
-        request_init(shutdown_req);
-        shutdown_req->type = PY_REQ_SHUTDOWN;
-
-        multi_executor_enqueue(i, shutdown_req);
+        if (shutdown_req != NULL) {
+            request_init(shutdown_req);
+            shutdown_req->type = PY_REQ_SHUTDOWN;
+            multi_executor_enqueue(i, shutdown_req);
+        }
+        /* If alloc fails, the shutdown flag is already set, so executor
+         * will exit when it checks the flag */
     }
 
     /* Wait for all executors to finish */
