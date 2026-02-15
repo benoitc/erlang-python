@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Context Affinity** - Bind Erlang processes to dedicated Python workers for state persistence
+  - `py:bind()` / `py:unbind()` - Bind current process to a worker, preserving Python state
+  - `py:bind(new)` - Create explicit context handles for multiple contexts per process
+  - `py:with_context(Fun)` - Scoped helper with automatic bind/unbind
+  - Context-aware functions: `py:ctx_call/4-6`, `py:ctx_eval/2-4`, `py:ctx_exec/2`
+  - Automatic cleanup via process monitors when bound processes die
+  - O(1) ETS-based binding lookup for minimal overhead
+  - New test suite: `test/py_context_SUITE.erl`
+
 - **Python Thread Support** - Any spawned Python thread can now call `erlang.call()` without blocking
   - Supports `threading.Thread`, `concurrent.futures.ThreadPoolExecutor`, and any other Python threads
   - Each spawned thread lazily acquires a dedicated "thread worker" channel

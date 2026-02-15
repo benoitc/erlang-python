@@ -66,7 +66,8 @@ def roll_dice(sides=6):
 
 Note: Definitions made with `exec` are local to the worker that executes them.
 Subsequent calls may go to different workers. Use [Shared State](#shared-state) to
-share data between workers.
+share data between workers, or [Context Affinity](#context-affinity) to bind to a
+dedicated worker.
 
 ## Working with Timeouts
 
@@ -180,6 +181,36 @@ Values are automatically converted between Erlang and Python:
 {ok, none} = py:eval(<<"None">>).
 ```
 
+## Context Affinity
+
+By default, each call may go to a different worker. To preserve Python state across
+calls (variables, imports, objects), bind to a dedicated worker:
+
+```erlang
+%% Bind current process to a worker
+ok = py:bind(),
+
+%% State persists across calls
+ok = py:exec(<<"counter = 0">>),
+ok = py:exec(<<"counter += 1">>),
+{ok, 1} = py:eval(<<"counter">>),
+
+%% Release the worker
+ok = py:unbind().
+```
+
+Or use the scoped helper for automatic cleanup:
+
+```erlang
+Result = py:with_context(fun() ->
+    ok = py:exec(<<"x = 10">>),
+    py:eval(<<"x * 2">>)
+end),
+{ok, 20} = Result.
+```
+
+See [Context Affinity](context-affinity.md) for explicit contexts and advanced usage.
+
 ## Execution Mode and Scalability
 
 Check the current execution mode:
@@ -271,6 +302,7 @@ This demonstrates basic calls, data conversion, callbacks, parallel processing (
 ## Next Steps
 
 - See [Type Conversion](type-conversion.md) for detailed type mapping
+- See [Context Affinity](context-affinity.md) for preserving Python state
 - See [Streaming](streaming.md) for working with generators
 - See [Memory Management](memory.md) for GC and debugging
 - See [Scalability](scalability.md) for parallelism and performance

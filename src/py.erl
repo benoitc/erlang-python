@@ -90,7 +90,15 @@
     state_decr/1,
     state_decr/2,
     %% Module reload
-    reload/1
+    reload/1,
+    %% Context affinity
+    bind/0, bind/1,
+    unbind/0, unbind/1,
+    is_bound/0,
+    with_context/1,
+    ctx_call/4, ctx_call/5, ctx_call/6,
+    ctx_eval/2, ctx_eval/3, ctx_eval/4,
+    ctx_exec/2
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -100,7 +108,11 @@
 -type py_args() :: [term()].
 -type py_kwargs() :: #{atom() | binary() => term()}.
 
--export_type([py_result/0, py_ref/0]).
+%% Context affinity handle
+-record(py_ctx, {ref :: reference()}).
+-opaque py_ctx() :: #py_ctx{}.
+
+-export_type([py_result/0, py_ref/0, py_ctx/0]).
 
 %% Default timeout for synchronous calls (30 seconds)
 -define(DEFAULT_TIMEOUT, 30000).
@@ -140,8 +152,20 @@ call(Module, Func, Args, Kwargs, Timeout) ->
 do_call(Module, Func, Args, Kwargs, Timeout) ->
     Ref = make_ref(),
     TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-    py_pool:request({call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs}),
+    Request = {call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs},
+    case get_binding() of
+        {bound, Worker} -> py_pool:direct_request(Worker, Request);
+        unbound -> py_pool:request(Request)
+    end,
     await(Ref, Timeout).
+
+%% @private Get binding if process is bound
+get_binding() ->
+    Key = {process, self()},
+    case py_pool:lookup_binding(Key) of
+        {ok, Worker} -> {bound, Worker};
+        not_found -> unbound
+    end.
 
 %% @doc Evaluate a Python expression and return the result.
 -spec eval(string() | binary()) -> py_result().
@@ -159,14 +183,22 @@ eval(Code, Locals) ->
 eval(Code, Locals, Timeout) ->
     Ref = make_ref(),
     TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-    py_pool:request({eval, Ref, self(), Code, Locals, TimeoutMs}),
+    Request = {eval, Ref, self(), Code, Locals, TimeoutMs},
+    case get_binding() of
+        {bound, Worker} -> py_pool:direct_request(Worker, Request);
+        unbound -> py_pool:request(Request)
+    end,
     await(Ref, Timeout).
 
 %% @doc Execute Python statements (no return value expected).
 -spec exec(string() | binary()) -> ok | {error, term()}.
 exec(Code) ->
     Ref = make_ref(),
-    py_pool:request({exec, Ref, self(), Code}),
+    Request = {exec, Ref, self(), Code},
+    case get_binding() of
+        {bound, Worker} -> py_pool:direct_request(Worker, Request);
+        unbound -> py_pool:request(Request)
+    end,
     case await(Ref, ?DEFAULT_TIMEOUT) of
         {ok, _} -> ok;
         Error -> Error
@@ -617,4 +649,173 @@ reload(Module) ->
     case Errors of
         [] -> ok;
         _ -> {error, [{worker, E} || E <- Errors]}
+    end.
+
+%%% ============================================================================
+%%% Context Affinity API
+%%% ============================================================================
+
+%% @doc Bind current process to a dedicated Python worker.
+%% All subsequent py:call/eval/exec operations from this process will use
+%% the same worker, preserving Python state (variables, imports) across calls.
+%%
+%% Example:
+%% ```
+%% ok = py:bind(),
+%% ok = py:exec(<<"x = 42">>),
+%% {ok, 42} = py:eval(<<"x">>),  % Same worker, x persists
+%% ok = py:unbind().
+%% '''
+-spec bind() -> ok | {error, term()}.
+bind() ->
+    Key = {process, self()},
+    case py_pool:lookup_binding(Key) of
+        {ok, _} -> ok;  % Already bound
+        not_found ->
+            case py_pool:checkout(Key) of
+                {ok, _} -> ok;
+                Error -> Error
+            end
+    end.
+
+%% @doc Create an explicit context with a dedicated worker.
+%% Returns a context handle that can be passed to call/eval/exec variants.
+%% Multiple contexts can exist per process.
+%%
+%% Example:
+%% ```
+%% {ok, Ctx1} = py:bind(new),
+%% {ok, Ctx2} = py:bind(new),
+%% ok = py:exec(Ctx1, <<"x = 1">>),
+%% ok = py:exec(Ctx2, <<"x = 2">>),
+%% {ok, 1} = py:eval(Ctx1, <<"x">>),  % Isolated
+%% {ok, 2} = py:eval(Ctx2, <<"x">>),  % Isolated
+%% ok = py:unbind(Ctx1),
+%% ok = py:unbind(Ctx2).
+%% '''
+-spec bind(new) -> {ok, py_ctx()} | {error, term()}.
+bind(new) ->
+    Ref = make_ref(),
+    Key = {context, Ref},
+    case py_pool:checkout(Key) of
+        {ok, _} -> {ok, #py_ctx{ref = Ref}};
+        Error -> Error
+    end.
+
+%% @doc Release bound worker for current process.
+-spec unbind() -> ok.
+unbind() ->
+    py_pool:checkin({process, self()}).
+
+%% @doc Release explicit context's worker.
+-spec unbind(py_ctx()) -> ok.
+unbind(#py_ctx{ref = Ref}) ->
+    py_pool:checkin({context, Ref}).
+
+%% @doc Check if current process is bound.
+-spec is_bound() -> boolean().
+is_bound() ->
+    case py_pool:lookup_binding({process, self()}) of
+        {ok, _} -> true;
+        not_found -> false
+    end.
+
+%% @doc Execute function with temporary bound context.
+%% Automatically binds before and unbinds after (even on exception).
+%%
+%% With arity-0 function (uses implicit process binding):
+%% ```
+%% Result = py:with_context(fun() ->
+%%     ok = py:exec(<<"total = 0">>),
+%%     ok = py:exec(<<"total += 1">>),
+%%     py:eval(<<"total">>)
+%% end).
+%% %% {ok, 1}
+%% '''
+%%
+%% With arity-1 function (receives explicit context):
+%% ```
+%% Result = py:with_context(fun(Ctx) ->
+%%     ok = py:exec(Ctx, <<"x = 10">>),
+%%     py:eval(Ctx, <<"x * 2">>)
+%% end).
+%% %% {ok, 20}
+%% '''
+-spec with_context(fun(() -> Result) | fun((py_ctx()) -> Result)) -> Result.
+with_context(Fun) when is_function(Fun, 0) ->
+    ok = bind(),
+    try Fun()
+    after unbind()
+    end;
+with_context(Fun) when is_function(Fun, 1) ->
+    {ok, Ctx} = bind(new),
+    try Fun(Ctx)
+    after unbind(Ctx)
+    end.
+
+%% @doc Call with explicit context.
+-spec ctx_call(py_ctx(), py_module(), py_func(), py_args()) -> py_result().
+ctx_call(Ctx, Module, Func, Args) ->
+    ctx_call(Ctx, Module, Func, Args, #{}).
+
+%% @doc Call with explicit context and kwargs.
+-spec ctx_call(py_ctx(), py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
+ctx_call(Ctx, Module, Func, Args, Kwargs) ->
+    ctx_call(Ctx, Module, Func, Args, Kwargs, ?DEFAULT_TIMEOUT).
+
+%% @doc Call with explicit context, kwargs, and timeout.
+-spec ctx_call(py_ctx(), py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
+ctx_call(#py_ctx{ref = CtxRef}, Module, Func, Args, Kwargs, Timeout) ->
+    case py_semaphore:acquire(Timeout) of
+        ok ->
+            try
+                Ref = make_ref(),
+                TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
+                Request = {call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs},
+                case py_pool:lookup_binding({context, CtxRef}) of
+                    {ok, Worker} -> py_pool:direct_request(Worker, Request);
+                    not_found -> error(context_not_bound)
+                end,
+                await(Ref, Timeout)
+            after
+                py_semaphore:release()
+            end;
+        {error, max_concurrent} ->
+            {error, {overloaded, py_semaphore:current(), py_semaphore:max_concurrent()}}
+    end.
+
+%% @doc Eval with explicit context.
+-spec ctx_eval(py_ctx(), string() | binary()) -> py_result().
+ctx_eval(Ctx, Code) ->
+    ctx_eval(Ctx, Code, #{}).
+
+%% @doc Eval with explicit context and locals.
+-spec ctx_eval(py_ctx(), string() | binary(), map()) -> py_result().
+ctx_eval(Ctx, Code, Locals) ->
+    ctx_eval(Ctx, Code, Locals, ?DEFAULT_TIMEOUT).
+
+%% @doc Eval with explicit context, locals, and timeout.
+-spec ctx_eval(py_ctx(), string() | binary(), map(), timeout()) -> py_result().
+ctx_eval(#py_ctx{ref = CtxRef}, Code, Locals, Timeout) ->
+    Ref = make_ref(),
+    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
+    Request = {eval, Ref, self(), Code, Locals, TimeoutMs},
+    case py_pool:lookup_binding({context, CtxRef}) of
+        {ok, Worker} -> py_pool:direct_request(Worker, Request);
+        not_found -> error(context_not_bound)
+    end,
+    await(Ref, Timeout).
+
+%% @doc Exec with explicit context.
+-spec ctx_exec(py_ctx(), string() | binary()) -> ok | {error, term()}.
+ctx_exec(#py_ctx{ref = CtxRef}, Code) ->
+    Ref = make_ref(),
+    Request = {exec, Ref, self(), Code},
+    case py_pool:lookup_binding({context, CtxRef}) of
+        {ok, Worker} -> py_pool:direct_request(Worker, Request);
+        not_found -> error(context_not_bound)
+    end,
+    case await(Ref, ?DEFAULT_TIMEOUT) of
+        {ok, _} -> ok;
+        Error -> Error
     end.

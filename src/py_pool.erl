@@ -25,7 +25,12 @@
     start_link/1,
     request/1,
     broadcast/1,
-    get_stats/0
+    get_stats/0,
+    %% Context affinity API
+    checkout/1,
+    checkin/1,
+    lookup_binding/1,
+    direct_request/2
 ]).
 
 -export([
@@ -40,8 +45,14 @@
     workers :: queue:queue(pid()),
     num_workers :: pos_integer(),
     pending :: non_neg_integer(),
-    worker_sup :: pid()
+    worker_sup :: pid(),
+    %% Context affinity tracking
+    checked_out = #{} :: #{pid() => checkout_info()},
+    monitors = #{} :: #{reference() => binding_key()}
 }).
+
+-type binding_key() :: {process, pid()} | {context, reference()}.
+-type checkout_info() :: #{key := binding_key(), monitor := reference()}.
 
 %%% ============================================================================
 %%% API
@@ -67,6 +78,33 @@ broadcast(Request) ->
 get_stats() ->
     gen_server:call(?MODULE, get_stats).
 
+%% @doc Checkout a worker for exclusive use by a binding key.
+%% The worker is removed from the available pool and associated with the key.
+-spec checkout(binding_key()) -> {ok, pid()} | {error, no_workers_available}.
+checkout(Key) ->
+    gen_server:call(?MODULE, {checkout, Key}).
+
+%% @doc Return a checked-out worker to the pool.
+%% This is synchronous to ensure the worker is returned before continuing.
+-spec checkin(binding_key()) -> ok.
+checkin(Key) ->
+    gen_server:call(?MODULE, {checkin, Key}).
+
+%% @doc Look up a binding to find the associated worker.
+%% Fast O(1) ETS lookup.
+-spec lookup_binding(binding_key()) -> {ok, pid()} | not_found.
+lookup_binding(Key) ->
+    case ets:lookup(py_bindings, Key) of
+        [{_, Worker}] -> {ok, Worker};
+        [] -> not_found
+    end.
+
+%% @doc Send a request directly to a specific worker.
+-spec direct_request(pid(), term()) -> ok.
+direct_request(Worker, Request) ->
+    Worker ! {py_request, Request},
+    ok.
+
 %%% ============================================================================
 %%% gen_server callbacks
 %%% ============================================================================
@@ -77,6 +115,9 @@ init([NumWorkers]) ->
     %% Initialize Python interpreter
     case py_nif:init() of
         ok ->
+            %% Create bindings ETS table for fast lookup
+            _ = ets:new(py_bindings, [named_table, public, set, {read_concurrency, true}]),
+
             %% Start worker supervisor
             {ok, WorkerSup} = py_worker_sup:start_link(),
 
@@ -97,15 +138,52 @@ handle_call(get_stats, _From, State) ->
     Stats = #{
         num_workers => State#state.num_workers,
         pending_requests => State#state.pending,
-        available_workers => queue:len(State#state.workers)
+        available_workers => queue:len(State#state.workers),
+        checked_out => maps:size(State#state.checked_out)
     },
     {reply, Stats, State};
+
+handle_call({checkout, Key}, {Owner, _}, State) ->
+    case queue:out(State#state.workers) of
+        {{value, Worker}, Rest} ->
+            MonRef = erlang:monitor(process, Owner),
+            ets:insert(py_bindings, {Key, Worker}),
+            Info = #{key => Key, monitor => MonRef},
+            NewState = State#state{
+                workers = Rest,
+                checked_out = maps:put(Worker, Info, State#state.checked_out),
+                monitors = maps:put(MonRef, Key, State#state.monitors)
+            },
+            {reply, {ok, Worker}, NewState};
+        {empty, _} ->
+            {reply, {error, no_workers_available}, State}
+    end;
 
 handle_call({broadcast, Request}, _From, State) ->
     %% Send request to all workers and collect results
     Workers = queue:to_list(State#state.workers),
     Results = broadcast_to_workers(Workers, Request),
     {reply, Results, State};
+
+handle_call({checkin, Key}, _From, State) ->
+    case ets:lookup(py_bindings, Key) of
+        [{_, Worker}] ->
+            ets:delete(py_bindings, Key),
+            case maps:get(Worker, State#state.checked_out, undefined) of
+                #{monitor := MonRef} ->
+                    erlang:demonitor(MonRef, [flush]),
+                    NewState = State#state{
+                        workers = queue:in(Worker, State#state.workers),
+                        checked_out = maps:remove(Worker, State#state.checked_out),
+                        monitors = maps:remove(MonRef, State#state.monitors)
+                    },
+                    {reply, ok, NewState};
+                undefined ->
+                    {reply, ok, State}
+            end;
+        [] ->
+            {reply, ok, State}
+    end;
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -136,13 +214,44 @@ handle_cast(_Msg, State) ->
 handle_info({worker_done, _WorkerPid}, State) ->
     {noreply, State#state{pending = max(0, State#state.pending - 1)}};
 
+handle_info({'DOWN', MonRef, process, _Pid, _Reason}, State) ->
+    %% Bound process died - return worker to pool
+    case maps:get(MonRef, State#state.monitors, undefined) of
+        undefined ->
+            {noreply, State};
+        Key ->
+            case ets:lookup(py_bindings, Key) of
+                [{_, Worker}] ->
+                    ets:delete(py_bindings, Key),
+                    {noreply, State#state{
+                        workers = queue:in(Worker, State#state.workers),
+                        checked_out = maps:remove(Worker, State#state.checked_out),
+                        monitors = maps:remove(MonRef, State#state.monitors)
+                    }};
+                [] ->
+                    {noreply, State#state{monitors = maps:remove(MonRef, State#state.monitors)}}
+            end
+    end;
+
 handle_info({'EXIT', Pid, Reason}, State) ->
     error_logger:error_msg("py_pool: worker ~p died: ~p~n", [Pid, Reason]),
+    %% Clean up if this was a checked-out worker
+    NewState = case maps:get(Pid, State#state.checked_out, undefined) of
+        #{key := Key, monitor := MonRef} ->
+            ets:delete(py_bindings, Key),
+            erlang:demonitor(MonRef, [flush]),
+            State#state{
+                checked_out = maps:remove(Pid, State#state.checked_out),
+                monitors = maps:remove(MonRef, State#state.monitors)
+            };
+        undefined ->
+            State
+    end,
     %% Remove dead worker from queue and start a new one
-    Workers = queue:filter(fun(W) -> W =/= Pid end, State#state.workers),
-    NewWorker = py_worker_sup:start_worker(State#state.worker_sup),
+    Workers = queue:filter(fun(W) -> W =/= Pid end, NewState#state.workers),
+    NewWorker = py_worker_sup:start_worker(NewState#state.worker_sup),
     NewWorkers = queue:in(NewWorker, Workers),
-    {noreply, State#state{workers = NewWorkers}};
+    {noreply, NewState#state{workers = NewWorkers}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
