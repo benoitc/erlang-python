@@ -133,3 +133,27 @@ def nested_compute(n, depth):
 
     # Call Erlang which will call nested_compute(n+1, depth-1)
     return erlang.call('nested_step', n, depth)
+
+
+def compute_chain(x):
+    """
+    Compute a chain of operations using multiple sequential Erlang callbacks.
+
+    This function makes THREE sequential erlang.call() invocations:
+    1. add_ten(x) -> x + 10
+    2. multiply_by_two(step1) -> step1 * 2
+    3. subtract_five(step2) -> step2 - 5
+
+    This tests the nested suspension handling - each call suspends Python,
+    executes the Erlang callback, then resumes Python to continue to the
+    next call.
+
+    Example: compute_chain(5) -> ((5 + 10) * 2) - 5 = 25
+    """
+    import erlang
+
+    step1 = erlang.call('add_ten', x)           # x + 10
+    step2 = erlang.call('multiply_by_two', step1)  # (x + 10) * 2
+    step3 = erlang.call('subtract_five', step2)    # ((x + 10) * 2) - 5
+
+    return step3

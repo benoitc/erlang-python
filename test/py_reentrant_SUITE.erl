@@ -19,7 +19,8 @@
     test_nested_callbacks/1,
     test_callback_error_propagation/1,
     test_concurrent_reentrant/1,
-    test_callback_with_complex_types/1
+    test_callback_with_complex_types/1,
+    test_multiple_sequential_callbacks/1
 ]).
 
 all() ->
@@ -28,7 +29,8 @@ all() ->
         test_nested_callbacks,
         test_callback_error_propagation,
         test_concurrent_reentrant,
-        test_callback_with_complex_types
+        test_callback_with_complex_types,
+        test_multiple_sequential_callbacks
     ].
 
 init_per_suite(Config) ->
@@ -49,6 +51,9 @@ end_per_testcase(_TestCase, _Config) ->
     catch py:unregister_function(call_level),
     catch py:unregister_function(may_fail),
     catch py:unregister_function(transform),
+    catch py:unregister_function(add_ten),
+    catch py:unregister_function(multiply_by_two),
+    catch py:unregister_function(subtract_five),
     ok.
 
 %%% ============================================================================
@@ -190,5 +195,38 @@ test_callback_with_complex_types(_Config) ->
         <<"count">> := 10,
         <<"processed">> := true
     } = Result,
+
+    ok.
+
+%% @doc Test multiple sequential erlang.call() invocations in one Python function.
+%% This tests that the nested suspension handling works when Python makes
+%% multiple callbacks within a single function execution.
+test_multiple_sequential_callbacks(_Config) ->
+    %% Register three Erlang functions that will be called sequentially
+    py:register_function(add_ten, fun([X]) -> X + 10 end),
+    py:register_function(multiply_by_two, fun([X]) -> X * 2 end),
+    py:register_function(subtract_five, fun([X]) -> X - 5 end),
+
+    %% Use py:eval with a lambda that makes 3 sequential erlang.call() invocations.
+    %% Each call triggers a suspension/resume cycle, and the second/third calls
+    %% require the nested suspension fix to work correctly.
+    %%
+    %% The lambda pattern: (lambda x: subtract_five(multiply_by_two(add_ten(x))))(input)
+    %% This is a single expression that makes 3 sequential callbacks.
+
+    %% Test with x=5: ((5 + 10) * 2) - 5 = 25
+    Code1 = <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 5))))(__import__('erlang'))">>,
+    {ok, Result1} = py:eval(Code1),
+    25 = Result1,
+
+    %% Test with x=10: ((10 + 10) * 2) - 5 = 35
+    Code2 = <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 10))))(__import__('erlang'))">>,
+    {ok, Result2} = py:eval(Code2),
+    35 = Result2,
+
+    %% Test with x=0: ((0 + 10) * 2) - 5 = 15
+    Code3 = <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 0))))(__import__('erlang'))">>,
+    {ok, Result3} = py:eval(Code3),
+    15 = Result3,
 
     ok.

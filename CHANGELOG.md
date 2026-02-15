@@ -26,6 +26,10 @@
 
 ### Fixed
 
+- **Multiple sequential erlang.call()** - Fixed infinite loop when Python code makes
+  multiple sequential `erlang.call()` invocations in the same function. The replay
+  mechanism now falls back to blocking pipe behavior for subsequent calls after the
+  first suspension, preventing the infinite replay loop.
 - **Memory safety in C NIF** - Fixed memory leaks and added NULL checks
   - `nif_async_worker_new`: msg_env now freed on pipe/thread creation failure
   - `multi_executor_stop`: shutdown requests now properly freed after join

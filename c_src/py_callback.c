@@ -579,6 +579,16 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         }
     }
 
+    /*
+     * FIX for multiple sequential erlang.call():
+     * If we're in replay context (tl_current_suspended != NULL) but didn't get
+     * a cache hit above, this is a SUBSEQUENT call (e.g., second erlang.call()
+     * in the same Python function). We MUST NOT suspend again - that would
+     * cause an infinite loop where replay always hits this second call.
+     * Instead, fall through to blocking pipe behavior for subsequent calls.
+     */
+    bool force_blocking = (tl_current_suspended != NULL);
+
     /* Build args list (remaining args) */
     PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
     if (call_args == NULL) {
@@ -590,8 +600,10 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
      * Suspension is only safe when the result will be directly examined by the
      * executor (PY_REQ_CALL or PY_REQ_EVAL). For PY_REQ_EXEC or nested Python
      * code, we must block and wait for the result.
+     *
+     * Also block if force_blocking is set (replay context with no cache hit).
      */
-    if (!tl_allow_suspension) {
+    if (!tl_allow_suspension || force_blocking) {
         /* Fall back to blocking behavior - send message and wait on pipe */
         ErlNifEnv *msg_env = enif_alloc_env();
         if (msg_env == NULL) {
