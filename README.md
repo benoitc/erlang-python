@@ -478,8 +478,11 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Getting Started](docs/getting-started.md)
 - [AI Integration Guide](docs/ai-integration.md)
 - [Type Conversion](docs/type-conversion.md)
+- [Context Affinity](docs/context-affinity.md)
 - [Scalability](docs/scalability.md)
 - [Streaming](docs/streaming.md)
+- [Threading](docs/threading.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
