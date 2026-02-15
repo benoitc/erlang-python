@@ -59,6 +59,16 @@ init([]) ->
         modules => [py_callback]
     },
 
+    %% Thread worker coordinator (for ThreadPoolExecutor support)
+    ThreadHandlerSpec = #{
+        id => py_thread_handler,
+        start => {py_thread_handler, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_thread_handler]
+    },
+
     %% Main worker pool
     PoolSpec = #{
         id => py_pool,
@@ -89,7 +99,7 @@ init([]) ->
         modules => [py_subinterp_pool]
     },
 
-    Children = [CallbackSpec, PoolSpec, AsyncPoolSpec, SubinterpPoolSpec],
+    Children = [CallbackSpec, ThreadHandlerSpec, PoolSpec, AsyncPoolSpec, SubinterpPoolSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

@@ -1151,4 +1151,55 @@ static void detect_execution_mode(void);
 
 /** @} */
 
+/* ============================================================================
+ * Thread Worker Functions (py_thread_worker.c)
+ * ============================================================================ */
+
+/**
+ * @defgroup thread_worker Thread Worker Support
+ * @brief Functions for ThreadPoolExecutor thread support
+ * @{
+ */
+
+/**
+ * @brief Initialize the thread worker system
+ *
+ * Creates pthread key for automatic cleanup on thread exit.
+ * Called during NIF initialization.
+ *
+ * @return 0 on success, -1 on failure
+ */
+static int thread_worker_init(void);
+
+/**
+ * @brief Clean up the thread worker system
+ *
+ * Releases all workers in the pool and destroys the pthread key.
+ * Called during NIF unload.
+ */
+static void thread_worker_cleanup(void);
+
+/**
+ * @brief Set the thread coordinator PID
+ *
+ * @param pid PID of the coordinator process
+ */
+static void thread_worker_set_coordinator(ErlNifPid pid);
+
+/**
+ * @brief Execute an erlang.call() from a spawned thread
+ *
+ * Called when a Python thread that is NOT an executor thread
+ * tries to call erlang.call().
+ *
+ * @param func_name Name of the Erlang function to call
+ * @param func_name_len Length of function name
+ * @param call_args Python tuple of arguments
+ * @return Python result object, or NULL with exception set
+ */
+static PyObject *thread_worker_call(const char *func_name, size_t func_name_len,
+                                    PyObject *call_args);
+
+/** @} */
+
 #endif /* PY_NIF_H */

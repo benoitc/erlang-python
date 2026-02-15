@@ -59,7 +59,11 @@
     parallel_execute/2,
     %% Execution mode info
     execution_mode/0,
-    num_executors/0
+    num_executors/0,
+    %% Thread worker support (ThreadPoolExecutor)
+    thread_worker_set_coordinator/1,
+    thread_worker_write/2,
+    thread_worker_signal_ready/1
 ]).
 
 -on_load(load_nif/0).
@@ -353,4 +357,28 @@ execution_mode() ->
 %% For other modes, returns 1.
 -spec num_executors() -> pos_integer().
 num_executors() ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Thread Worker Support (ThreadPoolExecutor)
+%%% ============================================================================
+
+%% @doc Set the thread worker coordinator process.
+%% This process receives spawn and callback messages from Python threads
+%% spawned via ThreadPoolExecutor.
+-spec thread_worker_set_coordinator(pid()) -> ok | {error, term()}.
+thread_worker_set_coordinator(_Pid) ->
+    ?NIF_STUB.
+
+%% @doc Write a callback response to a thread worker's pipe.
+%% Fd is the write end of the response pipe.
+%% Response is the result binary (status byte + python repr).
+-spec thread_worker_write(integer(), binary()) -> ok | {error, term()}.
+thread_worker_write(_Fd, _Response) ->
+    ?NIF_STUB.
+
+%% @doc Signal that a thread worker handler is ready.
+%% Writes a zero-length response to the pipe to indicate readiness.
+-spec thread_worker_signal_ready(integer()) -> ok | {error, term()}.
+thread_worker_signal_ready(_Fd) ->
     ?NIF_STUB.

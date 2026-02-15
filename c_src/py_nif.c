@@ -113,6 +113,7 @@ ERL_NIF_TERM ATOM_SUSPENDED;
 #include "py_convert.c"
 #include "py_exec.c"
 #include "py_callback.c"
+#include "py_thread_worker.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -388,6 +389,11 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         return make_error(env, "executor_start_failed");
     }
 
+    /* Initialize thread worker system for ThreadPoolExecutor support */
+    if (thread_worker_init() < 0) {
+        /* Non-fatal - thread worker support just won't be available */
+    }
+
     return ATOM_OK;
 }
 
@@ -398,6 +404,9 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     if (!g_python_initialized) {
         return ATOM_OK;
     }
+
+    /* Clean up thread worker system */
+    thread_worker_cleanup();
 
     /* Stop executors based on mode */
     switch (g_execution_mode) {
@@ -1744,7 +1753,12 @@ static ErlNifFunc nif_funcs[] = {
 
     /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},
-    {"num_executors", 0, nif_num_executors, 0}
+    {"num_executors", 0, nif_num_executors, 0},
+
+    /* Thread worker support (ThreadPoolExecutor) */
+    {"thread_worker_set_coordinator", 1, nif_thread_worker_set_coordinator, 0},
+    {"thread_worker_write", 2, nif_thread_worker_write, 0},
+    {"thread_worker_signal_ready", 1, nif_thread_worker_signal_ready, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

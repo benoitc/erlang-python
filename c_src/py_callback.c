@@ -540,11 +540,42 @@ static PyObject *ErlangFunction_New(PyObject *name) {
 static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     (void)self;
 
+    /*
+     * Check if this is a call from an executor thread (normal path) or
+     * from a spawned thread like ThreadPoolExecutor (thread worker path).
+     */
     if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
-        PyErr_SetString(PyExc_RuntimeError,
-            "erlang.call() must be called from worker thread. "
-            "Use execute_async() for concurrent calls from other threads.");
-        return NULL;
+        /*
+         * Not an executor thread - try thread worker path.
+         * This enables ThreadPoolExecutor threads to call erlang.call().
+         */
+        Py_ssize_t nargs = PyTuple_Size(args);
+        if (nargs < 1) {
+            PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
+            return NULL;
+        }
+
+        PyObject *name_obj = PyTuple_GetItem(args, 0);
+        if (!PyUnicode_Check(name_obj)) {
+            PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+            return NULL;
+        }
+        const char *func_name = PyUnicode_AsUTF8(name_obj);
+        if (func_name == NULL) {
+            return NULL;
+        }
+        size_t func_name_len = strlen(func_name);
+
+        /* Build args list (remaining args) */
+        PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
+        if (call_args == NULL) {
+            return NULL;
+        }
+
+        /* Use thread worker call */
+        PyObject *result = thread_worker_call(func_name, func_name_len, call_args);
+        Py_DECREF(call_args);
+        return result;
     }
 
     Py_ssize_t nargs = PyTuple_Size(args);
