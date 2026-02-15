@@ -17,6 +17,16 @@
 - Callback handlers now spawn separate processes for execution, allowing workers
   to remain available for nested `py:eval`/`py:call` operations
 
+### Fixed
+
+- **Memory safety in C NIF** - Fixed memory leaks and added NULL checks
+  - `nif_async_worker_new`: msg_env now freed on pipe/thread creation failure
+  - `multi_executor_stop`: shutdown requests now properly freed after join
+  - `create_suspended_state`: binary allocations cleaned up on failure paths
+  - Added NULL checks on all `enif_alloc_resource` and `enif_alloc_env` calls
+- **Dialyzer warnings** - Added `{suspended, ...}` return type to NIF specs for
+  `worker_call`, `worker_eval`, and `resume_callback` functions
+
 ## 1.1.0 (2026-02-15)
 
 ### Added
