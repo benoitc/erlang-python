@@ -4,14 +4,15 @@
 
 ### Added
 
-- **ThreadPoolExecutor Support** - Python threads spawned via `concurrent.futures.ThreadPoolExecutor`
-  can now call `erlang.call()` without blocking
+- **Python Thread Support** - Any spawned Python thread can now call `erlang.call()` without blocking
+  - Supports `threading.Thread`, `concurrent.futures.ThreadPoolExecutor`, and any other Python threads
   - Each spawned thread lazily acquires a dedicated "thread worker" channel
   - One lightweight Erlang process per Python thread handles callbacks
   - Automatic cleanup when Python thread exits via `pthread_key_t` destructor
   - New module: `py_thread_handler.erl` - Coordinator and per-thread handlers
   - New C file: `py_thread_worker.c` - Thread worker pool management
   - New test suite: `test/py_thread_callback_SUITE.erl`
+  - New documentation: `docs/threading.md` - Threading support guide
 
 - **Reentrant Callbacks** - Python→Erlang→Python callback chains without deadlocks
   - Exception-based suspension mechanism interrupts Python execution cleanly

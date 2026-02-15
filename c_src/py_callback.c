@@ -542,12 +542,15 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
 
     /*
      * Check if this is a call from an executor thread (normal path) or
-     * from a spawned thread like ThreadPoolExecutor (thread worker path).
+     * from a spawned thread (thread worker path).
      */
     if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
         /*
-         * Not an executor thread - try thread worker path.
-         * This enables ThreadPoolExecutor threads to call erlang.call().
+         * Not an executor thread - use thread worker path.
+         * This enables any spawned Python thread to call erlang.call():
+         * - threading.Thread instances
+         * - concurrent.futures.ThreadPoolExecutor workers
+         * - Any other Python threads
          */
         Py_ssize_t nargs = PyTuple_Size(args);
         if (nargs < 1) {

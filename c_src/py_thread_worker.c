@@ -16,12 +16,17 @@
 
 /**
  * @file py_thread_worker.c
- * @brief Thread worker pool for ThreadPoolExecutor support
+ * @brief Thread worker pool for Python thread support
  * @author Benoit Chesneau
  *
- * This module enables Python threads spawned via concurrent.futures.ThreadPoolExecutor
- * to call erlang.call() without blocking. Each spawned thread lazily acquires a
- * dedicated "thread worker" channel for communicating with Erlang.
+ * This module enables any spawned Python thread to call erlang.call() without
+ * blocking. Supported thread types include:
+ * - threading.Thread instances
+ * - concurrent.futures.ThreadPoolExecutor workers
+ * - Any other Python threads
+ *
+ * Each spawned thread lazily acquires a dedicated "thread worker" channel
+ * for communicating with Erlang.
  *
  * @par Architecture
  *

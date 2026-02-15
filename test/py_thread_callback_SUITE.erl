@@ -1,6 +1,6 @@
-%%% @doc Common Test suite for Python ThreadPoolExecutor callback support.
+%%% @doc Common Test suite for Python thread callback support.
 %%%
-%%% Tests that Python threads spawned via concurrent.futures.ThreadPoolExecutor
+%%% Tests that Python threads (both threading.Thread and ThreadPoolExecutor)
 %%% can call erlang.call() without blocking.
 -module(py_thread_callback_SUITE).
 
@@ -20,7 +20,10 @@
     threadpool_multiple_calls_test/1,
     threadpool_nested_callback_test/1,
     threadpool_error_handling_test/1,
-    threadpool_thread_reuse_test/1
+    threadpool_thread_reuse_test/1,
+    simple_thread_basic_test/1,
+    simple_thread_multiple_calls_test/1,
+    simple_thread_concurrent_test/1
 ]).
 
 all() ->
@@ -30,7 +33,10 @@ all() ->
         threadpool_multiple_calls_test,
         threadpool_nested_callback_test,
         threadpool_error_handling_test,
-        threadpool_thread_reuse_test
+        threadpool_thread_reuse_test,
+        simple_thread_basic_test,
+        simple_thread_multiple_calls_test,
+        simple_thread_concurrent_test
     ].
 
 init_per_suite(Config) ->
@@ -131,4 +137,65 @@ threadpool_thread_reuse_test(_Config) ->
     Code = <<"(lambda cf, th: len(set(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda _: th.get_ident(), range(10)))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('threading'))">>,
     {ok, ThreadCount} = py:eval(Code),
     true = (ThreadCount =< 2),
+    ok.
+
+%%% ============================================================================
+%%% Simple threading.Thread Test Cases
+%%% ============================================================================
+
+%% @doc Simple thread calling erlang.call()
+simple_thread_basic_test(_Config) ->
+    py:register_function(double_it, fun([X]) -> X * 2 end),
+
+    %% Create a threading.Thread subclass that stores its result
+    Code = <<"
+(lambda: (
+    __import__('threading').Thread(target=lambda: setattr(__import__('sys').modules[__name__], '_result', __import__('erlang').call('double_it', 5))).start() or
+    __import__('time').sleep(0.1) or
+    getattr(__import__('sys').modules[__name__], '_result', None)
+))()
+">>,
+    {ok, Result} = py:eval(Code),
+    10 = Result,
+    ok.
+
+%% @doc Same simple thread makes multiple erlang.call() invocations
+simple_thread_multiple_calls_test(_Config) ->
+    py:register_function(add_one, fun([X]) -> X + 1 end),
+
+    %% Thread that makes 3 sequential calls: add_one(add_one(add_one(0)))
+    Code = <<"
+(lambda: (
+    __import__('threading').Thread(target=lambda: setattr(
+        __import__('sys').modules[__name__], '_result',
+        __import__('erlang').call('add_one',
+            __import__('erlang').call('add_one',
+                __import__('erlang').call('add_one', 0)))
+    )).start() or
+    __import__('time').sleep(0.1) or
+    getattr(__import__('sys').modules[__name__], '_result', None)
+))()
+">>,
+    {ok, Result} = py:eval(Code),
+    3 = Result,
+    ok.
+
+%% @doc Multiple simple threads calling erlang.call() concurrently
+simple_thread_concurrent_test(_Config) ->
+    py:register_function(double_it, fun([X]) -> X * 2 end),
+
+    %% Create 5 threads, each calling double_it with different values
+    Code = <<"
+(lambda: (
+    (threads := [__import__('threading').Thread(target=lambda x=x: setattr(t, 'result', __import__('erlang').call('double_it', x))) for x in range(5) for t in [type('T', (), {'result': None})()]]),
+    [setattr(threads[i], 'obj', type('T', (), {'result': None})()) for i in range(5)],
+    (workers := []),
+    [workers.append(type('Worker', (__import__('threading').Thread,), {'result': None, 'run': lambda self, x=x: setattr(self, 'result', __import__('erlang').call('double_it', x))})()) for x in range(5)],
+    [w.start() for w in workers],
+    [w.join() for w in workers],
+    [w.result for w in workers]
+)[-1])()
+">>,
+    {ok, Results} = py:eval(Code),
+    [0, 2, 4, 6, 8] = Results,
     ok.
