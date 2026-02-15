@@ -16,6 +16,13 @@
 
 - Callback handlers now spawn separate processes for execution, allowing workers
   to remain available for nested `py:eval`/`py:call` operations
+- **Modular C code structure** - Split monolithic `py_nif.c` (4,335 lines) into
+  logical modules for better maintainability:
+  - `py_nif.h` - Shared header with types, macros, and declarations
+  - `py_convert.c` - Bidirectional type conversion (Python ↔ Erlang)
+  - `py_exec.c` - Python execution engine and GIL management
+  - `py_callback.c` - Erlang callback support and asyncio integration
+  - Uses `#include` approach for single compilation unit (no build changes needed)
 
 ### Fixed
 
@@ -26,6 +33,15 @@
   - Added NULL checks on all `enif_alloc_resource` and `enif_alloc_env` calls
 - **Dialyzer warnings** - Added `{suspended, ...}` return type to NIF specs for
   `worker_call`, `worker_eval`, and `resume_callback` functions
+
+### Documentation
+
+- **Doxygen-style C documentation** - Added documentation to all C source files:
+  - Architecture overview with execution mode diagrams
+  - Type mapping tables for conversions
+  - GIL management patterns and best practices
+  - Suspension/resume flow diagrams for callbacks
+  - Function-level `@param`, `@return`, `@pre`, `@warning`, `@see` annotations
 
 ## 1.1.0 (2026-02-15)
 
