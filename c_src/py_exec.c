@@ -1,3 +1,58 @@
+/**
+ * @file py_exec.c
+ * @brief Python execution engine and GIL management
+ * @author Benoit Chesneau
+ * @copyright 2026 Benoit Chesneau. Licensed under Apache License 2.0.
+ *
+ * @ingroup exec
+ *
+ * This module implements the core Python execution engine, handling:
+ *
+ * - **Timeout support**: Trace-based execution timeout monitoring
+ * - **Executor threads**: Single and multi-executor pool management
+ * - **Request processing**: Dispatch for call/eval/exec/import operations
+ * - **Free-threaded mode**: Support for Python 3.13+ no-GIL builds
+ *
+ * @par Architecture
+ *
+ * The execution model uses a request/response pattern:
+ *
+ * ```
+ * ┌─────────────┐    enqueue     ┌──────────────┐    process    ┌────────────┐
+ * │  NIF Call   │ ────────────>  │   Executor   │ ────────────> │   Python   │
+ * │  (Erlang)   │                │    Thread    │               │    Code    │
+ * └─────────────┘                └──────────────┘               └────────────┘
+ *       │                              │                              │
+ *       │         wait(cond)           │                              │
+ *       │<─────────────────────────────│<─────────────────────────────│
+ *       │                          completed                       result
+ * ```
+ *
+ * @par GIL Management Patterns
+ *
+ * Following PyO3/Granian best practices:
+ *
+ * - **Py_BEGIN_ALLOW_THREADS**: Release GIL during blocking waits
+ * - **Py_END_ALLOW_THREADS**: Re-acquire GIL before Python calls
+ * - **PyGILState_Ensure/Release**: For callbacks from non-Python threads
+ *
+ * @par Execution Modes
+ *
+ * | Mode | Description | GIL Handling |
+ * |------|-------------|--------------|
+ * | FREE_THREADED | Python 3.13+ no-GIL | Direct execution |
+ * | SUBINTERP | Python 3.12+ | Per-interpreter GIL |
+ * | MULTI_EXECUTOR | Traditional | N executor threads |
+ *
+ * @par Thread Safety
+ *
+ * - Executor queues protected by pthread mutexes
+ * - Request completion signaled via condition variables
+ * - Thread-local storage for timeout and callback state
+ *
+ * @note This file is included from py_nif.c (single compilation unit)
+ */
+
 /*
  * Copyright 2026 Benoit Chesneau
  *
@@ -14,22 +69,30 @@
  * limitations under the License.
  */
 
-/**
- * py_exec.c - Python execution and GIL management
- *
- * This module handles:
- * - Timeout support for Python execution
- * - Executor thread implementation (single and multi)
- * - Request processing (call, eval, exec, etc.)
- * - Free-threaded mode support
- */
-
-/* Note: This file is included from py_nif.c after py_nif.h and py_convert.c */
-
 /* ============================================================================
- * Timeout support
+ * Timeout Support
+ *
+ * Python execution timeout is implemented using PyEval_SetTrace(), which
+ * installs a callback invoked at each Python instruction. This allows
+ * cooperative timeout checking without requiring signal handlers.
  * ============================================================================ */
 
+/**
+ * @brief Trace callback for timeout checking
+ *
+ * Called by Python at each line/call/return event when tracing is enabled.
+ * Checks if the deadline has passed and raises TimeoutError if so.
+ *
+ * @param obj   Trace function argument (unused)
+ * @param frame Current execution frame (unused)
+ * @param what  Event type (call/line/return/exception)
+ * @param arg   Event-specific argument (unused)
+ *
+ * @return 0 to continue, -1 to abort with exception
+ *
+ * @note Called with GIL held
+ * @note Uses thread-local storage for deadline
+ */
 static int python_trace_callback(PyObject *obj, PyFrameObject *frame, int what, PyObject *arg) {
     (void)obj;
     (void)frame;
@@ -44,6 +107,26 @@ static int python_trace_callback(PyObject *obj, PyFrameObject *frame, int what, 
     return 0;
 }
 
+/**
+ * @brief Enable timeout monitoring for Python execution
+ *
+ * Installs a trace callback that checks elapsed time against a deadline.
+ * If the deadline is exceeded, TimeoutError is raised in Python.
+ *
+ * @param timeout_ms Timeout in milliseconds (0 = no timeout)
+ *
+ * @par Implementation
+ *
+ * Uses thread-local storage to avoid global state:
+ * - `tl_timeout_deadline`: Absolute deadline (monotonic ns)
+ * - `tl_timeout_enabled`: Flag to enable checking
+ *
+ * @note Must be paired with stop_timeout()
+ * @note GIL must be held
+ *
+ * @see stop_timeout()
+ * @see python_trace_callback()
+ */
 static void start_timeout(unsigned long timeout_ms) {
     if (timeout_ms > 0) {
         tl_timeout_deadline = get_monotonic_ns() + (timeout_ms * 1000000ULL);

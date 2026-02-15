@@ -1,3 +1,36 @@
+/**
+ * @file py_convert.c
+ * @brief Bidirectional type conversion between Python and Erlang
+ * @author Benoit Chesneau
+ * @copyright 2026 Benoit Chesneau. Licensed under Apache License 2.0.
+ *
+ * @ingroup convert
+ *
+ * This module provides functions for converting data between Python objects
+ * and Erlang terms. It handles the complete type mapping in both directions,
+ * including special cases like NumPy arrays and IEEE floating point specials.
+ *
+ * @par Conversion Strategy
+ *
+ * The conversion follows these principles:
+ * - Preserve semantics where possible (Python dict → Erlang map)
+ * - Use binaries for strings (UTF-8 encoded)
+ * - Handle Python's rich numeric types gracefully
+ * - Fall back to string representation for unknown types
+ *
+ * @par Memory Management
+ *
+ * - `py_to_term()`: Does NOT consume Python references
+ * - `term_to_py()`: Caller MUST Py_DECREF returned objects
+ * - Uses enif_alloc/enif_free for temporary buffers
+ *
+ * @par Thread Safety
+ *
+ * All functions require the GIL to be held by the calling thread.
+ *
+ * @note This file is included from py_nif.c (single compilation unit)
+ */
+
 /*
  * Copyright 2026 Benoit Chesneau
  *
@@ -14,26 +47,65 @@
  * limitations under the License.
  */
 
-/**
- * py_convert.c - Type conversion between Python and Erlang
- *
- * This module handles bidirectional type conversion:
- * - py_to_term(): Python objects -> Erlang terms
- * - term_to_py(): Erlang terms -> Python objects
- * - Error handling utilities
- */
-
-/* Note: This file is included from py_nif.c after py_nif.h */
-
 /* ============================================================================
- * Type conversion: Python -> Erlang
+ * Python to Erlang Conversion
  * ============================================================================ */
 
+/**
+ * @brief Convert a Python object to an Erlang term
+ *
+ * Recursively converts Python objects to their Erlang equivalents.
+ * The function handles all common Python types and provides fallback
+ * behavior for custom objects.
+ *
+ * @par Type Mapping
+ *
+ * | Python Type       | Erlang Type           | Notes                    |
+ * |-------------------|-----------------------|--------------------------|
+ * | `None`            | `none` atom           |                          |
+ * | `True`            | `true` atom           |                          |
+ * | `False`           | `false` atom          |                          |
+ * | `int`             | integer               | Falls back to string for big ints |
+ * | `float`           | float                 | NaN/Inf become atoms     |
+ * | `str`             | binary                | UTF-8 encoded            |
+ * | `bytes`           | binary                | Raw bytes                |
+ * | `list`            | list                  | Recursive conversion     |
+ * | `tuple`           | tuple                 | Recursive conversion     |
+ * | `dict`            | map                   | Recursive conversion     |
+ * | `numpy.ndarray`   | nested list           | Via `.tolist()` method   |
+ * | Other             | binary                | String representation    |
+ *
+ * @par Special Float Handling
+ *
+ * IEEE 754 special values are converted to atoms:
+ * - NaN → `nan`
+ * - +Inf → `infinity`
+ * - -Inf → `neg_infinity`
+ *
+ * @param env  NIF environment for term allocation
+ * @param obj  Python object to convert (borrowed reference, not consumed)
+ *
+ * @return Erlang term representing the Python object
+ *
+ * @retval ATOM_ERROR  On allocation failure
+ * @retval ATOM_UNDEFINED  On conversion failure
+ *
+ * @pre GIL must be held
+ * @pre env must be valid
+ * @pre obj must be a valid Python object (may be Py_None)
+ *
+ * @note Does NOT consume a reference to obj
+ * @note Recursively converts container types
+ *
+ * @see term_to_py() for the reverse conversion
+ */
 static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
+    /* Handle None singleton */
     if (obj == Py_None) {
         return ATOM_NONE;
     }
 
+    /* Handle boolean singletons (must check before int, as bool subclasses int) */
     if (obj == Py_True) {
         return ATOM_TRUE;
     }
@@ -42,15 +114,16 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return ATOM_FALSE;
     }
 
+    /* Handle integers */
     if (PyLong_Check(obj)) {
         long long val = PyLong_AsLongLong(obj);
         if (PyErr_Occurred()) {
             PyErr_Clear();
-            /* Try as unsigned */
+            /* Value too large for signed - try unsigned */
             unsigned long long uval = PyLong_AsUnsignedLongLong(obj);
             if (PyErr_Occurred()) {
                 PyErr_Clear();
-                /* Fall back to string representation for big integers */
+                /* Value too large for 64-bit - fall back to string representation */
                 PyObject *str = PyObject_Str(obj);
                 if (str != NULL) {
                     const char *s = PyUnicode_AsUTF8(str);
@@ -64,10 +137,11 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return enif_make_int64(env, val);
     }
 
+    /* Handle floats with special value handling */
     if (PyFloat_Check(obj)) {
         double val = PyFloat_AsDouble(obj);
-        /* Handle special float values */
-        if (val != val) {  /* NaN check */
+        /* Check for NaN (NaN != NaN is always true) */
+        if (val != val) {
             return ATOM_NAN;
         } else if (val == HUGE_VAL) {
             return ATOM_INFINITY;
@@ -77,6 +151,7 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return enif_make_double(env, val);
     }
 
+    /* Handle Unicode strings */
     if (PyUnicode_Check(obj)) {
         Py_ssize_t size;
         const char *data = PyUnicode_AsUTF8AndSize(obj, &size);
@@ -89,6 +164,7 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return bin;
     }
 
+    /* Handle byte strings */
     if (PyBytes_Check(obj)) {
         Py_ssize_t size = PyBytes_Size(obj);
         char *data = PyBytes_AsString(obj);
@@ -98,6 +174,7 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return bin;
     }
 
+    /* Handle lists */
     if (PyList_Check(obj)) {
         Py_ssize_t len = PyList_Size(obj);
         if (len == 0) {
@@ -116,7 +193,10 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return result;
     }
 
-    /* Handle numpy arrays by converting to list first */
+    /*
+     * Handle NumPy arrays by converting to Python list first.
+     * Detection: has both 'tolist' method and 'ndim' attribute.
+     */
     if (PyObject_HasAttrString(obj, "tolist") && PyObject_HasAttrString(obj, "ndim")) {
         PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
         if (tolist != NULL) {
@@ -127,6 +207,7 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         PyErr_Clear();
     }
 
+    /* Handle tuples */
     if (PyTuple_Check(obj)) {
         Py_ssize_t len = PyTuple_Size(obj);
         if (len == 0) {
@@ -145,6 +226,7 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return result;
     }
 
+    /* Handle dictionaries */
     if (PyDict_Check(obj)) {
         ERL_NIF_TERM map = enif_make_new_map(env);
         PyObject *key, *value;
@@ -157,7 +239,10 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return map;
     }
 
-    /* For other objects, convert to string representation */
+    /*
+     * Fallback: convert any other object to its string representation.
+     * This handles custom classes, functions, modules, etc.
+     */
     PyObject *str = PyObject_Str(obj);
     if (str != NULL) {
         const char *s = PyUnicode_AsUTF8(str);
@@ -172,9 +257,52 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
 }
 
 /* ============================================================================
- * Type conversion: Erlang -> Python
+ * Erlang to Python Conversion
  * ============================================================================ */
 
+/**
+ * @brief Convert an Erlang term to a Python object
+ *
+ * Recursively converts Erlang terms to their Python equivalents.
+ * The function handles all common Erlang types and provides sensible
+ * defaults for edge cases.
+ *
+ * @par Type Mapping
+ *
+ * | Erlang Type       | Python Type           | Notes                    |
+ * |-------------------|-----------------------|--------------------------|
+ * | `true` atom       | `True`                |                          |
+ * | `false` atom      | `False`               |                          |
+ * | `nil/none/undefined` | `None`             |                          |
+ * | Other atoms       | `str`                 | Atom name as string      |
+ * | integer           | `int`                 | All integer sizes        |
+ * | float             | `float`               |                          |
+ * | binary            | `str`                 | UTF-8 decoded            |
+ * | list              | `list`                | Recursive conversion     |
+ * | tuple             | `tuple`               | Recursive conversion     |
+ * | map               | `dict`                | Recursive conversion     |
+ * | py_object resource | unwrapped object     | Direct unwrap            |
+ * | Other             | `None`                | Fallback                 |
+ *
+ * @param env   NIF environment containing the term
+ * @param term  Erlang term to convert
+ *
+ * @return New Python object (caller owns reference), or NULL on error
+ *
+ * @retval NULL  On conversion error (with Python exception set)
+ *
+ * @pre GIL must be held
+ * @pre env must be valid
+ * @pre term must be a valid Erlang term
+ *
+ * @warning Caller MUST call Py_DECREF on the returned object
+ * @warning On NULL return, check PyErr_Occurred() for exception
+ *
+ * @note Creates new references for all returned objects
+ * @note Recursively converts container types
+ *
+ * @see py_to_term() for the reverse conversion
+ */
 static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
     int i_val;
     long l_val;
@@ -186,7 +314,7 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
     int arity;
     const ERL_NIF_TERM *tuple;
 
-    /* Check for atoms first */
+    /* Check for atoms first (most specific checks) */
     if (enif_is_atom(env, term)) {
         char atom_buf[256];
         if (enif_get_atom(env, term, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
@@ -199,13 +327,13 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
                        strcmp(atom_buf, "undefined") == 0) {
                 Py_RETURN_NONE;
             } else {
-                /* Convert atom to string */
+                /* Convert atom name to Python string */
                 return PyUnicode_FromString(atom_buf);
             }
         }
     }
 
-    /* Integer */
+    /* Try integer types in order of size */
     if (enif_get_int(env, term, &i_val)) {
         return PyLong_FromLong(i_val);
     }
@@ -219,17 +347,20 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return PyLong_FromUnsignedLongLong(u64_val);
     }
 
-    /* Float */
+    /* Try float */
     if (enif_get_double(env, term, &d_val)) {
         return PyFloat_FromDouble(d_val);
     }
 
-    /* Binary/String - check binary first, but NOT iolist (which would flatten lists) */
+    /*
+     * Check binary BEFORE list to avoid flattening iolists.
+     * This preserves the distinction between binaries and charlists.
+     */
     if (enif_inspect_binary(env, term, &bin)) {
         return PyUnicode_FromStringAndSize((char *)bin.data, bin.size);
     }
 
-    /* List - must check before iolist to preserve list structure */
+    /* Check list (must come after binary to preserve structure) */
     if (enif_get_list_length(env, term, &list_len)) {
         PyObject *list = PyList_New(list_len);
         ERL_NIF_TERM head, tail = term;
@@ -245,7 +376,7 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return list;
     }
 
-    /* Tuple */
+    /* Check tuple */
     if (enif_get_tuple(env, term, &arity, &tuple)) {
         PyObject *py_tuple = PyTuple_New(arity);
         for (int i = 0; i < arity; i++) {
@@ -259,7 +390,7 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return py_tuple;
     }
 
-    /* Map */
+    /* Check map */
     if (enif_is_map(env, term)) {
         PyObject *dict = PyDict_New();
         ERL_NIF_TERM key, value;
@@ -285,26 +416,73 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return dict;
     }
 
-    /* Check for resource (wrapped Python object) */
+    /* Check for wrapped Python object resource */
     py_object_t *wrapper;
     if (enif_get_resource(env, term, PYOBJ_RESOURCE_TYPE, (void **)&wrapper)) {
         Py_INCREF(wrapper->obj);
         return wrapper->obj;
     }
 
-    /* Unknown type - convert to string */
+    /* Fallback: return None for unknown types */
     Py_RETURN_NONE;
 }
 
 /* ============================================================================
- * Error handling
+ * Error Handling Utilities
  * ============================================================================ */
 
+/**
+ * @brief Create a simple error tuple `{error, Reason}`
+ *
+ * Creates an Erlang error tuple with an atom reason. This is used for
+ * internal errors that don't originate from Python exceptions.
+ *
+ * @param env     NIF environment for term allocation
+ * @param reason  Error reason as C string (converted to atom)
+ *
+ * @return `{error, reason}` tuple
+ *
+ * @par Example
+ * @code
+ * // Returns {error, alloc_failed}
+ * return make_error(env, "alloc_failed");
+ * @endcode
+ */
 static ERL_NIF_TERM make_error(ErlNifEnv *env, const char *reason) {
     return enif_make_tuple2(env, ATOM_ERROR,
         enif_make_atom(env, reason));
 }
 
+/**
+ * @brief Create an error tuple from the current Python exception
+ *
+ * Fetches the current Python exception state, formats it as an Erlang
+ * error tuple, and clears the Python error indicator.
+ *
+ * @par Return Format
+ *
+ * On success: `{error, {ExceptionType, Message}}`
+ *
+ * Where:
+ * - `ExceptionType` is an atom (e.g., `'ValueError'`)
+ * - `Message` is a string with the exception message
+ *
+ * @par Special Cases
+ *
+ * - `StopIteration` → `{error, {stop_iteration, none}}`
+ * - No exception set → `{error, unknown_python_error}`
+ *
+ * @param env  NIF environment for term allocation
+ *
+ * @return `{error, {ExceptionType, Message}}` tuple
+ *
+ * @pre GIL must be held
+ *
+ * @note Always clears the Python exception state
+ * @note Safe to call even if no exception is set
+ *
+ * @see make_error() for simple string errors
+ */
 static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
     PyObject *type, *value, *traceback;
     PyErr_Fetch(&type, &value, &traceback);
@@ -313,7 +491,7 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
         return make_error(env, "unknown_python_error");
     }
 
-    /* Check for StopIteration */
+    /* Special handling for StopIteration (common in iterators) */
     if (PyErr_GivenExceptionMatches(type, PyExc_StopIteration)) {
         PyErr_Clear();
         Py_XDECREF(type);
@@ -323,16 +501,20 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
             enif_make_tuple2(env, ATOM_STOP_ITERATION, ATOM_NONE));
     }
 
+    /* Get exception message */
     PyObject *str = PyObject_Str(value);
     const char *err_msg = str ? PyUnicode_AsUTF8(str) : "unknown";
 
+    /* Get exception type name */
     PyObject *type_name = PyObject_GetAttrString(type, "__name__");
     const char *type_str = type_name ? PyUnicode_AsUTF8(type_name) : "Exception";
 
+    /* Build error tuple: {error, {TypeAtom, MessageString}} */
     ERL_NIF_TERM error_tuple = enif_make_tuple2(env,
         enif_make_atom(env, type_str),
         enif_make_string(env, err_msg, ERL_NIF_LATIN1));
 
+    /* Clean up Python objects */
     Py_XDECREF(str);
     Py_XDECREF(type_name);
     Py_XDECREF(type);

@@ -1,3 +1,73 @@
+/**
+ * @file py_callback.c
+ * @brief Erlang callback support and asyncio integration
+ * @author Benoit Chesneau
+ * @copyright 2026 Benoit Chesneau. Licensed under Apache License 2.0.
+ *
+ * @ingroup cb
+ *
+ * This module implements bidirectional calling between Python and Erlang,
+ * enabling Python code to invoke Erlang functions and await their results.
+ *
+ * @par Features
+ *
+ * - **erlang module**: Python module providing `erlang.call()` and `erlang.func()`
+ * - **Suspension/Resume**: Reentrant callbacks without blocking dirty schedulers
+ * - **Asyncio support**: Background event loop for async Python operations
+ *
+ * @par Suspension Mechanism
+ *
+ * When Python calls `erlang.call('func', args)`:
+ *
+ * ```
+ * ┌────────────┐         ┌─────────────┐         ┌──────────────┐
+ * │   Python   │ raises  │  Executor   │ returns │    Erlang    │
+ * │   Code     │ ──────> │  Catches    │ ──────> │   Callback   │
+ * └────────────┘ Suspend │  Exception  │ suspend └──────────────┘
+ *                        └─────────────┘    │           │
+ *                                           │           │ result
+ *                        ┌─────────────┐    │           │
+ *                        │   Resume    │ <──────────────┘
+ *                        │   Replay    │
+ *                        └─────────────┘
+ *                              │
+ *                              v
+ *                        ┌────────────┐
+ *                        │  Continue  │
+ *                        │   Python   │
+ *                        └────────────┘
+ * ```
+ *
+ * @par Why Suspension?
+ *
+ * Without suspension, Python calling Erlang would block a dirty scheduler
+ * while waiting for the Erlang callback to complete. With suspension:
+ *
+ * 1. Dirty scheduler is released immediately
+ * 2. Erlang callback runs on normal scheduler
+ * 3. Result is stored, Python is replayed on dirty scheduler
+ *
+ * @par The 'erlang' Python Module
+ *
+ * Provides two calling syntaxes:
+ *
+ * ```python
+ * # Explicit call
+ * result = erlang.call('my_function', arg1, arg2)
+ *
+ * # Attribute-style call (via __getattr__)
+ * result = erlang.my_function(arg1, arg2)
+ * ```
+ *
+ * @par Thread Safety
+ *
+ * - Thread-local storage tracks current worker and suspended state
+ * - Async event loop runs in dedicated thread
+ * - Pending futures queue protected by mutex
+ *
+ * @note This file is included from py_nif.c (single compilation unit)
+ */
+
 /*
  * Copyright 2026 Benoit Chesneau
  *
@@ -13,19 +83,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-/**
- * py_callback.c - Erlang callback module and asyncio support
- *
- * This module handles:
- * - Erlang callback module for Python (erlang.call())
- * - Suspended state for reentrant callbacks
- * - Resume callback NIFs
- * - Asyncio event loop and futures
- * - Sub-interpreter support
- */
-
-/* Note: This file is included from py_nif.c after py_nif.h, py_convert.c, py_exec.c */
 
 /* ============================================================================
  * Suspended state management
