@@ -137,24 +137,30 @@ worker_destroy(_WorkerRef) ->
 
 %% @doc Call a Python function from a worker.
 %% This is a dirty NIF that acquires the GIL.
+%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
 -spec worker_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
 worker_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
 %% @doc Call a Python function from a worker with timeout.
+%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
 -spec worker_call(reference(), binary(), binary(), list(), map(), non_neg_integer()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
 worker_call(_WorkerRef, _Module, _Func, _Args, _Kwargs, _TimeoutMs) ->
     ?NIF_STUB.
 
 %% @doc Evaluate a Python expression in a worker.
--spec worker_eval(reference(), binary(), map()) -> {ok, term()} | {error, term()}.
+%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
+-spec worker_eval(reference(), binary(), map()) ->
+    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
 worker_eval(_WorkerRef, _Code, _Locals) ->
     ?NIF_STUB.
 
 %% @doc Evaluate a Python expression in a worker with timeout.
--spec worker_eval(reference(), binary(), map(), non_neg_integer()) -> {ok, term()} | {error, term()}.
+%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
+-spec worker_eval(reference(), binary(), map(), non_neg_integer()) ->
+    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
 worker_eval(_WorkerRef, _Code, _Locals, _TimeoutMs) ->
     ?NIF_STUB.
 
@@ -255,8 +261,9 @@ send_callback_response(_Fd, _Response) ->
 %% @doc Resume a suspended Python callback with the result.
 %% StateRef is the reference returned in the {suspended, ...} tuple.
 %% Result is the callback result as a binary (status byte + data).
-%% Returns {ok, FinalResult} or {error, Reason}.
--spec resume_callback(reference(), binary()) -> {ok, term()} | {error, term()}.
+%% Returns {ok, FinalResult}, {error, Reason}, or another {suspended, ...} for nested callbacks.
+-spec resume_callback(reference(), binary()) ->
+    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
 resume_callback(_StateRef, _Result) ->
     ?NIF_STUB.
 
