@@ -20,7 +20,8 @@
     test_callback_error_propagation/1,
     test_concurrent_reentrant/1,
     test_callback_with_complex_types/1,
-    test_multiple_sequential_callbacks/1
+    test_multiple_sequential_callbacks/1,
+    test_call_from_non_worker_thread/1
 ]).
 
 all() ->
@@ -30,7 +31,8 @@ all() ->
         test_callback_error_propagation,
         test_concurrent_reentrant,
         test_callback_with_complex_types,
-        test_multiple_sequential_callbacks
+        test_multiple_sequential_callbacks,
+        test_call_from_non_worker_thread
     ].
 
 init_per_suite(Config) ->
@@ -229,4 +231,31 @@ test_multiple_sequential_callbacks(_Config) ->
     {ok, Result3} = py:eval(Code3),
     15 = Result3,
 
+    ok.
+
+%% @doc Test that erlang.call() from a non-worker thread gives a helpful error.
+%% When Python spawns a thread (e.g., via ThreadPoolExecutor) and tries to call
+%% erlang.call() from that thread, it should fail with an informative message.
+test_call_from_non_worker_thread(_Config) ->
+    %% Register a simple function to call
+    py:register_function(simple_add, fun([A, B]) -> A + B end),
+
+    %% Use an inline lambda to test calling from a thread
+    %% The lambda imports, creates executor, runs in thread, catches error
+    Code = <<"(lambda cf, erlang: (lambda executor: (lambda future: (('expected_error', str(e)) if 'worker thread' in str(e := future.exception()) and 'execute_async' in str(e) else ('wrong_error', str(e))) if future.exception() else ('unexpected_success', future.result()))(executor.submit(lambda: erlang.call('simple_add', 1, 2))))(cf.ThreadPoolExecutor(max_workers=1).__enter__()))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    {ok, Result} = py:eval(Code),
+
+    %% Verify we got the expected error with helpful message
+    case Result of
+        {<<"expected_error">>, Msg} ->
+            ct:log("Got expected error message: ~s", [Msg]),
+            ok;
+        {<<"wrong_error">>, Msg} ->
+            ct:fail({wrong_error_message, Msg});
+        {<<"unexpected_success">>, Val} ->
+            ct:fail({should_have_failed, Val})
+    end,
+
+    %% Cleanup
+    py:unregister_function(simple_add),
     ok.

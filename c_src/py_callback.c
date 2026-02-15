@@ -541,7 +541,9 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     (void)self;
 
     if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
-        PyErr_SetString(PyExc_RuntimeError, "No callback handler registered");
+        PyErr_SetString(PyExc_RuntimeError,
+            "erlang.call() must be called from worker thread. "
+            "Use execute_async() for concurrent calls from other threads.");
         return NULL;
     }
 
