@@ -87,7 +87,7 @@
 
 - **Module Reload** - Reload Python modules across all workers during development
   - `py:reload(module)` uses `importlib.reload()` to refresh modules from disk
-  - `py_pool:broadcast/1` for sending requests to all workers
+  - `py_pool:broadcast` for sending requests to all workers
 
 - **Documentation improvements**
   - Added shared state section to getting-started, scalability, and ai-integration guides
@@ -97,7 +97,7 @@
 ### Fixed
 
 - **Memory safety** - Added NULL checks to all `enif_alloc()` calls in NIF code
-- **Worker resilience** - Fixed crash in `py_subinterp_pool:terminate/2` when workers undefined
+- **Worker resilience** - Fixed crash in `py_subinterp_pool:terminate` when workers undefined
 - **Streaming example** - Fixed to work with worker pool design (workers don't share namespace)
 - **ETS table ownership** - Moved `py_callbacks` table creation to supervisor for resilience
 
