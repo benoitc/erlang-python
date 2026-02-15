@@ -482,7 +482,7 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Scalability](docs/scalability.md)
 - [Streaming](docs/streaming.md)
 - [Threading](docs/threading.md)
-- [Changelog](CHANGELOG.md)
+- [Changelog](https://github.com/benoitc/erlang-python/releases)
 
 ## License
 
