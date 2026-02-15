@@ -1142,6 +1142,10 @@ static ERL_NIF_TERM nif_tracemalloc_stop(ErlNifEnv *env, int argc, const ERL_NIF
  */
 static void async_future_callback(py_async_worker_t *worker, async_pending_t *pending) {
     ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        /* Cannot send result - just log and return */
+        return;
+    }
     PyObject *py_result = PyObject_CallMethod(pending->future, "result", NULL);
 
     ERL_NIF_TERM result_term;
@@ -1311,6 +1315,7 @@ static ERL_NIF_TERM nif_async_worker_new(ErlNifEnv *env, int argc, const ERL_NIF
 
     /* Create notification pipe */
     if (pipe(worker->notify_pipe) < 0) {
+        enif_free_env(worker->msg_env);
         enif_release_resource(worker);
         return make_error(env, "pipe_failed");
     }
@@ -1323,6 +1328,7 @@ static ERL_NIF_TERM nif_async_worker_new(ErlNifEnv *env, int argc, const ERL_NIF
         close(worker->notify_pipe[0]);
         close(worker->notify_pipe[1]);
         pthread_mutex_destroy(&worker->queue_mutex);
+        enif_free_env(worker->msg_env);
         enif_release_resource(worker);
         return make_error(env, "thread_create_failed");
     }
@@ -2507,7 +2513,9 @@ static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_a
     state->orig_env = enif_alloc_env();
     if (state->orig_env == NULL) {
         Py_DECREF(callback_args);
+        state->callback_args = NULL;
         enif_free(state->callback_func_name);
+        state->callback_func_name = NULL;
         enif_release_resource(state);
         return NULL;
     }
@@ -2515,10 +2523,29 @@ static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_a
     /* Copy request-specific data */
     if (req->type == PY_REQ_CALL) {
         /* Copy module and function binaries */
-        enif_alloc_binary(req->module_bin.size, &state->orig_module);
+        if (!enif_alloc_binary(req->module_bin.size, &state->orig_module)) {
+            Py_DECREF(callback_args);
+            state->callback_args = NULL;
+            enif_free(state->callback_func_name);
+            state->callback_func_name = NULL;
+            enif_free_env(state->orig_env);
+            state->orig_env = NULL;
+            enif_release_resource(state);
+            return NULL;
+        }
         memcpy(state->orig_module.data, req->module_bin.data, req->module_bin.size);
 
-        enif_alloc_binary(req->func_bin.size, &state->orig_func);
+        if (!enif_alloc_binary(req->func_bin.size, &state->orig_func)) {
+            enif_release_binary(&state->orig_module);
+            Py_DECREF(callback_args);
+            state->callback_args = NULL;
+            enif_free(state->callback_func_name);
+            state->callback_func_name = NULL;
+            enif_free_env(state->orig_env);
+            state->orig_env = NULL;
+            enif_release_resource(state);
+            return NULL;
+        }
         memcpy(state->orig_func.data, req->func_bin.data, req->func_bin.size);
 
         /* Copy args and kwargs to our environment */
@@ -2526,7 +2553,16 @@ static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_a
         state->orig_kwargs = enif_make_copy(state->orig_env, req->kwargs_term);
     } else if (req->type == PY_REQ_EVAL) {
         /* Copy code binary */
-        enif_alloc_binary(req->code_bin.size, &state->orig_code);
+        if (!enif_alloc_binary(req->code_bin.size, &state->orig_code)) {
+            Py_DECREF(callback_args);
+            state->callback_args = NULL;
+            enif_free(state->callback_func_name);
+            state->callback_func_name = NULL;
+            enif_free_env(state->orig_env);
+            state->orig_env = NULL;
+            enif_release_resource(state);
+            return NULL;
+        }
         memcpy(state->orig_code.data, req->code_bin.data, req->code_bin.size);
 
         /* Copy locals */
@@ -2679,6 +2715,11 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     if (!tl_allow_suspension) {
         /* Fall back to blocking behavior - send message and wait on pipe */
         ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env == NULL) {
+            Py_DECREF(call_args);
+            PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
+            return NULL;
+        }
         ERL_NIF_TERM func_term;
         {
             unsigned char *buf = enif_make_new_binary(msg_env, func_name_len, &func_term);
@@ -3367,11 +3408,16 @@ static void process_request(py_request_t *req) {
             }
         } else if (PyGen_Check(py_result) || PyIter_Check(py_result)) {
             py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-            wrapper->obj = py_result;
-            ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
-            enif_release_resource(wrapper);
-            req->result = enif_make_tuple2(env, ATOM_OK,
-                enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+            if (wrapper == NULL) {
+                Py_DECREF(py_result);
+                req->result = make_error(env, "alloc_failed");
+            } else {
+                wrapper->obj = py_result;
+                ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
+                enif_release_resource(wrapper);
+                req->result = enif_make_tuple2(env, ATOM_OK,
+                    enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+            }
         } else {
             ERL_NIF_TERM term_result = py_to_term(env, py_result);
             Py_DECREF(py_result);
@@ -3469,11 +3515,16 @@ static void process_request(py_request_t *req) {
                 }
             } else if (PyGen_Check(py_result) || PyIter_Check(py_result)) {
                 py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-                wrapper->obj = py_result;
-                ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
-                enif_release_resource(wrapper);
-                req->result = enif_make_tuple2(env, ATOM_OK,
-                    enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+                if (wrapper == NULL) {
+                    Py_DECREF(py_result);
+                    req->result = make_error(env, "alloc_failed");
+                } else {
+                    wrapper->obj = py_result;
+                    ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
+                    enif_release_resource(wrapper);
+                    req->result = enif_make_tuple2(env, ATOM_OK,
+                        enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+                }
             } else {
                 ERL_NIF_TERM term_result = py_to_term(env, py_result);
                 Py_DECREF(py_result);
@@ -3537,11 +3588,16 @@ static void process_request(py_request_t *req) {
             }
         } else if (PyGen_Check(item) || PyIter_Check(item)) {
             py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-            wrapper->obj = item;
-            ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
-            enif_release_resource(wrapper);
-            req->result = enif_make_tuple2(env, ATOM_OK,
-                enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+            if (wrapper == NULL) {
+                Py_DECREF(item);
+                req->result = make_error(env, "alloc_failed");
+            } else {
+                wrapper->obj = item;
+                ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
+                enif_release_resource(wrapper);
+                req->result = enif_make_tuple2(env, ATOM_OK,
+                    enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
+            }
         } else {
             ERL_NIF_TERM term_result = py_to_term(env, item);
             Py_DECREF(item);
@@ -3564,10 +3620,15 @@ static void process_request(py_request_t *req) {
             req->result = make_py_error(env);
         } else {
             py_object_t *wrapper = enif_alloc_resource(PYOBJ_RESOURCE_TYPE, sizeof(py_object_t));
-            wrapper->obj = module;
-            ERL_NIF_TERM mod_ref = enif_make_resource(env, wrapper);
-            enif_release_resource(wrapper);
-            req->result = enif_make_tuple2(env, ATOM_OK, mod_ref);
+            if (wrapper == NULL) {
+                Py_DECREF(module);
+                req->result = make_error(env, "alloc_failed");
+            } else {
+                wrapper->obj = module;
+                ERL_NIF_TERM mod_ref = enif_make_resource(env, wrapper);
+                enif_release_resource(wrapper);
+                req->result = enif_make_tuple2(env, ATOM_OK, mod_ref);
+            }
         }
         break;
     }
@@ -3617,6 +3678,7 @@ static void process_request(py_request_t *req) {
                     enif_make_map_put(env, result_map,
                         enif_make_atom(env, "gc_stats"), gc_stats_list, &result_map);
                 }
+                /* If gen_stats alloc failed, we skip gc_stats but continue with other stats */
             }
             Py_DECREF(stats);
         }
@@ -4053,6 +4115,9 @@ static void multi_executor_stop(void) {
         return;
     }
 
+    /* Allocate shutdown requests for all executors */
+    py_request_t *shutdown_reqs[MAX_EXECUTORS] = {0};
+
     /* Signal shutdown and send shutdown requests to all executors */
     for (int i = 0; i < g_num_executors; i++) {
         executor_t *exec = &g_executors[i];
@@ -4062,18 +4127,25 @@ static void multi_executor_stop(void) {
         if (shutdown_req != NULL) {
             request_init(shutdown_req);
             shutdown_req->type = PY_REQ_SHUTDOWN;
+            shutdown_reqs[i] = shutdown_req;
             multi_executor_enqueue(i, shutdown_req);
         }
         /* If alloc fails, the shutdown flag is already set, so executor
          * will exit when it checks the flag */
     }
 
-    /* Wait for all executors to finish */
+    /* Wait for all executors to finish and clean up shutdown requests */
     for (int i = 0; i < g_num_executors; i++) {
         executor_t *exec = &g_executors[i];
         pthread_join(exec->thread, NULL);
         pthread_mutex_destroy(&exec->mutex);
         pthread_cond_destroy(&exec->cond);
+
+        /* Clean up the shutdown request */
+        if (shutdown_reqs[i] != NULL) {
+            request_cleanup(shutdown_reqs[i]);
+            enif_free(shutdown_reqs[i]);
+        }
     }
 
     g_multi_executor_initialized = false;
