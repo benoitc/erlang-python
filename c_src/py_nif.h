@@ -254,9 +254,6 @@ typedef struct async_pending {
     /** @brief PID of the Erlang process awaiting the result */
     ErlNifPid caller;
 
-    /** @brief Reference term for correlation (unused, reserved) */
-    ERL_NIF_TERM ref;
-
     /** @brief Next pending operation in the queue */
     struct async_pending *next;
 } async_pending_t;

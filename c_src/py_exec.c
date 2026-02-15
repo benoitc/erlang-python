@@ -1070,22 +1070,8 @@ static void multi_executor_stop(void) {
     g_multi_executor_initialized = false;
 }
 
-/* ============================================================================
- * Free-threaded execution (Python 3.13+ nogil)
- * ============================================================================ */
-
-#ifdef HAVE_FREE_THREADED
-/**
- * Execute a request directly in free-threaded mode.
- * No GIL management needed - Python handles synchronization internally.
+/*
+ * Note: Free-threaded execution (Python 3.13+ nogil) is handled inline
+ * in executor_enqueue() using PyGILState_Ensure/Release which are no-ops
+ * in free-threaded builds but still work correctly.
  */
-static ERL_NIF_TERM execute_direct(ErlNifEnv *env, py_request_t *req) {
-    /* In free-threaded mode, PyGILState functions still work but are essentially no-ops */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    process_request(req);
-
-    PyGILState_Release(gstate);
-    return req->result;
-}
-#endif
