@@ -45,6 +45,7 @@
     tracemalloc_stop/0,
     set_callback_handler/2,
     send_callback_response/2,
+    resume_callback/2,
     %% Async workers
     async_worker_new/0,
     async_worker_destroy/1,
@@ -249,6 +250,14 @@ set_callback_handler(_WorkerRef, _HandlerPid) ->
 %% @doc Send a callback response to a worker via file descriptor.
 -spec send_callback_response(integer(), binary()) -> ok | {error, term()}.
 send_callback_response(_Fd, _Response) ->
+    ?NIF_STUB.
+
+%% @doc Resume a suspended Python callback with the result.
+%% StateRef is the reference returned in the {suspended, ...} tuple.
+%% Result is the callback result as a binary (status byte + data).
+%% Returns {ok, FinalResult} or {error, Reason}.
+-spec resume_callback(reference(), binary()) -> {ok, term()} | {error, term()}.
+resume_callback(_StateRef, _Result) ->
     ?NIF_STUB.
 
 %%% ============================================================================

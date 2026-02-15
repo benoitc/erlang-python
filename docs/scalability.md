@@ -230,6 +230,106 @@ The state is backed by ETS with `{write_concurrency, true}`, making atomic
 counter operations fast and lock-free. See [Getting Started](getting-started.md#shared-state)
 for the full API.
 
+## Reentrant Callbacks
+
+erlang_python supports reentrant callbacks where Python code calls Erlang functions
+that themselves call back into Python. This is handled without deadlocking through
+a suspension/resume mechanism:
+
+```erlang
+%% Register an Erlang function that calls Python
+py:register_function(compute_via_python, fun([X]) ->
+    {ok, Result} = py:call('__main__', complex_compute, [X]),
+    Result * 2  %% Erlang post-processing
+end).
+
+%% Python code that uses the callback
+py:exec(<<"
+def process(x):
+    from erlang import call
+    # Calls Erlang, which calls Python's complex_compute
+    result = call('compute_via_python', x)
+    return result + 1
+">>).
+```
+
+### How Reentrant Callbacks Work
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Reentrant Callback Flow                      │
+│                                                                 │
+│  1. Python calls erlang.call('func', args)                      │
+│     └──► Returns suspension marker, frees dirty scheduler       │
+│                                                                 │
+│  2. Erlang executes the registered callback                     │
+│     └──► May call py:call() to run Python (on different worker) │
+│                                                                 │
+│  3. Erlang calls resume_callback with result                    │
+│     └──► Schedules dirty NIF to return result to Python         │
+│                                                                 │
+│  4. Python continues with the callback result                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Benefits
+
+- **No Deadlocks**: Dirty schedulers are freed during callback execution
+- **Nested Callbacks**: Multiple levels of Python→Erlang→Python→... are supported
+- **Transparent**: From Python's perspective, `erlang.call()` appears synchronous
+- **No Configuration**: Works automatically with all execution modes
+
+### Performance Considerations
+
+- Reentrant callbacks have slightly higher overhead due to suspension/resume
+- For tight loops, consider batching operations to reduce callback overhead
+- Concurrent reentrant calls are fully supported and scale well
+
+### Example: Nested Callbacks
+
+```erlang
+%% Each level alternates between Erlang and Python
+py:register_function(level, fun([N, Max]) ->
+    case N >= Max of
+        true -> N;
+        false ->
+            {ok, Result} = py:call('__main__', next_level, [N + 1, Max]),
+            Result
+    end
+end).
+
+py:exec(<<"
+def next_level(n, max):
+    from erlang import call
+    return call('level', n, max)
+
+def start(max):
+    from erlang import call
+    return call('level', 1, max)
+">>).
+
+%% Test 10 levels of nesting
+{ok, 10} = py:call('__main__', start, [10]).
+```
+
+### Example
+
+See `examples/reentrant_demo.erl` and `examples/reentrant_demo.py` for a complete
+demonstration including:
+
+- Basic reentrant calls with arithmetic expressions
+- Fibonacci with Erlang memoization
+- Deeply nested callbacks (10+ levels)
+- OOP-style class method callbacks
+
+```bash
+# Run the demo
+rebar3 shell
+1> reentrant_demo:start().
+2> reentrant_demo:demo_all().
+```
+
 ## See Also
 
 - [Getting Started](getting-started.md) - Basic usage

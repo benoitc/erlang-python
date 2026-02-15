@@ -155,6 +155,40 @@ result = erlang.call('my_func', 10, 20)
 All three methods are equivalent. The import and attribute syntaxes provide
 a more natural Python experience.
 
+### Reentrant Callbacks
+
+Python→Erlang→Python callbacks are fully supported. When Python code calls
+an Erlang function that in turn calls back into Python, the system handles
+this transparently without deadlocking:
+
+```erlang
+%% Register an Erlang function that calls Python
+py:register_function(double_via_python, fun([X]) ->
+    {ok, Result} = py:call('__main__', double, [X]),
+    Result
+end).
+
+%% Define Python functions
+py:exec(<<"
+def double(x):
+    return x * 2
+
+def process(x):
+    from erlang import call
+    # This calls Erlang, which calls Python's double()
+    doubled = call('double_via_python', x)
+    return doubled + 1
+">>).
+
+%% Test the full round-trip
+{ok, 21} = py:call('__main__', process, [10]).
+%% 10 → double_via_python → double(10)=20 → +1 = 21
+```
+
+The implementation uses a suspension/resume mechanism that frees the dirty
+scheduler while the Erlang callback executes, preventing deadlocks even with
+multiple levels of nesting.
+
 ## Shared State Between Workers
 
 Python workers don't share namespace state, but you can share data via the

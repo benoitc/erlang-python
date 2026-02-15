@@ -112,26 +112,26 @@ handle_request(WorkerRef, {call, Ref, Caller, Module, Func, Args, Kwargs, Timeou
     ModuleBin = to_binary(Module),
     FuncBin = to_binary(Func),
     Result = py_nif:worker_call(WorkerRef, ModuleBin, FuncBin, Args, Kwargs, TimeoutMs),
-    send_response(Caller, Ref, Result);
+    handle_call_result(Result, Ref, Caller);
 
 %% Call without timeout (backward compatible)
 handle_request(WorkerRef, {call, Ref, Caller, Module, Func, Args, Kwargs}) ->
     ModuleBin = to_binary(Module),
     FuncBin = to_binary(Func),
     Result = py_nif:worker_call(WorkerRef, ModuleBin, FuncBin, Args, Kwargs),
-    send_response(Caller, Ref, Result);
+    handle_call_result(Result, Ref, Caller);
 
 %% Eval with timeout
 handle_request(WorkerRef, {eval, Ref, Caller, Code, Locals, TimeoutMs}) ->
     CodeBin = to_binary(Code),
     Result = py_nif:worker_eval(WorkerRef, CodeBin, Locals, TimeoutMs),
-    send_response(Caller, Ref, Result);
+    handle_call_result(Result, Ref, Caller);
 
 %% Eval without timeout (backward compatible)
 handle_request(WorkerRef, {eval, Ref, Caller, Code, Locals}) ->
     CodeBin = to_binary(Code),
     Result = py_nif:worker_eval(WorkerRef, CodeBin, Locals),
-    send_response(Caller, Ref, Result);
+    handle_call_result(Result, Ref, Caller);
 
 handle_request(WorkerRef, {exec, Ref, Caller, Code}) ->
     CodeBin = to_binary(Code),
@@ -180,6 +180,68 @@ stream_chunks(WorkerRef, GenRef, Ref, Caller) ->
         {error, Error} ->
             Caller ! {py_error, Ref, Error}
     end.
+
+%%% ============================================================================
+%%% Suspended Callback Handling
+%%%
+%%% When Python code calls erlang.call(), it may return a suspension marker
+%%% instead of blocking. This allows the dirty scheduler to be freed while
+%%% the Erlang callback is executed.
+%%% ============================================================================
+
+%% Handle the result of a worker_call - either normal result or suspended callback
+handle_call_result({suspended, _CallbackId, StateRef, {FuncName, CallArgs}}, Ref, Caller) ->
+    %% Python code called erlang.call() - spawn a process to handle the callback.
+    %% This prevents deadlock when the callback itself calls py:eval, which would
+    %% otherwise block this worker while waiting for another worker (or even this
+    %% same worker via round-robin).
+    spawn_link(fun() ->
+        handle_suspended_callback(StateRef, FuncName, CallArgs, Ref, Caller)
+    end),
+    ok;  %% Don't block the worker - it can process other requests
+handle_call_result(Result, Ref, Caller) ->
+    %% Normal result - send directly to caller
+    send_response(Caller, Ref, Result).
+
+%% Execute a suspended callback and resume Python execution.
+%% This runs in a separate process to avoid blocking the worker.
+handle_suspended_callback(StateRef, FuncName, CallArgs, Ref, Caller) ->
+    %% Convert Args from tuple/list to list
+    ArgsList = case CallArgs of
+        T when is_tuple(T) -> tuple_to_list(T);
+        L when is_list(L) -> L;
+        _ -> [CallArgs]
+    end,
+    %% Execute the registered Erlang function
+    %% This can call py:eval, py:call, etc. without deadlocking
+    CallbackResult = py_callback:execute(FuncName, ArgsList),
+    %% Encode result as binary (status byte + python repr)
+    ResultBinary = case CallbackResult of
+        {ok, Value} ->
+            ValueRepr = term_to_python_repr(Value),
+            <<0, ValueRepr/binary>>;
+        {error, {not_found, Name}} ->
+            ErrMsg = iolist_to_binary(io_lib:format("Function '~s' not registered", [Name])),
+            <<1, ErrMsg/binary>>;
+        {error, {Class, Reason, _Stack}} ->
+            ErrMsg = iolist_to_binary(io_lib:format("~p: ~p", [Class, Reason])),
+            <<1, ErrMsg/binary>>
+    end,
+    %% Resume Python execution with the callback result
+    %% The NIF parses the result using Python's ast.literal_eval and returns
+    %% {ok, ParsedTerm} or {error, Reason}
+    FinalResult = py_nif:resume_callback(StateRef, ResultBinary),
+    %% Handle the final result (could be another suspension for nested callbacks)
+    %% Note: for nested callbacks, this will spawn another process recursively
+    forward_final_result(FinalResult, Ref, Caller).
+
+%% Forward the final result to the caller, handling nested suspensions
+forward_final_result({suspended, _CallbackId, StateRef, {FuncName, CallArgs}}, Ref, Caller) ->
+    %% Another suspension - handle it recursively
+    handle_suspended_callback(StateRef, FuncName, CallArgs, Ref, Caller);
+forward_final_result(Result, Ref, Caller) ->
+    %% Final result - send to the original caller
+    send_response(Caller, Ref, Result).
 
 %%% ============================================================================
 %%% Callback Handling

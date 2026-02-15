@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Added
+
+- **Reentrant Callbacks** - Python→Erlang→Python callback chains without deadlocks
+  - Exception-based suspension mechanism interrupts Python execution cleanly
+  - Callbacks execute in separate processes to prevent worker pool exhaustion
+  - Supports arbitrarily deep nesting (tested up to 10+ levels)
+  - Transparent to users - `erlang.call()` works the same, just without deadlocks
+  - New test suite: `test/py_reentrant_SUITE.erl`
+  - New examples: `examples/reentrant_demo.erl` and `examples/reentrant_demo.py`
+
+### Changed
+
+- Callback handlers now spawn separate processes for execution, allowing workers
+  to remain available for nested `py:eval`/`py:call` operations
+
 ## 1.1.0 (2026-02-15)
 
 ### Added

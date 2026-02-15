@@ -135,6 +135,50 @@ typedef struct {
 } py_async_worker_t;
 
 /* ============================================================================
+ * Suspended state for reentrant callbacks
+ *
+ * When Python calls erlang.call(), instead of blocking on a pipe read (which
+ * would hold the dirty scheduler), we suspend the Python execution and return
+ * to Erlang. Erlang executes the callback and then resumes Python execution.
+ * ============================================================================ */
+
+typedef struct {
+    py_worker_t *worker;        /* Worker context */
+    uint64_t callback_id;       /* Unique callback ID */
+
+    /* Callback function info (what erlang.call() is calling) */
+    char *callback_func_name;   /* Function name being called via erlang.call */
+    size_t callback_func_len;   /* Length of callback function name */
+    PyObject *callback_args;    /* Arguments for the callback */
+
+    /* Original Python call context (for replay) */
+    ErlNifBinary orig_module;   /* Original module name */
+    ErlNifBinary orig_func;     /* Original function name */
+    ERL_NIF_TERM orig_args;     /* Original args (copied to result_env) */
+    ERL_NIF_TERM orig_kwargs;   /* Original kwargs (copied to result_env) */
+    ErlNifEnv *orig_env;        /* Environment holding original terms */
+    int orig_timeout_ms;        /* Original timeout */
+    int request_type;           /* PY_REQ_CALL, PY_REQ_EVAL, etc. */
+    ErlNifBinary orig_code;     /* For eval/exec: the code string */
+    ERL_NIF_TERM orig_locals;   /* For eval: locals map */
+
+    /* Callback result */
+    unsigned char *result_data; /* Raw result data from callback */
+    size_t result_len;          /* Length of result data */
+    volatile bool has_result;   /* Whether result is available */
+    volatile bool is_error;     /* Whether result is an error */
+
+    pthread_mutex_t mutex;      /* Synchronization */
+    pthread_cond_t cond;        /* Signal when result is available */
+} suspended_state_t;
+
+/* Global counter for callback IDs */
+static _Atomic uint64_t g_callback_id_counter = 1;
+
+/* Custom exception for suspension (initialized in create_erlang_module) */
+static PyObject *SuspensionRequiredException = NULL;
+
+/* ============================================================================
  * Sub-interpreter support (Python 3.12+)
  * ============================================================================ */
 
@@ -310,6 +354,7 @@ static void executor_stop(void);
 static ErlNifResourceType *WORKER_RESOURCE_TYPE = NULL;
 static ErlNifResourceType *PYOBJ_RESOURCE_TYPE = NULL;
 static ErlNifResourceType *ASYNC_WORKER_RESOURCE_TYPE = NULL;
+static ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE = NULL;
 #ifdef HAVE_SUBINTERPRETERS
 static ErlNifResourceType *SUBINTERP_WORKER_RESOURCE_TYPE = NULL;
 #endif
@@ -321,6 +366,8 @@ static PyThreadState *g_main_thread_state = NULL;
 /* Thread-local callback context (set before Python execution) */
 static __thread py_worker_t *tl_current_worker = NULL;
 static __thread ErlNifEnv *tl_callback_env = NULL;
+static __thread suspended_state_t *tl_current_suspended = NULL;
+static __thread bool tl_allow_suspension = false;  /* Only allow suspension at top level */
 
 /* Atoms */
 static ERL_NIF_TERM ATOM_OK;
@@ -339,6 +386,7 @@ static ERL_NIF_TERM ATOM_NEG_INFINITY;
 static ERL_NIF_TERM ATOM_ERLANG_CALLBACK;
 static ERL_NIF_TERM ATOM_ASYNC_RESULT;
 static ERL_NIF_TERM ATOM_ASYNC_ERROR;
+static ERL_NIF_TERM ATOM_SUSPENDED;
 
 /* ============================================================================
  * Forward declarations
@@ -471,6 +519,34 @@ static void subinterp_worker_destructor(ErlNifEnv *env, void *obj) {
     }
 }
 #endif
+
+static void suspended_state_destructor(ErlNifEnv *env, void *obj) {
+    suspended_state_t *state = (suspended_state_t *)obj;
+
+    /* Clean up Python objects if Python is still initialized */
+    if (g_python_initialized && state->callback_args != NULL) {
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        Py_XDECREF(state->callback_args);
+        PyGILState_Release(gstate);
+    }
+
+    /* Free allocated memory */
+    if (state->callback_func_name != NULL) {
+        enif_free(state->callback_func_name);
+    }
+    if (state->result_data != NULL) {
+        enif_free(state->result_data);
+    }
+
+    /* Free original context environment */
+    if (state->orig_env != NULL) {
+        enif_free_env(state->orig_env);
+    }
+
+    /* Destroy synchronization primitives */
+    pthread_mutex_destroy(&state->mutex);
+    pthread_cond_destroy(&state->cond);
+}
 
 /* ============================================================================
  * Initialization
@@ -2332,112 +2408,156 @@ static PyObject *ErlangFunction_New(PyObject *name) {
 }
 
 /**
- * Python implementation of erlang.call(name, *args)
- *
- * This function allows Python code to call registered Erlang functions.
- * It sends a message to the callback handler and blocks until it receives
- * a response via the callback pipe.
+ * Check if a SuspensionRequired exception is pending.
+ * Returns true if the exception is set and matches SuspensionRequiredException.
  */
-static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
-    if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
-        PyErr_SetString(PyExc_RuntimeError, "No callback handler registered");
+static bool is_suspension_exception(void) {
+    if (!PyErr_Occurred()) {
+        return false;
+    }
+    return PyErr_ExceptionMatches(SuspensionRequiredException);
+}
+
+/**
+ * Extract suspension info from the pending SuspensionRequired exception.
+ * Returns the exception args tuple (callback_id, func_name, args) or NULL.
+ * Clears the exception if successful.
+ */
+static PyObject *get_suspension_args(void) {
+    PyObject *exc_type, *exc_value, *exc_tb;
+    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+    if (exc_value == NULL) {
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_tb);
         return NULL;
     }
 
-    Py_ssize_t nargs = PyTuple_Size(args);
-    if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
+    /* Get the args from the exception - it's a tuple (callback_id, func_name, args) */
+    PyObject *args = PyObject_GetAttrString(exc_value, "args");
+    Py_DECREF(exc_type);
+    Py_DECREF(exc_value);
+    Py_XDECREF(exc_tb);
+
+    if (args == NULL || !PyTuple_Check(args) || PyTuple_Size(args) != 3) {
+        Py_XDECREF(args);
         return NULL;
     }
 
-    /* Get function name (first arg) */
-    PyObject *name_obj = PyTuple_GetItem(args, 0);
-    if (!PyUnicode_Check(name_obj)) {
-        PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+    return args;  /* Caller owns this reference */
+}
+
+/**
+ * Create a suspended state resource from exception args.
+ * Args tuple format: (callback_id, func_name, args)
+ * Also stores the original request context for replay.
+ * Returns the suspended state or NULL on error.
+ */
+static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_args,
+                                                  py_request_t *req) {
+    if (!PyTuple_Check(exc_args) || PyTuple_Size(exc_args) != 3) {
         return NULL;
     }
-    const char *func_name = PyUnicode_AsUTF8(name_obj);
+
+    PyObject *callback_id_obj = PyTuple_GetItem(exc_args, 0);
+    PyObject *func_name_obj = PyTuple_GetItem(exc_args, 1);
+    PyObject *callback_args = PyTuple_GetItem(exc_args, 2);
+
+    if (!PyLong_Check(callback_id_obj) || !PyUnicode_Check(func_name_obj)) {
+        return NULL;
+    }
+
+    /* Allocate the suspended state resource */
+    suspended_state_t *state = enif_alloc_resource(
+        SUSPENDED_STATE_RESOURCE_TYPE, sizeof(suspended_state_t));
+    if (state == NULL) {
+        return NULL;
+    }
+
+    /* Initialize the state */
+    memset(state, 0, sizeof(suspended_state_t));
+    state->worker = tl_current_worker;
+    state->callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
+
+    /* Copy callback function name */
+    Py_ssize_t len;
+    const char *func_name = PyUnicode_AsUTF8AndSize(func_name_obj, &len);
     if (func_name == NULL) {
+        enif_release_resource(state);
+        return NULL;
+    }
+    state->callback_func_name = enif_alloc(len + 1);
+    if (state->callback_func_name == NULL) {
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->callback_func_name, func_name, len);
+    state->callback_func_name[len] = '\0';
+    state->callback_func_len = len;
+
+    /* Store reference to callback args */
+    Py_INCREF(callback_args);
+    state->callback_args = callback_args;
+
+    /* Store original request context for replay */
+    state->request_type = req->type;
+    state->orig_timeout_ms = req->timeout_ms;
+
+    /* Create environment to hold copied terms */
+    state->orig_env = enif_alloc_env();
+    if (state->orig_env == NULL) {
+        Py_DECREF(callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
         return NULL;
     }
 
-    /* Build args list (remaining args) */
-    PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
-    if (call_args == NULL) {
+    /* Copy request-specific data */
+    if (req->type == PY_REQ_CALL) {
+        /* Copy module and function binaries */
+        enif_alloc_binary(req->module_bin.size, &state->orig_module);
+        memcpy(state->orig_module.data, req->module_bin.data, req->module_bin.size);
+
+        enif_alloc_binary(req->func_bin.size, &state->orig_func);
+        memcpy(state->orig_func.data, req->func_bin.data, req->func_bin.size);
+
+        /* Copy args and kwargs to our environment */
+        state->orig_args = enif_make_copy(state->orig_env, req->args_term);
+        state->orig_kwargs = enif_make_copy(state->orig_env, req->kwargs_term);
+    } else if (req->type == PY_REQ_EVAL) {
+        /* Copy code binary */
+        enif_alloc_binary(req->code_bin.size, &state->orig_code);
+        memcpy(state->orig_code.data, req->code_bin.data, req->code_bin.size);
+
+        /* Copy locals */
+        state->orig_locals = enif_make_copy(state->orig_env, req->locals_term);
+    }
+
+    /* Initialize synchronization primitives */
+    pthread_mutex_init(&state->mutex, NULL);
+    pthread_cond_init(&state->cond, NULL);
+
+    state->result_data = NULL;
+    state->result_len = 0;
+    state->has_result = false;
+    state->is_error = false;
+
+    return state;
+}
+
+/**
+ * Helper to parse callback response data into a Python object.
+ * Response format: status_byte (0=ok, 1=error) + python_repr_string
+ */
+static PyObject *parse_callback_response(unsigned char *response_data, size_t response_len) {
+    if (response_len < 1) {
+        PyErr_SetString(PyExc_RuntimeError, "Empty callback response");
         return NULL;
     }
 
-    /* Convert args to Erlang term */
-    ErlNifEnv *msg_env = enif_alloc_env();
-    ERL_NIF_TERM func_term;
-    {
-        size_t len = strlen(func_name);
-        unsigned char *buf = enif_make_new_binary(msg_env, len, &func_term);
-        memcpy(buf, func_name, len);
-    }
-
-    ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
-    Py_DECREF(call_args);
-
-    /* Create callback reference */
-    uint64_t callback_id = (uint64_t)pthread_self();  /* Use thread ID as callback ID */
-    ERL_NIF_TERM id_term = enif_make_uint64(msg_env, callback_id);
-
-    /* Send message: {erlang_callback, CallbackId, FuncName, Args} */
-    ERL_NIF_TERM msg = enif_make_tuple4(msg_env,
-        ATOM_ERLANG_CALLBACK,
-        id_term,
-        func_term,
-        args_term);
-
-    /* Variables for response */
-    uint32_t response_len = 0;
-    ssize_t n;
-    char *response_data = NULL;
-
-    /* Release GIL before sending and waiting */
-    Py_BEGIN_ALLOW_THREADS
-
-    enif_send(NULL, &tl_current_worker->callback_handler, msg_env, msg);
-    enif_free_env(msg_env);
-
-    /* Wait for response by reading from pipe */
-    /* Response format: 4-byte length + msgpack/term data */
-    n = read(tl_current_worker->callback_pipe[0], &response_len, sizeof(response_len));
-
-    Py_END_ALLOW_THREADS
-
-    if (n != sizeof(response_len)) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response length");
-        return NULL;
-    }
-
-    /* Read response data */
-    response_data = enif_alloc(response_len);
-    if (response_data == NULL) {
-        PyErr_SetString(PyExc_MemoryError, "Failed to allocate response buffer");
-        return NULL;
-    }
-
-    Py_BEGIN_ALLOW_THREADS
-    n = read(tl_current_worker->callback_pipe[0], response_data, response_len);
-    Py_END_ALLOW_THREADS
-
-    if (n != (ssize_t)response_len) {
-        enif_free(response_data);
-        PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response data");
-        return NULL;
-    }
-
-    /* Parse response: first byte is status (0=ok, 1=error), rest is the value */
     uint8_t status = response_data[0];
 
-    /* Decode the binary response into an Erlang term, then to Python */
-    /* For simplicity, we use a simple encoding: status byte + string representation */
-    /* TODO: Use a more efficient binary encoding */
-
     if (response_len < 2) {
-        enif_free(response_data);
         if (status == 0) {
             Py_RETURN_NONE;
         } else {
@@ -2446,9 +2566,7 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         }
     }
 
-    /* Parse the result as a Python expression (simple approach) */
-    /* The response is: status_byte + python_repr_string */
-    char *result_str = response_data + 1;
+    char *result_str = (char *)response_data + 1;
     size_t result_len = response_len - 1;
 
     PyObject *result = NULL;
@@ -2477,11 +2595,190 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         }
     } else {
         /* Error case */
-        PyErr_SetString(PyExc_RuntimeError, result_str);
+        char *err_msg = enif_alloc(result_len + 1);
+        if (err_msg != NULL) {
+            memcpy(err_msg, result_str, result_len);
+            err_msg[result_len] = '\0';
+            PyErr_SetString(PyExc_RuntimeError, err_msg);
+            enif_free(err_msg);
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "Erlang callback failed");
+        }
     }
 
-    enif_free(response_data);
     return result;
+}
+
+/**
+ * Python implementation of erlang.call(name, *args)
+ *
+ * This function allows Python code to call registered Erlang functions.
+ *
+ * The implementation uses a suspension/resume mechanism to avoid holding
+ * dirty schedulers during callbacks:
+ *
+ * 1. If a suspended state exists with a cached result, return it immediately
+ * 2. Otherwise, create a suspended state, send callback message, wait on condvar
+ * 3. When resume_callback is called, the condvar is signaled with the result
+ * 4. Parse and return the result
+ *
+ * This allows the dirty scheduler to be freed while waiting for the callback.
+ */
+static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
+    if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
+        PyErr_SetString(PyExc_RuntimeError, "No callback handler registered");
+        return NULL;
+    }
+
+    Py_ssize_t nargs = PyTuple_Size(args);
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
+        return NULL;
+    }
+
+    /* Get function name (first arg) */
+    PyObject *name_obj = PyTuple_GetItem(args, 0);
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+        return NULL;
+    }
+    const char *func_name = PyUnicode_AsUTF8(name_obj);
+    if (func_name == NULL) {
+        return NULL;
+    }
+    size_t func_name_len = strlen(func_name);
+
+    /* Check if we have a suspended state with a cached result (replay case) */
+    if (tl_current_suspended != NULL && tl_current_suspended->has_result) {
+        /* Verify this is the same callback */
+        if (tl_current_suspended->callback_func_len == func_name_len &&
+            memcmp(tl_current_suspended->callback_func_name, func_name, func_name_len) == 0) {
+            /* Return the cached result - parse using ast.literal_eval */
+            PyObject *result = parse_callback_response(
+                tl_current_suspended->result_data,
+                tl_current_suspended->result_len);
+            /* Mark result as consumed (don't clear tl_current_suspended yet,
+             * as we might need it for nested callbacks in the future) */
+            tl_current_suspended->has_result = false;
+            return result;
+        }
+    }
+
+    /* Build args list (remaining args) */
+    PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
+    if (call_args == NULL) {
+        return NULL;
+    }
+
+    /*
+     * Check if suspension is allowed.
+     * Suspension is only safe when the result will be directly examined by the
+     * executor (PY_REQ_CALL or PY_REQ_EVAL). For PY_REQ_EXEC or nested Python
+     * code, we must block and wait for the result.
+     */
+    if (!tl_allow_suspension) {
+        /* Fall back to blocking behavior - send message and wait on pipe */
+        ErlNifEnv *msg_env = enif_alloc_env();
+        ERL_NIF_TERM func_term;
+        {
+            unsigned char *buf = enif_make_new_binary(msg_env, func_name_len, &func_term);
+            memcpy(buf, func_name, func_name_len);
+        }
+
+        ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
+        Py_DECREF(call_args);
+
+        uint64_t callback_id = atomic_fetch_add(&g_callback_id_counter, 1);
+        ERL_NIF_TERM id_term = enif_make_uint64(msg_env, callback_id);
+
+        ERL_NIF_TERM msg = enif_make_tuple4(msg_env,
+            ATOM_ERLANG_CALLBACK,
+            id_term,
+            func_term,
+            args_term);
+
+        uint32_t response_len = 0;
+        ssize_t n;
+        char *response_data = NULL;
+
+        Py_BEGIN_ALLOW_THREADS
+        enif_send(NULL, &tl_current_worker->callback_handler, msg_env, msg);
+        enif_free_env(msg_env);
+        n = read(tl_current_worker->callback_pipe[0], &response_len, sizeof(response_len));
+        Py_END_ALLOW_THREADS
+
+        if (n != sizeof(response_len)) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response length");
+            return NULL;
+        }
+
+        response_data = enif_alloc(response_len);
+        if (response_data == NULL) {
+            PyErr_SetString(PyExc_MemoryError, "Failed to allocate response buffer");
+            return NULL;
+        }
+
+        Py_BEGIN_ALLOW_THREADS
+        n = read(tl_current_worker->callback_pipe[0], response_data, response_len);
+        Py_END_ALLOW_THREADS
+
+        if (n != (ssize_t)response_len) {
+            enif_free(response_data);
+            PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response data");
+            return NULL;
+        }
+
+        PyObject *result = parse_callback_response((unsigned char *)response_data, response_len);
+        enif_free(response_data);
+        return result;
+    }
+
+    /*
+     * Suspension is allowed - raise SuspensionRequired exception.
+     *
+     * Unlike returning a marker tuple, raising an exception properly interrupts
+     * Python execution even in the middle of an expression like:
+     *   erlang.call('foo', x) + 1
+     *
+     * The executor (process_request) catches this exception and:
+     * 1. Creates a suspended state resource
+     * 2. Returns {suspended, CallbackId, StateRef, {Func, Args}} to Erlang
+     * 3. The dirty scheduler is freed
+     *
+     * When Erlang calls resume_callback with the result:
+     * 1. The result is stored in the suspended state
+     * 2. A dirty NIF is scheduled to re-run the Python code
+     * 3. On re-run, this function finds the cached result and returns it
+     */
+    uint64_t callback_id = atomic_fetch_add(&g_callback_id_counter, 1);
+
+    /* Create exception args tuple: (callback_id, func_name, args) */
+    PyObject *exc_args = PyTuple_New(3);
+    if (exc_args == NULL) {
+        Py_DECREF(call_args);
+        return NULL;
+    }
+
+    PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(callback_id);
+    PyObject *func_name_obj = PyUnicode_FromString(func_name);
+
+    if (callback_id_obj == NULL || func_name_obj == NULL) {
+        Py_XDECREF(callback_id_obj);
+        Py_XDECREF(func_name_obj);
+        Py_DECREF(call_args);
+        Py_DECREF(exc_args);
+        return NULL;
+    }
+
+    PyTuple_SET_ITEM(exc_args, 0, callback_id_obj); /* Takes ownership */
+    PyTuple_SET_ITEM(exc_args, 1, func_name_obj);   /* Takes ownership */
+    PyTuple_SET_ITEM(exc_args, 2, call_args);       /* Takes ownership */
+
+    /* Raise the exception - Python will unwind the stack */
+    PyErr_SetObject(SuspensionRequiredException, exc_args);
+    Py_DECREF(exc_args);  /* SetObject increfs, so we decref our reference */
+
+    return NULL;  /* Signals exception was raised */
 }
 
 /**
@@ -2557,6 +2854,22 @@ static int create_erlang_module(void) {
 
     PyObject *module = PyModule_Create(&ErlangModuleDef);
     if (module == NULL) {
+        return -1;
+    }
+
+    /* Create the SuspensionRequired exception.
+     * This exception is raised internally when erlang.call() needs to suspend.
+     * It carries callback info in args: (callback_id, func_name, args_tuple) */
+    SuspensionRequiredException = PyErr_NewException(
+        "erlang.SuspensionRequired", NULL, NULL);
+    if (SuspensionRequiredException == NULL) {
+        Py_DECREF(module);
+        return -1;
+    }
+    Py_INCREF(SuspensionRequiredException);
+    if (PyModule_AddObject(module, "SuspensionRequired", SuspensionRequiredException) < 0) {
+        Py_DECREF(SuspensionRequiredException);
+        Py_DECREF(module);
         return -1;
     }
 
@@ -2651,6 +2964,254 @@ static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const E
 }
 
 /* ============================================================================
+ * Reentrant callback resume support
+ *
+ * These NIFs allow Erlang to resume a suspended Python callback execution.
+ * ============================================================================ */
+
+/* Forward declaration for the dirty resume NIF */
+static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
+
+/**
+ * Resume a suspended callback by storing the result and scheduling replay.
+ *
+ * Args: StateRef, ResultBinary
+ *
+ * This NIF stores the callback result in the suspended state and schedules
+ * a dirty NIF (nif_resume_callback_dirty) to replay the Python code.
+ */
+static ERL_NIF_TERM nif_resume_callback(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    suspended_state_t *state;
+    ErlNifBinary result_bin;
+
+    if (!enif_get_resource(env, argv[0], SUSPENDED_STATE_RESOURCE_TYPE, (void **)&state)) {
+        return make_error(env, "invalid_state_ref");
+    }
+
+    if (!enif_inspect_binary(env, argv[1], &result_bin)) {
+        return make_error(env, "invalid_result");
+    }
+
+    /* Store the result in the suspended state */
+    pthread_mutex_lock(&state->mutex);
+
+    /* Copy result data */
+    state->result_data = enif_alloc(result_bin.size);
+    if (state->result_data == NULL) {
+        pthread_mutex_unlock(&state->mutex);
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(state->result_data, result_bin.data, result_bin.size);
+    state->result_len = result_bin.size;
+    state->has_result = true;
+    state->is_error = false;
+
+    pthread_mutex_unlock(&state->mutex);
+
+    /*
+     * Schedule the dirty resume NIF.
+     * This allows the current NIF to return immediately, and the dirty NIF
+     * will handle the Python replay on a dirty scheduler.
+     */
+    ERL_NIF_TERM new_argv[1] = { argv[0] };  /* Pass StateRef to dirty NIF */
+    return enif_schedule_nif(env, "resume_callback_dirty",
+        ERL_NIF_DIRTY_JOB_IO_BOUND, nif_resume_callback_dirty, 1, new_argv);
+}
+
+/**
+ * Dirty NIF that replays Python code with the cached callback result.
+ *
+ * This is scheduled by nif_resume_callback and runs on a dirty I/O scheduler.
+ * It sets tl_current_suspended so erlang_call_impl can return the cached result,
+ * then re-runs the original Python code. When Python hits erlang.call() again,
+ * it gets the cached result and continues normally.
+ */
+static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    suspended_state_t *state;
+
+    if (!enif_get_resource(env, argv[0], SUSPENDED_STATE_RESOURCE_TYPE, (void **)&state)) {
+        return make_error(env, "invalid_state_ref");
+    }
+
+    /* Verify the state has a result */
+    if (!state->has_result) {
+        return make_error(env, "no_result");
+    }
+
+    /* Set up thread-local state for replay */
+    tl_current_worker = state->worker;
+    tl_callback_env = env;
+    tl_current_suspended = state;  /* erlang_call_impl will check this */
+    tl_allow_suspension = true;
+
+    ERL_NIF_TERM result;
+
+    if (state->request_type == PY_REQ_CALL) {
+        /* Replay a py:call */
+        char *module_name = enif_alloc(state->orig_module.size + 1);
+        char *func_name = enif_alloc(state->orig_func.size + 1);
+
+        if (module_name == NULL || func_name == NULL) {
+            enif_free(module_name);
+            enif_free(func_name);
+            tl_current_suspended = NULL;
+            return make_error(env, "alloc_failed");
+        }
+
+        memcpy(module_name, state->orig_module.data, state->orig_module.size);
+        module_name[state->orig_module.size] = '\0';
+        memcpy(func_name, state->orig_func.data, state->orig_func.size);
+        func_name[state->orig_func.size] = '\0';
+
+        PyGILState_STATE gstate = PyGILState_Ensure();
+
+        PyObject *func = NULL;
+
+        /* Get the function (same logic as process_request) */
+        if (strcmp(module_name, "__main__") == 0) {
+            func = PyDict_GetItemString(state->worker->locals, func_name);
+            if (func == NULL) {
+                func = PyDict_GetItemString(state->worker->globals, func_name);
+            }
+            if (func != NULL) {
+                Py_INCREF(func);
+            } else {
+                PyErr_Format(PyExc_NameError, "name '%s' is not defined", func_name);
+                result = make_py_error(env);
+                goto call_cleanup;
+            }
+        } else {
+            PyObject *module = PyImport_ImportModule(module_name);
+            if (module == NULL) {
+                result = make_py_error(env);
+                goto call_cleanup;
+            }
+            func = PyObject_GetAttrString(module, func_name);
+            Py_DECREF(module);
+        }
+
+        if (func == NULL) {
+            result = make_py_error(env);
+            goto call_cleanup;
+        }
+
+        /* Convert args */
+        unsigned int args_len;
+        if (!enif_get_list_length(state->orig_env, state->orig_args, &args_len)) {
+            Py_DECREF(func);
+            result = make_error(env, "invalid_args");
+            goto call_cleanup;
+        }
+
+        PyObject *args = PyTuple_New(args_len);
+        ERL_NIF_TERM head, tail = state->orig_args;
+        for (unsigned int i = 0; i < args_len; i++) {
+            enif_get_list_cell(state->orig_env, tail, &head, &tail);
+            PyObject *arg = term_to_py(state->orig_env, head);
+            if (arg == NULL) {
+                Py_DECREF(args);
+                Py_DECREF(func);
+                result = make_error(env, "arg_conversion_failed");
+                goto call_cleanup;
+            }
+            PyTuple_SET_ITEM(args, i, arg);
+        }
+
+        /* Convert kwargs */
+        PyObject *kwargs = NULL;
+        if (enif_is_map(state->orig_env, state->orig_kwargs)) {
+            kwargs = term_to_py(state->orig_env, state->orig_kwargs);
+        }
+
+        /* Call the function (this will hit erlang.call which returns cached result) */
+        PyObject *py_result = PyObject_Call(func, args, kwargs);
+
+        Py_DECREF(func);
+        Py_DECREF(args);
+        Py_XDECREF(kwargs);
+
+        if (py_result == NULL) {
+            if (is_suspension_exception()) {
+                /* Another suspension - shouldn't happen if cache worked, but handle it */
+                PyErr_Clear();
+                result = make_error(env, "unexpected_suspension");
+            } else {
+                result = make_py_error(env);
+            }
+        } else {
+            ERL_NIF_TERM term_result = py_to_term(env, py_result);
+            Py_DECREF(py_result);
+            result = enif_make_tuple2(env, ATOM_OK, term_result);
+        }
+
+    call_cleanup:
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        enif_free(func_name);
+
+    } else if (state->request_type == PY_REQ_EVAL) {
+        /* Replay a py:eval */
+        char *code = enif_alloc(state->orig_code.size + 1);
+        if (code == NULL) {
+            tl_current_suspended = NULL;
+            return make_error(env, "alloc_failed");
+        }
+        memcpy(code, state->orig_code.data, state->orig_code.size);
+        code[state->orig_code.size] = '\0';
+
+        PyGILState_STATE gstate = PyGILState_Ensure();
+
+        /* Update locals if provided */
+        if (enif_is_map(state->orig_env, state->orig_locals)) {
+            PyObject *new_locals = term_to_py(state->orig_env, state->orig_locals);
+            if (new_locals != NULL && PyDict_Check(new_locals)) {
+                PyDict_Update(state->worker->locals, new_locals);
+                Py_DECREF(new_locals);
+            }
+        }
+
+        /* Compile and evaluate */
+        PyObject *compiled = Py_CompileString(code, "<erlang>", Py_eval_input);
+
+        if (compiled == NULL) {
+            result = make_py_error(env);
+        } else {
+            PyObject *py_result = PyEval_EvalCode(compiled, state->worker->globals,
+                                                   state->worker->locals);
+            Py_DECREF(compiled);
+
+            if (py_result == NULL) {
+                if (is_suspension_exception()) {
+                    /* Another suspension - shouldn't happen if cache worked, but handle it */
+                    PyErr_Clear();
+                    result = make_error(env, "unexpected_suspension");
+                } else {
+                    result = make_py_error(env);
+                }
+            } else {
+                ERL_NIF_TERM term_result = py_to_term(env, py_result);
+                Py_DECREF(py_result);
+                result = enif_make_tuple2(env, ATOM_OK, term_result);
+            }
+        }
+
+        PyGILState_Release(gstate);
+        enif_free(code);
+
+    } else {
+        result = make_error(env, "unsupported_request_type");
+    }
+
+    /* Clear thread-local state */
+    tl_current_worker = NULL;
+    tl_callback_env = NULL;
+    tl_current_suspended = NULL;
+    tl_allow_suspension = false;
+
+    return result;
+}
+
+/* ============================================================================
  * Executor thread implementation
  *
  * The executor thread owns the Python GIL and processes all Python operations.
@@ -2669,6 +3230,7 @@ static void process_request(py_request_t *req) {
         /* Set thread-local worker context for callbacks */
         tl_current_worker = worker;
         tl_callback_env = env;
+        tl_allow_suspension = true;  /* Allow suspension for direct calls */
 
         char *module_name = binary_to_string(&req->module_bin);
         char *func_name = binary_to_string(&req->func_bin);
@@ -2754,6 +3316,52 @@ static void process_request(py_request_t *req) {
             if (check_timeout_error()) {
                 PyErr_Clear();
                 req->result = enif_make_tuple2(env, ATOM_ERROR, ATOM_TIMEOUT);
+            } else if (is_suspension_exception()) {
+                /*
+                 * Python code called erlang.call() which raised SuspensionRequired.
+                 * Create a suspended state and return {suspended, CallbackId, StateRef, {Func, Args}}
+                 * so Erlang can execute the callback and then resume.
+                 */
+                PyObject *exc_args = get_suspension_args();  /* Clears exception */
+                if (exc_args == NULL) {
+                    req->result = make_error(env, "get_suspension_args_failed");
+                } else {
+                    suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
+                    if (suspended == NULL) {
+                        Py_DECREF(exc_args);
+                        req->result = make_error(env, "create_suspended_state_failed");
+                    } else {
+                        /* Extract callback info from exception args */
+                        PyObject *callback_id_obj = PyTuple_GetItem(exc_args, 0);
+                        PyObject *func_name_obj = PyTuple_GetItem(exc_args, 1);
+                        PyObject *call_args_obj = PyTuple_GetItem(exc_args, 2);
+
+                        uint64_t callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
+                        Py_ssize_t fn_len;
+                        const char *fn = PyUnicode_AsUTF8AndSize(func_name_obj, &fn_len);
+
+                        /* Create Erlang terms */
+                        ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
+                        enif_release_resource(suspended);  /* Erlang now holds the reference */
+
+                        ERL_NIF_TERM callback_id_term = enif_make_uint64(env, callback_id);
+
+                        ERL_NIF_TERM func_name_term;
+                        unsigned char *fn_buf = enif_make_new_binary(env, fn_len, &func_name_term);
+                        memcpy(fn_buf, fn, fn_len);
+
+                        ERL_NIF_TERM args_term = py_to_term(env, call_args_obj);
+
+                        Py_DECREF(exc_args);
+
+                        /* Return {suspended, CallbackId, StateRef, {FuncName, Args}} */
+                        req->result = enif_make_tuple4(env,
+                            ATOM_SUSPENDED,
+                            callback_id_term,
+                            state_ref,
+                            enif_make_tuple2(env, func_name_term, args_term));
+                    }
+                }
             } else {
                 req->result = make_py_error(env);
             }
@@ -2773,6 +3381,7 @@ static void process_request(py_request_t *req) {
     call_cleanup:
         tl_current_worker = NULL;
         tl_callback_env = NULL;
+        tl_allow_suspension = false;
         enif_free(module_name);
         enif_free(func_name);
         break;
@@ -2781,6 +3390,7 @@ static void process_request(py_request_t *req) {
     case PY_REQ_EVAL: {
         tl_current_worker = worker;
         tl_callback_env = env;
+        tl_allow_suspension = true;  /* Allow suspension - we replay on resume */
 
         char *code = binary_to_string(&req->code_bin);
         if (code == NULL) {
@@ -2815,6 +3425,45 @@ static void process_request(py_request_t *req) {
                 if (check_timeout_error()) {
                     PyErr_Clear();
                     req->result = enif_make_tuple2(env, ATOM_ERROR, ATOM_TIMEOUT);
+                } else if (is_suspension_exception()) {
+                    /* Handle suspension from erlang.call() in eval */
+                    PyObject *exc_args = get_suspension_args();  /* Clears exception */
+                    if (exc_args == NULL) {
+                        req->result = make_error(env, "get_suspension_args_failed");
+                    } else {
+                        suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
+                        if (suspended == NULL) {
+                            Py_DECREF(exc_args);
+                            req->result = make_error(env, "create_suspended_state_failed");
+                        } else {
+                            PyObject *callback_id_obj = PyTuple_GetItem(exc_args, 0);
+                            PyObject *func_name_obj = PyTuple_GetItem(exc_args, 1);
+                            PyObject *call_args_obj = PyTuple_GetItem(exc_args, 2);
+
+                            uint64_t callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
+                            Py_ssize_t fn_len;
+                            const char *fn = PyUnicode_AsUTF8AndSize(func_name_obj, &fn_len);
+
+                            ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
+                            enif_release_resource(suspended);
+
+                            ERL_NIF_TERM callback_id_term = enif_make_uint64(env, callback_id);
+
+                            ERL_NIF_TERM func_name_term;
+                            unsigned char *fn_buf = enif_make_new_binary(env, fn_len, &func_name_term);
+                            memcpy(fn_buf, fn, fn_len);
+
+                            ERL_NIF_TERM args_term = py_to_term(env, call_args_obj);
+
+                            Py_DECREF(exc_args);
+
+                            req->result = enif_make_tuple4(env,
+                                ATOM_SUSPENDED,
+                                callback_id_term,
+                                state_ref,
+                                enif_make_tuple2(env, func_name_term, args_term));
+                        }
+                    }
                 } else {
                     req->result = make_py_error(env);
                 }
@@ -2834,6 +3483,7 @@ static void process_request(py_request_t *req) {
 
         tl_current_worker = NULL;
         tl_callback_env = NULL;
+        tl_allow_suspension = false;
         enif_free(code);
         break;
     }
@@ -2841,6 +3491,7 @@ static void process_request(py_request_t *req) {
     case PY_REQ_EXEC: {
         tl_current_worker = worker;
         tl_callback_env = env;
+        /* Note: tl_allow_suspension stays false for exec - suspension not allowed */
 
         char *code = binary_to_string(&req->code_bin);
         if (code == NULL) {
@@ -3497,18 +4148,23 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         env, NULL, "py_async_worker", async_worker_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
+    SUSPENDED_STATE_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "py_suspended_state", suspended_state_destructor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
 #ifdef HAVE_SUBINTERPRETERS
     SUBINTERP_WORKER_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "py_subinterp_worker", subinterp_worker_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
     if (WORKER_RESOURCE_TYPE == NULL || PYOBJ_RESOURCE_TYPE == NULL ||
-        ASYNC_WORKER_RESOURCE_TYPE == NULL || SUBINTERP_WORKER_RESOURCE_TYPE == NULL) {
+        ASYNC_WORKER_RESOURCE_TYPE == NULL || SUSPENDED_STATE_RESOURCE_TYPE == NULL ||
+        SUBINTERP_WORKER_RESOURCE_TYPE == NULL) {
         return -1;
     }
 #else
     if (WORKER_RESOURCE_TYPE == NULL || PYOBJ_RESOURCE_TYPE == NULL ||
-        ASYNC_WORKER_RESOURCE_TYPE == NULL) {
+        ASYNC_WORKER_RESOURCE_TYPE == NULL || SUSPENDED_STATE_RESOURCE_TYPE == NULL) {
         return -1;
     }
 #endif
@@ -3530,6 +4186,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ERLANG_CALLBACK = enif_make_atom(env, "erlang_callback");
     ATOM_ASYNC_RESULT = enif_make_atom(env, "async_result");
     ATOM_ASYNC_ERROR = enif_make_atom(env, "async_error");
+    ATOM_SUSPENDED = enif_make_atom(env, "suspended");
 
     return 0;
 }
@@ -3580,6 +4237,7 @@ static ErlNifFunc nif_funcs[] = {
     /* Callback support */
     {"set_callback_handler", 2, nif_set_callback_handler, 0},
     {"send_callback_response", 2, nif_send_callback_response, 0},
+    {"resume_callback", 2, nif_resume_callback, 0},
 
     /* Async worker management */
     {"async_worker_new", 0, nif_async_worker_new, 0},
