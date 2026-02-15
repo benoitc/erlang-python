@@ -33,7 +33,6 @@
     worker_eval/4,
     worker_exec/2,
     worker_next/2,
-    worker_recv/2,
     import_module/2,
     get_attr/3,
     version/0,
@@ -173,12 +172,6 @@ worker_exec(_WorkerRef, _Code) ->
 %% Returns {ok, Value} | {error, stop_iteration} | {error, Error}
 -spec worker_next(reference(), reference()) -> {ok, term()} | {error, term()}.
 worker_next(_WorkerRef, _GeneratorRef) ->
-    ?NIF_STUB.
-
-%% @doc Wait for a message in the worker loop.
-%% Releases the GIL while waiting.
--spec worker_recv(reference(), timeout()) -> {ok, term()} | timeout | {error, term()}.
-worker_recv(_WorkerRef, _TimeoutMs) ->
     ?NIF_STUB.
 
 %%% ============================================================================

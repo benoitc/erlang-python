@@ -37,6 +37,10 @@
   - Added NULL checks on all `enif_alloc_resource` and `enif_alloc_env` calls
 - **Dialyzer warnings** - Added `{suspended, ...}` return type to NIF specs for
   `worker_call`, `worker_eval`, and `resume_callback` functions
+- **Dead code removal** - Cleaned up unused code discovered during code review:
+  - Removed `execute_direct()` function in `py_exec.c` (duplicated inline logic)
+  - Removed unused `ref` field from `async_pending_t` struct in `py_nif.h`
+  - Removed `worker_recv/2` from `py_nif.erl` (declared but never implemented in C)
 
 ### Documentation
 
