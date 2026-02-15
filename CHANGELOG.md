@@ -15,6 +15,10 @@
   - `erlang.my_func(args)` - attribute-style access
   - `erlang.call('my_func', args)` - legacy syntax still works
 
+- **Module Reload** - Reload Python modules across all workers during development
+  - `py:reload(module)` uses `importlib.reload()` to refresh modules from disk
+  - `py_pool:broadcast/1` for sending requests to all workers
+
 - **Documentation improvements**
   - Added shared state section to getting-started, scalability, and ai-integration guides
   - Added embedding caching example using shared state
