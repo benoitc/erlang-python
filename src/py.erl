@@ -88,7 +88,9 @@
     state_incr/1,
     state_incr/2,
     state_decr/1,
-    state_decr/2
+    state_decr/2,
+    %% Module reload
+    reload/1
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -574,3 +576,45 @@ state_decr(Key) ->
 -spec state_decr(term(), integer()) -> integer().
 state_decr(Key, Amount) ->
     py_state:decr(Key, Amount).
+
+%%% ============================================================================
+%%% Module Reload
+%%% ============================================================================
+
+%% @doc Reload a Python module across all workers.
+%% This uses importlib.reload() to refresh the module from disk.
+%% Useful during development when Python code changes.
+%%
+%% Note: This only affects already-imported modules. If the module
+%% hasn't been imported in a worker yet, the reload is a no-op for that worker.
+%%
+%% Example:
+%% ```
+%% %% After modifying mymodule.py on disk:
+%% ok = py:reload(mymodule).
+%% '''
+%%
+%% Returns ok if reload succeeded in all workers, or {error, Reasons}
+%% if any workers failed.
+-spec reload(py_module()) -> ok | {error, [{worker, term()}]}.
+reload(Module) ->
+    ModuleBin = ensure_binary(Module),
+    %% Build Python code that:
+    %% 1. Checks if module is loaded in sys.modules
+    %% 2. If yes, reloads it with importlib.reload()
+    %% 3. Returns the module name or None if not loaded
+    Code = <<"__import__('importlib').reload(__import__('sys').modules['",
+             ModuleBin/binary,
+             "']) if '", ModuleBin/binary, "' in __import__('sys').modules else None">>,
+    %% Broadcast to all workers
+    Request = {eval, undefined, undefined, Code, #{}},
+    Results = py_pool:broadcast(Request),
+    %% Check if any failed
+    Errors = lists:filtermap(fun
+        ({ok, _}) -> false;
+        ({error, Reason}) -> {true, Reason}
+    end, Results),
+    case Errors of
+        [] -> ok;
+        _ -> {error, [{worker, E} || E <- Errors]}
+    end.

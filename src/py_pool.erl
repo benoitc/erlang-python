@@ -24,6 +24,7 @@
 -export([
     start_link/1,
     request/1,
+    broadcast/1,
     get_stats/0
 ]).
 
@@ -54,6 +55,12 @@ start_link(NumWorkers) ->
 -spec request(term()) -> ok.
 request(Request) ->
     gen_server:cast(?MODULE, {request, Request}).
+
+%% @doc Broadcast a request to all workers.
+%% Returns a list of results from each worker.
+-spec broadcast(term()) -> [{ok, term()} | {error, term()}].
+broadcast(Request) ->
+    gen_server:call(?MODULE, {broadcast, Request}, infinity).
 
 %% @doc Get pool statistics.
 -spec get_stats() -> map().
@@ -93,6 +100,12 @@ handle_call(get_stats, _From, State) ->
         available_workers => queue:len(State#state.workers)
     },
     {reply, Stats, State};
+
+handle_call({broadcast, Request}, _From, State) ->
+    %% Send request to all workers and collect results
+    Workers = queue:to_list(State#state.workers),
+    Results = broadcast_to_workers(Workers, Request),
+    {reply, Results, State};
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -150,3 +163,33 @@ extract_ref_caller({call, Ref, Caller, _, _, _, _}) -> {Ref, Caller, call};
 extract_ref_caller({eval, Ref, Caller, _, _}) -> {Ref, Caller, eval};
 extract_ref_caller({exec, Ref, Caller, _}) -> {Ref, Caller, exec};
 extract_ref_caller({stream, Ref, Caller, _, _, _, _}) -> {Ref, Caller, stream}.
+
+%% @private
+%% Send a request to all workers and collect results
+broadcast_to_workers(Workers, RequestTemplate) ->
+    Self = self(),
+    %% Send requests to all workers in parallel
+    Refs = lists:map(fun(Worker) ->
+        Ref = make_ref(),
+        Request = inject_ref_caller(RequestTemplate, Ref, Self),
+        Worker ! {py_request, Request},
+        Ref
+    end, Workers),
+    %% Collect all responses
+    lists:map(fun(Ref) ->
+        receive
+            {py_response, Ref, Result} -> Result;
+            {py_error, Ref, Error} -> {error, Error}
+        after 30000 ->
+            {error, timeout}
+        end
+    end, Refs).
+
+%% @private
+%% Inject a reference and caller into a request template
+inject_ref_caller({exec, _Ref, _Caller, Code}, NewRef, NewCaller) ->
+    {exec, NewRef, NewCaller, Code};
+inject_ref_caller({eval, _Ref, _Caller, Code, Locals}, NewRef, NewCaller) ->
+    {eval, NewRef, NewCaller, Code, Locals};
+inject_ref_caller({eval, _Ref, _Caller, Code, Locals, Timeout}, NewRef, NewCaller) ->
+    {eval, NewRef, NewCaller, Code, Locals, Timeout}.

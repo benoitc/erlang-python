@@ -46,7 +46,8 @@
     test_semaphore_timeout/1,
     test_semaphore_rate_limiting/1,
     test_overload_protection/1,
-    test_shared_state/1
+    test_shared_state/1,
+    test_reload/1
 ]).
 
 all() ->
@@ -87,7 +88,8 @@ all() ->
         test_semaphore_timeout,
         test_semaphore_rate_limiting,
         test_overload_protection,
-        test_shared_state
+        test_shared_state,
+        test_reload
     ].
 
 init_per_suite(Config) ->
@@ -889,5 +891,27 @@ assert val == 2, f'Expected 2, got {val}'
 
     %% Cleanup
     ok = py:state_clear(),
+
+    ok.
+
+%% Test module reload across all workers
+test_reload(_Config) ->
+    %% First, ensure json module is imported in at least one worker
+    {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
+
+    %% Now reload it - should succeed across all workers
+    ok = py:reload(json),
+
+    %% Verify the module still works after reload
+    {ok, <<"[1, 2, 3]">>} = py:call(json, dumps, [[1, 2, 3]]),
+
+    %% Test reload of a module that might not be loaded (should not error)
+    ok = py:reload(collections),
+
+    %% Test reload with binary module name
+    ok = py:reload(<<"os">>),
+
+    %% Test reload with string module name
+    ok = py:reload("sys"),
 
     ok.
