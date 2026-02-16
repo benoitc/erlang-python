@@ -625,39 +625,36 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
             func_term,
             args_term);
 
-        uint32_t response_len = 0;
-        ssize_t n;
         char *response_data = NULL;
+        uint32_t response_len = 0;
+        int read_result;
 
         Py_BEGIN_ALLOW_THREADS
         enif_send(NULL, &tl_current_worker->callback_handler, msg_env, msg);
         enif_free_env(msg_env);
-        n = read(tl_current_worker->callback_pipe[0], &response_len, sizeof(response_len));
+        /* Use 30 second timeout to prevent indefinite blocking */
+        read_result = read_length_prefixed_data(
+            tl_current_worker->callback_pipe[0],
+            &response_data, &response_len, 30000);
         Py_END_ALLOW_THREADS
 
-        if (n != sizeof(response_len)) {
-            PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response length");
+        if (read_result == -1) {
+            if (errno == ETIMEDOUT) {
+                PyErr_SetString(PyExc_TimeoutError, "Callback response timed out");
+            } else {
+                PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response");
+            }
             return NULL;
         }
-
-        response_data = enif_alloc(response_len);
-        if (response_data == NULL) {
+        if (read_result == -2) {
             PyErr_SetString(PyExc_MemoryError, "Failed to allocate response buffer");
             return NULL;
         }
 
-        Py_BEGIN_ALLOW_THREADS
-        n = read(tl_current_worker->callback_pipe[0], response_data, response_len);
-        Py_END_ALLOW_THREADS
-
-        if (n != (ssize_t)response_len) {
-            enif_free(response_data);
-            PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response data");
-            return NULL;
-        }
-
         PyObject *result = parse_callback_response((unsigned char *)response_data, response_len);
-        enif_free(response_data);
+        if (response_data != NULL) {
+            enif_free(response_data);
+        }
         return result;
     }
 
@@ -723,19 +720,19 @@ extern bool g_has_thread_coordinator;
 static int g_async_callback_pipe[2] = {-1, -1};  /* [0]=read, [1]=write */
 static PyObject *g_async_pending_futures = NULL;  /* Dict: callback_id -> Future */
 static pthread_mutex_t g_async_futures_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_async_callback_initialized = false;
+
+/* Thread-safe initialization using pthread_once */
+static pthread_once_t g_async_callback_init_once = PTHREAD_ONCE_INIT;
+static int g_async_callback_init_result = 0;
 
 /**
- * Initialize async callback system.
- * Creates the response pipe and pending futures dict.
+ * Internal initialization function called by pthread_once.
+ * Thread-safe: only called once by pthread_once.
  */
-static int async_callback_init(void) {
-    if (g_async_callback_initialized) {
-        return 0;
-    }
-
+static void async_callback_init_impl(void) {
     if (pipe(g_async_callback_pipe) < 0) {
-        return -1;
+        g_async_callback_init_result = -1;
+        return;
     }
 
     /* Set the read end to non-blocking for asyncio compatibility */
@@ -750,11 +747,21 @@ static int async_callback_init(void) {
         close(g_async_callback_pipe[1]);
         g_async_callback_pipe[0] = -1;
         g_async_callback_pipe[1] = -1;
-        return -1;
+        g_async_callback_init_result = -1;
+        return;
     }
 
-    g_async_callback_initialized = true;
-    return 0;
+    g_async_callback_init_result = 0;
+}
+
+/**
+ * Initialize async callback system.
+ * Creates the response pipe and pending futures dict.
+ * Thread-safe: uses pthread_once for initialization.
+ */
+static int async_callback_init(void) {
+    pthread_once(&g_async_callback_init_once, async_callback_init_impl);
+    return g_async_callback_init_result;
 }
 
 /**
@@ -893,11 +900,10 @@ static PyObject *get_async_callback_fd(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
 
-    if (!g_async_callback_initialized) {
-        if (async_callback_init() < 0) {
-            PyErr_SetString(PyExc_RuntimeError, "Failed to initialize async callback system");
-            return NULL;
-        }
+    /* async_callback_init uses pthread_once, so it's safe to call multiple times */
+    if (async_callback_init() < 0) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize async callback system");
+        return NULL;
     }
 
     return PyLong_FromLong(g_async_callback_pipe[0]);
@@ -1328,40 +1334,75 @@ static void *async_event_loop_thread(void *arg) {
             PyErr_Clear();
         }
 
-        /* Check for completed futures (GIL held) */
+        /*
+         * Check for completed futures (GIL held).
+         *
+         * IMPORTANT: We must not hold the mutex while calling Python functions
+         * to avoid deadlocks. The pattern is:
+         * 1. Lock mutex, collect completed items, unlock
+         * 2. Process callbacks outside mutex (no contention)
+         * 3. Lock mutex, remove processed items, unlock
+         */
+
+        /* Phase 1: Collect completed futures under mutex */
+        #define MAX_COMPLETED_BATCH 16
+        async_pending_t *completed[MAX_COMPLETED_BATCH];
+        int num_completed = 0;
+
         pthread_mutex_lock(&worker->queue_mutex);
-        async_pending_t *prev = NULL;
         async_pending_t *p = worker->pending_head;
-        while (p != NULL) {
+        while (p != NULL && num_completed < MAX_COMPLETED_BATCH) {
             if (p->future != NULL) {
+                /* Quick check if future is done (still needs GIL, but mutex held briefly) */
                 PyObject *done = PyObject_CallMethod(p->future, "done", NULL);
                 if (done != NULL && PyObject_IsTrue(done)) {
                     Py_DECREF(done);
-
-                    /* Future is complete - process it */
-                    async_future_callback(worker, p);
-
-                    /* Remove from list */
-                    Py_DECREF(p->future);
-                    if (prev == NULL) {
-                        worker->pending_head = p->next;
-                    } else {
-                        prev->next = p->next;
-                    }
-                    if (p == worker->pending_tail) {
-                        worker->pending_tail = prev;
-                    }
-                    async_pending_t *to_free = p;
-                    p = p->next;
-                    enif_free(to_free);
-                    continue;
+                    completed[num_completed++] = p;
+                } else {
+                    Py_XDECREF(done);
                 }
-                Py_XDECREF(done);
             }
-            prev = p;
             p = p->next;
         }
         pthread_mutex_unlock(&worker->queue_mutex);
+
+        /* Phase 2: Process completed callbacks outside mutex (no deadlock risk) */
+        for (int i = 0; i < num_completed; i++) {
+            async_future_callback(worker, completed[i]);
+        }
+
+        /* Phase 3: Remove processed items under mutex */
+        if (num_completed > 0) {
+            pthread_mutex_lock(&worker->queue_mutex);
+            for (int i = 0; i < num_completed; i++) {
+                async_pending_t *to_remove = completed[i];
+
+                /* Find and remove from list */
+                async_pending_t *prev = NULL;
+                p = worker->pending_head;
+                while (p != NULL) {
+                    if (p == to_remove) {
+                        /* Remove from list */
+                        if (prev == NULL) {
+                            worker->pending_head = p->next;
+                        } else {
+                            prev->next = p->next;
+                        }
+                        if (p == worker->pending_tail) {
+                            worker->pending_tail = prev;
+                        }
+                        break;
+                    }
+                    prev = p;
+                    p = p->next;
+                }
+
+                /* Clean up */
+                Py_DECREF(to_remove->future);
+                enif_free(to_remove);
+            }
+            pthread_mutex_unlock(&worker->queue_mutex);
+        }
     }
 
     /* Stop and close the event loop */

@@ -332,9 +332,14 @@ static int thread_worker_spawn_handler(thread_worker_t *tw) {
     }
     enif_free_env(msg_env);
 
-    /* Read handler PID from pipe (Erlang writes it after spawning) */
+    /* Read handler PID from pipe (Erlang writes it after spawning)
+     * Use 10 second timeout for handler spawn */
     uint32_t response_len = 0;
-    ssize_t n = read(tw->response_pipe[0], &response_len, sizeof(response_len));
+    ssize_t n = read_with_timeout(tw->response_pipe[0], &response_len, sizeof(response_len), 10000);
+    if (n <= 0) {
+        /* Timeout or error - handler spawn failed */
+        return -1;
+    }
     if (n != sizeof(response_len) || response_len == 0) {
         /* Handler spawned successfully - pid info is in the length as a signal */
         tw->has_handler = true;
@@ -420,9 +425,9 @@ static PyObject *thread_worker_call(const char *func_name, size_t func_name_len,
         func_term,
         args_term);
 
-    ssize_t n;
-    uint32_t response_len = 0;
     char *response_data = NULL;
+    uint32_t response_len = 0;
+    int read_result;
 
     /* Send message to coordinator (can be done with GIL held) */
     if (!enif_send(NULL, &g_thread_coordinator_pid, msg_env, msg)) {
@@ -434,36 +439,29 @@ static PyObject *thread_worker_call(const char *func_name, size_t func_name_len,
 
     /* Release GIL while waiting for response */
     Py_BEGIN_ALLOW_THREADS
-
-    /* Read response from pipe */
-    n = read(tw->response_pipe[0], &response_len, sizeof(response_len));
-
+    /* Use 30 second timeout to prevent indefinite blocking */
+    read_result = read_length_prefixed_data(
+        tw->response_pipe[0], &response_data, &response_len, 30000);
     Py_END_ALLOW_THREADS
 
-    if (n != sizeof(response_len)) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response length");
+    if (read_result == -1) {
+        if (errno == ETIMEDOUT) {
+            PyErr_SetString(PyExc_TimeoutError, "Callback response timed out");
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response");
+        }
         return NULL;
     }
-
-    response_data = enif_alloc(response_len);
-    if (response_data == NULL) {
+    if (read_result == -2) {
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate response buffer");
-        return NULL;
-    }
-
-    Py_BEGIN_ALLOW_THREADS
-    n = read(tw->response_pipe[0], response_data, response_len);
-    Py_END_ALLOW_THREADS
-
-    if (n != (ssize_t)response_len) {
-        enif_free(response_data);
-        PyErr_SetString(PyExc_RuntimeError, "Failed to read callback response data");
         return NULL;
     }
 
     /* Parse response using existing function */
     PyObject *result = parse_callback_response((unsigned char *)response_data, response_len);
-    enif_free(response_data);
+    if (response_data != NULL) {
+        enif_free(response_data);
+    }
 
     return result;
 }

@@ -98,6 +98,8 @@
 /** @brief Flag indicating dlopen with RTLD_GLOBAL is needed for Python extensions */
 #define NEED_DLOPEN_GLOBAL 1
 #endif
+
+#include <sys/select.h>
 /** @} */
 
 /* ============================================================================
@@ -869,6 +871,86 @@ static char *binary_to_string(const ErlNifBinary *bin) {
         str[bin->size] = '\0';
     }
     return str;
+}
+
+/**
+ * @brief Read from a file descriptor with optional timeout
+ *
+ * Uses select() to implement a timeout on blocking read operations.
+ * This prevents indefinite blocking on pipe reads.
+ *
+ * @param fd         File descriptor to read from
+ * @param buf        Buffer to read into
+ * @param count      Number of bytes to read
+ * @param timeout_ms Timeout in milliseconds (0 = no timeout, wait indefinitely)
+ *
+ * @return Number of bytes read on success, 0 on timeout, -1 on error
+ *
+ * @note On timeout, errno is set to ETIMEDOUT
+ */
+static ssize_t read_with_timeout(int fd, void *buf, size_t count, int timeout_ms) {
+    if (timeout_ms > 0) {
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+
+        int ret = select(fd + 1, &fds, NULL, NULL, &tv);
+        if (ret < 0) {
+            return -1;  /* select error */
+        }
+        if (ret == 0) {
+            errno = ETIMEDOUT;
+            return 0;  /* timeout */
+        }
+    }
+
+    return read(fd, buf, count);
+}
+
+/**
+ * @brief Read length-prefixed data from a file descriptor
+ *
+ * Reads a 4-byte length prefix followed by the data payload.
+ * Uses read_with_timeout for optional timeout support.
+ *
+ * @param fd         File descriptor to read from
+ * @param data_out   Pointer to store allocated data buffer (caller must free with enif_free)
+ * @param len_out    Pointer to store data length
+ * @param timeout_ms Timeout in milliseconds (0 = no timeout)
+ *
+ * @return 0 on success, -1 on read error/timeout, -2 on allocation failure
+ *
+ * @note On success with len > 0, caller must call enif_free(*data_out)
+ */
+static int read_length_prefixed_data(int fd, char **data_out, uint32_t *len_out, int timeout_ms) {
+    uint32_t len;
+    ssize_t n = read_with_timeout(fd, &len, sizeof(len), timeout_ms);
+    if (n != sizeof(len)) {
+        return -1;
+    }
+
+    *data_out = NULL;
+    *len_out = len;
+
+    if (len > 0) {
+        *data_out = enif_alloc(len);
+        if (*data_out == NULL) {
+            return -2;
+        }
+
+        n = read_with_timeout(fd, *data_out, len, timeout_ms);
+        if (n != (ssize_t)len) {
+            enif_free(*data_out);
+            *data_out = NULL;
+            return -1;
+        }
+    }
+
+    return 0;
 }
 
 /** @} */
