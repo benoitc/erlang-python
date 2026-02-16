@@ -114,6 +114,14 @@ ERL_NIF_TERM ATOM_ASYNC_ERROR;
 ERL_NIF_TERM ATOM_SUSPENDED;
 
 /* ============================================================================
+ * Forward declarations for cross-module functions
+ * ============================================================================ */
+
+/* From py_callback.c - needed by py_exec.c */
+static PyObject *build_pending_callback_exc_args(void);
+static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *suspended);
+
+/* ============================================================================
  * Include module implementations
  * ============================================================================ */
 

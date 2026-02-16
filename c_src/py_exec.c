@@ -298,57 +298,17 @@ static void process_request(py_request_t *req) {
                 PyErr_Clear();  /* Clear whatever exception is set */
 
                 /* Build exc_args tuple from thread-local storage */
-                PyObject *exc_args = PyTuple_New(3);
+                PyObject *exc_args = build_pending_callback_exc_args();
                 if (exc_args == NULL) {
-                    tl_pending_callback = false;
-                    req->result = make_error(env, "alloc_exc_args_failed");
+                    req->result = make_error(env, "build_exc_args_failed");
                 } else {
-                    PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
-                    PyObject *func_name_obj = PyUnicode_FromStringAndSize(
-                        tl_pending_func_name, tl_pending_func_name_len);
-
-                    if (callback_id_obj == NULL || func_name_obj == NULL) {
-                        Py_XDECREF(callback_id_obj);
-                        Py_XDECREF(func_name_obj);
-                        Py_DECREF(exc_args);
+                    suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
+                    Py_DECREF(exc_args);
+                    if (suspended == NULL) {
                         tl_pending_callback = false;
-                        req->result = make_error(env, "build_exc_args_failed");
+                        req->result = make_error(env, "create_suspended_state_failed");
                     } else {
-                        PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
-                        PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
-                        Py_INCREF(tl_pending_args);  /* Tuple takes ownership */
-                        PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
-
-                        suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
-                        if (suspended == NULL) {
-                            Py_DECREF(exc_args);
-                            tl_pending_callback = false;
-                            req->result = make_error(env, "create_suspended_state_failed");
-                        } else {
-                            /* Create Erlang terms */
-                            ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
-                            enif_release_resource(suspended);
-
-                            ERL_NIF_TERM callback_id_term = enif_make_uint64(env, tl_pending_callback_id);
-
-                            ERL_NIF_TERM func_name_term;
-                            unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
-                            memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
-
-                            ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
-
-                            Py_DECREF(exc_args);
-
-                            /* Clear pending state */
-                            tl_pending_callback = false;
-
-                            /* Return {suspended, CallbackId, StateRef, {FuncName, Args}} */
-                            req->result = enif_make_tuple4(env,
-                                ATOM_SUSPENDED,
-                                callback_id_term,
-                                state_ref,
-                                enif_make_tuple2(env, func_name_term, args_term));
-                        }
+                        req->result = build_suspended_result(env, suspended);
                     }
                 }
             } else {
@@ -423,53 +383,17 @@ static void process_request(py_request_t *req) {
                     /* Flag-based callback detection for eval */
                     PyErr_Clear();
 
-                    PyObject *exc_args = PyTuple_New(3);
+                    PyObject *exc_args = build_pending_callback_exc_args();
                     if (exc_args == NULL) {
-                        tl_pending_callback = false;
-                        req->result = make_error(env, "alloc_exc_args_failed");
+                        req->result = make_error(env, "build_exc_args_failed");
                     } else {
-                        PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
-                        PyObject *func_name_obj = PyUnicode_FromStringAndSize(
-                            tl_pending_func_name, tl_pending_func_name_len);
-
-                        if (callback_id_obj == NULL || func_name_obj == NULL) {
-                            Py_XDECREF(callback_id_obj);
-                            Py_XDECREF(func_name_obj);
-                            Py_DECREF(exc_args);
+                        suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
+                        Py_DECREF(exc_args);
+                        if (suspended == NULL) {
                             tl_pending_callback = false;
-                            req->result = make_error(env, "build_exc_args_failed");
+                            req->result = make_error(env, "create_suspended_state_failed");
                         } else {
-                            PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
-                            PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
-                            Py_INCREF(tl_pending_args);
-                            PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
-
-                            suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
-                            if (suspended == NULL) {
-                                Py_DECREF(exc_args);
-                                tl_pending_callback = false;
-                                req->result = make_error(env, "create_suspended_state_failed");
-                            } else {
-                                ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
-                                enif_release_resource(suspended);
-
-                                ERL_NIF_TERM callback_id_term = enif_make_uint64(env, tl_pending_callback_id);
-
-                                ERL_NIF_TERM func_name_term;
-                                unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
-                                memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
-
-                                ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
-
-                                Py_DECREF(exc_args);
-                                tl_pending_callback = false;
-
-                                req->result = enif_make_tuple4(env,
-                                    ATOM_SUSPENDED,
-                                    callback_id_term,
-                                    state_ref,
-                                    enif_make_tuple2(env, func_name_term, args_term));
-                            }
+                            req->result = build_suspended_result(env, suspended);
                         }
                     }
                 } else {

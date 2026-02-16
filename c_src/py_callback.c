@@ -88,13 +88,62 @@
  * ============================================================================ */
 
 /**
+ * Source type for suspended state creation.
+ * Indicates whether the source is a request or an existing suspended state.
+ */
+typedef enum {
+    SUSPENDED_SOURCE_REQUEST,   /* Source is py_request_t */
+    SUSPENDED_SOURCE_EXISTING   /* Source is suspended_state_t */
+} suspended_source_type_t;
+
+/**
+ * Source union for suspended state creation.
+ * Contains pointers to either request or existing suspended state.
+ */
+typedef struct {
+    suspended_source_type_t type;
+    union {
+        py_request_t *req;           /* For SUSPENDED_SOURCE_REQUEST */
+        suspended_state_t *existing; /* For SUSPENDED_SOURCE_EXISTING */
+    } data;
+} suspended_source_t;
+
+/**
+ * Internal cleanup helper for suspended state creation failure.
+ */
+static void cleanup_suspended_state_partial(suspended_state_t *state, PyObject *callback_args) {
+    if (state->orig_env != NULL) {
+        enif_free_env(state->orig_env);
+    }
+    if (state->callback_args != NULL) {
+        Py_DECREF(state->callback_args);
+    } else if (callback_args != NULL) {
+        Py_DECREF(callback_args);
+    }
+    if (state->callback_func_name != NULL) {
+        enif_free(state->callback_func_name);
+    }
+    enif_release_resource(state);
+}
+
+/**
  * Create a suspended state resource from exception args.
  * Args tuple format: (callback_id, func_name, args)
- * Also stores the original request context for replay.
- * Returns the suspended state or NULL on error.
+ *
+ * This unified function handles both:
+ * - Creating from a request (initial suspension)
+ * - Creating from an existing suspended state (nested suspension during replay)
+ *
+ * @param env NIF environment
+ * @param exc_args Exception args tuple from erlang.call()
+ * @param source Source of original request data
+ * @return suspended_state_t* or NULL on error
  */
-static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_args,
-                                                  py_request_t *req) {
+static suspended_state_t *create_suspended_state_ex(
+    ErlNifEnv *env, PyObject *exc_args, const suspended_source_t *source) {
+
+    (void)env;  /* Only needed for future extensions */
+
     if (!PyTuple_Check(exc_args) || PyTuple_Size(exc_args) != 3) {
         return NULL;
     }
@@ -116,7 +165,14 @@ static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_a
 
     /* Initialize the state */
     memset(state, 0, sizeof(suspended_state_t));
-    state->worker = tl_current_worker;
+
+    /* Set worker based on source type */
+    if (source->type == SUSPENDED_SOURCE_REQUEST) {
+        state->worker = tl_current_worker;
+    } else {
+        state->worker = source->data.existing->worker;
+    }
+
     state->callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
 
     /* Copy callback function name */
@@ -139,68 +195,93 @@ static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_a
     Py_INCREF(callback_args);
     state->callback_args = callback_args;
 
-    /* Store original request context for replay */
-    state->request_type = req->type;
-    state->orig_timeout_ms = req->timeout_ms;
+    /* Get request type and timeout based on source */
+    int request_type;
+    unsigned long timeout_ms;
+
+    if (source->type == SUSPENDED_SOURCE_REQUEST) {
+        request_type = source->data.req->type;
+        timeout_ms = source->data.req->timeout_ms;
+    } else {
+        request_type = source->data.existing->request_type;
+        timeout_ms = source->data.existing->orig_timeout_ms;
+    }
+
+    state->request_type = request_type;
+    state->orig_timeout_ms = timeout_ms;
 
     /* Create environment to hold copied terms */
     state->orig_env = enif_alloc_env();
     if (state->orig_env == NULL) {
-        Py_DECREF(callback_args);
-        state->callback_args = NULL;
-        enif_free(state->callback_func_name);
-        state->callback_func_name = NULL;
-        enif_release_resource(state);
+        cleanup_suspended_state_partial(state, NULL);
         return NULL;
     }
 
-    /* Copy request-specific data */
-    if (req->type == PY_REQ_CALL) {
-        /* Copy module and function binaries */
-        if (!enif_alloc_binary(req->module_bin.size, &state->orig_module)) {
-            Py_DECREF(callback_args);
-            state->callback_args = NULL;
-            enif_free(state->callback_func_name);
-            state->callback_func_name = NULL;
-            enif_free_env(state->orig_env);
-            state->orig_env = NULL;
-            enif_release_resource(state);
-            return NULL;
-        }
-        memcpy(state->orig_module.data, req->module_bin.data, req->module_bin.size);
+    /* Copy request-specific data based on source type and request type */
+    if (request_type == PY_REQ_CALL) {
+        ErlNifBinary *src_module, *src_func;
+        ERL_NIF_TERM src_args, src_kwargs;
+        ErlNifEnv *src_env;
 
-        if (!enif_alloc_binary(req->func_bin.size, &state->orig_func)) {
-            enif_release_binary(&state->orig_module);
-            Py_DECREF(callback_args);
-            state->callback_args = NULL;
-            enif_free(state->callback_func_name);
-            state->callback_func_name = NULL;
-            enif_free_env(state->orig_env);
-            state->orig_env = NULL;
-            enif_release_resource(state);
+        if (source->type == SUSPENDED_SOURCE_REQUEST) {
+            src_module = &source->data.req->module_bin;
+            src_func = &source->data.req->func_bin;
+            src_args = source->data.req->args_term;
+            src_kwargs = source->data.req->kwargs_term;
+            src_env = source->data.req->env;
+        } else {
+            src_module = &source->data.existing->orig_module;
+            src_func = &source->data.existing->orig_func;
+            src_args = source->data.existing->orig_args;
+            src_kwargs = source->data.existing->orig_kwargs;
+            src_env = source->data.existing->orig_env;
+        }
+
+        /* Copy module binary */
+        if (!enif_alloc_binary(src_module->size, &state->orig_module)) {
+            cleanup_suspended_state_partial(state, NULL);
             return NULL;
         }
-        memcpy(state->orig_func.data, req->func_bin.data, req->func_bin.size);
+        memcpy(state->orig_module.data, src_module->data, src_module->size);
+
+        /* Copy function binary */
+        if (!enif_alloc_binary(src_func->size, &state->orig_func)) {
+            enif_release_binary(&state->orig_module);
+            cleanup_suspended_state_partial(state, NULL);
+            return NULL;
+        }
+        memcpy(state->orig_func.data, src_func->data, src_func->size);
 
         /* Copy args and kwargs to our environment */
-        state->orig_args = enif_make_copy(state->orig_env, req->args_term);
-        state->orig_kwargs = enif_make_copy(state->orig_env, req->kwargs_term);
-    } else if (req->type == PY_REQ_EVAL) {
+        state->orig_args = enif_make_copy(state->orig_env, src_args);
+        state->orig_kwargs = enif_make_copy(state->orig_env, src_kwargs);
+        (void)src_env;  /* Used implicitly by enif_make_copy */
+
+    } else if (request_type == PY_REQ_EVAL) {
+        ErlNifBinary *src_code;
+        ERL_NIF_TERM src_locals;
+        ErlNifEnv *src_env;
+
+        if (source->type == SUSPENDED_SOURCE_REQUEST) {
+            src_code = &source->data.req->code_bin;
+            src_locals = source->data.req->locals_term;
+            src_env = source->data.req->env;
+        } else {
+            src_code = &source->data.existing->orig_code;
+            src_locals = source->data.existing->orig_locals;
+            src_env = source->data.existing->orig_env;
+        }
+
         /* Copy code binary */
-        if (!enif_alloc_binary(req->code_bin.size, &state->orig_code)) {
-            Py_DECREF(callback_args);
-            state->callback_args = NULL;
-            enif_free(state->callback_func_name);
-            state->callback_func_name = NULL;
-            enif_free_env(state->orig_env);
-            state->orig_env = NULL;
-            enif_release_resource(state);
+        if (!enif_alloc_binary(src_code->size, &state->orig_code)) {
+            cleanup_suspended_state_partial(state, NULL);
             return NULL;
         }
-        memcpy(state->orig_code.data, req->code_bin.data, req->code_bin.size);
+        memcpy(state->orig_code.data, src_code->data, src_code->size);
 
         /* Copy locals */
-        state->orig_locals = enif_make_copy(state->orig_env, req->locals_term);
+        state->orig_locals = enif_make_copy(state->orig_env, src_locals);
+        (void)src_env;  /* Used implicitly by enif_make_copy */
     }
 
     /* Initialize synchronization primitives */
@@ -213,159 +294,95 @@ static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_a
     state->is_error = false;
 
     return state;
+}
+
+/**
+ * Create a suspended state resource from a request.
+ * Wrapper for create_suspended_state_ex for initial suspension.
+ */
+static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_args,
+                                                  py_request_t *req) {
+    suspended_source_t source = {
+        .type = SUSPENDED_SOURCE_REQUEST,
+        .data.req = req
+    };
+    return create_suspended_state_ex(env, exc_args, &source);
 }
 
 /**
  * Create a new suspended state from an existing one (for nested suspensions).
- * Used when a second erlang.call() is made during replay.
+ * Wrapper for create_suspended_state_ex for nested suspension during replay.
  */
 static suspended_state_t *create_suspended_state_from_existing(
     ErlNifEnv *env, PyObject *exc_args, suspended_state_t *existing) {
-
-    if (!PyTuple_Check(exc_args) || PyTuple_Size(exc_args) != 3) {
-        return NULL;
-    }
-
-    PyObject *callback_id_obj = PyTuple_GetItem(exc_args, 0);
-    PyObject *func_name_obj = PyTuple_GetItem(exc_args, 1);
-    PyObject *callback_args = PyTuple_GetItem(exc_args, 2);
-
-    if (!PyLong_Check(callback_id_obj) || !PyUnicode_Check(func_name_obj)) {
-        return NULL;
-    }
-
-    /* Allocate the new suspended state resource */
-    suspended_state_t *state = enif_alloc_resource(
-        SUSPENDED_STATE_RESOURCE_TYPE, sizeof(suspended_state_t));
-    if (state == NULL) {
-        return NULL;
-    }
-
-    /* Initialize the state */
-    memset(state, 0, sizeof(suspended_state_t));
-    state->worker = existing->worker;  /* Same worker */
-    state->callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
-
-    /* Copy callback function name */
-    Py_ssize_t len;
-    const char *func_name = PyUnicode_AsUTF8AndSize(func_name_obj, &len);
-    if (func_name == NULL) {
-        enif_release_resource(state);
-        return NULL;
-    }
-    state->callback_func_name = enif_alloc(len + 1);
-    if (state->callback_func_name == NULL) {
-        enif_release_resource(state);
-        return NULL;
-    }
-    memcpy(state->callback_func_name, func_name, len);
-    state->callback_func_name[len] = '\0';
-    state->callback_func_len = len;
-
-    /* Store reference to callback args */
-    Py_INCREF(callback_args);
-    state->callback_args = callback_args;
-
-    /* Copy original request context from existing state */
-    state->request_type = existing->request_type;
-    state->orig_timeout_ms = existing->orig_timeout_ms;
-
-    /* Create environment to hold copied terms */
-    state->orig_env = enif_alloc_env();
-    if (state->orig_env == NULL) {
-        Py_DECREF(callback_args);
-        state->callback_args = NULL;
-        enif_free(state->callback_func_name);
-        state->callback_func_name = NULL;
-        enif_release_resource(state);
-        return NULL;
-    }
-
-    /* Copy request-specific data from existing state */
-    if (existing->request_type == PY_REQ_CALL) {
-        /* Copy module binary */
-        if (!enif_alloc_binary(existing->orig_module.size, &state->orig_module)) {
-            Py_DECREF(callback_args);
-            state->callback_args = NULL;
-            enif_free(state->callback_func_name);
-            state->callback_func_name = NULL;
-            enif_free_env(state->orig_env);
-            state->orig_env = NULL;
-            enif_release_resource(state);
-            return NULL;
-        }
-        memcpy(state->orig_module.data, existing->orig_module.data, existing->orig_module.size);
-
-        /* Copy function binary */
-        if (!enif_alloc_binary(existing->orig_func.size, &state->orig_func)) {
-            enif_release_binary(&state->orig_module);
-            Py_DECREF(callback_args);
-            state->callback_args = NULL;
-            enif_free(state->callback_func_name);
-            state->callback_func_name = NULL;
-            enif_free_env(state->orig_env);
-            state->orig_env = NULL;
-            enif_release_resource(state);
-            return NULL;
-        }
-        memcpy(state->orig_func.data, existing->orig_func.data, existing->orig_func.size);
-
-        /* Copy args and kwargs to our environment */
-        state->orig_args = enif_make_copy(state->orig_env, existing->orig_args);
-        state->orig_kwargs = enif_make_copy(state->orig_env, existing->orig_kwargs);
-    } else if (existing->request_type == PY_REQ_EVAL) {
-        /* Copy code binary */
-        if (!enif_alloc_binary(existing->orig_code.size, &state->orig_code)) {
-            Py_DECREF(callback_args);
-            state->callback_args = NULL;
-            enif_free(state->callback_func_name);
-            state->callback_func_name = NULL;
-            enif_free_env(state->orig_env);
-            state->orig_env = NULL;
-            enif_release_resource(state);
-            return NULL;
-        }
-        memcpy(state->orig_code.data, existing->orig_code.data, existing->orig_code.size);
-
-        /* Copy locals */
-        state->orig_locals = enif_make_copy(state->orig_env, existing->orig_locals);
-    }
-
-    /* Initialize synchronization primitives */
-    pthread_mutex_init(&state->mutex, NULL);
-    pthread_cond_init(&state->cond, NULL);
-
-    state->result_data = NULL;
-    state->result_len = 0;
-    state->has_result = false;
-    state->is_error = false;
-
-    return state;
+    suspended_source_t source = {
+        .type = SUSPENDED_SOURCE_EXISTING,
+        .data.existing = existing
+    };
+    return create_suspended_state_ex(env, exc_args, &source);
 }
 
 /**
- * Helper to build {suspended, CallbackId, StateRef, {FuncName, Args}} term.
+ * Build exception args tuple from thread-local pending callback state.
+ *
+ * This helper extracts the common pattern of building the exc_args tuple
+ * (callback_id, func_name, args) from thread-local storage.
+ *
+ * @return PyObject* tuple on success, NULL on failure
+ * @note On failure, tl_pending_callback is cleared
+ * @note Caller must Py_DECREF the returned tuple when done
  */
-static ERL_NIF_TERM make_suspended_term(ErlNifEnv *env, suspended_state_t *suspended,
-                                         PyObject *exc_args) {
-    PyObject *callback_id_obj = PyTuple_GetItem(exc_args, 0);
-    PyObject *func_name_obj = PyTuple_GetItem(exc_args, 1);
-    PyObject *call_args_obj = PyTuple_GetItem(exc_args, 2);
+static PyObject *build_pending_callback_exc_args(void) {
+    PyObject *exc_args = PyTuple_New(3);
+    if (exc_args == NULL) {
+        tl_pending_callback = false;
+        return NULL;
+    }
 
-    uint64_t callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
-    Py_ssize_t fn_len;
-    const char *fn = PyUnicode_AsUTF8AndSize(func_name_obj, &fn_len);
+    PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
+    PyObject *func_name_obj = PyUnicode_FromStringAndSize(
+        tl_pending_func_name, tl_pending_func_name_len);
 
+    if (callback_id_obj == NULL || func_name_obj == NULL) {
+        Py_XDECREF(callback_id_obj);
+        Py_XDECREF(func_name_obj);
+        Py_DECREF(exc_args);
+        tl_pending_callback = false;
+        return NULL;
+    }
+
+    PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
+    PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
+    Py_INCREF(tl_pending_args);  /* Tuple takes ownership */
+    PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
+
+    return exc_args;
+}
+
+/**
+ * Build the {suspended, ...} result term from a suspended state.
+ *
+ * Common helper for creating the suspension result after a callback
+ * is detected during Python execution.
+ *
+ * @param env NIF environment
+ * @param suspended Suspended state (resource will be released)
+ * @return ERL_NIF_TERM {suspended, CallbackId, StateRef, {FuncName, Args}}
+ * @note Clears tl_pending_callback
+ */
+static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *suspended) {
     ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
-    enif_release_resource(suspended);  /* Erlang now holds the reference */
+    enif_release_resource(suspended);
 
-    ERL_NIF_TERM callback_id_term = enif_make_uint64(env, callback_id);
+    ERL_NIF_TERM callback_id_term = enif_make_uint64(env, tl_pending_callback_id);
 
     ERL_NIF_TERM func_name_term;
-    unsigned char *fn_buf = enif_make_new_binary(env, fn_len, &func_name_term);
-    memcpy(fn_buf, fn, fn_len);
+    unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
+    memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
 
-    ERL_NIF_TERM args_term = py_to_term(env, call_args_obj);
+    ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
+
+    tl_pending_callback = false;
 
     return enif_make_tuple4(env,
         ATOM_SUSPENDED,
@@ -1593,37 +1610,17 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
                 PyErr_Clear();  /* Clear whatever exception is set */
 
                 /* Build exc_args tuple from thread-local storage */
-                PyObject *exc_args = PyTuple_New(3);
+                PyObject *exc_args = build_pending_callback_exc_args();
                 if (exc_args == NULL) {
-                    tl_pending_callback = false;
-                    result = make_error(env, "alloc_exc_args_failed");
+                    result = make_error(env, "build_exc_args_failed");
                 } else {
-                    PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
-                    PyObject *func_name_obj = PyUnicode_FromStringAndSize(
-                        tl_pending_func_name, tl_pending_func_name_len);
-
-                    if (callback_id_obj == NULL || func_name_obj == NULL) {
-                        Py_XDECREF(callback_id_obj);
-                        Py_XDECREF(func_name_obj);
-                        Py_DECREF(exc_args);
+                    suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
+                    Py_DECREF(exc_args);
+                    if (new_suspended == NULL) {
                         tl_pending_callback = false;
-                        result = make_error(env, "build_exc_args_failed");
+                        result = make_error(env, "create_nested_suspended_state_failed");
                     } else {
-                        PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
-                        PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
-                        Py_INCREF(tl_pending_args);
-                        PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
-
-                        suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
-                        if (new_suspended == NULL) {
-                            Py_DECREF(exc_args);
-                            tl_pending_callback = false;
-                            result = make_error(env, "create_nested_suspended_state_failed");
-                        } else {
-                            result = make_suspended_term(env, new_suspended, exc_args);
-                            Py_DECREF(exc_args);
-                            tl_pending_callback = false;
-                        }
+                        result = build_suspended_result(env, new_suspended);
                     }
                 }
             } else {
@@ -1681,37 +1678,17 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
                     PyErr_Clear();  /* Clear whatever exception is set */
 
                     /* Build exc_args tuple from thread-local storage */
-                    PyObject *exc_args = PyTuple_New(3);
+                    PyObject *exc_args = build_pending_callback_exc_args();
                     if (exc_args == NULL) {
-                        tl_pending_callback = false;
-                        result = make_error(env, "alloc_exc_args_failed");
+                        result = make_error(env, "build_exc_args_failed");
                     } else {
-                        PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
-                        PyObject *func_name_obj = PyUnicode_FromStringAndSize(
-                            tl_pending_func_name, tl_pending_func_name_len);
-
-                        if (callback_id_obj == NULL || func_name_obj == NULL) {
-                            Py_XDECREF(callback_id_obj);
-                            Py_XDECREF(func_name_obj);
-                            Py_DECREF(exc_args);
+                        suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
+                        Py_DECREF(exc_args);
+                        if (new_suspended == NULL) {
                             tl_pending_callback = false;
-                            result = make_error(env, "build_exc_args_failed");
+                            result = make_error(env, "create_nested_suspended_state_failed");
                         } else {
-                            PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
-                            PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
-                            Py_INCREF(tl_pending_args);
-                            PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
-
-                            suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
-                            if (new_suspended == NULL) {
-                                Py_DECREF(exc_args);
-                                tl_pending_callback = false;
-                                result = make_error(env, "create_nested_suspended_state_failed");
-                            } else {
-                                result = make_suspended_term(env, new_suspended, exc_args);
-                                Py_DECREF(exc_args);
-                                tl_pending_callback = false;
-                            }
+                            result = build_suspended_result(env, new_suspended);
                         }
                     }
                 } else {
