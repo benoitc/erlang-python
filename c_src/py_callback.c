@@ -88,46 +88,6 @@
  * ============================================================================ */
 
 /**
- * Check if a SuspensionRequired exception is pending.
- * Returns true if the exception is set and matches SuspensionRequiredException.
- */
-static bool is_suspension_exception(void) {
-    if (!PyErr_Occurred()) {
-        return false;
-    }
-    return PyErr_ExceptionMatches(SuspensionRequiredException);
-}
-
-/**
- * Extract suspension info from the pending SuspensionRequired exception.
- * Returns the exception args tuple (callback_id, func_name, args) or NULL.
- * Clears the exception if successful.
- */
-static PyObject *get_suspension_args(void) {
-    PyObject *exc_type, *exc_value, *exc_tb;
-    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
-
-    if (exc_value == NULL) {
-        Py_XDECREF(exc_type);
-        Py_XDECREF(exc_tb);
-        return NULL;
-    }
-
-    /* Get the args from the exception - it's a tuple (callback_id, func_name, args) */
-    PyObject *args = PyObject_GetAttrString(exc_value, "args");
-    Py_DECREF(exc_type);
-    Py_DECREF(exc_value);
-    Py_XDECREF(exc_tb);
-
-    if (args == NULL || !PyTuple_Check(args) || PyTuple_Size(args) != 3) {
-        Py_XDECREF(args);
-        return NULL;
-    }
-
-    return args;  /* Caller owns this reference */
-}
-
-/**
  * Create a suspended state resource from exception args.
  * Args tuple format: (callback_id, func_name, args)
  * Also stores the original request context for replay.
@@ -1193,23 +1153,46 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
         Py_XDECREF(kwargs);
 
         if (py_result == NULL) {
-            if (is_suspension_exception()) {
+            if (tl_pending_callback) {
                 /*
-                 * Another suspension during replay - Python made a second erlang.call().
-                 * Create a new suspended state and return {suspended, ...} so Erlang
-                 * can handle this callback and resume again.
+                 * Flag-based callback detection during replay.
+                 * Check flag FIRST, not exception type - this works even if
+                 * Python code caught and re-raised the exception.
                  */
-                PyObject *exc_args = get_suspension_args();  /* Clears exception */
+                PyErr_Clear();  /* Clear whatever exception is set */
+
+                /* Build exc_args tuple from thread-local storage */
+                PyObject *exc_args = PyTuple_New(3);
                 if (exc_args == NULL) {
-                    result = make_error(env, "get_suspension_args_failed");
+                    tl_pending_callback = false;
+                    result = make_error(env, "alloc_exc_args_failed");
                 } else {
-                    suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
-                    if (new_suspended == NULL) {
+                    PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
+                    PyObject *func_name_obj = PyUnicode_FromStringAndSize(
+                        tl_pending_func_name, tl_pending_func_name_len);
+
+                    if (callback_id_obj == NULL || func_name_obj == NULL) {
+                        Py_XDECREF(callback_id_obj);
+                        Py_XDECREF(func_name_obj);
                         Py_DECREF(exc_args);
-                        result = make_error(env, "create_nested_suspended_state_failed");
+                        tl_pending_callback = false;
+                        result = make_error(env, "build_exc_args_failed");
                     } else {
-                        result = make_suspended_term(env, new_suspended, exc_args);
-                        Py_DECREF(exc_args);
+                        PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
+                        PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
+                        Py_INCREF(tl_pending_args);
+                        PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
+
+                        suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
+                        if (new_suspended == NULL) {
+                            Py_DECREF(exc_args);
+                            tl_pending_callback = false;
+                            result = make_error(env, "create_nested_suspended_state_failed");
+                        } else {
+                            result = make_suspended_term(env, new_suspended, exc_args);
+                            Py_DECREF(exc_args);
+                            tl_pending_callback = false;
+                        }
                     }
                 }
             } else {
@@ -1258,23 +1241,46 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
             Py_DECREF(compiled);
 
             if (py_result == NULL) {
-                if (is_suspension_exception()) {
+                if (tl_pending_callback) {
                     /*
-                     * Another suspension during replay - Python made a second erlang.call().
-                     * Create a new suspended state and return {suspended, ...} so Erlang
-                     * can handle this callback and resume again.
+                     * Flag-based callback detection during eval replay.
+                     * Check flag FIRST, not exception type - this works even if
+                     * Python code caught and re-raised the exception.
                      */
-                    PyObject *exc_args = get_suspension_args();  /* Clears exception */
+                    PyErr_Clear();  /* Clear whatever exception is set */
+
+                    /* Build exc_args tuple from thread-local storage */
+                    PyObject *exc_args = PyTuple_New(3);
                     if (exc_args == NULL) {
-                        result = make_error(env, "get_suspension_args_failed");
+                        tl_pending_callback = false;
+                        result = make_error(env, "alloc_exc_args_failed");
                     } else {
-                        suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
-                        if (new_suspended == NULL) {
+                        PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(tl_pending_callback_id);
+                        PyObject *func_name_obj = PyUnicode_FromStringAndSize(
+                            tl_pending_func_name, tl_pending_func_name_len);
+
+                        if (callback_id_obj == NULL || func_name_obj == NULL) {
+                            Py_XDECREF(callback_id_obj);
+                            Py_XDECREF(func_name_obj);
                             Py_DECREF(exc_args);
-                            result = make_error(env, "create_nested_suspended_state_failed");
+                            tl_pending_callback = false;
+                            result = make_error(env, "build_exc_args_failed");
                         } else {
-                            result = make_suspended_term(env, new_suspended, exc_args);
-                            Py_DECREF(exc_args);
+                            PyTuple_SET_ITEM(exc_args, 0, callback_id_obj);
+                            PyTuple_SET_ITEM(exc_args, 1, func_name_obj);
+                            Py_INCREF(tl_pending_args);
+                            PyTuple_SET_ITEM(exc_args, 2, tl_pending_args);
+
+                            suspended_state_t *new_suspended = create_suspended_state_from_existing(env, exc_args, state);
+                            if (new_suspended == NULL) {
+                                Py_DECREF(exc_args);
+                                tl_pending_callback = false;
+                                result = make_error(env, "create_nested_suspended_state_failed");
+                            } else {
+                                result = make_suspended_term(env, new_suspended, exc_args);
+                                Py_DECREF(exc_args);
+                                tl_pending_callback = false;
+                            }
                         }
                     }
                 } else {

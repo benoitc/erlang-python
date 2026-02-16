@@ -21,7 +21,8 @@
     test_concurrent_reentrant/1,
     test_callback_with_complex_types/1,
     test_multiple_sequential_callbacks/1,
-    test_call_from_non_worker_thread/1
+    test_call_from_non_worker_thread/1,
+    test_callback_with_try_except/1
 ]).
 
 all() ->
@@ -32,7 +33,8 @@ all() ->
         test_concurrent_reentrant,
         test_callback_with_complex_types,
         test_multiple_sequential_callbacks,
-        test_call_from_non_worker_thread
+        test_call_from_non_worker_thread,
+        test_callback_with_try_except
     ].
 
 init_per_suite(Config) ->
@@ -258,4 +260,51 @@ test_call_from_non_worker_thread(_Config) ->
 
     %% Cleanup
     py:unregister_function(simple_add),
+    ok.
+
+%% @doc Test that erlang.call() works even when wrapped in try/except blocks.
+%% This simulates ASGI/WSGI middleware that catches all exceptions.
+%% The flag-based detection should work even when the SuspensionRequired
+%% exception is caught and re-raised by Python code.
+%%
+%% Uses py:call on a test module with try/except blocks to properly test
+%% the suspension mechanism through middleware-like exception handling.
+test_callback_with_try_except(_Config) ->
+    %% Register a simple Erlang function
+    py:register_function(get_value, fun([Key]) ->
+        case Key of
+            <<"a">> -> 1;
+            <<"b">> -> 2;
+            <<"c">> -> 3;
+            _ -> 0
+        end
+    end),
+
+    %% Add test directory to Python path so we can import the test module
+    TestDir = code:lib_dir(erlang_python, test),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test 1: Try/except that catches Exception and re-raises
+    {ok, Result1} = py:call(py_test_middleware, call_with_try_except, [<<"a">>]),
+    1 = Result1,
+
+    %% Test 2: Try/except that catches BaseException (catches everything)
+    {ok, Result2} = py:call(py_test_middleware, call_with_base_exception, [<<"b">>]),
+    2 = Result2,
+
+    %% Test 3: Nested try/except blocks
+    {ok, Result3} = py:call(py_test_middleware, call_with_nested_try, [<<"c">>]),
+    3 = Result3,
+
+    %% Test 4: Try/finally pattern
+    {ok, Result4} = py:call(py_test_middleware, call_with_finally, [<<"a">>]),
+    1 = Result4,
+
+    %% Test 5: Multiple middleware layers
+    {ok, Result5} = py:call(py_test_middleware, call_through_layers, [<<"b">>]),
+    2 = Result5,
+
+    %% Cleanup
+    py:unregister_function(get_value),
     ok.

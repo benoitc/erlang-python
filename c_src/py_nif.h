@@ -1108,23 +1108,6 @@ static PyObject *erlang_module_getattr(PyObject *module, PyObject *name);
 static void *async_event_loop_thread(void *arg);
 
 /**
- * @brief Check if SuspensionRequired exception is pending
- *
- * @return true if exception matches SuspensionRequiredException
- */
-static bool is_suspension_exception(void);
-
-/**
- * @brief Extract args from pending SuspensionRequired exception
- *
- * Gets (callback_id, func_name, args) tuple from exception and
- * clears the exception state.
- *
- * @return New reference to args tuple, or NULL on error
- */
-static PyObject *get_suspension_args(void);
-
-/**
  * @brief Create suspended state for callback handling
  *
  * Captures all state needed to resume Python execution after
