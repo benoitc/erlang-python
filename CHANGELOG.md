@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.1 (2026-02-16)
+
+### Fixed
+
+- **Hex.pm packaging** - Added `files` section to app.src to include build scripts
+  (`do_cmake.sh`, `do_build.sh`) and other necessary files in the hex.pm package
+
 ## 1.3.0 (2026-02-16)
 
 ### Added
