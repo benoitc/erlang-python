@@ -702,51 +702,44 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     }
 
     /*
-     * Suspension is allowed - raise SuspensionRequired exception.
+     * Flag-based suspension: set thread-local flag and raise exception.
      *
-     * Unlike returning a marker tuple, raising an exception properly interrupts
-     * Python execution even in the middle of an expression like:
-     *   erlang.call('foo', x) + 1
+     * Unlike checking exception type (which fails if frameworks catch exceptions),
+     * we set a thread-local flag that the C executor checks FIRST. This way:
+     * 1. Python code can catch/re-raise the exception - we don't care
+     * 2. The flag tells us a callback is pending
+     * 3. Executor handles it before looking at exception type
      *
-     * The executor (process_request) catches this exception and:
-     * 1. Creates a suspended state resource
-     * 2. Returns {suspended, CallbackId, StateRef, {Func, Args}} to Erlang
-     * 3. The dirty scheduler is freed
-     *
-     * When Erlang calls resume_callback with the result:
-     * 1. The result is stored in the suspended state
-     * 2. A dirty NIF is scheduled to re-run the Python code
-     * 3. On re-run, this function finds the cached result and returns it
+     * The exception is just to abort Python execution cleanly.
      */
     uint64_t callback_id = atomic_fetch_add(&g_callback_id_counter, 1);
 
-    /* Create exception args tuple: (callback_id, func_name, args) */
-    PyObject *exc_args = PyTuple_New(3);
-    if (exc_args == NULL) {
+    /* Set pending callback flag and store info */
+    tl_pending_callback = true;
+    tl_pending_callback_id = callback_id;
+
+    /* Store function name (make a copy) */
+    if (tl_pending_func_name != NULL) {
+        enif_free(tl_pending_func_name);
+    }
+    tl_pending_func_name = enif_alloc(func_name_len + 1);
+    if (tl_pending_func_name == NULL) {
+        tl_pending_callback = false;
         Py_DECREF(call_args);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate function name");
         return NULL;
     }
+    memcpy(tl_pending_func_name, func_name, func_name_len);
+    tl_pending_func_name[func_name_len] = '\0';
+    tl_pending_func_name_len = func_name_len;
 
-    PyObject *callback_id_obj = PyLong_FromUnsignedLongLong(callback_id);
-    PyObject *func_name_obj = PyUnicode_FromString(func_name);
+    /* Store args (take ownership) */
+    Py_XDECREF(tl_pending_args);
+    tl_pending_args = call_args;  /* Takes ownership, don't decref */
 
-    if (callback_id_obj == NULL || func_name_obj == NULL) {
-        Py_XDECREF(callback_id_obj);
-        Py_XDECREF(func_name_obj);
-        Py_DECREF(call_args);
-        Py_DECREF(exc_args);
-        return NULL;
-    }
-
-    PyTuple_SET_ITEM(exc_args, 0, callback_id_obj); /* Takes ownership */
-    PyTuple_SET_ITEM(exc_args, 1, func_name_obj);   /* Takes ownership */
-    PyTuple_SET_ITEM(exc_args, 2, call_args);       /* Takes ownership */
-
-    /* Raise the exception - Python will unwind the stack */
-    PyErr_SetObject(SuspensionRequiredException, exc_args);
-    Py_DECREF(exc_args);  /* SetObject increfs, so we decref our reference */
-
-    return NULL;  /* Signals exception was raised */
+    /* Raise exception to abort Python execution */
+    PyErr_SetString(SuspensionRequiredException, "callback pending");
+    return NULL;
 }
 
 /**

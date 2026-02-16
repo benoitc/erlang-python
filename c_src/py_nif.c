@@ -83,6 +83,13 @@ __thread ErlNifEnv *tl_callback_env = NULL;
 __thread suspended_state_t *tl_current_suspended = NULL;
 __thread bool tl_allow_suspension = false;
 
+/* Thread-local pending callback state (flag-based detection, not exception-based) */
+__thread bool tl_pending_callback = false;
+__thread uint64_t tl_pending_callback_id = 0;
+__thread char *tl_pending_func_name = NULL;
+__thread size_t tl_pending_func_name_len = 0;
+__thread PyObject *tl_pending_args = NULL;
+
 /* Thread-local timeout state */
 __thread uint64_t tl_timeout_deadline = 0;
 __thread bool tl_timeout_enabled = false;

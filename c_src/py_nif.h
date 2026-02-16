@@ -717,6 +717,13 @@ extern __thread suspended_state_t *tl_current_suspended;
 /** @brief Flag: suspension is allowed in current context */
 extern __thread bool tl_allow_suspension;
 
+/** @brief Flag: pending callback detected (checked before exception type) */
+extern __thread bool tl_pending_callback;
+extern __thread uint64_t tl_pending_callback_id;
+extern __thread char *tl_pending_func_name;
+extern __thread size_t tl_pending_func_name_len;
+extern __thread PyObject *tl_pending_args;
+
 /** @brief Timeout deadline (nanoseconds, monotonic clock) */
 extern __thread uint64_t tl_timeout_deadline;
 
