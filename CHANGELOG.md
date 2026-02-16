@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.1 (2026-02-16)
+
+### Added
+
+- **Asyncio Support** - New `erlang.async_call()` for asyncio-compatible callbacks
+  - `await erlang.async_call('func', arg1, arg2)` - Call Erlang from async Python code
+  - Integrates with asyncio event loop via `add_reader()`
+  - No exceptions raised for control flow (unlike `erlang.call()`)
+  - Releases dirty NIF thread while waiting (non-blocking)
+  - Works with FastAPI, Starlette, aiohttp, and other ASGI frameworks
+  - Supports concurrent calls via `asyncio.gather()`
+  - New test: `test_async_call` in `py_reentrant_SUITE.erl`
+  - New test module: `test/py_test_async.py`
+  - Updated documentation: `docs/threading.md` - Added Asyncio Support section
+
+### Fixed
+
+- **Flag-based callback detection in replay path** - Fixed SuspensionRequired exceptions
+  leaking when ASGI middleware catches and re-raises exceptions. The replay path in
+  `nif_resume_callback_dirty` now uses flag-based detection (checking `tl_pending_callback`)
+  instead of exception-type detection.
+
 ## 1.2.0 (2026-02-15)
 
 ### Added
