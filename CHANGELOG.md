@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.1 (2026-02-16)
+## 1.3.0 (2026-02-16)
 
 ### Added
 
@@ -21,6 +21,20 @@
   leaking when ASGI middleware catches and re-raises exceptions. The replay path in
   `nif_resume_callback_dirty` now uses flag-based detection (checking `tl_pending_callback`)
   instead of exception-type detection.
+
+### Changed
+
+- **C code optimizations and refactoring**
+  - **Thread safety fixes**: Used `pthread_once` for async callback initialization,
+    fixed mutex held during Python calls in async event loop thread
+  - **Timeout handling**: Added `read_with_timeout()` and `read_length_prefixed_data()`
+    helpers with proper timeouts on all blocking pipe reads (30s for callbacks, 10s for spawns)
+  - **Code deduplication**: Merged `create_suspended_state()` and
+    `create_suspended_state_from_existing()` into unified `create_suspended_state_ex()`,
+    extracted `build_pending_callback_exc_args()` and `build_suspended_result()` helpers
+  - **Performance**: Optimized list conversion using `enif_make_list_cell()` to build
+    lists directly without temporary array allocation
+  - Removed unused `make_suspended_term()` function
 
 ## 1.2.0 (2026-02-15)
 
