@@ -173,23 +173,20 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return bin;
     }
 
-    /* Handle lists */
+    /*
+     * Handle lists - build directly without temporary array allocation.
+     * We iterate in reverse and prepend each element, which is O(1) per element
+     * and avoids the overhead of allocating/freeing a temporary array.
+     */
     if (PyList_Check(obj)) {
         Py_ssize_t len = PyList_Size(obj);
-        if (len == 0) {
-            return enif_make_list(env, 0);
-        }
-        ERL_NIF_TERM *items = enif_alloc(sizeof(ERL_NIF_TERM) * len);
-        if (items == NULL) {
-            return ATOM_ERROR;
-        }
-        for (Py_ssize_t i = 0; i < len; i++) {
+        ERL_NIF_TERM list = enif_make_list(env, 0);  /* Start with empty list */
+        for (Py_ssize_t i = len - 1; i >= 0; i--) {
             PyObject *item = PyList_GetItem(obj, i);  /* Borrowed ref */
-            items[i] = py_to_term(env, item);
+            ERL_NIF_TERM term = py_to_term(env, item);
+            list = enif_make_list_cell(env, term, list);
         }
-        ERL_NIF_TERM result = enif_make_list_from_array(env, items, len);
-        enif_free(items);
-        return result;
+        return list;
     }
 
     /*
