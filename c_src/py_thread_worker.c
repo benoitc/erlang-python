@@ -104,10 +104,10 @@ static bool g_thread_worker_key_created = false;
 static __thread thread_worker_t *tl_thread_worker = NULL;
 
 /** @brief PID of the Erlang thread coordinator process */
-static ErlNifPid g_thread_coordinator_pid;
+ErlNifPid g_thread_coordinator_pid;
 
 /** @brief Flag: coordinator PID has been set */
-static bool g_has_thread_coordinator = false;
+bool g_has_thread_coordinator = false;
 
 /* ============================================================================
  * Thread Worker Destructor (pthread_key cleanup)
@@ -546,6 +546,57 @@ static ERL_NIF_TERM nif_thread_worker_signal_ready(ErlNifEnv *env, int argc,
     ssize_t n = write(fd, &len, sizeof(len));
     if (n != sizeof(len)) {
         return make_error(env, "write_failed");
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief NIF to write an async callback response
+ *
+ * Args: WriteFd, CallbackId, ResponseBinary
+ * Called by Erlang to send the result of an async callback back to Python.
+ * The response is written to the async callback pipe in the format:
+ *   callback_id (8 bytes) + response_len (4 bytes) + response_data
+ */
+static ERL_NIF_TERM nif_async_callback_response(ErlNifEnv *env, int argc,
+                                                 const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    int fd;
+    ErlNifUInt64 callback_id;
+    ErlNifBinary response;
+
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    if (!enif_get_uint64(env, argv[1], &callback_id)) {
+        return make_error(env, "invalid_callback_id");
+    }
+
+    if (!enif_inspect_binary(env, argv[2], &response)) {
+        return make_error(env, "invalid_response");
+    }
+
+    /* Write callback_id (8 bytes) */
+    ssize_t n = write(fd, &callback_id, sizeof(callback_id));
+    if (n != sizeof(callback_id)) {
+        return make_error(env, "write_callback_id_failed");
+    }
+
+    /* Write response_len (4 bytes) */
+    uint32_t len = (uint32_t)response.size;
+    n = write(fd, &len, sizeof(len));
+    if (n != sizeof(len)) {
+        return make_error(env, "write_length_failed");
+    }
+
+    /* Write response_data */
+    if (len > 0) {
+        n = write(fd, response.data, response.size);
+        if (n != (ssize_t)response.size) {
+            return make_error(env, "write_data_failed");
+        }
     }
 
     return ATOM_OK;

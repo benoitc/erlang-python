@@ -105,6 +105,17 @@ handle_info({thread_callback, WorkerId, CallbackId, FuncName, Args},
     end,
     {noreply, State};
 
+%% Handle async callback request from Python async_call()
+%% Unlike thread_callback, this uses a global pipe for all async callbacks.
+%% Each response includes the callback_id so Python can match it to the right Future.
+handle_info({async_callback, CallbackId, FuncName, Args, WriteFd}, State) ->
+    %% Spawn a process to handle this callback asynchronously
+    %% This allows multiple async callbacks to be processed concurrently
+    spawn_link(fun() ->
+        handle_async_callback(WriteFd, CallbackId, FuncName, Args)
+    end),
+    {noreply, State};
+
 %% Handle handler process exit
 handle_info({'EXIT', Pid, _Reason}, #state{handlers = Handlers} = State) ->
     %% Remove handler from map
@@ -171,6 +182,37 @@ handle_thread_callback(WriteFd, FuncName, Args) ->
 
     %% Write response to pipe
     py_nif:thread_worker_write(WriteFd, Response).
+
+%% Execute an async callback and write response to the async callback pipe.
+%% Unlike handle_thread_callback, this includes the callback_id in the response
+%% so Python can match it to the correct Future.
+handle_async_callback(WriteFd, CallbackId, FuncName, Args) ->
+    %% Convert Args from tuple to list if needed
+    ArgsList = case Args of
+        T when is_tuple(T) -> tuple_to_list(T);
+        L when is_list(L) -> L;
+        _ -> [Args]
+    end,
+
+    %% Execute the registered function
+    Response = case py_callback:execute(FuncName, ArgsList) of
+        {ok, Result} ->
+            %% Encode result as Python-parseable string
+            %% Format: status_byte (0=ok) + python_repr
+            ResultStr = term_to_python_repr(Result),
+            <<0, ResultStr/binary>>;
+        {error, {not_found, Name}} ->
+            ErrMsg = iolist_to_binary(
+                io_lib:format("Function '~s' not registered", [Name])),
+            <<1, ErrMsg/binary>>;
+        {error, {Class, Reason, _Stack}} ->
+            ErrMsg = iolist_to_binary(
+                io_lib:format("~p: ~p", [Class, Reason])),
+            <<1, ErrMsg/binary>>
+    end,
+
+    %% Write response to async callback pipe (includes callback_id)
+    py_nif:async_callback_response(WriteFd, CallbackId, Response).
 
 %%% ============================================================================
 %%% Term to Python repr conversion

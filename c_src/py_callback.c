@@ -702,6 +702,312 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     return NULL;
 }
 
+/* ============================================================================
+ * Async callback support for asyncio integration
+ *
+ * This provides erlang.async_call() which returns an asyncio.Future that
+ * resolves when the Erlang callback completes. Unlike erlang.call():
+ * - No exceptions raised for control flow
+ * - Integrates with asyncio event loop
+ * - Releases dirty NIF thread while waiting
+ * ============================================================================ */
+
+/*
+ * Forward declarations for thread worker variables (defined in py_thread_worker.c)
+ * These are needed because py_callback.c is included before py_thread_worker.c.
+ */
+extern ErlNifPid g_thread_coordinator_pid;
+extern bool g_has_thread_coordinator;
+
+/* Global state for async callbacks */
+static int g_async_callback_pipe[2] = {-1, -1};  /* [0]=read, [1]=write */
+static PyObject *g_async_pending_futures = NULL;  /* Dict: callback_id -> Future */
+static pthread_mutex_t g_async_futures_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_async_callback_initialized = false;
+
+/**
+ * Initialize async callback system.
+ * Creates the response pipe and pending futures dict.
+ */
+static int async_callback_init(void) {
+    if (g_async_callback_initialized) {
+        return 0;
+    }
+
+    if (pipe(g_async_callback_pipe) < 0) {
+        return -1;
+    }
+
+    /* Set the read end to non-blocking for asyncio compatibility */
+    int flags = fcntl(g_async_callback_pipe[0], F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(g_async_callback_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    }
+
+    g_async_pending_futures = PyDict_New();
+    if (g_async_pending_futures == NULL) {
+        close(g_async_callback_pipe[0]);
+        close(g_async_callback_pipe[1]);
+        g_async_callback_pipe[0] = -1;
+        g_async_callback_pipe[1] = -1;
+        return -1;
+    }
+
+    g_async_callback_initialized = true;
+    return 0;
+}
+
+/**
+ * Process a single async callback response from the pipe.
+ * Called by the asyncio reader callback.
+ * Returns: 1 if processed, 0 if no data, -1 on error
+ */
+static int process_async_callback_response(void) {
+    /* Read callback_id (8 bytes) + response_len (4 bytes) + response_data */
+    uint64_t callback_id;
+    uint32_t response_len;
+    ssize_t n;
+
+    n = read(g_async_callback_pipe[0], &callback_id, sizeof(callback_id));
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;  /* No data available (non-blocking) */
+        }
+        return -1;  /* Error */
+    }
+    if (n == 0) {
+        return 0;  /* EOF / No data */
+    }
+    if (n != sizeof(callback_id)) {
+        return -1;  /* Partial read - error */
+    }
+
+    n = read(g_async_callback_pipe[0], &response_len, sizeof(response_len));
+    if (n != sizeof(response_len)) {
+        return -1;
+    }
+
+    char *response_data = NULL;
+    if (response_len > 0) {
+        response_data = enif_alloc(response_len);
+        if (response_data == NULL) {
+            return -1;
+        }
+        n = read(g_async_callback_pipe[0], response_data, response_len);
+        if (n != (ssize_t)response_len) {
+            enif_free(response_data);
+            return -1;
+        }
+    }
+
+    /* Look up and resolve the Future */
+    pthread_mutex_lock(&g_async_futures_mutex);
+
+    PyObject *key = PyLong_FromUnsignedLongLong(callback_id);
+    PyObject *future = PyDict_GetItem(g_async_pending_futures, key);
+
+    if (future != NULL) {
+        Py_INCREF(future);  /* Keep reference while we use it */
+        PyDict_DelItem(g_async_pending_futures, key);
+    }
+    Py_DECREF(key);
+
+    pthread_mutex_unlock(&g_async_futures_mutex);
+
+    if (future != NULL) {
+        /* Parse response and resolve Future */
+        PyObject *result = NULL;
+        if (response_data != NULL) {
+            result = parse_callback_response((unsigned char *)response_data, response_len);
+        } else {
+            Py_INCREF(Py_None);
+            result = Py_None;
+        }
+
+        if (result != NULL) {
+            /* Call future.set_result(result) */
+            PyObject *set_result = PyObject_GetAttrString(future, "set_result");
+            if (set_result != NULL) {
+                PyObject *ret = PyObject_CallFunctionObjArgs(set_result, result, NULL);
+                Py_XDECREF(ret);
+                Py_DECREF(set_result);
+            }
+            Py_DECREF(result);
+        } else {
+            /* Error occurred - set exception on Future */
+            PyObject *exc_type, *exc_value, *exc_tb;
+            PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+            PyObject *set_exception = PyObject_GetAttrString(future, "set_exception");
+            if (set_exception != NULL) {
+                if (exc_value != NULL) {
+                    PyObject *ret = PyObject_CallFunctionObjArgs(set_exception, exc_value, NULL);
+                    Py_XDECREF(ret);
+                } else {
+                    PyObject *runtime_err = PyObject_CallFunction(PyExc_RuntimeError,
+                        "s", "Erlang callback failed");
+                    PyObject *ret = PyObject_CallFunctionObjArgs(set_exception, runtime_err, NULL);
+                    Py_XDECREF(ret);
+                    Py_XDECREF(runtime_err);
+                }
+                Py_DECREF(set_exception);
+            }
+
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_value);
+            Py_XDECREF(exc_tb);
+            PyErr_Clear();
+        }
+
+        Py_DECREF(future);
+    }
+
+    if (response_data != NULL) {
+        enif_free(response_data);
+    }
+
+    return 1;
+}
+
+/**
+ * Python callback for asyncio reader.
+ * Called when data is available on the async callback pipe.
+ */
+static PyObject *async_callback_reader(PyObject *self, PyObject *args) {
+    (void)self;
+    (void)args;
+
+    /* Process all available responses */
+    while (process_async_callback_response() > 0) {
+        /* Continue processing */
+    }
+
+    Py_RETURN_NONE;
+}
+
+/**
+ * Get the read file descriptor for the async callback pipe.
+ * Used by Python to register with asyncio.
+ */
+static PyObject *get_async_callback_fd(PyObject *self, PyObject *args) {
+    (void)self;
+    (void)args;
+
+    if (!g_async_callback_initialized) {
+        if (async_callback_init() < 0) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to initialize async callback system");
+            return NULL;
+        }
+    }
+
+    return PyLong_FromLong(g_async_callback_pipe[0]);
+}
+
+/**
+ * Send an async callback request to Erlang.
+ * Returns the callback_id for tracking.
+ */
+static PyObject *send_async_callback_request(PyObject *self, PyObject *args) {
+    (void)self;
+
+    PyObject *name_obj;
+    PyObject *call_args;
+
+    if (!PyArg_ParseTuple(args, "OO", &name_obj, &call_args)) {
+        return NULL;
+    }
+
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+        return NULL;
+    }
+    if (!PyTuple_Check(call_args)) {
+        PyErr_SetString(PyExc_TypeError, "Arguments must be a tuple");
+        return NULL;
+    }
+
+    const char *func_name = PyUnicode_AsUTF8(name_obj);
+    if (func_name == NULL) {
+        return NULL;
+    }
+    size_t func_name_len = strlen(func_name);
+
+    /* Check if thread worker coordinator is available */
+    if (!g_has_thread_coordinator) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "Thread worker coordinator not initialized. "
+            "Ensure erlang_python application is started.");
+        return NULL;
+    }
+
+    /* Generate callback ID */
+    uint64_t callback_id = atomic_fetch_add(&g_callback_id_counter, 1);
+
+    /* Send callback request to Erlang via thread worker coordinator */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
+        return NULL;
+    }
+
+    /* Create function name binary */
+    ERL_NIF_TERM func_term;
+    unsigned char *fn_buf = enif_make_new_binary(msg_env, func_name_len, &func_term);
+    if (fn_buf == NULL) {
+        enif_free_env(msg_env);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate function name");
+        return NULL;
+    }
+    memcpy(fn_buf, func_name, func_name_len);
+
+    /* Convert args to Erlang term */
+    ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
+    ERL_NIF_TERM id_term = enif_make_uint64(msg_env, callback_id);
+
+    /* Send message: {async_callback, CallbackId, FuncName, Args, WriteFd}
+     * The WriteFd is the async callback pipe write end */
+    ERL_NIF_TERM msg = enif_make_tuple5(msg_env,
+        enif_make_atom(msg_env, "async_callback"),
+        id_term,
+        func_term,
+        args_term,
+        enif_make_int(msg_env, g_async_callback_pipe[1]));
+
+    if (!enif_send(NULL, &g_thread_coordinator_pid, msg_env, msg)) {
+        enif_free_env(msg_env);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to send async callback message");
+        return NULL;
+    }
+    enif_free_env(msg_env);
+
+    return PyLong_FromUnsignedLongLong(callback_id);
+}
+
+/**
+ * Register a Future for an async callback.
+ */
+static PyObject *register_async_future(PyObject *self, PyObject *args) {
+    (void)self;
+
+    unsigned long long callback_id;
+    PyObject *future;
+
+    if (!PyArg_ParseTuple(args, "KO", &callback_id, &future)) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&g_async_futures_mutex);
+
+    PyObject *key = PyLong_FromUnsignedLongLong(callback_id);
+    Py_INCREF(future);
+    PyDict_SetItem(g_async_pending_futures, key, future);
+    Py_DECREF(key);
+
+    pthread_mutex_unlock(&g_async_futures_mutex);
+
+    Py_RETURN_NONE;
+}
+
 /**
  * ErlangFunction.__call__ - forward to erlang_call_impl
  */
@@ -745,6 +1051,18 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Call a registered Erlang function.\n\n"
      "Usage: erlang.call('func_name', arg1, arg2, ...)\n"
      "Returns: The result from the Erlang function."},
+    {"_get_async_callback_fd", get_async_callback_fd, METH_NOARGS,
+     "Get the file descriptor for async callback responses.\n"
+     "Used internally by async_call() to register with asyncio."},
+    {"_async_callback_reader", async_callback_reader, METH_NOARGS,
+     "Process pending async callback responses.\n"
+     "Called by asyncio when the callback pipe has data."},
+    {"_send_async_request", send_async_callback_request, METH_VARARGS,
+     "Send an async callback request to Erlang.\n"
+     "Returns the callback_id for tracking."},
+    {"_register_async_future", register_async_future, METH_VARARGS,
+     "Register a Future for an async callback.\n"
+     "Usage: erlang._register_async_future(callback_id, future)"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -820,6 +1138,78 @@ static int create_erlang_module(void) {
     if (PyDict_SetItemString(sys_modules, "erlang", module) < 0) {
         Py_DECREF(module);
         return -1;
+    }
+
+    /* Add the async_call() coroutine function.
+     * This is implemented in Python for easier asyncio integration. */
+    const char *async_call_code =
+        "import asyncio\n"
+        "import erlang\n"
+        "\n"
+        "# Track if we've registered the reader with the event loop\n"
+        "_async_reader_registered = {}\n"
+        "\n"
+        "async def async_call(func_name, *args):\n"
+        "    '''\n"
+        "    Call an Erlang function asynchronously.\n"
+        "    \n"
+        "    This is safe to use from asyncio code:\n"
+        "    - No exceptions raised for control flow\n"
+        "    - Integrates with asyncio event loop\n"
+        "    - Releases dirty NIF thread while waiting\n"
+        "    \n"
+        "    Usage:\n"
+        "        result = await erlang.async_call('my_function', arg1, arg2)\n"
+        "    \n"
+        "    Args:\n"
+        "        func_name: Name of the registered Erlang function\n"
+        "        *args: Arguments to pass to the function\n"
+        "    \n"
+        "    Returns:\n"
+        "        The result from the Erlang function\n"
+        "    '''\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    \n"
+        "    # Ensure the reader is registered with this event loop\n"
+        "    loop_id = id(loop)\n"
+        "    if loop_id not in _async_reader_registered:\n"
+        "        fd = erlang._get_async_callback_fd()\n"
+        "        loop.add_reader(fd, erlang._async_callback_reader)\n"
+        "        _async_reader_registered[loop_id] = True\n"
+        "    \n"
+        "    # Create a Future for this call\n"
+        "    future = loop.create_future()\n"
+        "    \n"
+        "    # Send the request and get callback_id\n"
+        "    callback_id = erlang._send_async_request(func_name, args)\n"
+        "    \n"
+        "    # Register the Future\n"
+        "    erlang._register_async_future(callback_id, future)\n"
+        "    \n"
+        "    # Wait for the result\n"
+        "    return await future\n"
+        "\n"
+        "# Add async_call to the erlang module\n"
+        "erlang.async_call = async_call\n"
+        "erlang._async_reader_registered = _async_reader_registered\n";
+
+    PyObject *globals = PyDict_New();
+    if (globals == NULL) {
+        /* Non-fatal - async_call just won't be available */
+        PyErr_Clear();
+    } else {
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(globals, "__builtins__", builtins);
+
+        PyObject *result = PyRun_String(async_call_code, Py_file_input, globals, globals);
+        if (result == NULL) {
+            /* Non-fatal - async_call just won't be available */
+            PyErr_Print();
+            PyErr_Clear();
+        } else {
+            Py_DECREF(result);
+        }
+        Py_DECREF(globals);
     }
 
     return 0;

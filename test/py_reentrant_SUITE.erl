@@ -22,7 +22,8 @@
     test_callback_with_complex_types/1,
     test_multiple_sequential_callbacks/1,
     test_call_from_non_worker_thread/1,
-    test_callback_with_try_except/1
+    test_callback_with_try_except/1,
+    test_async_call/1
 ]).
 
 all() ->
@@ -34,7 +35,8 @@ all() ->
         test_callback_with_complex_types,
         test_multiple_sequential_callbacks,
         test_call_from_non_worker_thread,
-        test_callback_with_try_except
+        test_callback_with_try_except,
+        test_async_call
     ].
 
 init_per_suite(Config) ->
@@ -58,6 +60,7 @@ end_per_testcase(_TestCase, _Config) ->
     catch py:unregister_function(add_ten),
     catch py:unregister_function(multiply_by_two),
     catch py:unregister_function(subtract_five),
+    catch py:unregister_function(async_multiply),
     ok.
 
 %%% ============================================================================
@@ -307,4 +310,28 @@ test_callback_with_try_except(_Config) ->
 
     %% Cleanup
     py:unregister_function(get_value),
+    ok.
+
+%% @doc Test erlang.async_call() for asyncio-compatible callbacks.
+%% This tests the new async API that doesn't raise exceptions for control flow,
+%% making it safe to use from ASGI/asyncio applications.
+test_async_call(_Config) ->
+    %% Register an Erlang function
+    py:register_function(async_multiply, fun([X, Y]) -> X * Y end),
+
+    %% Add test directory to Python path
+    TestDir = code:lib_dir(erlang_python, test),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test single async_call
+    {ok, Result} = py:call(py_test_async, run_single_test, []),
+    42 = Result,
+
+    %% Test concurrent async_calls
+    {ok, ConcurrentResult} = py:call(py_test_async, run_concurrent_test, []),
+    [6, 20, 42] = ConcurrentResult,
+
+    %% Cleanup
+    py:unregister_function(async_multiply),
     ok.

@@ -1765,7 +1765,10 @@ static ErlNifFunc nif_funcs[] = {
     /* Thread worker support (ThreadPoolExecutor) */
     {"thread_worker_set_coordinator", 1, nif_thread_worker_set_coordinator, 0},
     {"thread_worker_write", 2, nif_thread_worker_write, 0},
-    {"thread_worker_signal_ready", 1, nif_thread_worker_signal_ready, 0}
+    {"thread_worker_signal_ready", 1, nif_thread_worker_signal_ready, 0},
+
+    /* Async callback support (for erlang.async_call) */
+    {"async_callback_response", 3, nif_async_callback_response, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

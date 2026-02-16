@@ -63,7 +63,9 @@
     %% Thread worker support (ThreadPoolExecutor)
     thread_worker_set_coordinator/1,
     thread_worker_write/2,
-    thread_worker_signal_ready/1
+    thread_worker_signal_ready/1,
+    %% Async callback support (for erlang.async_call)
+    async_callback_response/3
 ]).
 
 -on_load(load_nif/0).
@@ -381,4 +383,21 @@ thread_worker_write(_Fd, _Response) ->
 %% Writes a zero-length response to the pipe to indicate readiness.
 -spec thread_worker_signal_ready(integer()) -> ok | {error, term()}.
 thread_worker_signal_ready(_Fd) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Async Callback Support (for erlang.async_call)
+%%% ============================================================================
+
+%% @doc Write an async callback response to the async callback pipe.
+%% Fd is the write end of the async callback pipe.
+%% CallbackId is the unique identifier for this callback.
+%% Response is the result binary (status byte + encoded result).
+%%
+%% This is called when an async_callback message is processed.
+%% The response is written in the format:
+%%   callback_id (8 bytes) + response_len (4 bytes) + response_data
+-spec async_callback_response(integer(), non_neg_integer(), binary()) ->
+    ok | {error, term()}.
+async_callback_response(_Fd, _CallbackId, _Response) ->
     ?NIF_STUB.

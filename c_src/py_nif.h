@@ -89,6 +89,8 @@
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <pthread.h>
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
