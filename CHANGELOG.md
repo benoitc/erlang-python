@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.2 (2026-02-17)
+
+### Fixed
+
+- **torch/PyTorch introspection compatibility** - Fixed `AttributeError: 'erlang.Function'
+  object has no attribute 'endswith'` when importing torch or sentence_transformers in
+  contexts where erlang_python callbacks are registered.
+  - Root cause: torch does dynamic introspection during import, iterating through Python's
+    namespace and calling `.endswith()` on objects. The `erlang` module's `__getattr__` was
+    returning `ErlangFunction` wrappers for *any* attribute access.
+  - Solution: Added C-side callback name registry. Now `__getattr__` only returns
+    `ErlangFunction` wrappers for actually registered callbacks. Unregistered attributes
+    raise `AttributeError` (normal Python behavior).
+  - New test: `test_callback_name_registry` in `py_reentrant_SUITE.erl`
+
 ## 1.3.1 (2026-02-16)
 
 ### Fixed

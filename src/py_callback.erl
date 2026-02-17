@@ -62,17 +62,24 @@ init_tab() ->
     ok.
 
 %% @doc Register a function to be callable from Python.
+%% Also registers the name in the C-side registry so Python's erlang module
+%% __getattr__ will return an ErlangFunction wrapper for this name.
 -spec register(Name :: atom() | binary(), Fun :: fun((list()) -> term()) | {atom(), atom()}) -> ok.
 register(Name, Fun) ->
     NameBin = to_binary(Name),
     ets:insert(?TABLE, {NameBin, Fun}),
+    %% Register name in C-side registry for Python __getattr__
+    py_nif:register_callback_name(NameBin),
     ok.
 
 %% @doc Unregister a function.
+%% Also unregisters the name from the C-side registry.
 -spec unregister(Name :: atom() | binary()) -> ok.
 unregister(Name) ->
     NameBin = to_binary(Name),
     ets:delete(?TABLE, NameBin),
+    %% Unregister name from C-side registry
+    py_nif:unregister_callback_name(NameBin),
     ok.
 
 %% @doc Lookup a registered function.

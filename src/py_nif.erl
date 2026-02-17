@@ -65,7 +65,10 @@
     thread_worker_write/2,
     thread_worker_signal_ready/1,
     %% Async callback support (for erlang.async_call)
-    async_callback_response/3
+    async_callback_response/3,
+    %% Callback name registry (prevents torch introspection issues)
+    register_callback_name/1,
+    unregister_callback_name/1
 ]).
 
 -on_load(load_nif/0).
@@ -400,4 +403,21 @@ thread_worker_signal_ready(_Fd) ->
 -spec async_callback_response(integer(), non_neg_integer(), binary()) ->
     ok | {error, term()}.
 async_callback_response(_Fd, _CallbackId, _Response) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Callback Name Registry
+%%% ============================================================================
+
+%% @doc Register a callback name in the C-side registry.
+%% This allows the Python erlang module's __getattr__ to return
+%% ErlangFunction wrappers only for registered callbacks, preventing
+%% introspection issues with libraries like torch.
+-spec register_callback_name(atom() | binary()) -> ok | {error, term()}.
+register_callback_name(_Name) ->
+    ?NIF_STUB.
+
+%% @doc Unregister a callback name from the C-side registry.
+-spec unregister_callback_name(atom() | binary()) -> ok.
+unregister_callback_name(_Name) ->
     ?NIF_STUB.

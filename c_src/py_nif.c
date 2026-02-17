@@ -1708,7 +1708,9 @@ static int upgrade(ErlNifEnv *env, void **priv_data, void **old_priv_data,
 static void unload(ErlNifEnv *env, void *priv_data) {
     (void)env;
     (void)priv_data;
-    /* Cleanup handled by finalize */
+    /* Clean up callback name registry */
+    cleanup_callback_registry();
+    /* Other cleanup handled by finalize */
 }
 
 static ErlNifFunc nif_funcs[] = {
@@ -1776,7 +1778,11 @@ static ErlNifFunc nif_funcs[] = {
     {"thread_worker_signal_ready", 1, nif_thread_worker_signal_ready, 0},
 
     /* Async callback support (for erlang.async_call) */
-    {"async_callback_response", 3, nif_async_callback_response, 0}
+    {"async_callback_response", 3, nif_async_callback_response, 0},
+
+    /* Callback name registry (prevents torch introspection issues) */
+    {"register_callback_name", 1, nif_register_callback_name, 0},
+    {"unregister_callback_name", 1, nif_unregister_callback_name, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

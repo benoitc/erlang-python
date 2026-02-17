@@ -84,6 +84,169 @@
  */
 
 /* ============================================================================
+ * Callback Name Registry
+ *
+ * Maintains a C-side registry of registered callback function names.
+ * This allows erlang_module_getattr to only return ErlangFunction wrappers
+ * for actually registered functions, preventing introspection issues with
+ * libraries like torch that probe module attributes.
+ * ============================================================================ */
+
+/**
+ * @def CALLBACK_REGISTRY_BUCKETS
+ * @brief Number of hash buckets for the callback registry
+ */
+#define CALLBACK_REGISTRY_BUCKETS 64
+
+/**
+ * @struct callback_name_entry_t
+ * @brief Entry in the callback name registry hash table
+ */
+typedef struct callback_name_entry {
+    char *name;                        /**< Callback name (owned) */
+    size_t name_len;                   /**< Length of name */
+    struct callback_name_entry *next;  /**< Next entry in bucket chain */
+} callback_name_entry_t;
+
+/** @brief Hash table buckets for callback registry */
+static callback_name_entry_t *g_callback_registry[CALLBACK_REGISTRY_BUCKETS] = {NULL};
+
+/** @brief Mutex protecting the callback registry */
+static pthread_mutex_t g_callback_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * @brief Simple hash function for callback names
+ */
+static unsigned int callback_name_hash(const char *name, size_t len) {
+    unsigned int hash = 5381;
+    for (size_t i = 0; i < len; i++) {
+        hash = ((hash << 5) + hash) + (unsigned char)name[i];
+    }
+    return hash % CALLBACK_REGISTRY_BUCKETS;
+}
+
+/**
+ * @brief Check if a callback name is registered
+ *
+ * Thread-safe lookup in the callback registry.
+ *
+ * @param name Callback name to check
+ * @param len Length of name
+ * @return true if registered, false otherwise
+ */
+static bool is_callback_registered(const char *name, size_t len) {
+    unsigned int bucket = callback_name_hash(name, len);
+    bool found = false;
+
+    pthread_mutex_lock(&g_callback_registry_mutex);
+
+    callback_name_entry_t *entry = g_callback_registry[bucket];
+    while (entry != NULL) {
+        if (entry->name_len == len && memcmp(entry->name, name, len) == 0) {
+            found = true;
+            break;
+        }
+        entry = entry->next;
+    }
+
+    pthread_mutex_unlock(&g_callback_registry_mutex);
+    return found;
+}
+
+/**
+ * @brief Register a callback name
+ *
+ * Thread-safe addition to the callback registry.
+ *
+ * @param name Callback name to register
+ * @param len Length of name
+ * @return 0 on success, -1 on failure
+ */
+static int register_callback_name(const char *name, size_t len) {
+    /* Check if already registered */
+    if (is_callback_registered(name, len)) {
+        return 0;  /* Already registered, success */
+    }
+
+    /* Allocate new entry */
+    callback_name_entry_t *entry = enif_alloc(sizeof(callback_name_entry_t));
+    if (entry == NULL) {
+        return -1;
+    }
+
+    entry->name = enif_alloc(len + 1);
+    if (entry->name == NULL) {
+        enif_free(entry);
+        return -1;
+    }
+
+    memcpy(entry->name, name, len);
+    entry->name[len] = '\0';
+    entry->name_len = len;
+
+    unsigned int bucket = callback_name_hash(name, len);
+
+    pthread_mutex_lock(&g_callback_registry_mutex);
+
+    entry->next = g_callback_registry[bucket];
+    g_callback_registry[bucket] = entry;
+
+    pthread_mutex_unlock(&g_callback_registry_mutex);
+
+    return 0;
+}
+
+/**
+ * @brief Unregister a callback name
+ *
+ * Thread-safe removal from the callback registry.
+ *
+ * @param name Callback name to unregister
+ * @param len Length of name
+ */
+static void unregister_callback_name(const char *name, size_t len) {
+    unsigned int bucket = callback_name_hash(name, len);
+
+    pthread_mutex_lock(&g_callback_registry_mutex);
+
+    callback_name_entry_t **pp = &g_callback_registry[bucket];
+    while (*pp != NULL) {
+        callback_name_entry_t *entry = *pp;
+        if (entry->name_len == len && memcmp(entry->name, name, len) == 0) {
+            *pp = entry->next;
+            enif_free(entry->name);
+            enif_free(entry);
+            break;
+        }
+        pp = &entry->next;
+    }
+
+    pthread_mutex_unlock(&g_callback_registry_mutex);
+}
+
+/**
+ * @brief Clean up the callback registry
+ *
+ * Frees all entries. Called during NIF unload.
+ */
+static void cleanup_callback_registry(void) {
+    pthread_mutex_lock(&g_callback_registry_mutex);
+
+    for (int i = 0; i < CALLBACK_REGISTRY_BUCKETS; i++) {
+        callback_name_entry_t *entry = g_callback_registry[i];
+        while (entry != NULL) {
+            callback_name_entry_t *next = entry->next;
+            enif_free(entry->name);
+            enif_free(entry);
+            entry = next;
+        }
+        g_callback_registry[i] = NULL;
+    }
+
+    pthread_mutex_unlock(&g_callback_registry_mutex);
+}
+
+/* ============================================================================
  * Suspended state management
  * ============================================================================ */
 
@@ -1061,10 +1224,29 @@ static PyObject *ErlangFunction_call(ErlangFunctionObject *self, PyObject *args,
 
 /**
  * Module __getattr__ - enables "from erlang import func_name" and "erlang.func_name()"
+ *
+ * Only returns ErlangFunction wrapper for REGISTERED callback names.
+ * This prevents torch and other libraries that introspect module attributes
+ * from getting callable objects for arbitrary attribute names.
  */
 static PyObject *erlang_module_getattr(PyObject *module, PyObject *name) {
     (void)module;  /* Unused */
-    /* Return an ErlangFunction wrapper for any attribute access */
+
+    /* Get the name as a C string */
+    const char *name_str = PyUnicode_AsUTF8(name);
+    if (name_str == NULL) {
+        return NULL;  /* Exception already set */
+    }
+    size_t name_len = strlen(name_str);
+
+    /* Check if this callback is registered */
+    if (!is_callback_registered(name_str, name_len)) {
+        PyErr_Format(PyExc_AttributeError,
+            "module 'erlang' has no attribute '%s'", name_str);
+        return NULL;
+    }
+
+    /* Return an ErlangFunction wrapper for registered callbacks */
     return ErlangFunction_New(name);
 }
 
@@ -1715,4 +1897,73 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
     tl_allow_suspension = false;
 
     return result;
+}
+
+/* ============================================================================
+ * NIF functions for callback name registration
+ * ============================================================================ */
+
+/**
+ * @brief NIF to register a callback name in the C-side registry
+ *
+ * This allows the erlang module's __getattr__ to return ErlangFunction
+ * wrappers only for registered callbacks, preventing introspection issues.
+ *
+ * Args: Name (binary or atom)
+ * Returns: ok | {error, Reason}
+ */
+static ERL_NIF_TERM nif_register_callback_name(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    ErlNifBinary name_bin;
+    char atom_buf[256];
+
+    const char *name;
+    size_t name_len;
+
+    if (enif_inspect_binary(env, argv[0], &name_bin)) {
+        name = (const char *)name_bin.data;
+        name_len = name_bin.size;
+    } else if (enif_get_atom(env, argv[0], atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+        name = atom_buf;
+        name_len = strlen(atom_buf);
+    } else {
+        return make_error(env, "invalid_name");
+    }
+
+    if (register_callback_name(name, name_len) < 0) {
+        return make_error(env, "registration_failed");
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief NIF to unregister a callback name from the C-side registry
+ *
+ * Args: Name (binary or atom)
+ * Returns: ok
+ */
+static ERL_NIF_TERM nif_unregister_callback_name(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    ErlNifBinary name_bin;
+    char atom_buf[256];
+
+    const char *name;
+    size_t name_len;
+
+    if (enif_inspect_binary(env, argv[0], &name_bin)) {
+        name = (const char *)name_bin.data;
+        name_len = name_bin.size;
+    } else if (enif_get_atom(env, argv[0], atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+        name = atom_buf;
+        name_len = strlen(atom_buf);
+    } else {
+        return make_error(env, "invalid_name");
+    }
+
+    unregister_callback_name(name, name_len);
+
+    return ATOM_OK;
 }

@@ -23,7 +23,8 @@
     test_multiple_sequential_callbacks/1,
     test_call_from_non_worker_thread/1,
     test_callback_with_try_except/1,
-    test_async_call/1
+    test_async_call/1,
+    test_callback_name_registry/1
 ]).
 
 all() ->
@@ -36,7 +37,8 @@ all() ->
         test_multiple_sequential_callbacks,
         test_call_from_non_worker_thread,
         test_callback_with_try_except,
-        test_async_call
+        test_async_call,
+        test_callback_name_registry
     ].
 
 init_per_suite(Config) ->
@@ -61,6 +63,7 @@ end_per_testcase(_TestCase, _Config) ->
     catch py:unregister_function(multiply_by_two),
     catch py:unregister_function(subtract_five),
     catch py:unregister_function(async_multiply),
+    catch py:unregister_function(test_registry_func),
     ok.
 
 %%% ============================================================================
@@ -334,4 +337,32 @@ test_async_call(_Config) ->
 
     %% Cleanup
     py:unregister_function(async_multiply),
+    ok.
+
+%% @doc Test callback name registry for Python __getattr__.
+%% This tests that the erlang module's __getattr__ only returns ErlangFunction
+%% wrappers for registered callbacks, preventing introspection issues with
+%% libraries like torch that probe module attributes.
+test_callback_name_registry(_Config) ->
+    %% Before registering, hasattr should return False
+    {ok, false} = py:eval(<<"hasattr(__import__('erlang'), 'test_registry_func')">>),
+
+    %% Register the function
+    py:register_function(test_registry_func, fun([X]) -> X * 2 end),
+
+    %% Now hasattr should return True
+    {ok, true} = py:eval(<<"hasattr(__import__('erlang'), 'test_registry_func')">>),
+
+    %% And calling it should work
+    {ok, 10} = py:eval(<<"__import__('erlang').test_registry_func(5)">>),
+
+    %% Also test via erlang.call() - should still work
+    {ok, 20} = py:eval(<<"__import__('erlang').call('test_registry_func', 10)">>),
+
+    %% Unregister the function
+    py:unregister_function(test_registry_func),
+
+    %% After unregistering, hasattr should return False again
+    {ok, false} = py:eval(<<"hasattr(__import__('erlang'), 'test_registry_func')">>),
+
     ok.
