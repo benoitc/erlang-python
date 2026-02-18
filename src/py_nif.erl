@@ -114,7 +114,9 @@
     set_python_event_loop/1,
     %% ASGI optimizations
     asgi_build_scope/1,
-    asgi_run/5
+    asgi_run/5,
+    %% WSGI optimizations
+    wsgi_run/4
 ]).
 
 -on_load(load_nif/0).
@@ -772,4 +774,30 @@ asgi_build_scope(_ScopeMap) ->
 -spec asgi_run(binary(), binary(), binary(), map(), binary()) ->
     {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
 asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% WSGI Optimizations
+%%% ============================================================================
+
+%% @doc Execute a WSGI application with optimized marshalling.
+%%
+%% This is a direct NIF that bypasses the generic py:call() path:
+%% - Builds environ dict using interned keys
+%% - Uses cached constant values
+%% - Runs the WSGI app synchronously
+%%
+%% Requires the `hornbeam_wsgi_runner` Python module to be available,
+%% which provides the `_run_wsgi_sync` function that handles the
+%% WSGI start_response protocol.
+%%
+%% @param Runner Python runner module name (e.g., <<"hornbeam_wsgi_runner">>)
+%% @param Module Application module name (e.g., <<"myapp.wsgi">>)
+%% @param Callable WSGI callable name (e.g., <<"application">>)
+%% @param EnvironMap Erlang map containing WSGI environ
+%% @returns {ok, {Status, Headers, Body}} on success,
+%%          or {error, Reason}
+-spec wsgi_run(binary(), binary(), binary(), map()) ->
+    {ok, {binary(), [{binary(), binary()}], binary()}} | {error, term()}.
+wsgi_run(_Runner, _Module, _Callable, _EnvironMap) ->
     ?NIF_STUB.
