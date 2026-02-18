@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.5.0 (2026-02-18)
+
+### Added
+
+- **`py_asgi` module** - Optimized ASGI request handling with:
+  - Pre-interned Python string keys (15+ ASGI scope keys)
+  - Cached constant values (http type, HTTP versions, methods, schemes)
+  - Thread-local response pooling (16 slots per thread, 4KB initial buffer)
+  - Direct NIF path bypassing generic py:call()
+  - ~60-80% throughput improvement over py:call()
+  - Configurable runner module via `runner` option
+  - Sub-interpreter and free-threading (Python 3.13+) support
+
+- **`py_wsgi` module** - Optimized WSGI request handling with:
+  - Pre-interned WSGI environ keys
+  - Direct NIF path for marshalling
+  - ~60-80% throughput improvement over py:call()
+  - Sub-interpreter and free-threading support
+
+- **Web frameworks documentation** - New documentation at `docs/web-frameworks.md`
+
 ## 1.4.0 (2026-02-18)
 
 ### Added
