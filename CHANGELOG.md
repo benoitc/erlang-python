@@ -31,6 +31,16 @@
   - New documentation: `docs/asyncio.md`
   - Updated `docs/getting-started.md` with link to asyncio documentation
 
+### Performance
+
+- **Event loop optimizations**
+  - Fixed `run_until_complete` callback removal bug (was using two different lambda references)
+  - Cached `ast.literal_eval` lookup at module initialization (avoids import per callback)
+  - O(1) timer cancellation via handle-to-callback_id reverse map (was O(n) iteration)
+  - Detach pending queue under mutex, build Erlang terms outside lock (reduced contention)
+  - O(1) duplicate event detection using hash set (was O(n) linear scan)
+  - Added `PERF_BUILD` cmake option for aggressive optimizations (-O3, LTO, -march=native)
+
 ## 1.3.2 (2026-02-17)
 
 ### Fixed
