@@ -1870,7 +1870,7 @@ static ErlNifFunc nif_funcs[] = {
 
     /* ASGI optimizations */
     {"asgi_build_scope", 1, nif_asgi_build_scope, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"asgi_run", 4, nif_asgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND}
+    {"asgi_run", 5, nif_asgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

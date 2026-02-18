@@ -153,10 +153,10 @@ run(Module, Callable, Scope, Body) ->
 %% @returns {ok, {Status, Headers, Body}} on success
 -spec run(binary(), binary(), scope(), binary(), map()) ->
     {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
-run(Module, Callable, Scope, Body, _Opts) ->
-    %% Ensure scope has required ASGI fields
+run(Module, Callable, Scope, Body, Opts) ->
+    Runner = maps:get(runner, Opts, <<"hornbeam_asgi_runner">>),
     FullScope = ensure_scope_defaults(Scope),
-    py_nif:asgi_run(Module, Callable, FullScope, Body).
+    py_nif:asgi_run(Runner, Module, Callable, FullScope, Body).
 
 %% @doc Build an optimized Python scope dict.
 %%

@@ -1123,7 +1123,7 @@ static ERL_NIF_TERM nif_asgi_build_scope(ErlNifEnv *env, int argc, const ERL_NIF
 }
 
 static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    if (argc < 4) {
+    if (argc < 5) {
         return make_error(env, "badarg");
     }
 
@@ -1135,12 +1135,15 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return make_error(env, "asgi_not_initialized");
     }
 
-    ErlNifBinary module_bin, callable_bin;
+    ErlNifBinary runner_bin, module_bin, callable_bin;
 
-    if (!enif_inspect_binary(env, argv[0], &module_bin)) {
+    if (!enif_inspect_binary(env, argv[0], &runner_bin)) {
+        return make_error(env, "invalid_runner");
+    }
+    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
         return make_error(env, "invalid_module");
     }
-    if (!enif_inspect_binary(env, argv[1], &callable_bin)) {
+    if (!enif_inspect_binary(env, argv[2], &callable_bin)) {
         return make_error(env, "invalid_callable");
     }
 
@@ -1148,10 +1151,12 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
 
     ERL_NIF_TERM result;
 
-    /* Convert module and callable names */
+    /* Convert runner, module and callable names */
+    char *runner_name = binary_to_string(&runner_bin);
     char *module_name = binary_to_string(&module_bin);
     char *callable_name = binary_to_string(&callable_bin);
-    if (module_name == NULL || callable_name == NULL) {
+    if (runner_name == NULL || module_name == NULL || callable_name == NULL) {
+        enif_free(runner_name);
         enif_free(module_name);
         enif_free(callable_name);
         PyGILState_Release(gstate);
@@ -1174,7 +1179,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     }
 
     /* Build optimized scope dict from Erlang map */
-    PyObject *scope = asgi_scope_from_map(env, argv[2]);
+    PyObject *scope = asgi_scope_from_map(env, argv[3]);
     if (scope == NULL) {
         Py_DECREF(asgi_app);
         result = make_py_error(env);
@@ -1182,7 +1187,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     }
 
     /* Convert body binary */
-    PyObject *body = asgi_binary_to_buffer(env, argv[3]);
+    PyObject *body = asgi_binary_to_buffer(env, argv[4]);
     if (body == NULL) {
         Py_DECREF(scope);
         Py_DECREF(asgi_app);
@@ -1190,8 +1195,8 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         goto cleanup;
     }
 
-    /* Import the ASGI runner from hornbeam */
-    PyObject *runner_module = PyImport_ImportModule("hornbeam_asgi_runner");
+    /* Import the ASGI runner module */
+    PyObject *runner_module = PyImport_ImportModule(runner_name);
     if (runner_module == NULL) {
         /* Fallback: try to run ASGI app directly with asyncio.run */
         PyErr_Clear();
@@ -1213,11 +1218,11 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         Py_DECREF(body);
         Py_DECREF(scope);
         Py_DECREF(asgi_app);
-        result = make_error(env, "hornbeam_asgi_runner_required");
+        result = make_error(env, "runner_module_required");
         goto cleanup;
     }
 
-    /* Call run_asgi(module_name, callable_name, scope, body) */
+    /* Call _run_asgi_sync(module_name, callable_name, scope, body) */
     PyObject *run_result = PyObject_CallMethod(
         runner_module, "_run_asgi_sync", "ssOO",
         module_name, callable_name, scope, body);
@@ -1239,6 +1244,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     result = enif_make_tuple2(env, ATOM_OK, term_result);
 
 cleanup:
+    enif_free(runner_name);
     enif_free(module_name);
     enif_free(callable_name);
     PyGILState_Release(gstate);

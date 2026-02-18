@@ -470,12 +470,12 @@ static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map);
  * - Uses response pooling
  * - Runs ASGI app coroutine synchronously
  *
- * NIF signature: py_asgi:run(AppModule, AppCallable, ScopeMap, BodyBinary) ->
+ * NIF signature: py_asgi:run(Runner, AppModule, AppCallable, ScopeMap, BodyBinary) ->
  *                  {ok, {Status, Headers, Body}} | {error, Reason}
  *
  * @param env NIF environment
- * @param argc Argument count (must be 4)
- * @param argv [AppModule, AppCallable, ScopeMap, BodyBinary]
+ * @param argc Argument count (must be 5)
+ * @param argv [Runner, AppModule, AppCallable, ScopeMap, BodyBinary]
  * @return Result tuple
  */
 static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);

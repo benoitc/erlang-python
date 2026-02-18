@@ -114,7 +114,7 @@
     set_python_event_loop/1,
     %% ASGI optimizations
     asgi_build_scope/1,
-    asgi_run/4
+    asgi_run/5
 ]).
 
 -on_load(load_nif/0).
@@ -762,13 +762,14 @@ asgi_build_scope(_ScopeMap) ->
 %% which provides the `_run_asgi_sync` function that handles the
 %% ASGI receive/send protocol.
 %%
+%% @param Runner Python runner module name (e.g., <<"hornbeam_asgi_runner">>)
 %% @param Module Application module name (e.g., <<"myapp.asgi">>)
 %% @param Callable ASGI callable name (e.g., <<"application">>)
 %% @param ScopeMap Erlang map containing ASGI scope (see asgi_build_scope/1)
 %% @param Body Request body as binary
 %% @returns {ok, {Status, Headers, Body}} on success,
 %%          or {error, Reason}
--spec asgi_run(binary(), binary(), map(), binary()) ->
+-spec asgi_run(binary(), binary(), binary(), map(), binary()) ->
     {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
-asgi_run(_Module, _Callable, _ScopeMap, _Body) ->
+asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
     ?NIF_STUB.
