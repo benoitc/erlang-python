@@ -25,81 +25,308 @@
  * - Thread-local response pooling
  * - Direct ASGI NIF for maximum performance
  *
+ * Sub-interpreter and Free-threading Support:
+ * - Per-interpreter state for all cached Python objects
+ * - Thread-safe state access via mutex (for free-threading mode)
+ * - Automatic cleanup when interpreters are finalized
+ *
  * @note This file is included from py_nif.c (single compilation unit)
  */
 
 /* ============================================================================
- * Global Interned Keys
- * ============================================================================ */
+ * Per-Interpreter State Management
+ * ============================================================================
+ * Each Python interpreter maintains its own set of interned keys and cached
+ * constants. This is required for:
+ * - Sub-interpreters (Python 3.12+): Each has separate sys.modules
+ * - Free-threading (Python 3.13+): Avoid data races on shared state
+ */
 
-/* Core scope keys */
-PyObject *ASGI_KEY_TYPE = NULL;
-PyObject *ASGI_KEY_ASGI = NULL;
-PyObject *ASGI_KEY_HTTP_VERSION = NULL;
-PyObject *ASGI_KEY_METHOD = NULL;
-PyObject *ASGI_KEY_SCHEME = NULL;
-PyObject *ASGI_KEY_PATH = NULL;
-PyObject *ASGI_KEY_RAW_PATH = NULL;
-PyObject *ASGI_KEY_QUERY_STRING = NULL;
-PyObject *ASGI_KEY_ROOT_PATH = NULL;
-PyObject *ASGI_KEY_HEADERS = NULL;
-PyObject *ASGI_KEY_SERVER = NULL;
-PyObject *ASGI_KEY_CLIENT = NULL;
-PyObject *ASGI_KEY_STATE = NULL;
+/* Storage for per-interpreter states */
+static asgi_interp_state_t *g_interp_states[ASGI_MAX_INTERPRETERS];
+static int g_interp_state_count = 0;
+static pthread_mutex_t g_interp_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* ASGI subdict keys */
-PyObject *ASGI_KEY_VERSION = NULL;
-PyObject *ASGI_KEY_SPEC_VERSION = NULL;
-
-/* WebSocket keys */
-PyObject *ASGI_KEY_SUBPROTOCOLS = NULL;
-
-/* Extension keys */
-PyObject *ASGI_KEY_EXTENSIONS = NULL;
-PyObject *ASGI_KEY_HTTP_TRAILERS = NULL;
-PyObject *ASGI_KEY_HTTP_EARLY_HINTS = NULL;
-
-/* ============================================================================
- * Pre-built Constant Values
- * ============================================================================ */
-
-/* Type constants */
-PyObject *ASGI_TYPE_HTTP = NULL;
-PyObject *ASGI_TYPE_WEBSOCKET = NULL;
-PyObject *ASGI_TYPE_LIFESPAN = NULL;
-
-/* ASGI subdict - built once, used for every request */
-PyObject *ASGI_SUBDICT = NULL;
-
-/* HTTP versions */
-PyObject *ASGI_HTTP_10 = NULL;
-PyObject *ASGI_HTTP_11 = NULL;
-PyObject *ASGI_HTTP_2 = NULL;
-PyObject *ASGI_HTTP_3 = NULL;
-
-/* Schemes */
-PyObject *ASGI_SCHEME_HTTP = NULL;
-PyObject *ASGI_SCHEME_HTTPS = NULL;
-PyObject *ASGI_SCHEME_WS = NULL;
-PyObject *ASGI_SCHEME_WSS = NULL;
-
-/* Common HTTP methods */
-PyObject *ASGI_METHOD_GET = NULL;
-PyObject *ASGI_METHOD_POST = NULL;
-PyObject *ASGI_METHOD_PUT = NULL;
-PyObject *ASGI_METHOD_DELETE = NULL;
-PyObject *ASGI_METHOD_HEAD = NULL;
-PyObject *ASGI_METHOD_OPTIONS = NULL;
-PyObject *ASGI_METHOD_PATCH = NULL;
-PyObject *ASGI_METHOD_CONNECT = NULL;
-PyObject *ASGI_METHOD_TRACE = NULL;
-
-/* Empty values */
-PyObject *ASGI_EMPTY_STRING = NULL;
-PyObject *ASGI_EMPTY_BYTES = NULL;
-
-/* Flag: ASGI cache is initialized */
+/* Flag: ASGI subsystem is initialized (not per-interpreter) */
 static bool g_asgi_initialized = false;
+
+/**
+ * @brief Initialize a single interpreter state
+ */
+static int init_interp_state(asgi_interp_state_t *state) {
+    /* Intern core scope keys */
+    state->key_type = PyUnicode_InternFromString("type");
+    if (!state->key_type) return -1;
+    state->key_asgi = PyUnicode_InternFromString("asgi");
+    if (!state->key_asgi) return -1;
+    state->key_http_version = PyUnicode_InternFromString("http_version");
+    if (!state->key_http_version) return -1;
+    state->key_method = PyUnicode_InternFromString("method");
+    if (!state->key_method) return -1;
+    state->key_scheme = PyUnicode_InternFromString("scheme");
+    if (!state->key_scheme) return -1;
+    state->key_path = PyUnicode_InternFromString("path");
+    if (!state->key_path) return -1;
+    state->key_raw_path = PyUnicode_InternFromString("raw_path");
+    if (!state->key_raw_path) return -1;
+    state->key_query_string = PyUnicode_InternFromString("query_string");
+    if (!state->key_query_string) return -1;
+    state->key_root_path = PyUnicode_InternFromString("root_path");
+    if (!state->key_root_path) return -1;
+    state->key_headers = PyUnicode_InternFromString("headers");
+    if (!state->key_headers) return -1;
+    state->key_server = PyUnicode_InternFromString("server");
+    if (!state->key_server) return -1;
+    state->key_client = PyUnicode_InternFromString("client");
+    if (!state->key_client) return -1;
+    state->key_state = PyUnicode_InternFromString("state");
+    if (!state->key_state) return -1;
+
+    /* ASGI subdict keys */
+    state->key_version = PyUnicode_InternFromString("version");
+    if (!state->key_version) return -1;
+    state->key_spec_version = PyUnicode_InternFromString("spec_version");
+    if (!state->key_spec_version) return -1;
+
+    /* WebSocket keys */
+    state->key_subprotocols = PyUnicode_InternFromString("subprotocols");
+    if (!state->key_subprotocols) return -1;
+
+    /* Extension keys */
+    state->key_extensions = PyUnicode_InternFromString("extensions");
+    if (!state->key_extensions) return -1;
+    state->key_http_trailers = PyUnicode_InternFromString("http.response.trailers");
+    if (!state->key_http_trailers) return -1;
+    state->key_http_early_hints = PyUnicode_InternFromString("http.response.early_hints");
+    if (!state->key_http_early_hints) return -1;
+
+    /* Type constants */
+    state->type_http = PyUnicode_InternFromString("http");
+    if (!state->type_http) return -1;
+    state->type_websocket = PyUnicode_InternFromString("websocket");
+    if (!state->type_websocket) return -1;
+    state->type_lifespan = PyUnicode_InternFromString("lifespan");
+    if (!state->type_lifespan) return -1;
+
+    /* HTTP versions */
+    state->http_10 = PyUnicode_InternFromString("1.0");
+    if (!state->http_10) return -1;
+    state->http_11 = PyUnicode_InternFromString("1.1");
+    if (!state->http_11) return -1;
+    state->http_2 = PyUnicode_InternFromString("2");
+    if (!state->http_2) return -1;
+    state->http_3 = PyUnicode_InternFromString("3");
+    if (!state->http_3) return -1;
+
+    /* Schemes */
+    state->scheme_http = PyUnicode_InternFromString("http");
+    if (!state->scheme_http) return -1;
+    state->scheme_https = PyUnicode_InternFromString("https");
+    if (!state->scheme_https) return -1;
+    state->scheme_ws = PyUnicode_InternFromString("ws");
+    if (!state->scheme_ws) return -1;
+    state->scheme_wss = PyUnicode_InternFromString("wss");
+    if (!state->scheme_wss) return -1;
+
+    /* HTTP methods */
+    state->method_get = PyUnicode_InternFromString("GET");
+    if (!state->method_get) return -1;
+    state->method_post = PyUnicode_InternFromString("POST");
+    if (!state->method_post) return -1;
+    state->method_put = PyUnicode_InternFromString("PUT");
+    if (!state->method_put) return -1;
+    state->method_delete = PyUnicode_InternFromString("DELETE");
+    if (!state->method_delete) return -1;
+    state->method_head = PyUnicode_InternFromString("HEAD");
+    if (!state->method_head) return -1;
+    state->method_options = PyUnicode_InternFromString("OPTIONS");
+    if (!state->method_options) return -1;
+    state->method_patch = PyUnicode_InternFromString("PATCH");
+    if (!state->method_patch) return -1;
+    state->method_connect = PyUnicode_InternFromString("CONNECT");
+    if (!state->method_connect) return -1;
+    state->method_trace = PyUnicode_InternFromString("TRACE");
+    if (!state->method_trace) return -1;
+
+    /* Empty values */
+    state->empty_string = PyUnicode_InternFromString("");
+    if (!state->empty_string) return -1;
+    state->empty_bytes = PyBytes_FromStringAndSize("", 0);
+    if (!state->empty_bytes) return -1;
+
+    /* Build ASGI subdict: {"version": "3.0", "spec_version": "2.3"} */
+    state->asgi_subdict = PyDict_New();
+    if (!state->asgi_subdict) return -1;
+
+    PyObject *version_30 = PyUnicode_InternFromString("3.0");
+    PyObject *spec_version = PyUnicode_InternFromString("2.3");
+    if (!version_30 || !spec_version) {
+        Py_XDECREF(version_30);
+        Py_XDECREF(spec_version);
+        return -1;
+    }
+
+    PyDict_SetItem(state->asgi_subdict, state->key_version, version_30);
+    PyDict_SetItem(state->asgi_subdict, state->key_spec_version, spec_version);
+    Py_DECREF(version_30);
+    Py_DECREF(spec_version);
+
+    state->initialized = true;
+    return 0;
+}
+
+/**
+ * @brief Clean up a single interpreter state
+ */
+static void cleanup_interp_state(asgi_interp_state_t *state) {
+    if (!state || !state->initialized) return;
+
+    /* Clean up all Python objects */
+    Py_XDECREF(state->key_type);
+    Py_XDECREF(state->key_asgi);
+    Py_XDECREF(state->key_http_version);
+    Py_XDECREF(state->key_method);
+    Py_XDECREF(state->key_scheme);
+    Py_XDECREF(state->key_path);
+    Py_XDECREF(state->key_raw_path);
+    Py_XDECREF(state->key_query_string);
+    Py_XDECREF(state->key_root_path);
+    Py_XDECREF(state->key_headers);
+    Py_XDECREF(state->key_server);
+    Py_XDECREF(state->key_client);
+    Py_XDECREF(state->key_state);
+    Py_XDECREF(state->key_version);
+    Py_XDECREF(state->key_spec_version);
+    Py_XDECREF(state->key_subprotocols);
+    Py_XDECREF(state->key_extensions);
+    Py_XDECREF(state->key_http_trailers);
+    Py_XDECREF(state->key_http_early_hints);
+    Py_XDECREF(state->type_http);
+    Py_XDECREF(state->type_websocket);
+    Py_XDECREF(state->type_lifespan);
+    Py_XDECREF(state->asgi_subdict);
+    Py_XDECREF(state->http_10);
+    Py_XDECREF(state->http_11);
+    Py_XDECREF(state->http_2);
+    Py_XDECREF(state->http_3);
+    Py_XDECREF(state->scheme_http);
+    Py_XDECREF(state->scheme_https);
+    Py_XDECREF(state->scheme_ws);
+    Py_XDECREF(state->scheme_wss);
+    Py_XDECREF(state->method_get);
+    Py_XDECREF(state->method_post);
+    Py_XDECREF(state->method_put);
+    Py_XDECREF(state->method_delete);
+    Py_XDECREF(state->method_head);
+    Py_XDECREF(state->method_options);
+    Py_XDECREF(state->method_patch);
+    Py_XDECREF(state->method_connect);
+    Py_XDECREF(state->method_trace);
+    Py_XDECREF(state->empty_string);
+    Py_XDECREF(state->empty_bytes);
+
+    state->initialized = false;
+}
+
+/**
+ * @brief Get or create per-interpreter state for current interpreter
+ */
+asgi_interp_state_t *get_asgi_interp_state(void) {
+    PyInterpreterState *interp = PyInterpreterState_Get();
+
+    /* Fast path: check existing states without lock */
+    for (int i = 0; i < g_interp_state_count; i++) {
+        if (g_interp_states[i] && g_interp_states[i]->interp == interp) {
+            return g_interp_states[i];
+        }
+    }
+
+    /* Slow path: acquire lock and create new state */
+    pthread_mutex_lock(&g_interp_state_mutex);
+
+    /* Double-check after acquiring lock */
+    for (int i = 0; i < g_interp_state_count; i++) {
+        if (g_interp_states[i] && g_interp_states[i]->interp == interp) {
+            pthread_mutex_unlock(&g_interp_state_mutex);
+            return g_interp_states[i];
+        }
+    }
+
+    /* Check capacity */
+    if (g_interp_state_count >= ASGI_MAX_INTERPRETERS) {
+        pthread_mutex_unlock(&g_interp_state_mutex);
+        PyErr_SetString(PyExc_RuntimeError, "Too many Python interpreters");
+        return NULL;
+    }
+
+    /* Allocate and initialize new state */
+    asgi_interp_state_t *state = enif_alloc(sizeof(asgi_interp_state_t));
+    if (!state) {
+        pthread_mutex_unlock(&g_interp_state_mutex);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    memset(state, 0, sizeof(asgi_interp_state_t));
+    state->interp = interp;
+
+    if (init_interp_state(state) < 0) {
+        cleanup_interp_state(state);
+        enif_free(state);
+        pthread_mutex_unlock(&g_interp_state_mutex);
+        return NULL;
+    }
+
+    g_interp_states[g_interp_state_count++] = state;
+    pthread_mutex_unlock(&g_interp_state_mutex);
+
+    return state;
+}
+
+/**
+ * @brief Clean up state for a specific interpreter
+ */
+void cleanup_asgi_interp_state(PyInterpreterState *interp) {
+    if (!interp) {
+        interp = PyInterpreterState_Get();
+    }
+
+    pthread_mutex_lock(&g_interp_state_mutex);
+
+    for (int i = 0; i < g_interp_state_count; i++) {
+        if (g_interp_states[i] && g_interp_states[i]->interp == interp) {
+            cleanup_interp_state(g_interp_states[i]);
+            enif_free(g_interp_states[i]);
+
+            /* Shift remaining states down */
+            for (int j = i; j < g_interp_state_count - 1; j++) {
+                g_interp_states[j] = g_interp_states[j + 1];
+            }
+            g_interp_states[--g_interp_state_count] = NULL;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_interp_state_mutex);
+}
+
+/**
+ * @brief Clean up all interpreter states
+ */
+void cleanup_all_asgi_interp_states(void) {
+    pthread_mutex_lock(&g_interp_state_mutex);
+
+    for (int i = 0; i < g_interp_state_count; i++) {
+        if (g_interp_states[i]) {
+            cleanup_interp_state(g_interp_states[i]);
+            enif_free(g_interp_states[i]);
+            g_interp_states[i] = NULL;
+        }
+    }
+    g_interp_state_count = 0;
+
+    pthread_mutex_unlock(&g_interp_state_mutex);
+}
 
 /* ============================================================================
  * Thread-Local Response Pool
@@ -190,218 +417,47 @@ static void asgi_cleanup_response_pool(void) {
 }
 
 /* ============================================================================
- * Initialization / Cleanup
+ * Initialization / Cleanup (Per-Interpreter)
  * ============================================================================ */
 
 /**
- * @brief Intern a string and store in target
+ * @brief Initialize ASGI subsystem for current interpreter
+ *
+ * This now uses per-interpreter state. Each interpreter gets its own
+ * set of interned keys and cached constants, created on first use.
+ *
+ * @return 0 on success, -1 on error
  */
-static int intern_string(PyObject **target, const char *str) {
-    *target = PyUnicode_InternFromString(str);
-    return (*target != NULL) ? 0 : -1;
-}
-
 static int asgi_scope_init(void) {
     if (g_asgi_initialized) {
+        /* Already initialized globally, per-interpreter state
+         * will be created lazily in get_asgi_interp_state() */
         return 0;
     }
 
-    /* Intern core scope keys */
-    if (intern_string(&ASGI_KEY_TYPE, "type") < 0) return -1;
-    if (intern_string(&ASGI_KEY_ASGI, "asgi") < 0) return -1;
-    if (intern_string(&ASGI_KEY_HTTP_VERSION, "http_version") < 0) return -1;
-    if (intern_string(&ASGI_KEY_METHOD, "method") < 0) return -1;
-    if (intern_string(&ASGI_KEY_SCHEME, "scheme") < 0) return -1;
-    if (intern_string(&ASGI_KEY_PATH, "path") < 0) return -1;
-    if (intern_string(&ASGI_KEY_RAW_PATH, "raw_path") < 0) return -1;
-    if (intern_string(&ASGI_KEY_QUERY_STRING, "query_string") < 0) return -1;
-    if (intern_string(&ASGI_KEY_ROOT_PATH, "root_path") < 0) return -1;
-    if (intern_string(&ASGI_KEY_HEADERS, "headers") < 0) return -1;
-    if (intern_string(&ASGI_KEY_SERVER, "server") < 0) return -1;
-    if (intern_string(&ASGI_KEY_CLIENT, "client") < 0) return -1;
-    if (intern_string(&ASGI_KEY_STATE, "state") < 0) return -1;
-
-    /* Intern ASGI subdict keys */
-    if (intern_string(&ASGI_KEY_VERSION, "version") < 0) return -1;
-    if (intern_string(&ASGI_KEY_SPEC_VERSION, "spec_version") < 0) return -1;
-
-    /* Intern WebSocket keys */
-    if (intern_string(&ASGI_KEY_SUBPROTOCOLS, "subprotocols") < 0) return -1;
-
-    /* Intern extension keys */
-    if (intern_string(&ASGI_KEY_EXTENSIONS, "extensions") < 0) return -1;
-    if (intern_string(&ASGI_KEY_HTTP_TRAILERS, "http.response.trailers") < 0) return -1;
-    if (intern_string(&ASGI_KEY_HTTP_EARLY_HINTS, "http.response.early_hints") < 0) return -1;
-
-    /* Create type constants */
-    ASGI_TYPE_HTTP = PyUnicode_InternFromString("http");
-    if (ASGI_TYPE_HTTP == NULL) return -1;
-    ASGI_TYPE_WEBSOCKET = PyUnicode_InternFromString("websocket");
-    if (ASGI_TYPE_WEBSOCKET == NULL) return -1;
-    ASGI_TYPE_LIFESPAN = PyUnicode_InternFromString("lifespan");
-    if (ASGI_TYPE_LIFESPAN == NULL) return -1;
-
-    /* Create HTTP version constants */
-    ASGI_HTTP_10 = PyUnicode_InternFromString("1.0");
-    if (ASGI_HTTP_10 == NULL) return -1;
-    ASGI_HTTP_11 = PyUnicode_InternFromString("1.1");
-    if (ASGI_HTTP_11 == NULL) return -1;
-    ASGI_HTTP_2 = PyUnicode_InternFromString("2");
-    if (ASGI_HTTP_2 == NULL) return -1;
-    ASGI_HTTP_3 = PyUnicode_InternFromString("3");
-    if (ASGI_HTTP_3 == NULL) return -1;
-
-    /* Create scheme constants */
-    ASGI_SCHEME_HTTP = PyUnicode_InternFromString("http");
-    if (ASGI_SCHEME_HTTP == NULL) return -1;
-    ASGI_SCHEME_HTTPS = PyUnicode_InternFromString("https");
-    if (ASGI_SCHEME_HTTPS == NULL) return -1;
-    ASGI_SCHEME_WS = PyUnicode_InternFromString("ws");
-    if (ASGI_SCHEME_WS == NULL) return -1;
-    ASGI_SCHEME_WSS = PyUnicode_InternFromString("wss");
-    if (ASGI_SCHEME_WSS == NULL) return -1;
-
-    /* Create HTTP method constants */
-    ASGI_METHOD_GET = PyUnicode_InternFromString("GET");
-    if (ASGI_METHOD_GET == NULL) return -1;
-    ASGI_METHOD_POST = PyUnicode_InternFromString("POST");
-    if (ASGI_METHOD_POST == NULL) return -1;
-    ASGI_METHOD_PUT = PyUnicode_InternFromString("PUT");
-    if (ASGI_METHOD_PUT == NULL) return -1;
-    ASGI_METHOD_DELETE = PyUnicode_InternFromString("DELETE");
-    if (ASGI_METHOD_DELETE == NULL) return -1;
-    ASGI_METHOD_HEAD = PyUnicode_InternFromString("HEAD");
-    if (ASGI_METHOD_HEAD == NULL) return -1;
-    ASGI_METHOD_OPTIONS = PyUnicode_InternFromString("OPTIONS");
-    if (ASGI_METHOD_OPTIONS == NULL) return -1;
-    ASGI_METHOD_PATCH = PyUnicode_InternFromString("PATCH");
-    if (ASGI_METHOD_PATCH == NULL) return -1;
-    ASGI_METHOD_CONNECT = PyUnicode_InternFromString("CONNECT");
-    if (ASGI_METHOD_CONNECT == NULL) return -1;
-    ASGI_METHOD_TRACE = PyUnicode_InternFromString("TRACE");
-    if (ASGI_METHOD_TRACE == NULL) return -1;
-
-    /* Create empty values */
-    ASGI_EMPTY_STRING = PyUnicode_InternFromString("");
-    if (ASGI_EMPTY_STRING == NULL) return -1;
-    ASGI_EMPTY_BYTES = PyBytes_FromStringAndSize("", 0);
-    if (ASGI_EMPTY_BYTES == NULL) return -1;
-
-    /* Build ASGI subdict: {"version": "3.0", "spec_version": "2.3"} */
-    ASGI_SUBDICT = PyDict_New();
-    if (ASGI_SUBDICT == NULL) return -1;
-
-    PyObject *version_30 = PyUnicode_InternFromString("3.0");
-    PyObject *spec_version = PyUnicode_InternFromString("2.3");
-    if (version_30 == NULL || spec_version == NULL) {
-        Py_XDECREF(version_30);
-        Py_XDECREF(spec_version);
+    /* Initialize per-interpreter state for current interpreter */
+    asgi_interp_state_t *state = get_asgi_interp_state();
+    if (!state) {
         return -1;
     }
-
-    PyDict_SetItem(ASGI_SUBDICT, ASGI_KEY_VERSION, version_30);
-    PyDict_SetItem(ASGI_SUBDICT, ASGI_KEY_SPEC_VERSION, spec_version);
-    Py_DECREF(version_30);
-    Py_DECREF(spec_version);
 
     g_asgi_initialized = true;
     return 0;
 }
 
+/**
+ * @brief Clean up ASGI subsystem
+ *
+ * Cleans up all per-interpreter states. Should be called during
+ * module finalization.
+ */
 static void asgi_scope_cleanup(void) {
     if (!g_asgi_initialized) {
         return;
     }
 
-    /* Clean up interned keys */
-    Py_XDECREF(ASGI_KEY_TYPE);
-    Py_XDECREF(ASGI_KEY_ASGI);
-    Py_XDECREF(ASGI_KEY_HTTP_VERSION);
-    Py_XDECREF(ASGI_KEY_METHOD);
-    Py_XDECREF(ASGI_KEY_SCHEME);
-    Py_XDECREF(ASGI_KEY_PATH);
-    Py_XDECREF(ASGI_KEY_RAW_PATH);
-    Py_XDECREF(ASGI_KEY_QUERY_STRING);
-    Py_XDECREF(ASGI_KEY_ROOT_PATH);
-    Py_XDECREF(ASGI_KEY_HEADERS);
-    Py_XDECREF(ASGI_KEY_SERVER);
-    Py_XDECREF(ASGI_KEY_CLIENT);
-    Py_XDECREF(ASGI_KEY_STATE);
-    Py_XDECREF(ASGI_KEY_VERSION);
-    Py_XDECREF(ASGI_KEY_SPEC_VERSION);
-    Py_XDECREF(ASGI_KEY_SUBPROTOCOLS);
-    Py_XDECREF(ASGI_KEY_EXTENSIONS);
-    Py_XDECREF(ASGI_KEY_HTTP_TRAILERS);
-    Py_XDECREF(ASGI_KEY_HTTP_EARLY_HINTS);
-
-    /* Clean up constants */
-    Py_XDECREF(ASGI_TYPE_HTTP);
-    Py_XDECREF(ASGI_TYPE_WEBSOCKET);
-    Py_XDECREF(ASGI_TYPE_LIFESPAN);
-    Py_XDECREF(ASGI_SUBDICT);
-    Py_XDECREF(ASGI_HTTP_10);
-    Py_XDECREF(ASGI_HTTP_11);
-    Py_XDECREF(ASGI_HTTP_2);
-    Py_XDECREF(ASGI_HTTP_3);
-    Py_XDECREF(ASGI_SCHEME_HTTP);
-    Py_XDECREF(ASGI_SCHEME_HTTPS);
-    Py_XDECREF(ASGI_SCHEME_WS);
-    Py_XDECREF(ASGI_SCHEME_WSS);
-    Py_XDECREF(ASGI_METHOD_GET);
-    Py_XDECREF(ASGI_METHOD_POST);
-    Py_XDECREF(ASGI_METHOD_PUT);
-    Py_XDECREF(ASGI_METHOD_DELETE);
-    Py_XDECREF(ASGI_METHOD_HEAD);
-    Py_XDECREF(ASGI_METHOD_OPTIONS);
-    Py_XDECREF(ASGI_METHOD_PATCH);
-    Py_XDECREF(ASGI_METHOD_CONNECT);
-    Py_XDECREF(ASGI_METHOD_TRACE);
-    Py_XDECREF(ASGI_EMPTY_STRING);
-    Py_XDECREF(ASGI_EMPTY_BYTES);
-
-    /* Reset all pointers */
-    ASGI_KEY_TYPE = NULL;
-    ASGI_KEY_ASGI = NULL;
-    ASGI_KEY_HTTP_VERSION = NULL;
-    ASGI_KEY_METHOD = NULL;
-    ASGI_KEY_SCHEME = NULL;
-    ASGI_KEY_PATH = NULL;
-    ASGI_KEY_RAW_PATH = NULL;
-    ASGI_KEY_QUERY_STRING = NULL;
-    ASGI_KEY_ROOT_PATH = NULL;
-    ASGI_KEY_HEADERS = NULL;
-    ASGI_KEY_SERVER = NULL;
-    ASGI_KEY_CLIENT = NULL;
-    ASGI_KEY_STATE = NULL;
-    ASGI_KEY_VERSION = NULL;
-    ASGI_KEY_SPEC_VERSION = NULL;
-    ASGI_KEY_SUBPROTOCOLS = NULL;
-    ASGI_KEY_EXTENSIONS = NULL;
-    ASGI_KEY_HTTP_TRAILERS = NULL;
-    ASGI_KEY_HTTP_EARLY_HINTS = NULL;
-    ASGI_TYPE_HTTP = NULL;
-    ASGI_TYPE_WEBSOCKET = NULL;
-    ASGI_TYPE_LIFESPAN = NULL;
-    ASGI_SUBDICT = NULL;
-    ASGI_HTTP_10 = NULL;
-    ASGI_HTTP_11 = NULL;
-    ASGI_HTTP_2 = NULL;
-    ASGI_HTTP_3 = NULL;
-    ASGI_SCHEME_HTTP = NULL;
-    ASGI_SCHEME_HTTPS = NULL;
-    ASGI_SCHEME_WS = NULL;
-    ASGI_SCHEME_WSS = NULL;
-    ASGI_METHOD_GET = NULL;
-    ASGI_METHOD_POST = NULL;
-    ASGI_METHOD_PUT = NULL;
-    ASGI_METHOD_DELETE = NULL;
-    ASGI_METHOD_HEAD = NULL;
-    ASGI_METHOD_OPTIONS = NULL;
-    ASGI_METHOD_PATCH = NULL;
-    ASGI_METHOD_CONNECT = NULL;
-    ASGI_METHOD_TRACE = NULL;
-    ASGI_EMPTY_STRING = NULL;
-    ASGI_EMPTY_BYTES = NULL;
+    /* Clean up all per-interpreter states */
+    cleanup_all_asgi_interp_states();
 
     g_asgi_initialized = false;
 }

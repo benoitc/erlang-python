@@ -27,6 +27,15 @@
  * - Response pooling (reduce dict allocation overhead)
  * - Direct ASGI NIF bypassing generic py:call() path
  *
+ * @section subinterpreters Sub-interpreter and Free-threading Support
+ *
+ * This module supports Python 3.12+ sub-interpreters and Python 3.13+
+ * free-threading (no-GIL) mode through per-interpreter state management:
+ * - Each interpreter maintains its own set of interned keys and constants
+ * - State is automatically created on first use in each interpreter
+ * - Thread-safe access in free-threading mode via mutex protection
+ * - Proper cleanup when interpreter is finalized
+ *
  * @section performance Performance Gains
  *
  * | Optimization | Improvement |
@@ -45,6 +54,7 @@
 #define PY_ASGI_H
 
 #include "py_nif.h"
+#include <pthread.h>
 
 /* ============================================================================
  * Configuration
@@ -74,94 +84,184 @@
  */
 #define ASGI_ZERO_COPY_THRESHOLD 1024
 
+/**
+ * @def ASGI_MAX_INTERPRETERS
+ * @brief Maximum number of concurrent sub-interpreters supported
+ */
+#define ASGI_MAX_INTERPRETERS 64
+
 /* ============================================================================
- * Interned ASGI Scope Keys
+ * Per-Interpreter State (Sub-interpreter & Free-threading Support)
  * ============================================================================ */
 
 /**
- * @defgroup asgi_keys Interned ASGI Keys
- * @brief Pre-interned Python strings for ASGI scope dictionary keys
+ * @brief Per-interpreter ASGI state
  *
- * These are created once at initialization and reused for all requests,
- * eliminating per-request string allocation and interning overhead.
- * @{
+ * Each Python interpreter (main or sub-interpreter) has its own set of
+ * interned keys and cached constants. This structure holds all interpreter-
+ * specific state and is accessed via get_asgi_interp_state().
+ *
+ * In free-threading mode (Python 3.13+), access to this state is protected
+ * by a mutex to prevent data races.
  */
+typedef struct asgi_interp_state {
+    /* Interpreter identification */
+    PyInterpreterState *interp;     /**< Python interpreter this state belongs to */
+    bool initialized;               /**< State has been initialized */
 
-/* Core scope keys */
-extern PyObject *ASGI_KEY_TYPE;           /**< "type" */
-extern PyObject *ASGI_KEY_ASGI;           /**< "asgi" */
-extern PyObject *ASGI_KEY_HTTP_VERSION;   /**< "http_version" */
-extern PyObject *ASGI_KEY_METHOD;         /**< "method" */
-extern PyObject *ASGI_KEY_SCHEME;         /**< "scheme" */
-extern PyObject *ASGI_KEY_PATH;           /**< "path" */
-extern PyObject *ASGI_KEY_RAW_PATH;       /**< "raw_path" */
-extern PyObject *ASGI_KEY_QUERY_STRING;   /**< "query_string" */
-extern PyObject *ASGI_KEY_ROOT_PATH;      /**< "root_path" */
-extern PyObject *ASGI_KEY_HEADERS;        /**< "headers" */
-extern PyObject *ASGI_KEY_SERVER;         /**< "server" */
-extern PyObject *ASGI_KEY_CLIENT;         /**< "client" */
-extern PyObject *ASGI_KEY_STATE;          /**< "state" */
+    /* Core scope keys */
+    PyObject *key_type;             /**< "type" */
+    PyObject *key_asgi;             /**< "asgi" */
+    PyObject *key_http_version;     /**< "http_version" */
+    PyObject *key_method;           /**< "method" */
+    PyObject *key_scheme;           /**< "scheme" */
+    PyObject *key_path;             /**< "path" */
+    PyObject *key_raw_path;         /**< "raw_path" */
+    PyObject *key_query_string;     /**< "query_string" */
+    PyObject *key_root_path;        /**< "root_path" */
+    PyObject *key_headers;          /**< "headers" */
+    PyObject *key_server;           /**< "server" */
+    PyObject *key_client;           /**< "client" */
+    PyObject *key_state;            /**< "state" */
 
-/* ASGI subdict keys */
-extern PyObject *ASGI_KEY_VERSION;        /**< "version" */
-extern PyObject *ASGI_KEY_SPEC_VERSION;   /**< "spec_version" */
+    /* ASGI subdict keys */
+    PyObject *key_version;          /**< "version" */
+    PyObject *key_spec_version;     /**< "spec_version" */
 
-/* WebSocket keys */
-extern PyObject *ASGI_KEY_SUBPROTOCOLS;   /**< "subprotocols" */
+    /* WebSocket keys */
+    PyObject *key_subprotocols;     /**< "subprotocols" */
 
-/* Extension keys */
-extern PyObject *ASGI_KEY_EXTENSIONS;     /**< "extensions" */
-extern PyObject *ASGI_KEY_HTTP_TRAILERS;  /**< "http.response.trailers" */
-extern PyObject *ASGI_KEY_HTTP_EARLY_HINTS; /**< "http.response.early_hints" */
+    /* Extension keys */
+    PyObject *key_extensions;       /**< "extensions" */
+    PyObject *key_http_trailers;    /**< "http.response.trailers" */
+    PyObject *key_http_early_hints; /**< "http.response.early_hints" */
 
-/** @} */
+    /* Type constants */
+    PyObject *type_http;            /**< "http" */
+    PyObject *type_websocket;       /**< "websocket" */
+    PyObject *type_lifespan;        /**< "lifespan" */
 
-/* ============================================================================
- * Pre-built Constant Values
- * ============================================================================ */
+    /* ASGI subdict (version info) */
+    PyObject *asgi_subdict;         /**< {"version": "3.0", "spec_version": "2.3"} */
+
+    /* HTTP versions */
+    PyObject *http_10;              /**< "1.0" */
+    PyObject *http_11;              /**< "1.1" */
+    PyObject *http_2;               /**< "2" */
+    PyObject *http_3;               /**< "3" */
+
+    /* Schemes */
+    PyObject *scheme_http;          /**< "http" */
+    PyObject *scheme_https;         /**< "https" */
+    PyObject *scheme_ws;            /**< "ws" */
+    PyObject *scheme_wss;           /**< "wss" */
+
+    /* Common HTTP methods */
+    PyObject *method_get;           /**< "GET" */
+    PyObject *method_post;          /**< "POST" */
+    PyObject *method_put;           /**< "PUT" */
+    PyObject *method_delete;        /**< "DELETE" */
+    PyObject *method_head;          /**< "HEAD" */
+    PyObject *method_options;       /**< "OPTIONS" */
+    PyObject *method_patch;         /**< "PATCH" */
+    PyObject *method_connect;       /**< "CONNECT" */
+    PyObject *method_trace;         /**< "TRACE" */
+
+    /* Empty values */
+    PyObject *empty_string;         /**< "" */
+    PyObject *empty_bytes;          /**< b"" */
+} asgi_interp_state_t;
 
 /**
- * @defgroup asgi_constants Pre-built Constants
- * @brief Cached immutable Python objects for common ASGI values
- * @{
+ * @brief Get per-interpreter ASGI state for current interpreter
+ *
+ * Returns the ASGI state for the current Python interpreter. Creates and
+ * initializes the state if it doesn't exist. Thread-safe in free-threading mode.
+ *
+ * @return Pointer to interpreter state, or NULL on error
+ */
+asgi_interp_state_t *get_asgi_interp_state(void);
+
+/**
+ * @brief Clean up ASGI state for a specific interpreter
+ *
+ * Should be called when an interpreter is being finalized.
+ *
+ * @param interp The interpreter being finalized, or NULL for current
+ */
+void cleanup_asgi_interp_state(PyInterpreterState *interp);
+
+/**
+ * @brief Clean up all ASGI interpreter states
+ *
+ * Called during module unload to clean up all cached state.
+ */
+void cleanup_all_asgi_interp_states(void);
+
+/* ============================================================================
+ * Legacy Global Accessors (for backward compatibility)
+ * ============================================================================
+ * These macros provide the old global variable names but now access
+ * per-interpreter state. Code using these will continue to work but
+ * now properly supports sub-interpreters.
  */
 
-/* Type constants */
-extern PyObject *ASGI_TYPE_HTTP;          /**< "http" */
-extern PyObject *ASGI_TYPE_WEBSOCKET;     /**< "websocket" */
-extern PyObject *ASGI_TYPE_LIFESPAN;      /**< "lifespan" */
+#define ASGI_KEY_TYPE           (get_asgi_interp_state()->key_type)
+#define ASGI_KEY_ASGI           (get_asgi_interp_state()->key_asgi)
+#define ASGI_KEY_HTTP_VERSION   (get_asgi_interp_state()->key_http_version)
+#define ASGI_KEY_METHOD         (get_asgi_interp_state()->key_method)
+#define ASGI_KEY_SCHEME         (get_asgi_interp_state()->key_scheme)
+#define ASGI_KEY_PATH           (get_asgi_interp_state()->key_path)
+#define ASGI_KEY_RAW_PATH       (get_asgi_interp_state()->key_raw_path)
+#define ASGI_KEY_QUERY_STRING   (get_asgi_interp_state()->key_query_string)
+#define ASGI_KEY_ROOT_PATH      (get_asgi_interp_state()->key_root_path)
+#define ASGI_KEY_HEADERS        (get_asgi_interp_state()->key_headers)
+#define ASGI_KEY_SERVER         (get_asgi_interp_state()->key_server)
+#define ASGI_KEY_CLIENT         (get_asgi_interp_state()->key_client)
+#define ASGI_KEY_STATE          (get_asgi_interp_state()->key_state)
+#define ASGI_KEY_VERSION        (get_asgi_interp_state()->key_version)
+#define ASGI_KEY_SPEC_VERSION   (get_asgi_interp_state()->key_spec_version)
+#define ASGI_KEY_SUBPROTOCOLS   (get_asgi_interp_state()->key_subprotocols)
+#define ASGI_KEY_EXTENSIONS     (get_asgi_interp_state()->key_extensions)
+#define ASGI_KEY_HTTP_TRAILERS  (get_asgi_interp_state()->key_http_trailers)
+#define ASGI_KEY_HTTP_EARLY_HINTS (get_asgi_interp_state()->key_http_early_hints)
 
-/* ASGI subdict (version info) - same object reused every request */
-extern PyObject *ASGI_SUBDICT;            /**< {"version": "3.0", "spec_version": "2.3"} */
+#define ASGI_TYPE_HTTP          (get_asgi_interp_state()->type_http)
+#define ASGI_TYPE_WEBSOCKET     (get_asgi_interp_state()->type_websocket)
+#define ASGI_TYPE_LIFESPAN      (get_asgi_interp_state()->type_lifespan)
+#define ASGI_SUBDICT            (get_asgi_interp_state()->asgi_subdict)
 
-/* HTTP versions */
-extern PyObject *ASGI_HTTP_10;            /**< "1.0" */
-extern PyObject *ASGI_HTTP_11;            /**< "1.1" */
-extern PyObject *ASGI_HTTP_2;             /**< "2" */
-extern PyObject *ASGI_HTTP_3;             /**< "3" */
+#define ASGI_HTTP_10            (get_asgi_interp_state()->http_10)
+#define ASGI_HTTP_11            (get_asgi_interp_state()->http_11)
+#define ASGI_HTTP_2             (get_asgi_interp_state()->http_2)
+#define ASGI_HTTP_3             (get_asgi_interp_state()->http_3)
 
-/* Schemes */
-extern PyObject *ASGI_SCHEME_HTTP;        /**< "http" */
-extern PyObject *ASGI_SCHEME_HTTPS;       /**< "https" */
-extern PyObject *ASGI_SCHEME_WS;          /**< "ws" */
-extern PyObject *ASGI_SCHEME_WSS;         /**< "wss" */
+#define ASGI_SCHEME_HTTP        (get_asgi_interp_state()->scheme_http)
+#define ASGI_SCHEME_HTTPS       (get_asgi_interp_state()->scheme_https)
+#define ASGI_SCHEME_WS          (get_asgi_interp_state()->scheme_ws)
+#define ASGI_SCHEME_WSS         (get_asgi_interp_state()->scheme_wss)
 
-/* Common HTTP methods - cached to avoid repeated allocation */
-extern PyObject *ASGI_METHOD_GET;         /**< "GET" */
-extern PyObject *ASGI_METHOD_POST;        /**< "POST" */
-extern PyObject *ASGI_METHOD_PUT;         /**< "PUT" */
-extern PyObject *ASGI_METHOD_DELETE;      /**< "DELETE" */
-extern PyObject *ASGI_METHOD_HEAD;        /**< "HEAD" */
-extern PyObject *ASGI_METHOD_OPTIONS;     /**< "OPTIONS" */
-extern PyObject *ASGI_METHOD_PATCH;       /**< "PATCH" */
-extern PyObject *ASGI_METHOD_CONNECT;     /**< "CONNECT" */
-extern PyObject *ASGI_METHOD_TRACE;       /**< "TRACE" */
+#define ASGI_METHOD_GET         (get_asgi_interp_state()->method_get)
+#define ASGI_METHOD_POST        (get_asgi_interp_state()->method_post)
+#define ASGI_METHOD_PUT         (get_asgi_interp_state()->method_put)
+#define ASGI_METHOD_DELETE      (get_asgi_interp_state()->method_delete)
+#define ASGI_METHOD_HEAD        (get_asgi_interp_state()->method_head)
+#define ASGI_METHOD_OPTIONS     (get_asgi_interp_state()->method_options)
+#define ASGI_METHOD_PATCH       (get_asgi_interp_state()->method_patch)
+#define ASGI_METHOD_CONNECT     (get_asgi_interp_state()->method_connect)
+#define ASGI_METHOD_TRACE       (get_asgi_interp_state()->method_trace)
 
-/* Empty string/bytes (common for root_path, empty query_string) */
-extern PyObject *ASGI_EMPTY_STRING;       /**< "" */
-extern PyObject *ASGI_EMPTY_BYTES;        /**< b"" */
+#define ASGI_EMPTY_STRING       (get_asgi_interp_state()->empty_string)
+#define ASGI_EMPTY_BYTES        (get_asgi_interp_state()->empty_bytes)
 
-/** @} */
+/* ============================================================================
+ * Deprecated: Direct Global Variable Access
+ * ============================================================================
+ * The following extern declarations are kept for source compatibility but
+ * the variables no longer exist. Use the macros above instead which access
+ * per-interpreter state.
+ */
+
 
 /* ============================================================================
  * Response Pooling
