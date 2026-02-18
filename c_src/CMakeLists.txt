@@ -47,6 +47,17 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Performance build option (for maximum optimization)
+option(PERF_BUILD "Enable aggressive performance optimizations (-O3, LTO, native arch)" OFF)
+
+if(PERF_BUILD)
+    message(STATUS "Performance build enabled - using aggressive optimizations")
+    # Override compiler flags for maximum performance
+    set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+    # Enable Link-Time Optimization
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 # Find Erlang
 include(FindErlang)
 include_directories(${ERLANG_ERTS_INCLUDE_PATH})
@@ -99,11 +110,24 @@ target_include_directories(py_nif PRIVATE
 )
 
 # Compiler flags
-target_compile_options(py_nif PRIVATE
-    -O2
-    -Wall
-    -fPIC
-)
+if(PERF_BUILD)
+    # Performance build: aggressive optimizations
+    target_compile_options(py_nif PRIVATE
+        -O3
+        -Wall
+        -fPIC
+        -march=native
+        -ffast-math
+        -funroll-loops
+    )
+else()
+    # Standard build
+    target_compile_options(py_nif PRIVATE
+        -O2
+        -Wall
+        -fPIC
+    )
+endif()
 
 # Platform-specific settings
 if(APPLE)

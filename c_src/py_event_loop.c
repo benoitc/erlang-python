@@ -785,6 +785,9 @@ ERL_NIF_TERM nif_poll_events(ErlNifEnv *env, int argc,
     return enif_make_tuple2(env, ATOM_OK, enif_make_int(env, num_events));
 }
 
+/* Forward declaration for hash set clear function (defined with other hash functions) */
+static inline void pending_hash_clear(erlang_event_loop_t *loop);
+
 /**
  * get_pending(LoopRef) -> [{CallbackId, Type}]
  *
@@ -800,10 +803,28 @@ ERL_NIF_TERM nif_get_pending(ErlNifEnv *env, int argc,
         return enif_make_list(env, 0);
     }
 
+    /*
+     * Phase 1: Detach pending list under lock (fast - just pointer swap)
+     * This minimizes lock contention by doing minimal work under the mutex.
+     */
     pthread_mutex_lock(&loop->mutex);
 
+    pending_event_t *snapshot_head = loop->pending_head;
+    loop->pending_head = NULL;
+    loop->pending_tail = NULL;
+    atomic_store(&loop->pending_count, 0);
+
+    /* Clear the hash set since we're consuming all pending events */
+    pending_hash_clear(loop);
+
+    pthread_mutex_unlock(&loop->mutex);
+
+    /*
+     * Phase 2: Build Erlang list outside lock (no contention)
+     * Term creation and memory operations happen without holding the mutex.
+     */
     ERL_NIF_TERM list = enif_make_list(env, 0);
-    pending_event_t *current = loop->pending_head;
+    pending_event_t *current = snapshot_head;
 
     while (current != NULL) {
         ERL_NIF_TERM type_atom;
@@ -832,12 +853,6 @@ ERL_NIF_TERM nif_get_pending(ErlNifEnv *env, int argc,
         enif_free(current);
         current = next;
     }
-
-    loop->pending_head = NULL;
-    loop->pending_tail = NULL;
-    atomic_store(&loop->pending_count, 0);
-
-    pthread_mutex_unlock(&loop->mutex);
 
     /* Reverse the list to maintain order */
     ERL_NIF_TERM reversed = enif_make_list(env, 0);
@@ -1033,19 +1048,114 @@ static inline void return_pending_event(erlang_event_loop_t *loop,
     }
 }
 
+/* ============================================================================
+ * Pending Event Hash Set (O(1) duplicate detection)
+ *
+ * Uses open addressing with linear probing. Key is (callback_id, type)
+ * combined into a single uint64_t.
+ * ============================================================================ */
+
+/**
+ * @brief Compute hash key from callback_id and event type
+ */
+static inline uint64_t pending_hash_key(uint64_t callback_id, event_type_t type) {
+    /* Combine callback_id and type into a single key */
+    return (callback_id << 2) | (uint64_t)type;
+}
+
+/**
+ * @brief Compute hash bucket index
+ */
+static inline uint32_t pending_hash_index(uint64_t key) {
+    /* Simple hash: XOR fold and modulo */
+    return (uint32_t)((key ^ (key >> 32)) % PENDING_HASH_SIZE);
+}
+
+/**
+ * @brief Check if a (callback_id, type) pair exists in the hash set
+ *
+ * @param loop Event loop containing the hash set
+ * @param callback_id Callback ID to check
+ * @param type Event type to check
+ * @return true if exists, false otherwise
+ */
+static inline bool pending_hash_contains(erlang_event_loop_t *loop,
+                                          uint64_t callback_id, event_type_t type) {
+    if (loop->pending_hash_count == 0) {
+        return false;
+    }
+
+    uint64_t key = pending_hash_key(callback_id, type);
+    uint32_t idx = pending_hash_index(key);
+
+    /* Linear probing */
+    for (int i = 0; i < PENDING_HASH_SIZE; i++) {
+        uint32_t probe = (idx + i) % PENDING_HASH_SIZE;
+        if (!loop->pending_hash_occupied[probe]) {
+            return false;  /* Empty slot means key not present */
+        }
+        if (loop->pending_hash_keys[probe] == key) {
+            return true;
+        }
+    }
+    return false;  /* Table full, key not found */
+}
+
+/**
+ * @brief Insert a (callback_id, type) pair into the hash set
+ *
+ * @param loop Event loop containing the hash set
+ * @param callback_id Callback ID to insert
+ * @param type Event type to insert
+ * @return true if inserted, false if already exists or table full
+ */
+static inline bool pending_hash_insert(erlang_event_loop_t *loop,
+                                        uint64_t callback_id, event_type_t type) {
+    /* Don't insert if table is too full (load factor > 0.75) */
+    if (loop->pending_hash_count >= (PENDING_HASH_SIZE * 3) / 4) {
+        return false;
+    }
+
+    uint64_t key = pending_hash_key(callback_id, type);
+    uint32_t idx = pending_hash_index(key);
+
+    /* Linear probing */
+    for (int i = 0; i < PENDING_HASH_SIZE; i++) {
+        uint32_t probe = (idx + i) % PENDING_HASH_SIZE;
+        if (!loop->pending_hash_occupied[probe]) {
+            loop->pending_hash_keys[probe] = key;
+            loop->pending_hash_occupied[probe] = true;
+            loop->pending_hash_count++;
+            return true;
+        }
+        if (loop->pending_hash_keys[probe] == key) {
+            return false;  /* Already exists */
+        }
+    }
+    return false;  /* Table full */
+}
+
+/**
+ * @brief Clear the pending hash set
+ *
+ * @param loop Event loop containing the hash set
+ */
+static inline void pending_hash_clear(erlang_event_loop_t *loop) {
+    if (loop->pending_hash_count > 0) {
+        memset(loop->pending_hash_occupied, 0, sizeof(loop->pending_hash_occupied));
+        loop->pending_hash_count = 0;
+    }
+}
+
 void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
                             uint64_t callback_id, int fd) {
     pthread_mutex_lock(&loop->mutex);
 
-    /* Check for duplicate - don't add if same callback_id already pending */
-    pending_event_t *current = loop->pending_head;
-    while (current != NULL) {
-        if (current->callback_id == callback_id && current->type == type) {
-            /* Already have this event pending, skip */
-            pthread_mutex_unlock(&loop->mutex);
-            return;
-        }
-        current = current->next;
+    /* O(1) duplicate check using hash set */
+    if (pending_hash_contains(loop, callback_id, type)) {
+        /* Already have this event pending, skip */
+        pthread_mutex_unlock(&loop->mutex);
+        return;
     }
 
     /* Get event from freelist or allocate new (Phase 7 optimization) */
@@ -1068,6 +1178,9 @@ void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
         loop->pending_tail = event;
     }
 
+    /* Add to hash set for future O(1) duplicate checks */
+    pending_hash_insert(loop, callback_id, type);
+
     atomic_fetch_add(&loop->pending_count, 1);
     pthread_cond_signal(&loop->event_cond);
 
@@ -1088,6 +1201,9 @@ void event_loop_clear_pending(erlang_event_loop_t *loop) {
     loop->pending_head = NULL;
     loop->pending_tail = NULL;
     atomic_store(&loop->pending_count, 0);
+
+    /* Clear the hash set since all pending events are cleared */
+    pending_hash_clear(loop);
 
     pthread_mutex_unlock(&loop->mutex);
 }
@@ -2084,6 +2200,9 @@ static PyObject *py_get_pending(PyObject *self, PyObject *args) {
     loop->pending_tail = NULL;
     atomic_store(&loop->pending_count, 0);
 
+    /* Clear the hash set since we're consuming all pending events */
+    pending_hash_clear(loop);
+
     pthread_mutex_unlock(&loop->mutex);
 
     return list;
@@ -2455,6 +2574,7 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
             loop->pending_head = NULL;
             loop->pending_tail = NULL;
             atomic_store(&loop->pending_count, 0);
+            pending_hash_clear(loop);
             pthread_mutex_unlock(&loop->mutex);
             return NULL;
         }
@@ -2476,6 +2596,9 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
     loop->pending_head = NULL;
     loop->pending_tail = NULL;
     atomic_store(&loop->pending_count, 0);
+
+    /* Clear the hash set since we're consuming all pending events */
+    pending_hash_clear(loop);
 
     pthread_mutex_unlock(&loop->mutex);
 

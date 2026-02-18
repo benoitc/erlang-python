@@ -49,6 +49,9 @@
 /** @brief Maximum events to keep in freelist (Phase 7 optimization) */
 #define EVENT_FREELIST_SIZE 256
 
+/** @brief Size of pending event hash set for O(1) duplicate detection */
+#define PENDING_HASH_SIZE 128
+
 /** @brief Event types for pending callbacks */
 typedef enum {
     EVENT_TYPE_READ = 1,
@@ -210,6 +213,22 @@ typedef struct erlang_event_loop {
 
     /** @brief Number of events currently in freelist */
     int freelist_count;
+
+    /* ========== O(1) Duplicate Detection Hash Set ========== */
+
+    /**
+     * @brief Hash set for O(1) duplicate pending event detection
+     *
+     * Key: (callback_id, type) combined into a single uint64_t
+     * Uses open addressing with linear probing.
+     */
+    uint64_t pending_hash_keys[PENDING_HASH_SIZE];
+
+    /** @brief Occupancy flags for hash set slots */
+    bool pending_hash_occupied[PENDING_HASH_SIZE];
+
+    /** @brief Count of occupied slots in hash set */
+    int pending_hash_count;
 } erlang_event_loop_t;
 
 /* ============================================================================

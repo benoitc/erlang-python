@@ -84,6 +84,44 @@
  */
 
 /* ============================================================================
+ * Cached Python Function References
+ *
+ * Cache frequently-used Python functions to avoid repeated module import
+ * and attribute lookup overhead on every callback.
+ * ============================================================================ */
+
+/** @brief Cached reference to ast.literal_eval function */
+static PyObject *g_ast_literal_eval = NULL;
+
+/**
+ * @brief Initialize cached Python function references
+ *
+ * Called during module initialization. Must be called with GIL held.
+ */
+static void init_callback_cache(void) {
+    if (g_ast_literal_eval == NULL) {
+        PyObject *ast_mod = PyImport_ImportModule("ast");
+        if (ast_mod != NULL) {
+            g_ast_literal_eval = PyObject_GetAttrString(ast_mod, "literal_eval");
+            Py_DECREF(ast_mod);
+        }
+        if (g_ast_literal_eval == NULL) {
+            PyErr_Clear();  /* Non-fatal if unavailable */
+        }
+    }
+}
+
+/**
+ * @brief Cleanup cached Python function references
+ *
+ * Called during module cleanup. Must be called with GIL held.
+ */
+static void cleanup_callback_cache(void) {
+    Py_XDECREF(g_ast_literal_eval);
+    g_ast_literal_eval = NULL;
+}
+
+/* ============================================================================
  * Callback Name Registry
  *
  * Maintains a C-side registry of registered callback function names.
@@ -580,24 +618,18 @@ static PyObject *parse_callback_response(unsigned char *response_data, size_t re
 
     PyObject *result = NULL;
     if (status == 0) {
-        /* Try to evaluate the result string as Python literal */
-        PyObject *ast_module = PyImport_ImportModule("ast");
-        if (ast_module != NULL) {
-            PyObject *literal_eval = PyObject_GetAttrString(ast_module, "literal_eval");
-            if (literal_eval != NULL) {
-                PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
-                if (arg != NULL) {
-                    result = PyObject_CallFunctionObjArgs(literal_eval, arg, NULL);
-                    Py_DECREF(arg);
-                    if (result == NULL) {
-                        /* If literal_eval fails, return as string */
-                        PyErr_Clear();
-                        result = PyUnicode_FromStringAndSize(result_str, result_len);
-                    }
+        /* Try to evaluate the result string as Python literal using cached function */
+        if (g_ast_literal_eval != NULL) {
+            PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
+            if (arg != NULL) {
+                result = PyObject_CallFunctionObjArgs(g_ast_literal_eval, arg, NULL);
+                Py_DECREF(arg);
+                if (result == NULL) {
+                    /* If literal_eval fails, return as string */
+                    PyErr_Clear();
+                    result = PyUnicode_FromStringAndSize(result_str, result_len);
                 }
-                Py_DECREF(literal_eval);
             }
-            Py_DECREF(ast_module);
         }
         if (result == NULL) {
             result = PyUnicode_FromStringAndSize(result_str, result_len);
@@ -1291,6 +1323,9 @@ static struct PyModuleDef ErlangModuleDef = {
  * Called during Python initialization.
  */
 static int create_erlang_module(void) {
+    /* Initialize cached Python function references */
+    init_callback_cache();
+
     /* Initialize ErlangFunction type */
     if (PyType_Ready(&ErlangFunctionType) < 0) {
         return -1;

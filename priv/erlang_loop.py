@@ -80,7 +80,8 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # Use __slots__ for faster attribute access and reduced memory
     __slots__ = (
         '_pel', '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
-        '_timers', '_timer_refs', '_timer_heap', '_ready', '_callback_id',
+        '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
+        '_ready', '_callback_id',
         '_handle_pool', '_handle_pool_max', '_running', '_stopping', '_closed',
         '_thread_id', '_clock_resolution', '_exception_handler', '_current_handle',
         '_debug', '_task_factory', '_default_executor',
@@ -113,6 +114,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._timers = {}   # callback_id -> handle
         self._timer_refs = {}  # callback_id -> timer_ref (for cancellation)
         self._timer_heap = []  # min-heap of (when, callback_id) for O(1) minimum lookup
+        self._handle_to_callback_id = {}  # handle -> callback_id (reverse map for O(1) cancellation)
         self._ready = deque()  # Callbacks ready to run
         self._callback_id = 0
 
@@ -190,7 +192,12 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if new_task:
             future._log_destroy_pending = False
 
-        future.add_done_callback(lambda f: self.stop())
+        # Use a single callback reference to ensure proper removal
+        # (two different lambdas would be different objects)
+        def _done_callback(f):
+            self.stop()
+
+        future.add_done_callback(_done_callback)
 
         try:
             self.run_forever()
@@ -199,7 +206,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 future.exception()
             raise
         finally:
-            future.remove_done_callback(lambda f: self.stop())
+            future.remove_done_callback(_done_callback)
 
         if not future.done():
             raise RuntimeError('Event loop stopped before Future completed.')
@@ -244,6 +251,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._timers.clear()
         self._timer_refs.clear()
         self._timer_heap.clear()
+        self._handle_to_callback_id.clear()
 
         # Remove all readers/writers
         for fd in list(self._readers.keys()):
@@ -301,6 +309,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         handle = events.TimerHandle(when, callback, args, self, context)
         self._timers[callback_id] = handle
+        self._handle_to_callback_id[id(handle)] = callback_id  # Reverse map for O(1) cancellation
 
         # Push to timer heap for O(1) minimum lookup
         heapq.heappush(self._timer_heap, (when, callback_id))
@@ -866,6 +875,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             handle = self._timers.pop(callback_id, None)
             if handle is not None:
                 self._timer_refs.pop(callback_id, None)
+                self._handle_to_callback_id.pop(id(handle), None)  # Clean up reverse map
                 if not handle._cancelled:
                     self._ready_append(handle)
 
@@ -880,16 +890,20 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             raise RuntimeError('This event loop is already running')
 
     def _timer_handle_cancelled(self, handle):
-        """Called when a TimerHandle is cancelled."""
-        for callback_id, h in list(self._timers.items()):
-            if h is handle:
-                timer_ref = self._timer_refs.pop(callback_id, None)
-                if timer_ref is not None:
-                    try:
-                        self._pel._cancel_timer(timer_ref)
-                    except (AttributeError, RuntimeError):
-                        pass
-                break
+        """Called when a TimerHandle is cancelled.
+
+        Uses O(1) reverse map lookup instead of O(n) iteration.
+        """
+        # O(1) lookup via reverse map
+        callback_id = self._handle_to_callback_id.pop(id(handle), None)
+        if callback_id is not None:
+            self._timers.pop(callback_id, None)
+            timer_ref = self._timer_refs.pop(callback_id, None)
+            if timer_ref is not None:
+                try:
+                    self._pel._cancel_timer(timer_ref)
+                except (AttributeError, RuntimeError):
+                    pass
 
     def _set_coroutine_origin_tracking(self, enabled):
         """Enable/disable coroutine origin tracking."""

@@ -1732,6 +1732,8 @@ static int upgrade(ErlNifEnv *env, void **priv_data, void **old_priv_data,
 static void unload(ErlNifEnv *env, void *priv_data) {
     (void)env;
     (void)priv_data;
+    /* Clean up cached function references */
+    cleanup_callback_cache();
     /* Clean up callback name registry */
     cleanup_callback_registry();
     /* Other cleanup handled by finalize */
