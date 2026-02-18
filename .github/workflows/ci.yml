@@ -218,3 +218,40 @@ jobs:
 
       - name: Run dialyzer
         run: rebar3 dialyzer
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set Python library path
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Build documentation
+        run: rebar3 ex_doc
+
+      - name: Verify doc artifacts
+        run: |
+          test -d doc || (echo "doc directory not created" && exit 1)
+          test -f doc/index.html || (echo "doc/index.html not found" && exit 1)
+          echo "Documentation built successfully"
+          ls -la doc/
