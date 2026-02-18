@@ -441,7 +441,10 @@ static void process_request(py_request_t *req) {
         if (compiled == NULL) {
             req->result = make_py_error(env);
         } else {
-            PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->locals);
+            /* Use globals for both to ensure imports are visible to defined functions.
+             * When using separate dicts, imports go to locals but function closures
+             * only see globals, causing "name X is not defined" errors. */
+            PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->globals);
             Py_DECREF(compiled);
 
             if (py_result == NULL) {

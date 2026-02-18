@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Erlang-native asyncio event loop** - Custom asyncio event loop backed by Erlang's scheduler
+  - `ErlangEventLoop` class in `priv/erlang_loop.py`
+  - Sub-millisecond latency via Erlang's `enif_select` (vs 10ms polling)
+  - Zero CPU usage when idle - no busy-waiting or polling overhead
+  - Full GIL release during waits for better concurrency
+  - Native Erlang scheduler integration for I/O events
+  - Event loop policy via `get_event_loop_policy()`
+
+- **TCP support for asyncio event loop**
+  - `create_connection()` - TCP client connections
+  - `create_server()` - TCP server with accept loop
+  - `_ErlangSocketTransport` - Non-blocking socket transport with write buffering
+  - `_ErlangServer` - TCP server with `serve_forever()` support
+
+- **UDP/datagram support for asyncio event loop**
+  - `create_datagram_endpoint()` - Create UDP endpoints with full parameter support
+  - `_ErlangDatagramTransport` - Datagram transport implementation
+  - Parameters: `local_addr`, `remote_addr`, `reuse_address`, `reuse_port`, `allow_broadcast`
+  - `DatagramProtocol` callbacks: `datagram_received()`, `error_received()`
+  - Support for both connected and unconnected UDP
+  - New NIF helpers: `create_test_udp_socket`, `sendto_test_udp`, `recvfrom_test_udp`, `set_udp_broadcast`
+  - New test suite: `test/py_udp_e2e_SUITE.erl`
+
+- **Asyncio event loop documentation**
+  - New documentation: `docs/asyncio.md`
+  - Updated `docs/getting-started.md` with link to asyncio documentation
+
 ## 1.3.2 (2026-02-17)
 
 ### Fixed

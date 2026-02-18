@@ -99,7 +99,17 @@ init([]) ->
         modules => [py_subinterp_pool]
     },
 
-    Children = [CallbackSpec, ThreadHandlerSpec, PoolSpec, AsyncPoolSpec, SubinterpPoolSpec],
+    %% Event loop manager (for Erlang-native asyncio)
+    EventLoopSpec = #{
+        id => py_event_loop,
+        start => {py_event_loop, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_event_loop]
+    },
+
+    Children = [CallbackSpec, ThreadHandlerSpec, PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

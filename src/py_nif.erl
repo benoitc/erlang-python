@@ -68,7 +68,50 @@
     async_callback_response/3,
     %% Callback name registry (prevents torch introspection issues)
     register_callback_name/1,
-    unregister_callback_name/1
+    unregister_callback_name/1,
+    %% Erlang-native event loop (for asyncio integration)
+    event_loop_new/0,
+    event_loop_destroy/1,
+    event_loop_set_router/2,
+    event_loop_wakeup/1,
+    add_reader/3,
+    remove_reader/2,
+    add_writer/3,
+    remove_writer/2,
+    call_later/3,
+    cancel_timer/2,
+    poll_events/2,
+    get_pending/1,
+    dispatch_callback/3,
+    dispatch_timer/2,
+    get_fd_callback_id/2,
+    reselect_reader/2,
+    reselect_writer/2,
+    %% FD lifecycle management (uvloop-like API)
+    handle_fd_event/2,
+    stop_reader/1,
+    start_reader/1,
+    stop_writer/1,
+    start_writer/1,
+    cancel_reader/2,  %% Legacy alias for stop_reader
+    cancel_writer/2,  %% Legacy alias for stop_writer
+    close_fd/1,
+    %% Test helpers for fd monitoring (using pipes)
+    create_test_pipe/0,
+    close_test_fd/1,
+    write_test_fd/2,
+    read_test_fd/2,
+    %% TCP test helpers
+    create_test_tcp_listener/1,
+    accept_test_tcp/1,
+    connect_test_tcp/2,
+    %% UDP test helpers
+    create_test_udp_socket/1,
+    recvfrom_test_udp/2,
+    sendto_test_udp/4,
+    set_udp_broadcast/2,
+    %% Python event loop integration
+    set_python_event_loop/1
 ]).
 
 -on_load(load_nif/0).
@@ -420,4 +463,251 @@ register_callback_name(_Name) ->
 %% @doc Unregister a callback name from the C-side registry.
 -spec unregister_callback_name(atom() | binary()) -> ok.
 unregister_callback_name(_Name) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Erlang-native Event Loop (asyncio integration)
+%%% ============================================================================
+
+%% @doc Create a new Erlang-backed asyncio event loop.
+%% Returns an opaque reference to be used with event loop functions.
+-spec event_loop_new() -> {ok, reference()} | {error, term()}.
+event_loop_new() ->
+    ?NIF_STUB.
+
+%% @doc Destroy an event loop.
+-spec event_loop_destroy(reference()) -> ok | {error, term()}.
+event_loop_destroy(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Set the router process for an event loop.
+%% The router receives enif_select messages and timer events.
+-spec event_loop_set_router(reference(), pid()) -> ok | {error, term()}.
+event_loop_set_router(_LoopRef, _RouterPid) ->
+    ?NIF_STUB.
+
+%% @doc Wake up an event loop from a wait.
+-spec event_loop_wakeup(reference()) -> ok | {error, term()}.
+event_loop_wakeup(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Register a file descriptor for read monitoring.
+%% Uses enif_select to register with the Erlang scheduler.
+-spec add_reader(reference(), integer(), non_neg_integer()) ->
+    {ok, reference()} | {error, term()}.
+add_reader(_LoopRef, _Fd, _CallbackId) ->
+    ?NIF_STUB.
+
+%% @doc Stop monitoring a file descriptor for reads.
+%% FdRef must be the same resource returned by add_reader.
+-spec remove_reader(reference(), reference()) -> ok | {error, term()}.
+remove_reader(_LoopRef, _FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Register a file descriptor for write monitoring.
+-spec add_writer(reference(), integer(), non_neg_integer()) ->
+    {ok, reference()} | {error, term()}.
+add_writer(_LoopRef, _Fd, _CallbackId) ->
+    ?NIF_STUB.
+
+%% @doc Stop monitoring a file descriptor for writes.
+%% FdRef must be the same resource returned by add_writer.
+-spec remove_writer(reference(), reference()) -> ok | {error, term()}.
+remove_writer(_LoopRef, _FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Schedule a timer callback.
+%% DelayMs is the delay in milliseconds.
+-spec call_later(reference(), integer(), non_neg_integer()) ->
+    {ok, reference()} | {error, term()}.
+call_later(_LoopRef, _DelayMs, _CallbackId) ->
+    ?NIF_STUB.
+
+%% @doc Cancel a pending timer.
+-spec cancel_timer(reference(), reference()) -> ok | {error, term()}.
+cancel_timer(_LoopRef, _TimerRef) ->
+    ?NIF_STUB.
+
+%% @doc Wait for events with timeout.
+%% Returns the number of pending events.
+%% This is a dirty NIF that releases the GIL while waiting.
+-spec poll_events(reference(), integer()) -> {ok, integer()} | {error, term()}.
+poll_events(_LoopRef, _TimeoutMs) ->
+    ?NIF_STUB.
+
+%% @doc Get list of pending events.
+%% Returns [{CallbackId, Type}] where Type is read | write | timer.
+-spec get_pending(reference()) -> [{non_neg_integer(), read | write | timer}].
+get_pending(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Dispatch a callback from the router.
+%% Called when an fd becomes ready.
+-spec dispatch_callback(reference(), non_neg_integer(), read | write | timer) -> ok.
+dispatch_callback(_LoopRef, _CallbackId, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Dispatch a timer callback.
+%% Called when a timer expires.
+-spec dispatch_timer(reference(), non_neg_integer()) -> ok.
+dispatch_timer(_LoopRef, _CallbackId) ->
+    ?NIF_STUB.
+
+%% @doc Get callback ID from an fd resource.
+%% Type is read or write.
+-spec get_fd_callback_id(reference(), read | write) -> non_neg_integer() | undefined.
+get_fd_callback_id(_FdRes, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Re-register an fd resource for read monitoring.
+%% Called after an event is delivered since enif_select is one-shot.
+-spec reselect_reader(reference(), reference()) -> ok | {error, term()}.
+reselect_reader(_LoopRef, _FdRes) ->
+    ?NIF_STUB.
+
+%% @doc Re-register an fd resource for write monitoring.
+%% Called after an event is delivered since enif_select is one-shot.
+-spec reselect_writer(reference(), reference()) -> ok | {error, term()}.
+reselect_writer(_LoopRef, _FdRes) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% FD Lifecycle Management (uvloop-like API)
+%%% ============================================================================
+
+%% @doc Handle a select event (dispatch + auto-reselect).
+%% Called by py_event_router when receiving {select, FdRes, Ref, ready_input/output}.
+%% This combines get_fd_callback_id + dispatch_callback + reselect into one NIF call.
+%% Type: read | write
+-spec handle_fd_event(reference(), read | write) -> ok | {error, term()}.
+handle_fd_event(_FdRef, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Stop/pause read monitoring without closing the FD.
+%% The watcher still exists and can be restarted with start_reader.
+-spec stop_reader(reference()) -> ok | {error, term()}.
+stop_reader(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Start/resume read monitoring on an existing watcher.
+%% Must have been created with add_reader first.
+-spec start_reader(reference()) -> ok | {error, term()}.
+start_reader(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Stop/pause write monitoring without closing the FD.
+%% The watcher still exists and can be restarted with start_writer.
+-spec stop_writer(reference()) -> ok | {error, term()}.
+stop_writer(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Start/resume write monitoring on an existing watcher.
+%% Must have been created with add_writer first.
+-spec start_writer(reference()) -> ok | {error, term()}.
+start_writer(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Cancel read monitoring (legacy alias for stop_reader).
+%% Kept for backward compatibility.
+-spec cancel_reader(reference(), reference()) -> ok | {error, term()}.
+cancel_reader(_LoopRef, _FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Cancel write monitoring (legacy alias for stop_writer).
+%% Kept for backward compatibility.
+-spec cancel_writer(reference(), reference()) -> ok | {error, term()}.
+cancel_writer(_LoopRef, _FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Explicitly close an FD with proper lifecycle cleanup.
+%% Transfers ownership and triggers proper cleanup via ERL_NIF_SELECT_STOP.
+%% Safe to call multiple times (idempotent).
+-spec close_fd(reference()) -> ok | {error, term()}.
+close_fd(_FdRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Test Helper Functions (for fd monitoring tests using pipes)
+%%% ============================================================================
+
+%% @doc Create a pipe for testing fd monitoring.
+%% Returns {ReadFd, WriteFd} where both are non-blocking.
+-spec create_test_pipe() -> {ok, {integer(), integer()}} | {error, term()}.
+create_test_pipe() ->
+    ?NIF_STUB.
+
+%% @doc Close a test file descriptor.
+-spec close_test_fd(integer()) -> ok | {error, term()}.
+close_test_fd(_Fd) ->
+    ?NIF_STUB.
+
+%% @doc Write binary data to a test file descriptor.
+-spec write_test_fd(integer(), binary()) -> ok | {error, term()}.
+write_test_fd(_Fd, _Data) ->
+    ?NIF_STUB.
+
+%% @doc Read data from a test file descriptor.
+-spec read_test_fd(integer(), integer()) -> {ok, binary()} | {error, term()}.
+read_test_fd(_Fd, _MaxSize) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% TCP Test Helper Functions
+%%% ============================================================================
+
+%% @doc Create a TCP listener socket for testing.
+%% Port 0 will cause the OS to assign an ephemeral port.
+%% Returns {ListenFd, ActualPort}.
+-spec create_test_tcp_listener(integer()) -> {ok, {integer(), integer()}} | {error, term()}.
+create_test_tcp_listener(_Port) ->
+    ?NIF_STUB.
+
+%% @doc Accept a connection on a TCP listener socket.
+%% Returns the client socket fd.
+-spec accept_test_tcp(integer()) -> {ok, integer()} | {error, term()}.
+accept_test_tcp(_ListenFd) ->
+    ?NIF_STUB.
+
+%% @doc Connect to a TCP server.
+%% Host should be a binary like <<"127.0.0.1">>.
+-spec connect_test_tcp(binary(), integer()) -> {ok, integer()} | {error, term()}.
+connect_test_tcp(_Host, _Port) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% UDP Test Helper Functions
+%%% ============================================================================
+
+%% @doc Create a UDP socket for testing.
+%% Port 0 will cause the OS to assign an ephemeral port.
+%% Returns {Fd, ActualPort}.
+-spec create_test_udp_socket(integer()) -> {ok, {integer(), integer()}} | {error, term()}.
+create_test_udp_socket(_Port) ->
+    ?NIF_STUB.
+
+%% @doc Receive data from a UDP socket.
+%% Returns the data and source address: {Data, {Host, Port}}.
+-spec recvfrom_test_udp(integer(), integer()) -> {ok, {binary(), {binary(), integer()}}} | {error, term()}.
+recvfrom_test_udp(_Fd, _MaxSize) ->
+    ?NIF_STUB.
+
+%% @doc Send data to a UDP destination address.
+%% Host should be a binary like <<"127.0.0.1">>.
+-spec sendto_test_udp(integer(), binary(), binary(), integer()) -> ok | {error, term()}.
+sendto_test_udp(_Fd, _Data, _Host, _Port) ->
+    ?NIF_STUB.
+
+%% @doc Enable or disable SO_BROADCAST on a UDP socket.
+-spec set_udp_broadcast(integer(), boolean()) -> ok | {error, term()}.
+set_udp_broadcast(_Fd, _Enable) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Python Event Loop Integration
+%%% ============================================================================
+
+%% @doc Set the global Python event loop.
+%% This makes the event loop available to Python asyncio code.
+-spec set_python_event_loop(reference()) -> ok | {error, term()}.
+set_python_event_loop(_LoopRef) ->
     ?NIF_STUB.

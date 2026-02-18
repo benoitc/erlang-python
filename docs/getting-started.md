@@ -307,3 +307,4 @@ This demonstrates basic calls, data conversion, callbacks, parallel processing (
 - See [Memory Management](memory.md) for GC and debugging
 - See [Scalability](scalability.md) for parallelism and performance
 - See [AI Integration](ai-integration.md) for ML/AI examples
+- See [Asyncio Event Loop](asyncio.md) for the Erlang-native asyncio implementation with TCP and UDP support

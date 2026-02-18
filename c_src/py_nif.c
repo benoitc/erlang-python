@@ -129,6 +129,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_exec.c"
 #include "py_callback.c"
 #include "py_thread_worker.c"
+#include "py_event_loop.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -355,6 +356,24 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         g_python_initialized = false;
         return make_error(env, "erlang_module_creation_failed");
     }
+
+    /* Create the 'py_event_loop' module for asyncio integration */
+    if (create_py_event_loop_module() < 0) {
+        Py_Finalize();
+        g_python_initialized = false;
+        return make_error(env, "event_loop_module_creation_failed");
+    }
+
+    /* Create a default event loop so Python asyncio always has one available */
+    if (create_default_event_loop(env) < 0) {
+        Py_Finalize();
+        g_python_initialized = false;
+        return make_error(env, "default_event_loop_creation_failed");
+    }
+
+    /* Set ErlangEventLoop as the default asyncio event loop policy.
+     * This is done via the erlang_loop module which is loaded from priv/.
+     * The priv directory path is passed via init options or environment. */
 
     /* Detect execution mode based on Python version and build */
     detect_execution_mode();
@@ -1696,6 +1715,11 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ASYNC_ERROR = enif_make_atom(env, "async_error");
     ATOM_SUSPENDED = enif_make_atom(env, "suspended");
 
+    /* Initialize event loop module */
+    if (event_loop_init(env) < 0) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1782,7 +1806,51 @@ static ErlNifFunc nif_funcs[] = {
 
     /* Callback name registry (prevents torch introspection issues) */
     {"register_callback_name", 1, nif_register_callback_name, 0},
-    {"unregister_callback_name", 1, nif_unregister_callback_name, 0}
+    {"unregister_callback_name", 1, nif_unregister_callback_name, 0},
+
+    /* Erlang-native event loop NIFs */
+    {"event_loop_new", 0, nif_event_loop_new, 0},
+    {"event_loop_destroy", 1, nif_event_loop_destroy, 0},
+    {"event_loop_set_router", 2, nif_event_loop_set_router, 0},
+    {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
+    {"add_reader", 3, nif_add_reader, 0},
+    {"remove_reader", 2, nif_remove_reader, 0},
+    {"add_writer", 3, nif_add_writer, 0},
+    {"remove_writer", 2, nif_remove_writer, 0},
+    {"call_later", 3, nif_call_later, 0},
+    {"cancel_timer", 2, nif_cancel_timer, 0},
+    {"poll_events", 2, nif_poll_events, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"get_pending", 1, nif_get_pending, 0},
+    {"dispatch_callback", 3, nif_dispatch_callback, 0},
+    {"dispatch_timer", 2, nif_dispatch_timer, 0},
+    {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0},
+    {"reselect_reader", 2, nif_reselect_reader, 0},
+    {"reselect_writer", 2, nif_reselect_writer, 0},
+    /* FD lifecycle management (uvloop-like API) */
+    {"handle_fd_event", 2, nif_handle_fd_event, 0},
+    {"stop_reader", 1, nif_stop_reader, 0},
+    {"start_reader", 1, nif_start_reader, 0},
+    {"stop_writer", 1, nif_stop_writer, 0},
+    {"start_writer", 1, nif_start_writer, 0},
+    {"cancel_reader", 2, nif_cancel_reader, 0},  /* Legacy alias */
+    {"cancel_writer", 2, nif_cancel_writer, 0},  /* Legacy alias */
+    {"close_fd", 1, nif_close_fd, 0},
+    /* Test helpers for fd monitoring (using pipes) */
+    {"create_test_pipe", 0, nif_create_test_pipe, 0},
+    {"close_test_fd", 1, nif_close_test_fd, 0},
+    {"write_test_fd", 2, nif_write_test_fd, 0},
+    {"read_test_fd", 2, nif_read_test_fd, 0},
+    /* TCP test helpers */
+    {"create_test_tcp_listener", 1, nif_create_test_tcp_listener, 0},
+    {"accept_test_tcp", 1, nif_accept_test_tcp, 0},
+    {"connect_test_tcp", 2, nif_connect_test_tcp, 0},
+    /* UDP test helpers */
+    {"create_test_udp_socket", 1, nif_create_test_udp_socket, 0},
+    {"recvfrom_test_udp", 2, nif_recvfrom_test_udp, 0},
+    {"sendto_test_udp", 4, nif_sendto_test_udp, 0},
+    {"set_udp_broadcast", 2, nif_set_udp_broadcast, 0},
+    /* Python event loop integration */
+    {"set_python_event_loop", 1, nif_set_python_event_loop, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)
