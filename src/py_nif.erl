@@ -669,7 +669,7 @@ accept_test_tcp(_ListenFd) ->
     ?NIF_STUB.
 
 %% @doc Connect to a TCP server.
-%% Host should be a binary like <<"127.0.0.1">>.
+%% Host should be a binary like `&lt;&lt;"127.0.0.1"&gt;&gt;'.
 -spec connect_test_tcp(binary(), integer()) -> {ok, integer()} | {error, term()}.
 connect_test_tcp(_Host, _Port) ->
     ?NIF_STUB.
@@ -692,7 +692,7 @@ recvfrom_test_udp(_Fd, _MaxSize) ->
     ?NIF_STUB.
 
 %% @doc Send data to a UDP destination address.
-%% Host should be a binary like <<"127.0.0.1">>.
+%% Host should be a binary like `&lt;&lt;"127.0.0.1"&gt;&gt;'.
 -spec sendto_test_udp(integer(), binary(), binary(), integer()) -> ok | {error, term()}.
 sendto_test_udp(_Fd, _Data, _Host, _Port) ->
     ?NIF_STUB.
