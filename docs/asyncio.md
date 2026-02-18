@@ -338,6 +338,56 @@ transport, protocol = await loop.create_datagram_endpoint(
 transport.sendto(b'Broadcast message', ('255.255.255.255', 9999))
 ```
 
+## Performance
+
+The event loop includes several optimizations for high-throughput applications.
+
+### Built-in Optimizations
+
+| Optimization | Description | Impact |
+|-------------|-------------|--------|
+| **Cached function lookups** | `ast.literal_eval` cached at module init | Avoids import per callback |
+| **O(1) timer cancellation** | Handle-to-callback reverse map | Was O(n) iteration |
+| **O(1) duplicate detection** | Hash set for pending events | Was O(n) linear scan |
+| **Lock-free event consumption** | Detach queue under lock, process outside | Reduced contention |
+| **Object pooling** | Reuse event structures via freelist | Fewer allocations |
+| **Deque method caching** | Pre-bound `append`/`popleft` methods | Avoids attribute lookup |
+
+### Performance Build
+
+For maximum performance, rebuild with the `PERF_BUILD` cmake option:
+
+```bash
+# Clean build with performance optimizations
+rm -rf _build/cmake
+mkdir -p _build/cmake && cd _build/cmake
+cmake ../../c_src -DPERF_BUILD=ON
+cmake --build .
+```
+
+This enables:
+- `-O3` optimization level
+- Link-Time Optimization (LTO)
+- `-march=native` (CPU-specific optimizations)
+- `-ffast-math` and `-funroll-loops`
+
+**Note:** Performance builds are not portable across different CPU architectures due to `-march=native`.
+
+### Benchmarking
+
+Run the event loop benchmarks to measure performance:
+
+```bash
+python3 examples/benchmark_event_loop.py
+```
+
+Example output:
+```
+Timer throughput: 150,000 timers/sec
+Callback dispatch: 200,000 callbacks/sec
+I/O ready detection: <1ms latency
+```
+
 ## Low-level APIs
 
 The event loop is backed by NIFs (Native Implemented Functions) that provide direct access to Erlang's event system. These are primarily for internal use and testing.
