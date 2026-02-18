@@ -111,7 +111,10 @@
     sendto_test_udp/4,
     set_udp_broadcast/2,
     %% Python event loop integration
-    set_python_event_loop/1
+    set_python_event_loop/1,
+    %% ASGI optimizations
+    asgi_build_scope/1,
+    asgi_run/4
 ]).
 
 -on_load(load_nif/0).
@@ -710,4 +713,62 @@ set_udp_broadcast(_Fd, _Enable) ->
 %% This makes the event loop available to Python asyncio code.
 -spec set_python_event_loop(reference()) -> ok | {error, term()}.
 set_python_event_loop(_LoopRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% ASGI Optimizations
+%%% ============================================================================
+
+%% @doc Build an optimized ASGI scope dict from an Erlang map.
+%%
+%% This function converts an Erlang map to a Python dict using
+%% interned keys and cached constant values for maximum performance.
+%% The returned reference wraps a Python dict object.
+%%
+%% Example scope map:
+%% ```
+%% #{
+%%   type => <<"http">>,
+%%   asgi => #{version => <<"3.0">>, spec_version => <<"2.3">>},
+%%   http_version => <<"1.1">>,
+%%   method => <<"GET">>,
+%%   scheme => <<"http">>,
+%%   path => <<"/">>,
+%%   raw_path => <<"/">>,
+%%   query_string => <<>>,
+%%   root_path => <<>>,
+%%   headers => [[<<"host">>, <<"localhost">>]],
+%%   server => {<<"localhost">>, 8080},
+%%   client => {<<"127.0.0.1">>, 54321},
+%%   state => #{}
+%% }
+%% '''
+%%
+%% @param ScopeMap Erlang map containing ASGI scope keys
+%% @returns {ok, ScopeRef} where ScopeRef is a wrapped Python dict,
+%%          or {error, Reason}
+-spec asgi_build_scope(map()) -> {ok, reference()} | {error, term()}.
+asgi_build_scope(_ScopeMap) ->
+    ?NIF_STUB.
+
+%% @doc Execute an ASGI application with optimized marshalling.
+%%
+%% This is a direct NIF that bypasses the generic py:call() path:
+%% - Builds scope dict using interned keys
+%% - Uses response pooling
+%% - Runs the ASGI app coroutine synchronously
+%%
+%% Requires the `hornbeam_asgi_runner` Python module to be available,
+%% which provides the `_run_asgi_sync` function that handles the
+%% ASGI receive/send protocol.
+%%
+%% @param Module Application module name (e.g., <<"myapp.asgi">>)
+%% @param Callable ASGI callable name (e.g., <<"application">>)
+%% @param ScopeMap Erlang map containing ASGI scope (see asgi_build_scope/1)
+%% @param Body Request body as binary
+%% @returns {ok, {Status, Headers, Body}} on success,
+%%          or {error, Reason}
+-spec asgi_run(binary(), binary(), map(), binary()) ->
+    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
+asgi_run(_Module, _Callable, _ScopeMap, _Body) ->
     ?NIF_STUB.

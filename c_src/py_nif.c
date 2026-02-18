@@ -37,6 +37,7 @@
  */
 
 #include "py_nif.h"
+#include "py_asgi.h"
 
 /* ============================================================================
  * Global state definitions
@@ -130,6 +131,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_callback.c"
 #include "py_thread_worker.c"
 #include "py_event_loop.c"
+#include "py_asgi.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -364,6 +366,13 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         return make_error(env, "event_loop_module_creation_failed");
     }
 
+    /* Initialize ASGI scope key cache for optimized marshalling */
+    if (asgi_scope_init() < 0) {
+        Py_Finalize();
+        g_python_initialized = false;
+        return make_error(env, "asgi_scope_init_failed");
+    }
+
     /* Create a default event loop so Python asyncio always has one available */
     if (create_default_event_loop(env) < 0) {
         Py_Finalize();
@@ -441,6 +450,11 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
 
     /* Clean up thread worker system */
     thread_worker_cleanup();
+
+    /* Clean up ASGI scope key cache */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    asgi_scope_cleanup();
+    PyGILState_Release(gstate);
 
     /* Stop executors based on mode */
     switch (g_execution_mode) {
@@ -1852,7 +1866,11 @@ static ErlNifFunc nif_funcs[] = {
     {"sendto_test_udp", 4, nif_sendto_test_udp, 0},
     {"set_udp_broadcast", 2, nif_set_udp_broadcast, 0},
     /* Python event loop integration */
-    {"set_python_event_loop", 1, nif_set_python_event_loop, 0}
+    {"set_python_event_loop", 1, nif_set_python_event_loop, 0},
+
+    /* ASGI optimizations */
+    {"asgi_build_scope", 1, nif_asgi_build_scope, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"asgi_run", 4, nif_asgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)
