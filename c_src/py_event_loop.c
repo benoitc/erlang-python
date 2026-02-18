@@ -767,17 +767,18 @@ ERL_NIF_TERM nif_poll_events(ErlNifEnv *env, int argc,
     int num_events = 0;
 
     /*
-     * Check if we have the GIL before trying to release it.
-     * If called from Erlang (not Python), we don't have the GIL.
-     * PyGILState_Check returns 1 if current thread holds GIL, 0 otherwise.
+     * Check if we have a valid Python thread state AND the GIL before releasing it.
+     * PyGILState_Check() can return true even with NULL thread state on some platforms.
+     * PyGILState_GetThisThreadState() returns NULL if thread has no Python state.
      */
-    if (g_python_initialized && PyGILState_Check()) {
-        /* We have the GIL - release it while waiting */
+    PyThreadState *tstate = PyGILState_GetThisThreadState();
+    if (tstate != NULL && g_python_initialized && PyGILState_Check()) {
+        /* We have valid thread state and GIL - release it while waiting */
         Py_BEGIN_ALLOW_THREADS
         num_events = poll_events_wait(loop, timeout_ms);
         Py_END_ALLOW_THREADS
     } else {
-        /* No GIL - just wait directly */
+        /* No GIL or invalid thread state - just wait directly */
         num_events = poll_events_wait(loop, timeout_ms);
     }
 
