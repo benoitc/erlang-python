@@ -756,21 +756,22 @@ asgi_build_scope(_ScopeMap) ->
 %% @doc Execute an ASGI application with optimized marshalling.
 %%
 %% This is a direct NIF that bypasses the generic py:call() path:
-%% - Builds scope dict using interned keys
-%% - Uses response pooling
-%% - Runs the ASGI app coroutine synchronously
+%% <ul>
+%% <li>Builds scope dict using interned keys</li>
+%% <li>Uses response pooling</li>
+%% <li>Runs the ASGI app coroutine synchronously</li>
+%% </ul>
 %%
-%% Requires the `hornbeam_asgi_runner` Python module to be available,
-%% which provides the `_run_asgi_sync` function that handles the
+%% Requires the hornbeam_asgi_runner Python module to be available,
+%% which provides the _run_asgi_sync function that handles the
 %% ASGI receive/send protocol.
 %%
-%% @param Runner Python runner module name (e.g., <<"hornbeam_asgi_runner">>)
-%% @param Module Application module name (e.g., <<"myapp.asgi">>)
-%% @param Callable ASGI callable name (e.g., <<"application">>)
+%% @param Runner Python runner module name
+%% @param Module Application module name
+%% @param Callable ASGI callable name
 %% @param ScopeMap Erlang map containing ASGI scope (see asgi_build_scope/1)
 %% @param Body Request body as binary
-%% @returns {ok, {Status, Headers, Body}} on success,
-%%          or {error, Reason}
+%% @returns {ok, {Status, Headers, Body}} on success, or {error, Reason}
 -spec asgi_run(binary(), binary(), binary(), map(), binary()) ->
     {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
 asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
@@ -783,20 +784,21 @@ asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
 %% @doc Execute a WSGI application with optimized marshalling.
 %%
 %% This is a direct NIF that bypasses the generic py:call() path:
-%% - Builds environ dict using interned keys
-%% - Uses cached constant values
-%% - Runs the WSGI app synchronously
+%% <ul>
+%% <li>Builds environ dict using interned keys</li>
+%% <li>Uses cached constant values</li>
+%% <li>Runs the WSGI app synchronously</li>
+%% </ul>
 %%
-%% Requires the `hornbeam_wsgi_runner` Python module to be available,
-%% which provides the `_run_wsgi_sync` function that handles the
+%% Requires the hornbeam_wsgi_runner Python module to be available,
+%% which provides the _run_wsgi_sync function that handles the
 %% WSGI start_response protocol.
 %%
-%% @param Runner Python runner module name (e.g., <<"hornbeam_wsgi_runner">>)
-%% @param Module Application module name (e.g., <<"myapp.wsgi">>)
-%% @param Callable WSGI callable name (e.g., <<"application">>)
+%% @param Runner Python runner module name
+%% @param Module Application module name
+%% @param Callable WSGI callable name
 %% @param EnvironMap Erlang map containing WSGI environ
-%% @returns {ok, {Status, Headers, Body}} on success,
-%%          or {error, Reason}
+%% @returns {ok, {Status, Headers, Body}} on success, or {error, Reason}
 -spec wsgi_run(binary(), binary(), binary(), map()) ->
     {ok, {binary(), [{binary(), binary()}], binary()}} | {error, term()}.
 wsgi_run(_Runner, _Module, _Callable, _EnvironMap) ->

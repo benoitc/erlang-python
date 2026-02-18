@@ -17,49 +17,31 @@
 %%% This module provides high-performance WSGI request handling by using
 %%% optimized C-level marshalling between Erlang and Python:
 %%%
-%%% - **Interned keys**: WSGI environ keys are pre-interned Python strings,
-%%%   eliminating per-request string allocation and hashing overhead.
-%%%
-%%% - **Cached constants**: Common values like `"GET"`, `"HTTP/1.1"`,
-%%%   etc. are reused across requests.
-%%%
-%%% - **Direct NIF path**: Bypasses generic py:call() for WSGI-specific
-%%%   optimizations.
+%%% <ul>
+%%% <li>Interned keys: WSGI environ keys are pre-interned Python strings,
+%%%   eliminating per-request string allocation and hashing overhead.</li>
+%%% <li>Cached constants: Common values like "GET", "HTTP/1.1",
+%%%   etc. are reused across requests.</li>
+%%% <li>Direct NIF path: Bypasses generic py:call() for WSGI-specific
+%%%   optimizations.</li>
+%%% </ul>
 %%%
 %%% == Performance ==
 %%%
-%%% Compared to generic py:call()-based WSGI handling:
-%%%
-%%% | Optimization | Improvement |
-%%% |--------------|-------------|
-%%% | Interned keys | +15-20% throughput |
-%%% | Direct NIF | +25-30% throughput |
-%%% | **Total** | ~60-80% improvement |
+%%% Compared to generic py:call()-based WSGI handling, this module
+%%% provides approximately 60-80% throughput improvement through
+%%% interned keys (+15-20%) and direct NIF path (+25-30%).
 %%%
 %%% == Usage ==
 %%%
-%%% ```erlang
-%%% %% Build WSGI environ from Cowboy request
+%%% ```
 %%% Environ = #{
 %%%     <<"REQUEST_METHOD">> => <<"GET">>,
-%%%     <<"SCRIPT_NAME">> => <<>>,
-%%%     <<"PATH_INFO">> => <<"/api/users">>,
-%%%     <<"QUERY_STRING">> => <<"id=123">>,
-%%%     <<"SERVER_NAME">> => <<"localhost">>,
-%%%     <<"SERVER_PORT">> => <<"8080">>,
-%%%     <<"SERVER_PROTOCOL">> => <<"HTTP/1.1">>,
-%%%     <<"wsgi.url_scheme">> => <<"http">>,
-%%%     <<"wsgi.input">> => Body
+%%%     <<"PATH_INFO">> => <<"/api/users">>
 %%% },
-%%%
-%%% %% Execute WSGI application
 %%% case py_wsgi:run(<<"myapp">>, <<"application">>, Environ) of
-%%%     {ok, {Status, Headers, ResponseBody}} ->
-%%%         %% Send response
-%%%         StatusCode = parse_status(Status),
-%%%         cowboy_req:reply(StatusCode, Headers, ResponseBody, Req);
-%%%     {error, Reason} ->
-%%%         cowboy_req:reply(500, #{}, <<"Internal Server Error">>, Req)
+%%%     {ok, {Status, Headers, ResponseBody}} -> ok;
+%%%     {error, Reason} -> error
 %%% end.
 %%% '''
 %%%
@@ -75,7 +57,6 @@
     environ/0
 ]).
 
-%% @type environ() = #{binary() => binary() | integer() | atom()}.
 %% WSGI environ dictionary.
 -type environ() :: #{
     binary() => binary() | integer() | atom()
@@ -98,7 +79,9 @@ run(Module, Callable, Environ) ->
 %% @doc Execute a WSGI application with options.
 %%
 %% Additional options:
-%% - `runner` - Python runner module name (default: <<"hornbeam_wsgi_runner">>)
+%% <ul>
+%% <li>runner - Python runner module name (default: hornbeam_wsgi_runner)</li>
+%% </ul>
 %%
 %% @param Module Python module containing the WSGI application
 %% @param Callable Name of the WSGI callable

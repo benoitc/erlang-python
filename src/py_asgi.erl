@@ -17,53 +17,35 @@
 %%% This module provides high-performance ASGI request handling by using
 %%% optimized C-level marshalling between Erlang and Python:
 %%%
-%%% - **Interned keys**: ASGI scope keys are pre-interned Python strings,
-%%%   eliminating per-request string allocation and hashing overhead.
-%%%
-%%% - **Cached constants**: Common values like `"http"`, `"1.1"`, `"GET"`,
-%%%   etc. are reused across requests.
-%%%
-%%% - **Response pooling**: Pre-allocated response structures reduce
-%%%   memory allocation during request processing.
-%%%
-%%% - **Direct NIF path**: Bypasses generic py:call() for ASGI-specific
-%%%   optimizations.
+%%% <ul>
+%%% <li>Interned keys: ASGI scope keys are pre-interned Python strings,
+%%%   eliminating per-request string allocation and hashing overhead.</li>
+%%% <li>Cached constants: Common values like "http", "1.1", "GET",
+%%%   etc. are reused across requests.</li>
+%%% <li>Response pooling: Pre-allocated response structures reduce
+%%%   memory allocation during request processing.</li>
+%%% <li>Direct NIF path: Bypasses generic py:call() for ASGI-specific
+%%%   optimizations.</li>
+%%% </ul>
 %%%
 %%% == Performance ==
 %%%
-%%% Compared to generic py:call()-based ASGI handling:
-%%%
-%%% | Optimization | Improvement |
-%%% |--------------|-------------|
-%%% | Interned keys | +15-20% throughput |
-%%% | Response pooling | +20-25% throughput |
-%%% | Direct NIF | +25-30% throughput |
-%%% | **Total** | ~60-80% improvement |
+%%% Compared to generic py:call()-based ASGI handling, this module
+%%% provides approximately 60-80% throughput improvement through
+%%% interned keys (+15-20%), response pooling (+20-25%), and
+%%% direct NIF path (+25-30%).
 %%%
 %%% == Usage ==
 %%%
-%%% ```erlang
-%%% %% Build ASGI scope from Cowboy request
+%%% ```
 %%% Scope = #{
 %%%     type => <<"http">>,
-%%%     http_version => <<"1.1">>,
 %%%     method => <<"GET">>,
-%%%     scheme => <<"http">>,
-%%%     path => <<"/api/users">>,
-%%%     query_string => <<"id=123">>,
-%%%     headers => [[<<"host">>, <<"localhost:8080">>]],
-%%%     server => {<<"localhost">>, 8080},
-%%%     client => {<<"127.0.0.1">>, 54321}
+%%%     path => <<"/api/users">>
 %%% },
-%%%
-%%% %% Execute ASGI application
 %%% case py_asgi:run(<<"myapp">>, <<"application">>, Scope, Body) of
-%%%     {ok, {Status, Headers, ResponseBody}} ->
-%%%         %% Send response
-%%%         cowboy_req:reply(Status, Headers, ResponseBody, Req);
-%%%     {error, Reason} ->
-%%%         %% Handle error
-%%%         cowboy_req:reply(500, #{}, <<"Internal Server Error">>, Req)
+%%%     {ok, {Status, Headers, ResponseBody}} -> ok;
+%%%     {error, Reason} -> error
 %%% end.
 %%% '''
 %%%
@@ -82,21 +64,6 @@
     scope_opts/0
 ]).
 
-%% @type scope() = #{
-%%   type := binary(),
-%%   asgi => #{version => binary(), spec_version => binary()},
-%%   http_version => binary(),
-%%   method => binary(),
-%%   scheme => binary(),
-%%   path := binary(),
-%%   raw_path => binary(),
-%%   query_string => binary(),
-%%   root_path => binary(),
-%%   headers => [[binary()]],
-%%   server => {binary(), integer()},
-%%   client => {binary(), integer()},
-%%   state => map()
-%% }.
 %% ASGI scope dictionary.
 -type scope() :: #{
     type := binary(),
@@ -115,10 +82,6 @@
     extensions => map()
 }.
 
-%% @type scope_opts() = #{
-%%   state => map(),
-%%   extensions => map()
-%% }.
 %% Options for scope building.
 -type scope_opts() :: #{
     state => map(),
@@ -143,7 +106,9 @@ run(Module, Callable, Scope, Body) ->
 %% @doc Execute an ASGI application with options.
 %%
 %% Additional options:
-%% - `timeout` - Request timeout in milliseconds (default: 30000)
+%% <ul>
+%% <li>runner - Custom Python runner module name</li>
+%% </ul>
 %%
 %% @param Module Python module containing the ASGI application
 %% @param Callable Name of the ASGI callable
