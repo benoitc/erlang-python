@@ -46,9 +46,35 @@
  * @note This file is included from py_nif.c (single compilation unit)
  */
 
+/* Stack allocation threshold for small tuples/maps to avoid heap allocation */
+#define SMALL_CONTAINER_THRESHOLD 16
+
 /* ============================================================================
  * Python to Erlang Conversion
  * ============================================================================ */
+
+/**
+ * @brief Check if object is a numpy ndarray
+ *
+ * Uses cached type when available (main interpreter), falls back to
+ * attribute detection for subinterpreters where the cached type is invalid.
+ *
+ * @param obj Python object to check
+ * @return true if obj is a numpy ndarray, false otherwise
+ */
+static inline bool is_numpy_ndarray(PyObject *obj) {
+    /* Use cached type for fast isinstance check when available.
+     * The cache is only valid in the main interpreter - subinterpreters
+     * have their own object space, so we fall back to attribute detection. */
+    if (g_numpy_ndarray_type != NULL && g_execution_mode != PY_MODE_SUBINTERP) {
+        return PyObject_IsInstance(obj, g_numpy_ndarray_type) == 1;
+    }
+
+    /* Fallback: duck typing via attribute detection.
+     * Check for both 'tolist' method and 'ndim' attribute. */
+    return PyObject_HasAttrString(obj, "tolist") &&
+           PyObject_HasAttrString(obj, "ndim");
+}
 
 /**
  * @brief Convert a Python object to an Erlang term
@@ -95,62 +121,23 @@
  *
  * @note Does NOT consume a reference to obj
  * @note Recursively converts container types
+ * @note Type checks are ordered by expected frequency for web workloads
  *
  * @see term_to_py() for the reverse conversion
  */
 static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
-    /* Handle None singleton */
-    if (obj == Py_None) {
-        return ATOM_NONE;
-    }
+    /*
+     * Type check ordering optimized for web/ASGI workloads:
+     * 1. Strings (most common in HTTP headers, bodies, JSON)
+     * 2. Dicts (headers, JSON objects, scope)
+     * 3. Integers (status codes, content-length)
+     * 4. Lists (header lists, JSON arrays)
+     * 5. Booleans, None
+     * 6. Floats, bytes, tuples
+     * 7. NumPy arrays, fallback
+     */
 
-    /* Handle boolean singletons (must check before int, as bool subclasses int) */
-    if (obj == Py_True) {
-        return ATOM_TRUE;
-    }
-
-    if (obj == Py_False) {
-        return ATOM_FALSE;
-    }
-
-    /* Handle integers */
-    if (PyLong_Check(obj)) {
-        long long val = PyLong_AsLongLong(obj);
-        if (PyErr_Occurred()) {
-            PyErr_Clear();
-            /* Value too large for signed - try unsigned */
-            unsigned long long uval = PyLong_AsUnsignedLongLong(obj);
-            if (PyErr_Occurred()) {
-                PyErr_Clear();
-                /* Value too large for 64-bit - fall back to string representation */
-                PyObject *str = PyObject_Str(obj);
-                if (str != NULL) {
-                    const char *s = PyUnicode_AsUTF8(str);
-                    ERL_NIF_TERM result = enif_make_string(env, s, ERL_NIF_LATIN1);
-                    Py_DECREF(str);
-                    return result;
-                }
-            }
-            return enif_make_uint64(env, uval);
-        }
-        return enif_make_int64(env, val);
-    }
-
-    /* Handle floats with special value handling */
-    if (PyFloat_Check(obj)) {
-        double val = PyFloat_AsDouble(obj);
-        /* Check for NaN (NaN != NaN is always true) */
-        if (val != val) {
-            return ATOM_NAN;
-        } else if (val == HUGE_VAL) {
-            return ATOM_INFINITY;
-        } else if (val == -HUGE_VAL) {
-            return ATOM_NEG_INFINITY;
-        }
-        return enif_make_double(env, val);
-    }
-
-    /* Handle Unicode strings */
+    /* Handle Unicode strings - most common in web workloads */
     if (PyUnicode_Check(obj)) {
         Py_ssize_t size;
         const char *data = PyUnicode_AsUTF8AndSize(obj, &size);
@@ -159,18 +146,97 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         }
         ERL_NIF_TERM bin;
         unsigned char *buf = enif_make_new_binary(env, size, &bin);
+        if (buf == NULL) {
+            return ATOM_ERROR;
+        }
         memcpy(buf, data, size);
         return bin;
     }
 
-    /* Handle byte strings */
-    if (PyBytes_Check(obj)) {
-        Py_ssize_t size = PyBytes_Size(obj);
-        char *data = PyBytes_AsString(obj);
-        ERL_NIF_TERM bin;
-        unsigned char *buf = enif_make_new_binary(env, size, &bin);
-        memcpy(buf, data, size);
-        return bin;
+    /* Handle dictionaries - very common (headers, JSON, scope) */
+    if (PyDict_Check(obj)) {
+        Py_ssize_t size = PyDict_Size(obj);
+        if (size == 0) {
+            return enif_make_new_map(env);
+        }
+
+        /* Use stack allocation for small maps, heap for large */
+        ERL_NIF_TERM stack_keys[SMALL_CONTAINER_THRESHOLD];
+        ERL_NIF_TERM stack_values[SMALL_CONTAINER_THRESHOLD];
+        ERL_NIF_TERM *keys = stack_keys;
+        ERL_NIF_TERM *values = stack_values;
+
+        if (size > SMALL_CONTAINER_THRESHOLD) {
+            keys = enif_alloc(sizeof(ERL_NIF_TERM) * size);
+            values = enif_alloc(sizeof(ERL_NIF_TERM) * size);
+            if (keys == NULL || values == NULL) {
+                if (keys != stack_keys) enif_free(keys);
+                if (values != stack_values) enif_free(values);
+                return ATOM_ERROR;
+            }
+        }
+
+        /* Collect all key-value pairs */
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        Py_ssize_t i = 0;
+        while (PyDict_Next(obj, &pos, &key, &value)) {
+            keys[i] = py_to_term(env, key);
+            values[i] = py_to_term(env, value);
+            i++;
+        }
+
+        /* Build map from arrays - more efficient than iterative puts */
+        ERL_NIF_TERM map;
+        int result = enif_make_map_from_arrays(env, keys, values, size, &map);
+
+        if (keys != stack_keys) enif_free(keys);
+        if (values != stack_values) enif_free(values);
+
+        if (!result) {
+            return ATOM_ERROR;
+        }
+        return map;
+    }
+
+    /* Handle integers - use overflow-aware API for efficiency */
+    if (PyLong_Check(obj)) {
+        /* Check for boolean first (bool subclasses int in Python) */
+        if (obj == Py_True) {
+            return ATOM_TRUE;
+        }
+        if (obj == Py_False) {
+            return ATOM_FALSE;
+        }
+
+        int overflow;
+        long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
+
+        if (overflow == 0) {
+            /* Fits in signed 64-bit */
+            return enif_make_int64(env, val);
+        } else if (overflow == 1) {
+            /* Positive overflow - try unsigned */
+            unsigned long long uval = PyLong_AsUnsignedLongLong(obj);
+            if (!PyErr_Occurred()) {
+                return enif_make_uint64(env, uval);
+            }
+            PyErr_Clear();
+        }
+        /* overflow == -1 or unsigned also overflowed: fall back to string */
+        PyObject *str = PyObject_Str(obj);
+        if (str != NULL) {
+            Py_ssize_t len;
+            const char *s = PyUnicode_AsUTF8AndSize(str, &len);
+            if (s != NULL) {
+                ERL_NIF_TERM result = enif_make_string_len(env, s, len, ERL_NIF_LATIN1);
+                Py_DECREF(str);
+                return result;
+            }
+            Py_DECREF(str);
+        }
+        PyErr_Clear();
+        return ATOM_ERROR;
     }
 
     /*
@@ -189,11 +255,70 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return list;
     }
 
-    /*
-     * Handle NumPy arrays by converting to Python list first.
-     * Detection: has both 'tolist' method and 'ndim' attribute.
-     */
-    if (PyObject_HasAttrString(obj, "tolist") && PyObject_HasAttrString(obj, "ndim")) {
+    /* Handle None singleton */
+    if (obj == Py_None) {
+        return ATOM_NONE;
+    }
+
+    /* Handle floats with special value handling */
+    if (PyFloat_Check(obj)) {
+        double val = PyFloat_AsDouble(obj);
+        /* Check for NaN (NaN != NaN is always true) */
+        if (val != val) {
+            return ATOM_NAN;
+        } else if (val == HUGE_VAL) {
+            return ATOM_INFINITY;
+        } else if (val == -HUGE_VAL) {
+            return ATOM_NEG_INFINITY;
+        }
+        return enif_make_double(env, val);
+    }
+
+    /* Handle byte strings */
+    if (PyBytes_Check(obj)) {
+        Py_ssize_t size = PyBytes_Size(obj);
+        char *data = PyBytes_AsString(obj);
+        ERL_NIF_TERM bin;
+        unsigned char *buf = enif_make_new_binary(env, size, &bin);
+        if (buf == NULL) {
+            return ATOM_ERROR;
+        }
+        memcpy(buf, data, size);
+        return bin;
+    }
+
+    /* Handle tuples - use stack allocation for small tuples */
+    if (PyTuple_Check(obj)) {
+        Py_ssize_t len = PyTuple_Size(obj);
+        if (len == 0) {
+            return enif_make_tuple(env, 0);
+        }
+
+        ERL_NIF_TERM stack_items[SMALL_CONTAINER_THRESHOLD];
+        ERL_NIF_TERM *items = stack_items;
+
+        if (len > SMALL_CONTAINER_THRESHOLD) {
+            items = enif_alloc(sizeof(ERL_NIF_TERM) * len);
+            if (items == NULL) {
+                return ATOM_ERROR;
+            }
+        }
+
+        for (Py_ssize_t i = 0; i < len; i++) {
+            PyObject *item = PyTuple_GetItem(obj, i);  /* Borrowed ref */
+            items[i] = py_to_term(env, item);
+        }
+
+        ERL_NIF_TERM result = enif_make_tuple_from_array(env, items, len);
+
+        if (items != stack_items) {
+            enif_free(items);
+        }
+        return result;
+    }
+
+    /* Handle NumPy arrays by converting to Python list first */
+    if (is_numpy_ndarray(obj)) {
         PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
         if (tolist != NULL) {
             ERL_NIF_TERM result = py_to_term(env, tolist);
@@ -203,50 +328,24 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         PyErr_Clear();
     }
 
-    /* Handle tuples */
-    if (PyTuple_Check(obj)) {
-        Py_ssize_t len = PyTuple_Size(obj);
-        if (len == 0) {
-            return enif_make_tuple(env, 0);
-        }
-        ERL_NIF_TERM *items = enif_alloc(sizeof(ERL_NIF_TERM) * len);
-        if (items == NULL) {
-            return ATOM_ERROR;
-        }
-        for (Py_ssize_t i = 0; i < len; i++) {
-            PyObject *item = PyTuple_GetItem(obj, i);  /* Borrowed ref */
-            items[i] = py_to_term(env, item);
-        }
-        ERL_NIF_TERM result = enif_make_tuple_from_array(env, items, len);
-        enif_free(items);
-        return result;
-    }
-
-    /* Handle dictionaries */
-    if (PyDict_Check(obj)) {
-        ERL_NIF_TERM map = enif_make_new_map(env);
-        PyObject *key, *value;
-        Py_ssize_t pos = 0;
-        while (PyDict_Next(obj, &pos, &key, &value)) {
-            ERL_NIF_TERM k = py_to_term(env, key);
-            ERL_NIF_TERM v = py_to_term(env, value);
-            enif_make_map_put(env, map, k, v, &map);
-        }
-        return map;
-    }
-
     /*
      * Fallback: convert any other object to its string representation.
      * This handles custom classes, functions, modules, etc.
      */
     PyObject *str = PyObject_Str(obj);
     if (str != NULL) {
-        const char *s = PyUnicode_AsUTF8(str);
-        ERL_NIF_TERM bin;
-        unsigned char *buf = enif_make_new_binary(env, strlen(s), &bin);
-        memcpy(buf, s, strlen(s));
+        Py_ssize_t len;
+        const char *s = PyUnicode_AsUTF8AndSize(str, &len);
+        if (s != NULL) {
+            ERL_NIF_TERM bin;
+            unsigned char *buf = enif_make_new_binary(env, len, &bin);
+            if (buf != NULL) {
+                memcpy(buf, s, len);
+                Py_DECREF(str);
+                return bin;
+            }
+        }
         Py_DECREF(str);
-        return bin;
     }
 
     return ATOM_UNDEFINED;
@@ -273,7 +372,7 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
  * | Other atoms       | `str`                 | Atom name as string      |
  * | integer           | `int`                 | All integer sizes        |
  * | float             | `float`               |                          |
- * | binary            | `str`                 | UTF-8 decoded            |
+ * | binary            | `str`                 | UTF-8 decoded, falls back to bytes |
  * | list              | `list`                | Recursive conversion     |
  * | tuple             | `tuple`               | Recursive conversion     |
  * | map               | `dict`                | Recursive conversion     |
@@ -300,45 +399,47 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
  * @see py_to_term() for the reverse conversion
  */
 static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
-    int i_val;
-    long l_val;
-    ErlNifSInt64 i64_val;
-    ErlNifUInt64 u64_val;
     double d_val;
     ErlNifBinary bin;
     unsigned int list_len;
     int arity;
     const ERL_NIF_TERM *tuple;
 
-    /* Check for atoms first (most specific checks) */
+    /*
+     * Check atoms first using direct term comparison (enif_is_identical)
+     * instead of string comparison (strcmp). This is faster because
+     * atoms are interned - we just compare pointers.
+     */
     if (enif_is_atom(env, term)) {
+        if (enif_is_identical(term, ATOM_TRUE)) {
+            Py_RETURN_TRUE;
+        }
+        if (enif_is_identical(term, ATOM_FALSE)) {
+            Py_RETURN_FALSE;
+        }
+        if (enif_is_identical(term, ATOM_NIL) ||
+            enif_is_identical(term, ATOM_NONE) ||
+            enif_is_identical(term, ATOM_UNDEFINED)) {
+            Py_RETURN_NONE;
+        }
+        /* Convert other atoms to Python string */
         char atom_buf[256];
         if (enif_get_atom(env, term, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
-            if (strcmp(atom_buf, "true") == 0) {
-                Py_RETURN_TRUE;
-            } else if (strcmp(atom_buf, "false") == 0) {
-                Py_RETURN_FALSE;
-            } else if (strcmp(atom_buf, "nil") == 0 ||
-                       strcmp(atom_buf, "none") == 0 ||
-                       strcmp(atom_buf, "undefined") == 0) {
-                Py_RETURN_NONE;
-            } else {
-                /* Convert atom name to Python string */
-                return PyUnicode_FromString(atom_buf);
-            }
+            return PyUnicode_FromString(atom_buf);
         }
+        Py_RETURN_NONE;
     }
 
-    /* Try integer types in order of size */
-    if (enif_get_int(env, term, &i_val)) {
-        return PyLong_FromLong(i_val);
-    }
-    if (enif_get_long(env, term, &l_val)) {
-        return PyLong_FromLong(l_val);
-    }
+    /*
+     * Try integer types - use a single int64 check first since it covers
+     * most practical cases, then fall back to larger types.
+     */
+    ErlNifSInt64 i64_val;
     if (enif_get_int64(env, term, &i64_val)) {
         return PyLong_FromLongLong(i64_val);
     }
+
+    ErlNifUInt64 u64_val;
     if (enif_get_uint64(env, term, &u64_val)) {
         return PyLong_FromUnsignedLongLong(u64_val);
     }
@@ -350,15 +451,24 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
 
     /*
      * Check binary BEFORE list to avoid flattening iolists.
-     * This preserves the distinction between binaries and charlists.
+     * Try UTF-8 decode first, fall back to bytes for invalid UTF-8.
      */
     if (enif_inspect_binary(env, term, &bin)) {
-        return PyUnicode_FromStringAndSize((char *)bin.data, bin.size);
+        PyObject *str = PyUnicode_DecodeUTF8((char *)bin.data, bin.size, "strict");
+        if (str != NULL) {
+            return str;
+        }
+        /* Not valid UTF-8 - return as bytes instead */
+        PyErr_Clear();
+        return PyBytes_FromStringAndSize((char *)bin.data, bin.size);
     }
 
     /* Check list (must come after binary to preserve structure) */
     if (enif_get_list_length(env, term, &list_len)) {
         PyObject *list = PyList_New(list_len);
+        if (list == NULL) {
+            return NULL;
+        }
         ERL_NIF_TERM head, tail = term;
         for (unsigned int i = 0; i < list_len; i++) {
             enif_get_list_cell(env, tail, &head, &tail);
@@ -375,6 +485,9 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
     /* Check tuple */
     if (enif_get_tuple(env, term, &arity, &tuple)) {
         PyObject *py_tuple = PyTuple_New(arity);
+        if (py_tuple == NULL) {
+            return NULL;
+        }
         for (int i = 0; i < arity; i++) {
             PyObject *item = term_to_py(env, tuple[i]);
             if (item == NULL) {
@@ -389,6 +502,9 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
     /* Check map */
     if (enif_is_map(env, term)) {
         PyObject *dict = PyDict_New();
+        if (dict == NULL) {
+            return NULL;
+        }
         ERL_NIF_TERM key, value;
         ErlNifMapIterator iter;
 

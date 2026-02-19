@@ -707,6 +707,9 @@ extern _Atomic uint64_t g_callback_id_counter;
 /** @brief Python exception class for suspension */
 extern PyObject *SuspensionRequiredException;
 
+/** @brief Cached numpy.ndarray type for fast isinstance checks (NULL if numpy unavailable) */
+extern PyObject *g_numpy_ndarray_type;
+
 /* Thread-local state */
 
 /** @brief Current worker for callback context */
@@ -751,6 +754,7 @@ extern ERL_NIF_TERM ATOM_ERROR;          /**< @brief `error` atom */
 extern ERL_NIF_TERM ATOM_TRUE;           /**< @brief `true` atom */
 extern ERL_NIF_TERM ATOM_FALSE;          /**< @brief `false` atom */
 extern ERL_NIF_TERM ATOM_NONE;           /**< @brief `none` atom (Python None) */
+extern ERL_NIF_TERM ATOM_NIL;            /**< @brief `nil` atom (Elixir nil) */
 extern ERL_NIF_TERM ATOM_UNDEFINED;      /**< @brief `undefined` atom */
 extern ERL_NIF_TERM ATOM_NIF_NOT_LOADED; /**< @brief `nif_not_loaded` atom */
 extern ERL_NIF_TERM ATOM_GENERATOR;      /**< @brief `generator` atom */

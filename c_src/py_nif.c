@@ -79,6 +79,9 @@ _Atomic uint64_t g_callback_id_counter = 1;
 /* Custom exception for suspension */
 PyObject *SuspensionRequiredException = NULL;
 
+/* Cached numpy.ndarray type for fast isinstance checks (NULL if numpy not available) */
+PyObject *g_numpy_ndarray_type = NULL;
+
 /* Thread-local callback context */
 __thread py_worker_t *tl_current_worker = NULL;
 __thread ErlNifEnv *tl_callback_env = NULL;
@@ -102,6 +105,7 @@ ERL_NIF_TERM ATOM_ERROR;
 ERL_NIF_TERM ATOM_TRUE;
 ERL_NIF_TERM ATOM_FALSE;
 ERL_NIF_TERM ATOM_NONE;
+ERL_NIF_TERM ATOM_NIL;
 ERL_NIF_TERM ATOM_UNDEFINED;
 ERL_NIF_TERM ATOM_NIF_NOT_LOADED;
 ERL_NIF_TERM ATOM_GENERATOR;
@@ -393,6 +397,21 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
      * This is done via the erlang_loop module which is loaded from priv/.
      * The priv directory path is passed via init options or environment. */
 
+    /* Cache numpy.ndarray type for fast isinstance checks in py_to_term.
+     * This avoids slow PyObject_HasAttrString calls on every object. */
+    {
+        PyObject *numpy_module = PyImport_ImportModule("numpy");
+        if (numpy_module != NULL) {
+            g_numpy_ndarray_type = PyObject_GetAttrString(numpy_module, "ndarray");
+            Py_DECREF(numpy_module);
+            /* Note: We keep a reference to g_numpy_ndarray_type for the lifetime of the process */
+        } else {
+            /* numpy not available - clear any import error */
+            PyErr_Clear();
+            g_numpy_ndarray_type = NULL;
+        }
+    }
+
     /* Detect execution mode based on Python version and build */
     detect_execution_mode();
 
@@ -464,6 +483,11 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     PyGILState_STATE gstate = PyGILState_Ensure();
     asgi_scope_cleanup();
     wsgi_scope_cleanup();
+
+    /* Clean up numpy type cache */
+    Py_XDECREF(g_numpy_ndarray_type);
+    g_numpy_ndarray_type = NULL;
+
     PyGILState_Release(gstate);
 
     /* Stop executors based on mode */
@@ -1726,6 +1750,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_TRUE = enif_make_atom(env, "true");
     ATOM_FALSE = enif_make_atom(env, "false");
     ATOM_NONE = enif_make_atom(env, "none");
+    ATOM_NIL = enif_make_atom(env, "nil");
     ATOM_UNDEFINED = enif_make_atom(env, "undefined");
     ATOM_NIF_NOT_LOADED = enif_make_atom(env, "nif_not_loaded");
     ATOM_GENERATOR = enif_make_atom(env, "generator");
