@@ -28,9 +28,9 @@
     test_call_sandboxed_basic/1,
     test_call_sandboxed_strict/1,
     test_call_sandboxed_with_kwargs/1,
-    %% Escape attempt tests
-    test_subprocess_escape_attempts/1,
-    test_network_escape_attempts/1
+    %% Additional tests
+    test_file_write_escape_attempts/1,
+    test_file_read_allowed/1
 ]).
 
 all() ->
@@ -49,8 +49,8 @@ all() ->
         test_call_sandboxed_basic,
         test_call_sandboxed_strict,
         test_call_sandboxed_with_kwargs,
-        test_subprocess_escape_attempts,
-        test_network_escape_attempts
+        test_file_write_escape_attempts,
+        test_file_read_allowed
     ].
 
 init_per_suite(Config) ->
@@ -229,17 +229,23 @@ test_sandbox_enable_disable(_Config) ->
 
 %% Test sandbox_set_policy to change policy
 test_sandbox_set_policy(_Config) ->
-    {ok, W} = py_nif:worker_new(),
-    %% Initially no sandbox - file write allowed
-    ok = py_nif:worker_exec(W, <<"f = open('/tmp/policy_test_before.txt', 'w')\nf.close()">>),
-    %% Set policy to block file_write
-    ok = py_nif:sandbox_set_policy(W, #{enabled => true, block => [file_write]}),
-    %% Now file write should be blocked
-    Result = py_nif:worker_exec(W, <<"g = open('/tmp/policy_test_after.txt', 'w')">>),
-    py_nif:worker_destroy(W),
-    case Result of
-        {error, {'PermissionError', _}} -> ok;
-        Other -> ct:fail({should_be_blocked_after_policy_change, Other})
+    try
+        {ok, W} = py_nif:worker_new(),
+        %% Initially no sandbox - file write allowed
+        ok = py_nif:worker_exec(W, <<"f = open('/tmp/policy_test_before.txt', 'w')\nf.close()">>),
+        %% Set policy to block file_write
+        ok = py_nif:sandbox_set_policy(W, #{enabled => true, block => [file_write]}),
+        %% Now file write should be blocked
+        Result = py_nif:worker_exec(W, <<"g = open('/tmp/policy_test_after.txt', 'w')">>),
+        py_nif:worker_destroy(W),
+        case Result of
+            {error, {'PermissionError', _}} -> ok;
+            Other -> ct:fail({should_be_blocked_after_policy_change, Other})
+        end
+    after
+        %% Clean up test files
+        _ = file:delete("/tmp/policy_test_before.txt"),
+        _ = file:delete("/tmp/policy_test_after.txt")
     end.
 
 %% Test sandbox_get_policy
@@ -284,11 +290,11 @@ test_call_sandboxed_with_kwargs(_Config) ->
     ok.
 
 %%% ============================================================================
-%%% Test Cases - Escape Attempts
+%%% Test Cases - Additional File Operation Tests
 %%% ============================================================================
 
-%% Test various file write escape attempts
-test_subprocess_escape_attempts(_Config) ->
+%% Test that various file write modes are blocked
+test_file_write_escape_attempts(_Config) ->
     %% Test each write attempt with a fresh worker
     %% Using file operations since they are reliably audited
     Attempts = [
@@ -309,8 +315,8 @@ test_subprocess_escape_attempts(_Config) ->
     end, Attempts),
     ok.
 
-%% Test that file reads are allowed
-test_network_escape_attempts(_Config) ->
+%% Test that file reads are allowed with strict preset
+test_file_read_allowed(_Config) ->
     {ok, W} = py_nif:worker_new(#{sandbox => #{preset => strict}}),
     %% File read should be allowed (strict only blocks write)
     Result = py_nif:worker_exec(W, <<"data = open('/etc/hosts', 'r').read()[:10]">>),

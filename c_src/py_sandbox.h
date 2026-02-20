@@ -119,11 +119,13 @@ struct sandbox_policy_t {
     /** @brief Number of entries in allowed_imports */
     size_t allowed_imports_count;
 
-    /** @brief Whether to send audit events to Erlang handler */
+    /**
+     * @brief Whether to log audit events (reserved for future use)
+     *
+     * When true, blocked events will be logged. Event forwarding to Erlang
+     * is planned for a future version.
+     */
     bool log_events;
-
-    /** @brief PID of Erlang process to receive audit events */
-    ErlNifPid audit_handler;
 
     /** @brief Mutex for protecting policy updates */
     pthread_mutex_t mutex;

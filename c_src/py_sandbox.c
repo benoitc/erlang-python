@@ -399,7 +399,7 @@ sandbox_policy_t *sandbox_policy_new(void) {
     memset(policy, 0, sizeof(sandbox_policy_t));
     pthread_mutex_init(&policy->mutex, NULL);
     policy->enabled = false;
-    policy->block_flags = 0;
+    atomic_init(&policy->block_flags, 0);
     policy->allowed_imports = NULL;
     policy->allowed_imports_count = 0;
     policy->log_events = false;
@@ -477,13 +477,15 @@ int parse_sandbox_options(ErlNifEnv *env, ERL_NIF_TERM opts, sandbox_policy_t *p
         }
     }
 
-    /* Check for block list */
+    /* Check for block list
+     * Note: An explicit block list is combined with any preset flags using OR.
+     * This allows extending a preset with additional blocked operations. */
     key = enif_make_atom(env, "block");
     if (enif_get_map_value(env, opts, key, &value)) {
         unsigned int list_len;
         if (enif_get_list_length(env, value, &list_len)) {
             ERL_NIF_TERM head, tail = value;
-            policy->block_flags = 0;
+            /* Don't reset block_flags - preserve preset flags and merge with block list */
             policy->enabled = true;  /* Enable if block list provided */
 
             while (enif_get_list_cell(env, tail, &head, &tail)) {
@@ -525,20 +527,36 @@ int parse_sandbox_options(ErlNifEnv *env, ERL_NIF_TERM opts, sandbox_policy_t *p
                 ErlNifBinary bin;
                 if (enif_inspect_binary(env, head, &bin)) {
                     char *import_name = enif_alloc(bin.size + 1);
-                    if (import_name != NULL) {
-                        memcpy(import_name, bin.data, bin.size);
-                        import_name[bin.size] = '\0';
-                        policy->allowed_imports[policy->allowed_imports_count++] = import_name;
+                    if (import_name == NULL) {
+                        /* Cleanup previously allocated imports on failure */
+                        for (size_t i = 0; i < policy->allowed_imports_count; i++) {
+                            enif_free(policy->allowed_imports[i]);
+                        }
+                        enif_free(policy->allowed_imports);
+                        policy->allowed_imports = NULL;
+                        policy->allowed_imports_count = 0;
+                        return -1;
                     }
+                    memcpy(import_name, bin.data, bin.size);
+                    import_name[bin.size] = '\0';
+                    policy->allowed_imports[policy->allowed_imports_count++] = import_name;
                 } else {
                     /* Try as atom */
                     char atom_buf[256];
                     if (enif_get_atom(env, head, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
                         char *import_name = enif_alloc(strlen(atom_buf) + 1);
-                        if (import_name != NULL) {
-                            strcpy(import_name, atom_buf);
-                            policy->allowed_imports[policy->allowed_imports_count++] = import_name;
+                        if (import_name == NULL) {
+                            /* Cleanup previously allocated imports on failure */
+                            for (size_t i = 0; i < policy->allowed_imports_count; i++) {
+                                enif_free(policy->allowed_imports[i]);
+                            }
+                            enif_free(policy->allowed_imports);
+                            policy->allowed_imports = NULL;
+                            policy->allowed_imports_count = 0;
+                            return -1;
                         }
+                        strcpy(import_name, atom_buf);
+                        policy->allowed_imports[policy->allowed_imports_count++] = import_name;
                     }
                 }
             }
@@ -565,7 +583,9 @@ int parse_sandbox_options(ErlNifEnv *env, ERL_NIF_TERM opts, sandbox_policy_t *p
  */
 void sandbox_policy_set_enabled(sandbox_policy_t *policy, bool enabled) {
     if (policy != NULL) {
+        pthread_mutex_lock(&policy->mutex);
         policy->enabled = enabled;
+        pthread_mutex_unlock(&policy->mutex);
     }
 }
 
@@ -592,6 +612,13 @@ int sandbox_policy_update(ErlNifEnv *env, sandbox_policy_t *policy, ERL_NIF_TERM
     temp.log_events = policy->log_events;
 
     if (parse_sandbox_options(env, opts, &temp) < 0) {
+        /* Clean up any imports allocated in temp before returning */
+        if (temp.allowed_imports != NULL) {
+            for (size_t i = 0; i < temp.allowed_imports_count; i++) {
+                enif_free(temp.allowed_imports[i]);
+            }
+            enif_free(temp.allowed_imports);
+        }
         pthread_mutex_unlock(&policy->mutex);
         return -1;
     }
@@ -601,18 +628,16 @@ int sandbox_policy_update(ErlNifEnv *env, sandbox_policy_t *policy, ERL_NIF_TERM
     policy->enabled = temp.enabled;
     policy->log_events = temp.log_events;
 
-    /* Update import whitelist */
-    if (temp.allowed_imports != NULL) {
-        /* Free old whitelist */
-        if (policy->allowed_imports != NULL) {
-            for (size_t i = 0; i < policy->allowed_imports_count; i++) {
-                enif_free(policy->allowed_imports[i]);
-            }
-            enif_free(policy->allowed_imports);
+    /* Update import whitelist - always sync from temp so omitting
+     * allow_imports in an update clears any existing whitelist */
+    if (policy->allowed_imports != NULL) {
+        for (size_t i = 0; i < policy->allowed_imports_count; i++) {
+            enif_free(policy->allowed_imports[i]);
         }
-        policy->allowed_imports = temp.allowed_imports;
-        policy->allowed_imports_count = temp.allowed_imports_count;
+        enif_free(policy->allowed_imports);
     }
+    policy->allowed_imports = temp.allowed_imports;
+    policy->allowed_imports_count = temp.allowed_imports_count;
 
     pthread_mutex_unlock(&policy->mutex);
     return 0;

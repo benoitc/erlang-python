@@ -37,7 +37,7 @@ py_nif:worker_destroy(Worker).
 ### Strict Preset
 
 The `strict` preset blocks:
-- `subprocess`: `subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.popen`
+- `subprocess`: `subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.fork`, `os.posix_spawn`, `os.popen`
 - `network`: `socket.*` operations
 - `ctypes`: ctypes module (memory access)
 - `file_write`: `open()` with write/append modes (`w`, `a`, `x`, `+`)
@@ -67,7 +67,7 @@ For fine-grained control, specify exactly which operations to block:
 |------|--------|
 | `file_write` | `open()` with write/append modes |
 | `file_read` | All file read operations |
-| `subprocess` | `subprocess.*`, `os.exec*`, `os.spawn*`, `os.popen` |
+| `subprocess` | `subprocess.*`, `os.exec*`, `os.spawn*`, `os.fork`, `os.posix_spawn`, `os.popen` |
 | `network` | `socket.*` operations |
 | `ctypes` | ctypes module (memory access) |
 | `import` | Non-whitelisted imports |

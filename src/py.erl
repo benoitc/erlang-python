@@ -841,7 +841,7 @@ ctx_exec(#py_ctx{ref = CtxRef}, Code) ->
 %% '''
 %%
 %% With strict preset, the following are blocked:
-%% - subprocess: subprocess.*, os.system, os.exec*, os.spawn*, os.popen
+%% - subprocess: subprocess.*, os.system, os.exec*, os.spawn*, os.fork, os.posix_spawn, os.popen
 %% - network: socket.*
 %% - ctypes: ctypes module (memory access)
 %% - file_write: open() with write/append modes
