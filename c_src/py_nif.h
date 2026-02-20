@@ -102,6 +102,9 @@
 #include <sys/select.h>
 /** @} */
 
+/* Forward declaration for sandbox policy */
+typedef struct sandbox_policy_t sandbox_policy_t;
+
 /* ============================================================================
  * Feature Detection Macros
  * ============================================================================ */
@@ -239,6 +242,9 @@ typedef struct {
 
     /** @brief Environment for building callback messages */
     ErlNifEnv *callback_env;
+
+    /** @brief Sandbox policy (NULL if no sandboxing) */
+    sandbox_policy_t *sandbox;
 } py_worker_t;
 
 /**

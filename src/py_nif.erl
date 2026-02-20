@@ -69,6 +69,10 @@
     %% Callback name registry (prevents torch introspection issues)
     register_callback_name/1,
     unregister_callback_name/1,
+    %% Sandbox support
+    sandbox_set_policy/2,
+    sandbox_enable/2,
+    sandbox_get_policy/1,
     %% Erlang-native event loop (for asyncio integration)
     event_loop_new/0,
     event_loop_destroy/1,
@@ -468,6 +472,33 @@ register_callback_name(_Name) ->
 %% @doc Unregister a callback name from the C-side registry.
 -spec unregister_callback_name(atom() | binary()) -> ok.
 unregister_callback_name(_Name) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Sandbox Support
+%%% ============================================================================
+
+%% @doc Set sandbox policy for a worker.
+%% Policy is a map that can contain:
+%%   preset => strict
+%%   enabled => true | false
+%%   block => [file_write, file_read, subprocess, network, ctypes, import, exec]
+%%   allow_imports => [binary()]  %% Whitelist when import is blocked
+%%   log_events => true | false
+-spec sandbox_set_policy(reference(), map()) -> ok | {error, term()}.
+sandbox_set_policy(_WorkerRef, _Policy) ->
+    ?NIF_STUB.
+
+%% @doc Enable or disable sandbox for a worker.
+%% If sandbox is disabled, all operations are allowed.
+-spec sandbox_enable(reference(), boolean()) -> ok | {error, term()}.
+sandbox_enable(_WorkerRef, _Enabled) ->
+    ?NIF_STUB.
+
+%% @doc Get current sandbox policy for a worker.
+%% Returns a map with enabled, block, allow_imports, log_events.
+-spec sandbox_get_policy(reference()) -> {ok, map()} | {error, term()}.
+sandbox_get_policy(_WorkerRef) ->
     ?NIF_STUB.
 
 %%% ============================================================================

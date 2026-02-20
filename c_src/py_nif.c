@@ -39,6 +39,7 @@
 #include "py_nif.h"
 #include "py_asgi.h"
 #include "py_wsgi.h"
+#include "py_sandbox.h"
 
 /* ============================================================================
  * Global state definitions
@@ -138,6 +139,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_event_loop.c"
 #include "py_asgi.c"
 #include "py_wsgi.c"
+#include "py_sandbox.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -153,6 +155,12 @@ static void worker_destructor(ErlNifEnv *env, void *obj) {
     }
     if (worker->callback_pipe[1] >= 0) {
         close(worker->callback_pipe[1]);
+    }
+
+    /* Clean up sandbox policy */
+    if (worker->sandbox != NULL) {
+        sandbox_policy_destroy(worker->sandbox);
+        worker->sandbox = NULL;
     }
 
     /* Only clean up Python state if Python is still initialized */
@@ -415,6 +423,13 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     /* Detect execution mode based on Python version and build */
     detect_execution_mode();
 
+    /* Initialize sandbox system (audit hooks) */
+    if (init_sandbox_system() < 0) {
+        Py_Finalize();
+        g_python_initialized = false;
+        return make_error(env, "sandbox_init_failed");
+    }
+
     /* Save main thread state and release GIL for other threads */
     g_main_thread_state = PyEval_SaveThread();
 
@@ -535,9 +550,6 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
  * ============================================================================ */
 
 static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-
     if (!g_python_initialized) {
         return make_error(env, "python_not_initialized");
     }
@@ -545,6 +557,28 @@ static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     py_worker_t *worker = enif_alloc_resource(WORKER_RESOURCE_TYPE, sizeof(py_worker_t));
     if (worker == NULL) {
         return make_error(env, "alloc_failed");
+    }
+
+    /* Initialize sandbox to NULL */
+    worker->sandbox = NULL;
+
+    /* Parse options if provided */
+    if (argc > 0 && enif_is_map(env, argv[0])) {
+        ERL_NIF_TERM sandbox_key = enif_make_atom(env, "sandbox");
+        ERL_NIF_TERM sandbox_opts;
+        if (enif_get_map_value(env, argv[0], sandbox_key, &sandbox_opts)) {
+            /* Create and configure sandbox policy */
+            worker->sandbox = sandbox_policy_new();
+            if (worker->sandbox == NULL) {
+                enif_release_resource(worker);
+                return make_error(env, "sandbox_alloc_failed");
+            }
+            if (parse_sandbox_options(env, sandbox_opts, worker->sandbox) < 0) {
+                sandbox_policy_destroy(worker->sandbox);
+                enif_release_resource(worker);
+                return make_error(env, "invalid_sandbox_options");
+            }
+        }
     }
 
     /* Acquire GIL to create thread state */
@@ -991,6 +1025,77 @@ static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const E
     }
 
     return ATOM_OK;
+}
+
+/* ============================================================================
+ * Sandbox control NIFs
+ * ============================================================================ */
+
+static ERL_NIF_TERM nif_sandbox_set_policy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_worker_t *worker;
+
+    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
+        return make_error(env, "invalid_worker");
+    }
+
+    /* Create policy if it doesn't exist */
+    if (worker->sandbox == NULL) {
+        worker->sandbox = sandbox_policy_new();
+        if (worker->sandbox == NULL) {
+            return make_error(env, "sandbox_alloc_failed");
+        }
+    }
+
+    /* Update policy with new options */
+    if (sandbox_policy_update(env, worker->sandbox, argv[1]) < 0) {
+        return make_error(env, "invalid_policy");
+    }
+
+    return ATOM_OK;
+}
+
+static ERL_NIF_TERM nif_sandbox_enable(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_worker_t *worker;
+
+    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
+        return make_error(env, "invalid_worker");
+    }
+
+    char enabled[16];
+    if (!enif_get_atom(env, argv[1], enabled, sizeof(enabled), ERL_NIF_LATIN1)) {
+        return make_error(env, "invalid_enabled");
+    }
+
+    bool enable = (strcmp(enabled, "true") == 0);
+
+    if (worker->sandbox == NULL) {
+        if (!enable) {
+            /* Already disabled - no sandbox exists */
+            return ATOM_OK;
+        }
+        /* Need to enable but no sandbox - create one with empty policy */
+        worker->sandbox = sandbox_policy_new();
+        if (worker->sandbox == NULL) {
+            return make_error(env, "sandbox_alloc_failed");
+        }
+    }
+
+    sandbox_policy_set_enabled(worker->sandbox, enable);
+    return ATOM_OK;
+}
+
+static ERL_NIF_TERM nif_sandbox_get_policy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_worker_t *worker;
+
+    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
+        return make_error(env, "invalid_worker");
+    }
+
+    ERL_NIF_TERM policy_map = sandbox_policy_to_term(env, worker->sandbox);
+    return enif_make_tuple2(env, ATOM_OK, policy_map);
 }
 
 /* ============================================================================
@@ -1826,6 +1931,11 @@ static ErlNifFunc nif_funcs[] = {
     {"set_callback_handler", 2, nif_set_callback_handler, 0},
     {"send_callback_response", 2, nif_send_callback_response, 0},
     {"resume_callback", 2, nif_resume_callback, 0},
+
+    /* Sandbox support */
+    {"sandbox_set_policy", 2, nif_sandbox_set_policy, 0},
+    {"sandbox_enable", 2, nif_sandbox_enable, 0},
+    {"sandbox_get_policy", 1, nif_sandbox_get_policy, 0},
 
     /* Async worker management */
     {"async_worker_new", 0, nif_async_worker_new, 0},

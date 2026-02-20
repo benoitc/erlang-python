@@ -98,7 +98,10 @@
     with_context/1,
     ctx_call/4, ctx_call/5, ctx_call/6,
     ctx_eval/2, ctx_eval/3, ctx_eval/4,
-    ctx_exec/2
+    ctx_exec/2,
+    %% Sandboxed execution
+    call_sandboxed/4,
+    call_sandboxed/5
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -818,4 +821,51 @@ ctx_exec(#py_ctx{ref = CtxRef}, Code) ->
     case await(Ref, ?DEFAULT_TIMEOUT) of
         {ok, _} -> ok;
         Error -> Error
+    end.
+
+%%% ============================================================================
+%%% Sandboxed Execution API
+%%% ============================================================================
+
+%% @doc Call a Python function with sandbox protection.
+%% Creates a temporary sandboxed worker, executes the call, and destroys it.
+%%
+%% SandboxOpts can contain:
+%%   preset => strict  %% Use predefined strict policy
+%%   block => [file_write, subprocess, network, ctypes, import, exec, file_read]
+%%   allow_imports => [binary()]  %% Whitelist when import is blocked
+%%
+%% Example:
+%% ```
+%% {ok, Result} = py:call_sandboxed(json, dumps, [#{a => 1}], #{preset => strict}).
+%% '''
+%%
+%% With strict preset, the following are blocked:
+%% - subprocess: subprocess.*, os.system, os.exec*, os.spawn*, os.popen
+%% - network: socket.*
+%% - ctypes: ctypes module (memory access)
+%% - file_write: open() with write/append modes
+%%
+%% When blocked operation is attempted, returns:
+%% `{error, {'PermissionError', Msg}}' where Msg describes the blocked operation.
+-spec call_sandboxed(py_module(), py_func(), py_args(), map()) -> py_result().
+call_sandboxed(Module, Func, Args, SandboxOpts) ->
+    call_sandboxed(Module, Func, Args, #{}, SandboxOpts).
+
+%% @doc Call a Python function with sandbox protection and kwargs.
+-spec call_sandboxed(py_module(), py_func(), py_args(), py_kwargs(), map()) -> py_result().
+call_sandboxed(Module, Func, Args, Kwargs, SandboxOpts) ->
+    %% Create worker with sandbox options
+    WorkerOpts = #{sandbox => SandboxOpts},
+    case py_nif:worker_new(WorkerOpts) of
+        {ok, Worker} ->
+            try
+                ModuleBin = ensure_binary(Module),
+                FuncBin = ensure_binary(Func),
+                py_nif:worker_call(Worker, ModuleBin, FuncBin, Args, Kwargs)
+            after
+                py_nif:worker_destroy(Worker)
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
