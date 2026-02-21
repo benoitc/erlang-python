@@ -89,6 +89,28 @@ When blocking imports, you can whitelist specific modules:
 
 Note: Import whitelisting is complex because importing a module often triggers additional imports for dependencies. You may need to whitelist more modules than expected.
 
+### Disable Builtins
+
+For defense-in-depth, you can remove dangerous builtins (`exec`, `eval`, `compile`, `__import__`, `open`) from the worker's namespace:
+
+```erlang
+{ok, Worker} = py_nif:worker_new(#{
+    sandbox => #{
+        preset => strict,
+        disable_builtins => true
+    }
+}),
+
+%% exec() will raise NameError
+{error, {'NameError', _}} =
+    py_nif:worker_exec(Worker, <<"exec('x = 1')">>),
+
+%% Normal operations still work
+{ok, 4} = py_nif:worker_eval(Worker, <<"2 + 2">>, #{}).
+```
+
+This provides an additional layer of security beyond audit hook blocking, as it completely removes the functions from the Python namespace.
+
 ## Dynamic Policy Control
 
 You can enable, disable, or modify the sandbox policy at runtime:

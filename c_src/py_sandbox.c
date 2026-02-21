@@ -403,6 +403,7 @@ sandbox_policy_t *sandbox_policy_new(void) {
     policy->allowed_imports = NULL;
     policy->allowed_imports_count = 0;
     policy->log_events = false;
+    policy->disable_builtins = false;
 
     return policy;
 }
@@ -572,6 +573,15 @@ int parse_sandbox_options(ErlNifEnv *env, ERL_NIF_TERM opts, sandbox_policy_t *p
         }
     }
 
+    /* Check for disable_builtins flag */
+    key = enif_make_atom(env, "disable_builtins");
+    if (enif_get_map_value(env, opts, key, &value)) {
+        char disable_builtins[16];
+        if (enif_get_atom(env, value, disable_builtins, sizeof(disable_builtins), ERL_NIF_LATIN1)) {
+            policy->disable_builtins = (strcmp(disable_builtins, "true") == 0);
+        }
+    }
+
     return 0;
 }
 
@@ -718,6 +728,73 @@ ERL_NIF_TERM sandbox_policy_to_term(ErlNifEnv *env, sandbox_policy_t *policy) {
     value = policy->log_events ? enif_make_atom(env, "true") : enif_make_atom(env, "false");
     enif_make_map_put(env, map, key, value, &map);
 
+    /* Add disable_builtins */
+    key = enif_make_atom(env, "disable_builtins");
+    value = policy->disable_builtins ? enif_make_atom(env, "true") : enif_make_atom(env, "false");
+    enif_make_map_put(env, map, key, value, &map);
+
     pthread_mutex_unlock(&policy->mutex);
     return map;
+}
+
+/* ============================================================================
+ * Builtin Restrictions
+ * ============================================================================ */
+
+/**
+ * @brief List of dangerous builtins to remove
+ */
+static const char *DANGEROUS_BUILTINS[] = {
+    "exec",
+    "eval",
+    "compile",
+    "__import__",
+    "open",
+    NULL
+};
+
+/**
+ * @brief Apply builtin restrictions to a Python worker
+ *
+ * Removes dangerous builtins from the worker's builtins module.
+ * Must be called with GIL held and worker's thread state active.
+ *
+ * @param globals The worker's globals dict
+ * @return 0 on success, -1 on failure
+ */
+int sandbox_apply_builtin_restrictions(PyObject *globals) {
+    if (globals == NULL) {
+        return -1;
+    }
+
+    /* Get the __builtins__ from globals */
+    PyObject *builtins = PyDict_GetItemString(globals, "__builtins__");
+    if (builtins == NULL) {
+        return -1;
+    }
+
+    /* __builtins__ can be either a module or a dict depending on context */
+    PyObject *builtins_dict = NULL;
+    if (PyModule_Check(builtins)) {
+        builtins_dict = PyModule_GetDict(builtins);
+    } else if (PyDict_Check(builtins)) {
+        builtins_dict = builtins;
+    } else {
+        return -1;
+    }
+
+    if (builtins_dict == NULL) {
+        return -1;
+    }
+
+    /* Remove each dangerous builtin */
+    for (int i = 0; DANGEROUS_BUILTINS[i] != NULL; i++) {
+        /* Use PyDict_DelItemString - it's OK if key doesn't exist */
+        if (PyDict_GetItemString(builtins_dict, DANGEROUS_BUILTINS[i]) != NULL) {
+            PyDict_DelItemString(builtins_dict, DANGEROUS_BUILTINS[i]);
+        }
+        PyErr_Clear(); /* Clear any KeyError */
+    }
+
+    return 0;
 }

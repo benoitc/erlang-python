@@ -30,7 +30,12 @@
     test_call_sandboxed_with_kwargs/1,
     %% Additional tests
     test_file_write_escape_attempts/1,
-    test_file_read_allowed/1
+    test_file_read_allowed/1,
+    %% Disable builtins tests
+    test_disable_builtins_blocks_exec/1,
+    test_disable_builtins_blocks_eval/1,
+    test_disable_builtins_blocks_open/1,
+    test_disable_builtins_allows_safe_ops/1
 ]).
 
 all() ->
@@ -50,7 +55,11 @@ all() ->
         test_call_sandboxed_strict,
         test_call_sandboxed_with_kwargs,
         test_file_write_escape_attempts,
-        test_file_read_allowed
+        test_file_read_allowed,
+        test_disable_builtins_blocks_exec,
+        test_disable_builtins_blocks_eval,
+        test_disable_builtins_blocks_open,
+        test_disable_builtins_allows_safe_ops
     ].
 
 init_per_suite(Config) ->
@@ -334,3 +343,65 @@ test_file_read_allowed(_Config) ->
                 _ -> ok
             end
     end.
+
+%%% ============================================================================
+%%% Test Cases - Disable Builtins
+%%% ============================================================================
+
+%% Test that disable_builtins blocks exec()
+test_disable_builtins_blocks_exec(_Config) ->
+    {ok, W} = py_nif:worker_new(#{sandbox => #{
+        preset => strict,
+        disable_builtins => true
+    }}),
+    Result = py_nif:worker_exec(W, <<"exec('x = 1')">>),
+    py_nif:worker_destroy(W),
+    case Result of
+        {error, {'NameError', _}} -> ok;
+        {error, {'TypeError', _}} -> ok;  %% exec is None or removed
+        Other -> ct:fail({exec_should_be_blocked, Other})
+    end.
+
+%% Test that disable_builtins blocks eval()
+test_disable_builtins_blocks_eval(_Config) ->
+    {ok, W} = py_nif:worker_new(#{sandbox => #{
+        preset => strict,
+        disable_builtins => true
+    }}),
+    Result = py_nif:worker_exec(W, <<"y = eval('1 + 1')">>),
+    py_nif:worker_destroy(W),
+    case Result of
+        {error, {'NameError', _}} -> ok;
+        {error, {'TypeError', _}} -> ok;
+        Other -> ct:fail({eval_should_be_blocked, Other})
+    end.
+
+%% Test that disable_builtins blocks open()
+test_disable_builtins_blocks_open(_Config) ->
+    {ok, W} = py_nif:worker_new(#{sandbox => #{
+        preset => strict,
+        disable_builtins => true
+    }}),
+    Result = py_nif:worker_exec(W, <<"f = open('/etc/hosts', 'r')">>),
+    py_nif:worker_destroy(W),
+    case Result of
+        {error, {'NameError', _}} -> ok;
+        {error, {'TypeError', _}} -> ok;
+        Other -> ct:fail({open_should_be_blocked, Other})
+    end.
+
+%% Test that disable_builtins allows safe operations
+test_disable_builtins_allows_safe_ops(_Config) ->
+    {ok, W} = py_nif:worker_new(#{sandbox => #{
+        preset => strict,
+        disable_builtins => true
+    }}),
+    %% Basic operations should still work
+    {ok, 4} = py_nif:worker_eval(W, <<"2 + 2">>, #{}),
+    {ok, <<"HELLO">>} = py_nif:worker_eval(W, <<"'hello'.upper()">>, #{}),
+    {ok, [1, 2, 3]} = py_nif:worker_eval(W, <<"list(range(1, 4))">>, #{}),
+    %% len, str, int, etc. should work
+    {ok, 5} = py_nif:worker_eval(W, <<"len('hello')">>, #{}),
+    {ok, <<"42">>} = py_nif:worker_eval(W, <<"str(42)">>, #{}),
+    py_nif:worker_destroy(W),
+    ok.

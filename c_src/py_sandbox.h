@@ -127,6 +127,15 @@ struct sandbox_policy_t {
      */
     bool log_events;
 
+    /**
+     * @brief Whether to disable dangerous builtins
+     *
+     * When true, dangerous builtins (exec, eval, compile, __import__, open)
+     * are removed from the builtins module after worker initialization.
+     * This provides defense-in-depth beyond audit hook blocking.
+     */
+    bool disable_builtins;
+
     /** @brief Mutex for protecting policy updates */
     pthread_mutex_t mutex;
 };
@@ -223,6 +232,18 @@ int sandbox_policy_update(ErlNifEnv *env, sandbox_policy_t *policy, ERL_NIF_TERM
  * @return Erlang map term
  */
 ERL_NIF_TERM sandbox_policy_to_term(ErlNifEnv *env, sandbox_policy_t *policy);
+
+/**
+ * @brief Apply builtin restrictions to a Python worker
+ *
+ * Removes dangerous builtins (exec, eval, compile, __import__, open)
+ * from the worker's builtins module. Must be called with GIL held
+ * and worker's thread state active.
+ *
+ * @param globals The worker's globals dict
+ * @return 0 on success, -1 on failure
+ */
+int sandbox_apply_builtin_restrictions(PyObject *globals);
 
 /** @} */
 

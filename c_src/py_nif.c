@@ -596,6 +596,11 @@ static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     PyObject *builtins = PyEval_GetBuiltins();
     PyDict_SetItemString(worker->globals, "__builtins__", builtins);
 
+    /* Apply builtin restrictions if configured */
+    if (worker->sandbox != NULL && worker->sandbox->disable_builtins) {
+        sandbox_apply_builtin_restrictions(worker->globals);
+    }
+
     /* Import erlang module into worker's namespace for callbacks */
     PyObject *erlang_module = PyImport_ImportModule("erlang");
     if (erlang_module != NULL) {
