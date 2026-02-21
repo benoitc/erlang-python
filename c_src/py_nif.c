@@ -157,6 +157,14 @@ static void worker_destructor(ErlNifEnv *env, void *obj) {
         close(worker->callback_pipe[1]);
     }
 
+    /* Restore builtins if this worker used disable_builtins */
+    if (worker->sandbox != NULL && worker->sandbox->disable_builtins &&
+        worker->globals != NULL && g_python_initialized) {
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        sandbox_restore_builtins(worker->globals);
+        PyGILState_Release(gstate);
+    }
+
     /* Clean up sandbox policy */
     if (worker->sandbox != NULL) {
         sandbox_policy_destroy(worker->sandbox);
@@ -491,21 +499,25 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return ATOM_OK;
     }
 
-    /* Clean up thread worker system */
+    /* IMPORTANT: Since Py_Finalize() is disabled (see below), we must NOT
+     * reset global state flags or cleanup Python-side resources. The Python
+     * interpreter persists for the lifetime of the Erlang process, so:
+     *
+     * 1. g_python_initialized remains false to allow "re-init" to work
+     * 2. But ASGI/WSGI scope state, sandbox state, etc. remain valid
+     * 3. On "re-init", the existing state is reused via the _initialized flags
+     *
+     * This approach allows test suites to stop/start the erlang_python application
+     * without corrupting the Python interpreter state.
+     *
+     * NOTE: Executor threads and thread workers ARE cleaned up since they are
+     * Erlang/C-side resources that need to be recreated on restart.
+     */
+
+    /* Clean up thread worker system - these are C-side resources */
     thread_worker_cleanup();
 
-    /* Clean up ASGI and WSGI scope key caches */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    asgi_scope_cleanup();
-    wsgi_scope_cleanup();
-
-    /* Clean up numpy type cache */
-    Py_XDECREF(g_numpy_ndarray_type);
-    g_numpy_ndarray_type = NULL;
-
-    PyGILState_Release(gstate);
-
-    /* Stop executors based on mode */
+    /* Stop executors based on mode - these are C-side threads */
     switch (g_execution_mode) {
         case PY_MODE_FREE_THREADED:
             /* No executor to stop */
@@ -525,7 +537,7 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
             break;
     }
 
-    /* Restore main thread state before finalizing */
+    /* Restore main thread state before "finalizing" */
     if (g_main_thread_state != NULL) {
         PyEval_RestoreThread(g_main_thread_state);
         g_main_thread_state = NULL;
@@ -536,9 +548,26 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
      * The process will clean up resources on exit, so we skip finalization.
      *
      * Note: If explicit cleanup is needed in the future, consider using
-     * Py_FinalizeEx() or manually clearing atexit handlers before finalize. */
+     * Py_FinalizeEx() or manually clearing atexit handlers before finalize.
+     *
+     * IMPORTANT: Do NOT call cleanup functions for Python-side resources here:
+     * - cleanup_sandbox_system() - audit hook must persist
+     * - asgi_scope_cleanup() - interned strings must persist
+     * - wsgi_scope_cleanup() - interned strings must persist
+     * - Py_XDECREF(g_numpy_ndarray_type) - cached type must persist
+     *
+     * These resources remain valid because Py_Finalize() is not called.
+     */
 #if 0
     Py_Finalize();
+    /* Only if Py_Finalize() is re-enabled, uncomment these cleanups: */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    asgi_scope_cleanup();
+    wsgi_scope_cleanup();
+    Py_XDECREF(g_numpy_ndarray_type);
+    g_numpy_ndarray_type = NULL;
+    cleanup_sandbox_system();
+    PyGILState_Release(gstate);
 #endif
     g_python_initialized = false;
 

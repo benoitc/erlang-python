@@ -161,6 +161,14 @@ struct sandbox_policy_t {
 int init_sandbox_system(void);
 
 /**
+ * @brief Reset sandbox system state
+ *
+ * Should be called before Py_Finalize() to ensure the audit hook
+ * will be re-registered on the next Python init.
+ */
+void cleanup_sandbox_system(void);
+
+/**
  * @brief Create a new sandbox policy
  *
  * Creates a new policy with default values (disabled, no blocks).
@@ -244,6 +252,19 @@ ERL_NIF_TERM sandbox_policy_to_term(ErlNifEnv *env, sandbox_policy_t *policy);
  * @return 0 on success, -1 on failure
  */
 int sandbox_apply_builtin_restrictions(PyObject *globals);
+
+/**
+ * @brief Restore dangerous builtins that were removed
+ *
+ * Called when a worker with disable_builtins is destroyed, to restore
+ * the global Python state for other workers. This should be called when
+ * cleaning up a worker that used sandbox_apply_builtin_restrictions().
+ * Must be called with GIL held.
+ *
+ * @param globals The worker's globals dict (or any valid globals with __builtins__)
+ * @return 0 on success, -1 on failure
+ */
+int sandbox_restore_builtins(PyObject *globals);
 
 /** @} */
 

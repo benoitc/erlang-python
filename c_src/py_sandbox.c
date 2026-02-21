@@ -381,6 +381,18 @@ int init_sandbox_system(void) {
     return 0;
 }
 
+/**
+ * @brief Reset sandbox system state
+ *
+ * Should be called before Py_Finalize() to ensure the audit hook
+ * will be re-registered on the next Python init.
+ */
+void cleanup_sandbox_system(void) {
+    pthread_mutex_lock(&g_sandbox_init_mutex);
+    g_sandbox_initialized = false;
+    pthread_mutex_unlock(&g_sandbox_init_mutex);
+}
+
 /* ============================================================================
  * Policy Management
  * ============================================================================ */
@@ -743,49 +755,82 @@ ERL_NIF_TERM sandbox_policy_to_term(ErlNifEnv *env, sandbox_policy_t *policy) {
 
 /**
  * @brief List of dangerous builtins to remove
+ *
+ * NOTE: __import__ is intentionally NOT included here because removing it
+ * breaks Python's import machinery globally (affects PyImport_ImportModule()
+ * C API calls). Use the audit hook mechanism with block => [import] instead
+ * if you need to control imports.
  */
 static const char *DANGEROUS_BUILTINS[] = {
     "exec",
     "eval",
     "compile",
-    "__import__",
     "open",
     NULL
 };
+
+/* Number of dangerous builtins (excluding NULL terminator) */
+#define NUM_DANGEROUS_BUILTINS 4
+
+/* Saved original builtin function objects for restoration */
+static PyObject *g_saved_builtins[NUM_DANGEROUS_BUILTINS] = {NULL};
+static bool g_builtins_saved = false;
+static pthread_mutex_t g_builtins_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * @brief Get the builtins dict from globals
+ */
+static PyObject *get_builtins_dict(PyObject *globals) {
+    if (globals == NULL) {
+        return NULL;
+    }
+
+    /* Get the __builtins__ from globals */
+    PyObject *builtins = PyDict_GetItemString(globals, "__builtins__");
+    if (builtins == NULL) {
+        return NULL;
+    }
+
+    /* __builtins__ can be either a module or a dict depending on context */
+    if (PyModule_Check(builtins)) {
+        return PyModule_GetDict(builtins);
+    } else if (PyDict_Check(builtins)) {
+        return builtins;
+    }
+    return NULL;
+}
 
 /**
  * @brief Apply builtin restrictions to a Python worker
  *
  * Removes dangerous builtins from the worker's builtins module.
+ * The original builtin values are saved for later restoration.
  * Must be called with GIL held and worker's thread state active.
  *
  * @param globals The worker's globals dict
  * @return 0 on success, -1 on failure
  */
 int sandbox_apply_builtin_restrictions(PyObject *globals) {
-    if (globals == NULL) {
-        return -1;
-    }
-
-    /* Get the __builtins__ from globals */
-    PyObject *builtins = PyDict_GetItemString(globals, "__builtins__");
-    if (builtins == NULL) {
-        return -1;
-    }
-
-    /* __builtins__ can be either a module or a dict depending on context */
-    PyObject *builtins_dict = NULL;
-    if (PyModule_Check(builtins)) {
-        builtins_dict = PyModule_GetDict(builtins);
-    } else if (PyDict_Check(builtins)) {
-        builtins_dict = builtins;
-    } else {
-        return -1;
-    }
-
+    PyObject *builtins_dict = get_builtins_dict(globals);
     if (builtins_dict == NULL) {
         return -1;
     }
+
+    pthread_mutex_lock(&g_builtins_mutex);
+
+    /* Save original builtins on first call (thread-safe) */
+    if (!g_builtins_saved) {
+        for (int i = 0; DANGEROUS_BUILTINS[i] != NULL; i++) {
+            PyObject *obj = PyDict_GetItemString(builtins_dict, DANGEROUS_BUILTINS[i]);
+            if (obj != NULL) {
+                Py_INCREF(obj);
+                g_saved_builtins[i] = obj;
+            }
+        }
+        g_builtins_saved = true;
+    }
+
+    pthread_mutex_unlock(&g_builtins_mutex);
 
     /* Remove each dangerous builtin */
     for (int i = 0; DANGEROUS_BUILTINS[i] != NULL; i++) {
@@ -796,5 +841,43 @@ int sandbox_apply_builtin_restrictions(PyObject *globals) {
         PyErr_Clear(); /* Clear any KeyError */
     }
 
+    return 0;
+}
+
+/**
+ * @brief Restore dangerous builtins that were removed
+ *
+ * Called when a worker with disable_builtins is destroyed, to restore
+ * the global Python state for other workers.
+ * Must be called with GIL held.
+ *
+ * @param globals The worker's globals dict (or any valid globals with __builtins__)
+ * @return 0 on success, -1 on failure
+ */
+int sandbox_restore_builtins(PyObject *globals) {
+    PyObject *builtins_dict = get_builtins_dict(globals);
+    if (builtins_dict == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_builtins_mutex);
+
+    if (!g_builtins_saved) {
+        pthread_mutex_unlock(&g_builtins_mutex);
+        return 0; /* Nothing to restore */
+    }
+
+    /* Restore each saved builtin */
+    for (int i = 0; DANGEROUS_BUILTINS[i] != NULL; i++) {
+        if (g_saved_builtins[i] != NULL) {
+            /* Only restore if not already present */
+            if (PyDict_GetItemString(builtins_dict, DANGEROUS_BUILTINS[i]) == NULL) {
+                PyDict_SetItemString(builtins_dict, DANGEROUS_BUILTINS[i], g_saved_builtins[i]);
+            }
+            PyErr_Clear();
+        }
+    }
+
+    pthread_mutex_unlock(&g_builtins_mutex);
     return 0;
 }
