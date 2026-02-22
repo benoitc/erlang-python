@@ -1,9 +1,7 @@
-%%% @doc Integration test suite for per-loop isolation with real asyncio workloads.
+%%% @doc Integration test suite for isolated event loops with real asyncio workloads.
 %%%
-%%% Tests that multiple ErlangEventLoop instances can run real asyncio operations
-%%% (sleep, TCP, concurrent tasks) concurrently without interference.
-%%%
-%%% These tests use the `event_loop_isolation = per_loop` mode.
+%%% Tests that multiple ErlangEventLoop instances created with `isolated=True`
+%%% can run real asyncio operations concurrently without interference.
 -module(py_multi_loop_integration_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -18,48 +16,33 @@
 ]).
 
 -export([
-    test_per_loop_mode_enabled/1,
-    test_two_loops_concurrent_sleep/1,
-    test_two_loops_concurrent_gather/1,
-    test_isolated_loop_tcp_echo/1,
-    test_two_loops_with_timers/1
+    test_isolated_loop_creation/1,
+    test_two_loops_concurrent_callbacks/1,
+    test_two_loops_isolation/1,
+    test_multiple_loops_lifecycle/1,
+    test_isolated_loops_with_timers/1
 ]).
 
 all() ->
     [
-        test_per_loop_mode_enabled,
-        test_two_loops_concurrent_sleep,
-        test_two_loops_concurrent_gather,
-        test_isolated_loop_tcp_echo,
-        test_two_loops_with_timers
+        test_isolated_loop_creation,
+        test_two_loops_concurrent_callbacks,
+        test_two_loops_isolation,
+        test_multiple_loops_lifecycle,
+        test_isolated_loops_with_timers
     ].
 
 init_per_suite(Config) ->
     %% Stop application if already running (from other test suites)
     _ = application:stop(erlang_python),
-    timer:sleep(200),  %% Allow full cleanup
-
-    %% Set per_loop isolation mode BEFORE starting the application
-    application:set_env(erlang_python, event_loop_isolation, per_loop),
-
-    %% Verify env is set
-    PerLoop = application:get_env(erlang_python, event_loop_isolation, global),
-    ct:pal("Setting isolation mode to: ~p", [PerLoop]),
+    timer:sleep(200),
 
     {ok, _} = application:ensure_all_started(erlang_python),
-
-    %% Manually set isolation mode again to ensure it's applied
-    %% (in case gen_server was already running)
-    ok = py_nif:set_isolation_mode(per_loop),
-
-    %% Wait for event loop to be ready
     timer:sleep(200),
     Config.
 
 end_per_suite(_Config) ->
     ok = application:stop(erlang_python),
-    %% Reset to default
-    application:set_env(erlang_python, event_loop_isolation, global),
     ok.
 
 init_per_testcase(_TestCase, Config) ->
@@ -71,37 +54,39 @@ end_per_testcase(_TestCase, _Config) ->
     ok.
 
 %% ============================================================================
-%% Test: Verify per_loop mode is enabled
+%% Test: Verify isolated loop can be created with isolated=True
 %% ============================================================================
 
-test_per_loop_mode_enabled(_Config) ->
-    {ok, Mode} = py:call(py_event_loop, '_get_isolation_mode', []),
-    ct:pal("Isolation mode: ~p", [Mode]),
-    ?assertEqual(<<"per_loop">>, Mode),
+test_isolated_loop_creation(_Config) ->
+    ok = py:exec(<<"
+from erlang_loop import ErlangEventLoop
+
+# Default loop uses shared global
+default_loop = ErlangEventLoop()
+assert default_loop._loop_handle is None, 'Default loop should use global (None handle)'
+default_loop.close()
+
+# Isolated loop gets its own handle
+isolated_loop = ErlangEventLoop(isolated=True)
+assert isolated_loop._loop_handle is not None, 'Isolated loop should have its own handle'
+isolated_loop.close()
+">>),
     ok.
 
 %% ============================================================================
-%% Test: Two loops running concurrent call_soon callbacks
+%% Test: Two isolated loops running concurrent call_soon callbacks
 %% ============================================================================
-%%
-%% Creates two ErlangEventLoop instances (each with isolated native loop)
-%% and runs call_soon callbacks. Verifies both loops process their own
-%% callbacks independently without interference.
-%%
-%% Note: asyncio.sleep requires a router (for Erlang timers). This test
-%% uses call_soon which works with the basic loop infrastructure.
 
-test_two_loops_concurrent_sleep(_Config) ->
+test_two_loops_concurrent_callbacks(_Config) ->
     ok = py:exec(<<"
-import time
 import threading
 from erlang_loop import ErlangEventLoop
 
 results = {}
 
 def run_loop_callbacks(loop_id, num_callbacks):
-    '''Run callbacks in a separate thread with its own loop.'''
-    loop = ErlangEventLoop()
+    '''Run callbacks in a separate thread with its own isolated loop.'''
+    loop = ErlangEventLoop(isolated=True)
 
     callback_results = []
 
@@ -120,7 +105,7 @@ def run_loop_callbacks(loop_id, num_callbacks):
 
         results[loop_id] = {
             'count': len(callback_results),
-            'values': callback_results[:5],  # First 5 for debugging
+            'values': callback_results[:5],
             'success': True
         }
     except Exception as e:
@@ -128,7 +113,7 @@ def run_loop_callbacks(loop_id, num_callbacks):
     finally:
         loop.close()
 
-# Run two loops concurrently
+# Run two isolated loops concurrently
 t1 = threading.Thread(target=run_loop_callbacks, args=('loop_a', 10))
 t2 = threading.Thread(target=run_loop_callbacks, args=('loop_b', 10))
 
@@ -148,13 +133,10 @@ assert results['loop_b']['count'] == 10, f'Loop B wrong count: {results[\"loop_b
     ok.
 
 %% ============================================================================
-%% Test: Two loops with isolated callback queues
+%% Test: Callbacks are isolated between loops
 %% ============================================================================
-%%
-%% Verifies that callbacks scheduled on one loop don't appear on another.
-%% This is the core isolation test.
 
-test_two_loops_concurrent_gather(_Config) ->
+test_two_loops_isolation(_Config) ->
     ok = py:exec(<<"
 import threading
 from erlang_loop import ErlangEventLoop
@@ -163,7 +145,7 @@ results = {}
 
 def run_isolated_loop(loop_id, marker_value):
     '''Each loop schedules callbacks with unique markers.'''
-    loop = ErlangEventLoop()
+    loop = ErlangEventLoop(isolated=True)
 
     collected = []
 
@@ -215,20 +197,17 @@ assert results['loop_b']['count'] == 5, f'Loop B wrong count'
     ok.
 
 %% ============================================================================
-%% Test: Isolated loop creation and destruction
+%% Test: Multiple isolated loops lifecycle
 %% ============================================================================
-%%
-%% Tests that multiple loops can be created and destroyed without
-%% affecting each other.
 
-test_isolated_loop_tcp_echo(_Config) ->
+test_multiple_loops_lifecycle(_Config) ->
     ok = py:exec(<<"
 from erlang_loop import ErlangEventLoop
 
-# Create multiple loops
+# Create multiple isolated loops
 loops = []
 for i in range(3):
-    loop = ErlangEventLoop()
+    loop = ErlangEventLoop(isolated=True)
     loops.append(loop)
 
 # Each loop should be independent
@@ -260,19 +239,16 @@ for loop in loops:
     ok.
 
 %% ============================================================================
-%% Test: Two loops with timer callbacks (call_later)
+%% Test: Isolated loops with timer callbacks (call_later)
 %% ============================================================================
-%%
-%% Tests that per-loop created loops can use timers (via shared router).
-%% This verifies that the shared router is properly set up and working.
 
-test_two_loops_with_timers(_Config) ->
+test_isolated_loops_with_timers(_Config) ->
     ok = py:exec(<<"
 import time
 from erlang_loop import ErlangEventLoop
 
-# Test timer in a single loop first
-loop = ErlangEventLoop()
+# Test timer in an isolated loop
+loop = ErlangEventLoop(isolated=True)
 timer_fired = []
 
 def timer_callback():
@@ -293,9 +269,9 @@ assert len(timer_fired) > 0, f'Timer did not fire within timeout, elapsed={time.
 
 loop.close()
 
-# Now test two loops sequentially
+# Now test two isolated loops sequentially
 for loop_id in ['loop_a', 'loop_b']:
-    loop = ErlangEventLoop()
+    loop = ErlangEventLoop(isolated=True)
     timer_result = []
 
     def make_cb(lid):
