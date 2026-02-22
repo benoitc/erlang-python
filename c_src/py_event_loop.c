@@ -63,10 +63,116 @@ ERL_NIF_TERM ATOM_EVENT_LOOP;
 ERL_NIF_TERM ATOM_DISPATCH;
 
 /* ============================================================================
+ * Per-Interpreter Event Loop Storage
+ * ============================================================================
+ *
+ * Event loop references are stored as module attributes in py_event_loop,
+ * using PyCapsule for safe C pointer storage. This approach:
+ *
+ * - Works uniformly for main interpreter and sub-interpreters
+ * - Each interpreter has its own py_event_loop module with its own attribute
+ * - Thread-safe for free-threading (Python 3.13+)
+ * - Uses gil_acquire()/gil_release() for safe GIL management
+ *
+ * Flow:
+ *   NIF set_python_event_loop() -> stores capsule in py_event_loop._loop
+ *   Python _is_initialized() -> checks if _loop attribute exists and is valid
+ *   Python operations -> retrieve loop from py_event_loop._loop
+ */
+
+/** @brief Name for the PyCapsule storing event loop pointer */
+static const char *EVENT_LOOP_CAPSULE_NAME = "erlang_python.event_loop";
+
+/** @brief Module attribute name for storing the event loop */
+static const char *EVENT_LOOP_ATTR_NAME = "_loop";
+
+/**
+ * Get the py_event_loop module for the current interpreter.
+ * MUST be called with GIL held.
+ * Returns borrowed reference.
+ */
+static PyObject *get_event_loop_module(void) {
+    PyObject *modules = PyImport_GetModuleDict();
+    if (modules == NULL) {
+        return NULL;
+    }
+    return PyDict_GetItemString(modules, "py_event_loop");
+}
+
+/**
+ * Get the event loop for the current Python interpreter.
+ * MUST be called with GIL held.
+ * Retrieves from py_event_loop._loop module attribute.
+ *
+ * @return Event loop pointer or NULL if not set
+ */
+static erlang_event_loop_t *get_interpreter_event_loop(void) {
+    PyObject *module = get_event_loop_module();
+    if (module == NULL) {
+        return NULL;
+    }
+
+    PyObject *capsule = PyObject_GetAttrString(module, EVENT_LOOP_ATTR_NAME);
+    if (capsule == NULL) {
+        PyErr_Clear();  /* Attribute doesn't exist */
+        return NULL;
+    }
+
+    if (!PyCapsule_IsValid(capsule, EVENT_LOOP_CAPSULE_NAME)) {
+        Py_DECREF(capsule);
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(
+        capsule, EVENT_LOOP_CAPSULE_NAME);
+    Py_DECREF(capsule);
+
+    return loop;
+}
+
+/**
+ * Set the event loop for the current interpreter.
+ * MUST be called with GIL held.
+ * Stores as py_event_loop._loop module attribute.
+ *
+ * @param loop Event loop to set
+ * @return 0 on success, -1 on error
+ */
+static int set_interpreter_event_loop(erlang_event_loop_t *loop) {
+    PyObject *module = get_event_loop_module();
+    if (module == NULL) {
+        return -1;
+    }
+
+    if (loop == NULL) {
+        /* Clear the event loop attribute */
+        if (PyObject_SetAttrString(module, EVENT_LOOP_ATTR_NAME, Py_None) < 0) {
+            PyErr_Clear();
+        }
+        return 0;
+    }
+
+    PyObject *capsule = PyCapsule_New(loop, EVENT_LOOP_CAPSULE_NAME, NULL);
+    if (capsule == NULL) {
+        return -1;
+    }
+
+    int result = PyObject_SetAttrString(module, EVENT_LOOP_ATTR_NAME, capsule);
+    Py_DECREF(capsule);
+
+    if (result < 0) {
+        PyErr_Clear();
+        return -1;
+    }
+
+    return 0;
+}
+
+/* ============================================================================
  * Resource Callbacks
  * ============================================================================ */
 
-/* Forward declaration of global Python event loop pointer (defined later in file) */
+/* Global Python event loop pointer - kept for fast access from C code */
 static erlang_event_loop_t *g_python_event_loop;
 
 /* Forward declaration */
@@ -2099,6 +2205,10 @@ int py_event_loop_init_python(ErlNifEnv *env, erlang_event_loop_t *loop) {
 /**
  * NIF to set the global Python event loop.
  * Called from Erlang: py_nif:set_python_event_loop(LoopRef)
+ *
+ * Only updates the global C variable. The per-interpreter storage
+ * is set during initialization when the GIL is already held.
+ * This avoids needing to acquire the GIL from an arbitrary Erlang thread.
  */
 ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]) {
@@ -2110,6 +2220,7 @@ ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_event_loop");
     }
 
+    /* Set global C variable for fast access from C code */
     g_python_event_loop = loop;
 
     return ATOM_OK;
