@@ -86,18 +86,18 @@ handle_cast(_Msg, State) ->
 
 %% Handle enif_select messages for read readiness
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
-    #state{loop_ref = LoopRef} = State,
     py_nif:handle_fd_event(FdRes, read),
     %% Re-register for more events (enif_select is one-shot)
-    py_nif:reselect_reader(LoopRef, FdRes),
+    %% Uses fd_res->loop internally, no need to pass LoopRef
+    py_nif:reselect_reader_fd(FdRes),
     {noreply, State};
 
 %% Handle enif_select messages for write readiness
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
-    #state{loop_ref = LoopRef} = State,
     py_nif:handle_fd_event(FdRes, write),
     %% Re-register for more events (enif_select is one-shot)
-    py_nif:reselect_writer(LoopRef, FdRes),
+    %% Uses fd_res->loop internally, no need to pass LoopRef
+    py_nif:reselect_writer_fd(FdRes),
     {noreply, State};
 
 %% Handle timer start request from call_later NIF

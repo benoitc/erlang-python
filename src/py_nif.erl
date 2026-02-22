@@ -92,6 +92,8 @@
     get_fd_callback_id/2,
     reselect_reader/2,
     reselect_writer/2,
+    reselect_reader_fd/1,
+    reselect_writer_fd/1,
     %% FD lifecycle management (uvloop-like API)
     handle_fd_event/2,
     stop_reader/1,
@@ -604,6 +606,20 @@ reselect_reader(_LoopRef, _FdRes) ->
 %% Called after an event is delivered since enif_select is one-shot.
 -spec reselect_writer(reference(), reference()) -> ok | {error, term()}.
 reselect_writer(_LoopRef, _FdRes) ->
+    ?NIF_STUB.
+
+%% @doc Re-register an fd resource for read monitoring using fd_res->loop.
+%% This variant doesn't require LoopRef since the fd resource already
+%% has a back-reference to its parent loop.
+-spec reselect_reader_fd(reference()) -> ok | {error, term()}.
+reselect_reader_fd(_FdRes) ->
+    ?NIF_STUB.
+
+%% @doc Re-register an fd resource for write monitoring using fd_res->loop.
+%% This variant doesn't require LoopRef since the fd resource already
+%% has a back-reference to its parent loop.
+-spec reselect_writer_fd(reference()) -> ok | {error, term()}.
+reselect_writer_fd(_FdRes) ->
     ?NIF_STUB.
 
 %%% ============================================================================

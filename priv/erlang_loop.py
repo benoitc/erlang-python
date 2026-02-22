@@ -79,7 +79,8 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
     # Use __slots__ for faster attribute access and reduced memory
     __slots__ = (
-        '_pel', '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
+        '_pel', '_loop_handle',  # Native loop handle (capsule) for per-loop isolation
+        '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
         '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
         '_ready', '_callback_id',
         '_handle_pool', '_handle_pool_max', '_running', '_stopping', '_closed',
@@ -89,22 +90,31 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         '_ready_append', '_ready_popleft',
     )
 
-    def __init__(self):
+    def __init__(self, loop_handle=None):
         """Initialize the Erlang event loop.
 
         The event loop is backed by Erlang's scheduler via the py_event_loop
         C module. This module provides direct access to the event loop
         without going through Erlang callbacks.
+
+        Args:
+            loop_handle: Optional native loop handle (capsule) for per-loop
+                isolation. If None, uses the global/default loop set by Erlang.
+                Pass a handle from _loop_new() for independent multi-loop usage.
         """
         try:
             import py_event_loop as pel
             self._pel = pel
-            if not pel._is_initialized():
-                raise RuntimeError("Erlang event loop not initialized. "
-                                 "Make sure erlang_python application is started.")
+            if loop_handle is None:
+                # Use legacy global loop - check it's initialized
+                if not pel._is_initialized():
+                    raise RuntimeError("Erlang event loop not initialized. "
+                                     "Make sure erlang_python application is started.")
+            self._loop_handle = loop_handle
         except ImportError:
             # Fallback for testing without actual NIF
             self._pel = _MockNifModule()
+            self._loop_handle = None
 
         # Callback management
         self._readers = {}  # fd -> (callback, args, callback_id, fd_key)
@@ -245,7 +255,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             timer_ref = self._timer_refs.get(callback_id)
             if timer_ref is not None:
                 try:
-                    self._pel._cancel_timer(timer_ref)
+                    if self._loop_handle is not None:
+                        self._pel._cancel_timer_for(self._loop_handle, timer_ref)
+                    else:
+                        self._pel._cancel_timer(timer_ref)
                 except (AttributeError, RuntimeError):
                     pass
         self._timers.clear()
@@ -258,6 +271,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             self.remove_reader(fd)
         for fd in list(self._writers.keys()):
             self.remove_writer(fd)
+
+        # Destroy the native loop handle if we have one
+        if self._loop_handle is not None:
+            try:
+                self._pel._loop_destroy(self._loop_handle)
+            except (AttributeError, RuntimeError):
+                pass
+            self._loop_handle = None
 
         # Shutdown default executor
         if self._default_executor is not None:
@@ -291,7 +312,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         handle = self.call_soon(callback, *args, context=context)
         # Wake up the event loop
         try:
-            self._pel._wakeup()
+            if self._loop_handle is not None:
+                self._pel._wakeup_for(self._loop_handle)
+            else:
+                self._pel._wakeup()
         except Exception:
             pass
         return handle
@@ -317,7 +341,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Schedule with Erlang's native timer system
         delay_ms = max(0, int((when - self.time()) * 1000))
         try:
-            timer_ref = self._pel._schedule_timer(delay_ms, callback_id)
+            if self._loop_handle is not None:
+                timer_ref = self._pel._schedule_timer_for(self._loop_handle, delay_ms, callback_id)
+            else:
+                timer_ref = self._pel._schedule_timer(delay_ms, callback_id)
             self._timer_refs[callback_id] = timer_ref
         except AttributeError:
             pass  # Fallback: mock module doesn't have _schedule_timer
@@ -381,7 +408,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         callback_id = self._next_id()
 
         try:
-            fd_key = self._pel._add_reader(fd, callback_id)
+            if self._loop_handle is not None:
+                fd_key = self._pel._add_reader_for(self._loop_handle, fd, callback_id)
+            else:
+                fd_key = self._pel._add_reader(fd, callback_id)
             self._readers[fd] = (callback, args, callback_id, fd_key)
             self._readers_by_cid[callback_id] = fd  # Reverse map for O(1) dispatch
         except Exception as e:
@@ -397,7 +427,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             self._readers_by_cid.pop(callback_id, None)  # Clean up reverse map
             try:
                 if fd_key is not None:
-                    self._pel._remove_reader(fd_key)
+                    if self._loop_handle is not None:
+                        self._pel._remove_reader_for(self._loop_handle, fd_key)
+                    else:
+                        self._pel._remove_reader(fd_key)
             except Exception:
                 pass
             return True
@@ -411,7 +444,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         callback_id = self._next_id()
 
         try:
-            fd_key = self._pel._add_writer(fd, callback_id)
+            if self._loop_handle is not None:
+                fd_key = self._pel._add_writer_for(self._loop_handle, fd, callback_id)
+            else:
+                fd_key = self._pel._add_writer(fd, callback_id)
             self._writers[fd] = (callback, args, callback_id, fd_key)
             self._writers_by_cid[callback_id] = fd  # Reverse map for O(1) dispatch
         except Exception as e:
@@ -427,7 +463,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             self._writers_by_cid.pop(callback_id, None)  # Clean up reverse map
             try:
                 if fd_key is not None:
-                    self._pel._remove_writer(fd_key)
+                    if self._loop_handle is not None:
+                        self._pel._remove_writer_for(self._loop_handle, fd_key)
+                    else:
+                        self._pel._remove_writer(fd_key)
             except Exception:
                 pass
             return True
@@ -839,7 +878,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         # Use combined poll + get_pending (single NIF call, integer event types)
         try:
-            pending = self._pel._run_once_native(timeout)
+            # Use handle-based API when loop_handle is set, legacy otherwise
+            if self._loop_handle is not None:
+                pending = self._pel._run_once_native_for(self._loop_handle, timeout)
+            else:
+                pending = self._pel._run_once_native(timeout)
             dispatch = self._dispatch
             for callback_id, event_type in pending:
                 dispatch(callback_id, event_type)

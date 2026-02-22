@@ -1421,6 +1421,88 @@ ERL_NIF_TERM nif_reselect_writer(ErlNifEnv *env, int argc,
 }
 
 /**
+ * reselect_reader_fd(FdRes) -> ok | {error, Reason}
+ *
+ * Re-register an fd for read monitoring using fd_res->loop.
+ * This variant doesn't require LoopRef since the fd resource
+ * already has a back-reference to its parent loop.
+ */
+ERL_NIF_TERM nif_reselect_reader_fd(ErlNifEnv *env, int argc,
+                                     const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    /* Don't reselect if reader was removed or FD is closing */
+    if (!fd_res->reader_active) {
+        return ATOM_OK;
+    }
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return ATOM_OK;
+    }
+
+    /* Use the loop stored in the fd resource */
+    erlang_event_loop_t *loop = fd_res->loop;
+    if (loop == NULL || !loop->has_router) {
+        return make_error(env, "no_loop");
+    }
+
+    /* Re-register with Erlang scheduler for read monitoring */
+    int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
+                          fd_res, &loop->router_pid, enif_make_ref(env));
+
+    if (ret < 0) {
+        return make_error(env, "reselect_failed");
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * reselect_writer_fd(FdRes) -> ok | {error, Reason}
+ *
+ * Re-register an fd for write monitoring using fd_res->loop.
+ * This variant doesn't require LoopRef since the fd resource
+ * already has a back-reference to its parent loop.
+ */
+ERL_NIF_TERM nif_reselect_writer_fd(ErlNifEnv *env, int argc,
+                                     const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    /* Don't reselect if writer was removed or FD is closing */
+    if (!fd_res->writer_active) {
+        return ATOM_OK;
+    }
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return ATOM_OK;
+    }
+
+    /* Use the loop stored in the fd resource */
+    erlang_event_loop_t *loop = fd_res->loop;
+    if (loop == NULL || !loop->has_router) {
+        return make_error(env, "no_loop");
+    }
+
+    /* Re-register with Erlang scheduler for write monitoring */
+    int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
+                          fd_res, &loop->router_pid, enif_make_ref(env));
+
+    if (ret < 0) {
+        return make_error(env, "reselect_failed");
+    }
+
+    return ATOM_OK;
+}
+
+/**
  * stop_reader(FdRef) -> ok | {error, Reason}
  *
  * Stop/pause read monitoring WITHOUT closing the FD.
@@ -2724,8 +2806,585 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
     return list;
 }
 
+/* ============================================================================
+ * Handle-Based Python API (_for methods)
+ * ============================================================================
+ *
+ * These methods take an explicit loop handle (PyCapsule) as the first argument,
+ * allowing Python code to operate on multiple independent event loops.
+ */
+
+/** @brief Capsule name for event loop handles */
+static const char *LOOP_CAPSULE_NAME = "erlang_python.event_loop";
+
+/**
+ * Extract event loop pointer from a PyCapsule.
+ *
+ * @param capsule The PyCapsule containing an erlang_event_loop_t pointer
+ * @return Pointer to the event loop, or NULL if invalid
+ */
+static erlang_event_loop_t *loop_from_capsule(PyObject *capsule) {
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "Expected event loop capsule");
+        return NULL;
+    }
+    void *ptr = PyCapsule_GetPointer(capsule, LOOP_CAPSULE_NAME);
+    if (ptr == NULL) {
+        /* PyCapsule_GetPointer sets appropriate error */
+        return NULL;
+    }
+    return (erlang_event_loop_t *)ptr;
+}
+
+/**
+ * Get the default event loop for backward compatibility.
+ * Used by legacy API methods.
+ */
+static erlang_event_loop_t *default_loop_for_compat(void) {
+    return get_interpreter_event_loop();
+}
+
+/**
+ * Destructor callback for loop capsules.
+ * Called when the capsule is garbage collected.
+ */
+static void loop_capsule_destructor(PyObject *capsule) {
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(
+        capsule, LOOP_CAPSULE_NAME);
+    if (loop != NULL) {
+        /* Signal shutdown */
+        loop->shutdown = true;
+
+        /* Wake up any waiting threads */
+        pthread_mutex_lock(&loop->mutex);
+        pthread_cond_broadcast(&loop->event_cond);
+        pthread_mutex_unlock(&loop->mutex);
+
+        /* Release the NIF resource reference */
+        enif_release_resource(loop);
+    }
+}
+
+/* Python function: _loop_new() -> capsule */
+static PyObject *py_loop_new(PyObject *self, PyObject *args) {
+    (void)self;
+    (void)args;
+
+    /* Allocate event loop resource */
+    erlang_event_loop_t *loop = enif_alloc_resource(
+        EVENT_LOOP_RESOURCE_TYPE, sizeof(erlang_event_loop_t));
+
+    if (loop == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate event loop");
+        return NULL;
+    }
+
+    /* Initialize fields */
+    memset(loop, 0, sizeof(erlang_event_loop_t));
+
+    if (pthread_mutex_init(&loop->mutex, NULL) != 0) {
+        enif_release_resource(loop);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize mutex");
+        return NULL;
+    }
+
+    if (pthread_cond_init(&loop->event_cond, NULL) != 0) {
+        pthread_mutex_destroy(&loop->mutex);
+        enif_release_resource(loop);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize condition variable");
+        return NULL;
+    }
+
+    loop->msg_env = enif_alloc_env();
+    if (loop->msg_env == NULL) {
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_release_resource(loop);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
+        return NULL;
+    }
+
+    atomic_store(&loop->next_callback_id, 1);
+    atomic_store(&loop->pending_count, 0);
+    loop->pending_head = NULL;
+    loop->pending_tail = NULL;
+    loop->shutdown = false;
+    loop->has_router = false;
+    loop->has_self = false;
+    loop->event_freelist = NULL;
+    loop->freelist_count = 0;
+
+    /* Create a capsule wrapping the loop pointer */
+    PyObject *capsule = PyCapsule_New(loop, LOOP_CAPSULE_NAME, loop_capsule_destructor);
+    if (capsule == NULL) {
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        return NULL;
+    }
+
+    /* Keep a reference to the NIF resource (capsule destructor will release) */
+    enif_keep_resource(loop);
+
+    return capsule;
+}
+
+/* Python function: _loop_destroy(capsule) -> None */
+static PyObject *py_loop_destroy(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    /* Signal shutdown */
+    loop->shutdown = true;
+
+    /* Wake up any waiting threads */
+    pthread_mutex_lock(&loop->mutex);
+    pthread_cond_broadcast(&loop->event_cond);
+    pthread_mutex_unlock(&loop->mutex);
+
+    Py_RETURN_NONE;
+}
+
+/* Python function: _run_once_native_for(capsule, timeout_ms) -> [(callback_id, event_type), ...] */
+static PyObject *py_run_once_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    int timeout_ms;
+
+    if (!PyArg_ParseTuple(args, "Oi", &capsule, &timeout_ms)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    if (loop->shutdown) {
+        return PyList_New(0);
+    }
+
+    /* Release GIL while waiting for events */
+    Py_BEGIN_ALLOW_THREADS
+    poll_events_wait(loop, timeout_ms);
+    Py_END_ALLOW_THREADS
+
+    /* Build pending list with GIL held */
+    pthread_mutex_lock(&loop->mutex);
+
+    int count = atomic_load(&loop->pending_count);
+    if (count == 0) {
+        pthread_mutex_unlock(&loop->mutex);
+        return PyList_New(0);
+    }
+
+    PyObject *list = PyList_New(count);
+    if (list == NULL) {
+        pthread_mutex_unlock(&loop->mutex);
+        return NULL;
+    }
+
+    pending_event_t *current = loop->pending_head;
+    int i = 0;
+    while (current != NULL && i < count) {
+        PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
+        if (tuple == NULL) {
+            Py_DECREF(list);
+            while (current != NULL) {
+                pending_event_t *next = current->next;
+                return_pending_event(loop, current);
+                current = next;
+            }
+            loop->pending_head = NULL;
+            loop->pending_tail = NULL;
+            atomic_store(&loop->pending_count, 0);
+            pending_hash_clear(loop);
+            pthread_mutex_unlock(&loop->mutex);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, i++, tuple);
+
+        pending_event_t *next = current->next;
+        return_pending_event(loop, current);
+        current = next;
+    }
+
+    while (current != NULL) {
+        pending_event_t *next = current->next;
+        return_pending_event(loop, current);
+        current = next;
+    }
+
+    loop->pending_head = NULL;
+    loop->pending_tail = NULL;
+    atomic_store(&loop->pending_count, 0);
+    pending_hash_clear(loop);
+
+    pthread_mutex_unlock(&loop->mutex);
+
+    return list;
+}
+
+/* Python function: _add_reader_for(capsule, fd, callback_id) -> fd_key */
+static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    int fd;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "OiK", &capsule, &fd, &callback_id)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    if (!loop->has_router) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router");
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE, sizeof(fd_resource_t));
+    if (fd_res == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate fd resource");
+        return NULL;
+    }
+
+    fd_res->fd = fd;
+    fd_res->loop = loop;
+    fd_res->read_callback_id = callback_id;
+    fd_res->write_callback_id = 0;
+    fd_res->reader_active = true;
+    fd_res->writer_active = false;
+    fd_res->owner_pid = loop->router_pid;
+    atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
+    fd_res->monitor_active = false;
+    fd_res->owns_fd = false;
+
+    int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
+                          ERL_NIF_SELECT_READ, fd_res, &loop->router_pid, ATOM_UNDEFINED);
+
+    if (ret < 0) {
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to register fd for reading");
+        return NULL;
+    }
+
+    unsigned long long key = (unsigned long long)(uintptr_t)fd_res;
+    return PyLong_FromUnsignedLongLong(key);
+}
+
+/* Python function: _remove_reader_for(capsule, fd_key) -> None */
+static PyObject *py_remove_reader_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    unsigned long long fd_key;
+
+    if (!PyArg_ParseTuple(args, "OK", &capsule, &fd_key)) {
+        return NULL;
+    }
+
+    /* Validate capsule (but we use fd_res->loop directly) */
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "Expected event loop capsule");
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res != NULL && fd_res->loop != NULL) {
+        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+        fd_res->reader_active = false;
+        enif_release_resource(fd_res);
+    }
+
+    Py_RETURN_NONE;
+}
+
+/* Python function: _add_writer_for(capsule, fd, callback_id) -> fd_key */
+static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    int fd;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "OiK", &capsule, &fd, &callback_id)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    if (!loop->has_router) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router");
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE, sizeof(fd_resource_t));
+    if (fd_res == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate fd resource");
+        return NULL;
+    }
+
+    fd_res->fd = fd;
+    fd_res->loop = loop;
+    fd_res->read_callback_id = 0;
+    fd_res->write_callback_id = callback_id;
+    fd_res->reader_active = false;
+    fd_res->writer_active = true;
+    fd_res->owner_pid = loop->router_pid;
+    atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
+    fd_res->monitor_active = false;
+    fd_res->owns_fd = false;
+
+    int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
+                          ERL_NIF_SELECT_WRITE, fd_res, &loop->router_pid, ATOM_UNDEFINED);
+
+    if (ret < 0) {
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to register fd for writing");
+        return NULL;
+    }
+
+    unsigned long long key = (unsigned long long)(uintptr_t)fd_res;
+    return PyLong_FromUnsignedLongLong(key);
+}
+
+/* Python function: _remove_writer_for(capsule, fd_key) -> None */
+static PyObject *py_remove_writer_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    unsigned long long fd_key;
+
+    if (!PyArg_ParseTuple(args, "OK", &capsule, &fd_key)) {
+        return NULL;
+    }
+
+    /* Validate capsule (but we use fd_res->loop directly) */
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "Expected event loop capsule");
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res != NULL && fd_res->loop != NULL) {
+        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+        fd_res->writer_active = false;
+        enif_release_resource(fd_res);
+    }
+
+    Py_RETURN_NONE;
+}
+
+/* Python function: _schedule_timer_for(capsule, delay_ms, callback_id) -> timer_ref */
+static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    int delay_ms;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "OiK", &capsule, &delay_ms, &callback_id)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    if (!loop->has_router) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router");
+        return NULL;
+    }
+
+    if (delay_ms < 0) delay_ms = 0;
+
+    uint64_t timer_ref_id = atomic_fetch_add(&loop->next_callback_id, 1);
+
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message env");
+        return NULL;
+    }
+
+    ERL_NIF_TERM msg = enif_make_tuple4(
+        msg_env,
+        ATOM_START_TIMER,
+        enif_make_int(msg_env, delay_ms),
+        enif_make_uint64(msg_env, callback_id),
+        enif_make_uint64(msg_env, timer_ref_id)
+    );
+
+    int send_result = enif_send(NULL, &loop->router_pid, msg_env, msg);
+    enif_free_env(msg_env);
+
+    if (!send_result) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to send timer message");
+        return NULL;
+    }
+
+    return PyLong_FromUnsignedLongLong(timer_ref_id);
+}
+
+/* Python function: _cancel_timer_for(capsule, timer_ref) -> None */
+static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    unsigned long long timer_ref_id;
+
+    if (!PyArg_ParseTuple(args, "OK", &capsule, &timer_ref_id)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        PyErr_Clear();  /* Don't fail on cancel */
+        Py_RETURN_NONE;
+    }
+
+    if (!loop->has_router) {
+        Py_RETURN_NONE;
+    }
+
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        Py_RETURN_NONE;
+    }
+
+    ERL_NIF_TERM msg = enif_make_tuple2(
+        msg_env,
+        ATOM_CANCEL_TIMER,
+        enif_make_uint64(msg_env, timer_ref_id)
+    );
+
+    enif_send(NULL, &loop->router_pid, msg_env, msg);
+    enif_free_env(msg_env);
+    Py_RETURN_NONE;
+}
+
+/* Python function: _wakeup_for(capsule) -> None */
+static PyObject *py_wakeup_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+
+    pthread_mutex_lock(&loop->mutex);
+    pthread_cond_broadcast(&loop->event_cond);
+    pthread_mutex_unlock(&loop->mutex);
+
+    Py_RETURN_NONE;
+}
+
+/* Python function: _is_initialized_for(capsule) -> bool */
+static PyObject *py_is_initialized_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        Py_RETURN_FALSE;
+    }
+
+    void *ptr = PyCapsule_GetPointer(capsule, LOOP_CAPSULE_NAME);
+    if (ptr == NULL) {
+        PyErr_Clear();
+        Py_RETURN_FALSE;
+    }
+
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)ptr;
+    if (loop->shutdown) {
+        Py_RETURN_FALSE;
+    }
+
+    Py_RETURN_TRUE;
+}
+
+/* Python function: _get_pending_for(capsule) -> [(callback_id, event_type), ...] */
+static PyObject *py_get_pending_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        PyErr_Clear();
+        return PyList_New(0);
+    }
+
+    pthread_mutex_lock(&loop->mutex);
+
+    int count = 0;
+    pending_event_t *current = loop->pending_head;
+    while (current != NULL) {
+        count++;
+        current = current->next;
+    }
+
+    PyObject *list = PyList_New(count);
+    if (list == NULL) {
+        pthread_mutex_unlock(&loop->mutex);
+        return NULL;
+    }
+
+    current = loop->pending_head;
+    int i = 0;
+    while (current != NULL) {
+        PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
+        if (tuple == NULL) {
+            Py_DECREF(list);
+            pthread_mutex_unlock(&loop->mutex);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, i++, tuple);
+
+        pending_event_t *next = current->next;
+        return_pending_event(loop, current);
+        current = next;
+    }
+
+    loop->pending_head = NULL;
+    loop->pending_tail = NULL;
+    atomic_store(&loop->pending_count, 0);
+    pending_hash_clear(loop);
+
+    pthread_mutex_unlock(&loop->mutex);
+
+    return list;
+}
+
 /* Module method definitions */
 static PyMethodDef PyEventLoopMethods[] = {
+    /* Legacy API (uses global event loop) */
     {"_poll_events", py_poll_events, METH_VARARGS, "Wait for events with timeout"},
     {"_get_pending", py_get_pending, METH_NOARGS, "Get and clear pending events"},
     {"_run_once_native", py_run_once, METH_VARARGS, "Combined poll + get_pending with int event types"},
@@ -2738,6 +3397,19 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_remove_writer", py_remove_writer, METH_VARARGS, "Stop monitoring fd for writes"},
     {"_schedule_timer", py_schedule_timer, METH_VARARGS, "Schedule a timer with Erlang"},
     {"_cancel_timer", py_cancel_timer, METH_VARARGS, "Cancel an Erlang timer"},
+    /* Handle-based API (takes explicit loop capsule) */
+    {"_loop_new", py_loop_new, METH_NOARGS, "Create a new event loop, returns capsule"},
+    {"_loop_destroy", py_loop_destroy, METH_VARARGS, "Destroy an event loop"},
+    {"_run_once_native_for", py_run_once_for, METH_VARARGS, "Combined poll + get_pending for specific loop"},
+    {"_get_pending_for", py_get_pending_for, METH_VARARGS, "Get and clear pending events for specific loop"},
+    {"_wakeup_for", py_wakeup_for, METH_VARARGS, "Wake up specific event loop"},
+    {"_is_initialized_for", py_is_initialized_for, METH_VARARGS, "Check if specific loop is initialized"},
+    {"_add_reader_for", py_add_reader_for, METH_VARARGS, "Register fd for read monitoring on specific loop"},
+    {"_remove_reader_for", py_remove_reader_for, METH_VARARGS, "Stop monitoring fd for reads on specific loop"},
+    {"_add_writer_for", py_add_writer_for, METH_VARARGS, "Register fd for write monitoring on specific loop"},
+    {"_remove_writer_for", py_remove_writer_for, METH_VARARGS, "Stop monitoring fd for writes on specific loop"},
+    {"_schedule_timer_for", py_schedule_timer_for, METH_VARARGS, "Schedule timer on specific loop"},
+    {"_cancel_timer_for", py_cancel_timer_for, METH_VARARGS, "Cancel timer on specific loop"},
     {NULL, NULL, 0, NULL}
 };
 

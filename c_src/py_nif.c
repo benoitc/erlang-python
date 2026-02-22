@@ -1896,6 +1896,8 @@ static ErlNifFunc nif_funcs[] = {
     {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0},
     {"reselect_reader", 2, nif_reselect_reader, 0},
     {"reselect_writer", 2, nif_reselect_writer, 0},
+    {"reselect_reader_fd", 1, nif_reselect_reader_fd, 0},
+    {"reselect_writer_fd", 1, nif_reselect_writer_fd, 0},
     /* FD lifecycle management (uvloop-like API) */
     {"handle_fd_event", 2, nif_handle_fd_event, 0},
     {"stop_reader", 1, nif_stop_reader, 0},
