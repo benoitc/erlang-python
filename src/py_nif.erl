@@ -73,6 +73,11 @@
     sandbox_set_policy/2,
     sandbox_enable/2,
     sandbox_get_policy/1,
+    %% Logging and tracing
+    set_log_receiver/2,
+    clear_log_receiver/0,
+    set_trace_receiver/1,
+    clear_trace_receiver/0,
     %% Erlang-native event loop (for asyncio integration)
     event_loop_new/0,
     event_loop_destroy/1,
@@ -499,6 +504,31 @@ sandbox_enable(_WorkerRef, _Enabled) ->
 %% Returns a map with enabled, block, allow_imports, log_events.
 -spec sandbox_get_policy(reference()) -> {ok, map()} | {error, term()}.
 sandbox_get_policy(_WorkerRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Logging and Tracing
+%%% ============================================================================
+
+%% @doc Set the log receiver process and minimum level threshold.
+%% Level is the Python levelno (0=DEBUG to 50=CRITICAL).
+-spec set_log_receiver(pid(), integer()) -> ok | {error, term()}.
+set_log_receiver(_Pid, _Level) ->
+    ?NIF_STUB.
+
+%% @doc Clear the log receiver - log messages will be dropped.
+-spec clear_log_receiver() -> ok.
+clear_log_receiver() ->
+    ?NIF_STUB.
+
+%% @doc Set the trace receiver process for span events.
+-spec set_trace_receiver(pid()) -> ok | {error, term()}.
+set_trace_receiver(_Pid) ->
+    ?NIF_STUB.
+
+%% @doc Clear the trace receiver - trace events will be dropped.
+-spec clear_trace_receiver() -> ok.
+clear_trace_receiver() ->
     ?NIF_STUB.
 
 %%% ============================================================================

@@ -1300,6 +1300,19 @@ static PyMethodDef ErlangModuleMethods[] = {
     {"_register_async_future", register_async_future, METH_VARARGS,
      "Register a Future for an async callback.\n"
      "Usage: erlang._register_async_future(callback_id, future)"},
+    /* Logging and tracing (from py_logging.c) */
+    {"_log", erlang_log_impl, METH_VARARGS,
+     "Log message to Erlang logger (fire-and-forget).\n"
+     "Usage: erlang._log(level, logger_name, message, metadata)"},
+    {"_trace_start", erlang_trace_start_impl, METH_VARARGS,
+     "Start a trace span.\n"
+     "Usage: erlang._trace_start(name, span_id, parent_id, attrs)"},
+    {"_trace_end", erlang_trace_end_impl, METH_VARARGS,
+     "End a trace span.\n"
+     "Usage: erlang._trace_end(span_id, status, attrs)"},
+    {"_trace_event", erlang_trace_event_impl, METH_VARARGS,
+     "Add event to a span.\n"
+     "Usage: erlang._trace_event(span_id, name, attrs)"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -1450,6 +1463,126 @@ static int create_erlang_module(void) {
             Py_DECREF(result);
         }
         Py_DECREF(globals);
+    }
+
+    /* Inject logging and tracing Python code */
+    const char *erlang_logging_code =
+        "import logging\n"
+        "import threading\n"
+        "import random\n"
+        "\n"
+        "class ErlangHandler(logging.Handler):\n"
+        "    '''Logging handler that forwards log records to Erlang logger.'''\n"
+        "    def emit(self, record):\n"
+        "        try:\n"
+        "            msg = self.format(record)\n"
+        "            meta = {'module': record.module, 'lineno': record.lineno,\n"
+        "                    'funcName': record.funcName}\n"
+        "            erlang._log(record.levelno, record.name, msg, meta)\n"
+        "        except:\n"
+        "            pass\n"
+        "\n"
+        "def setup_logging(level=10, format=None):\n"
+        "    '''Set up Python logging to forward to Erlang.\n"
+        "    \n"
+        "    Args:\n"
+        "        level: Minimum log level (10=DEBUG, 20=INFO, 30=WARNING, etc.)\n"
+        "        format: Optional format string\n"
+        "    \n"
+        "    Returns:\n"
+        "        The created ErlangHandler instance\n"
+        "    '''\n"
+        "    handler = ErlangHandler()\n"
+        "    if format:\n"
+        "        handler.setFormatter(logging.Formatter(format))\n"
+        "    else:\n"
+        "        handler.setFormatter(logging.Formatter('%(message)s'))\n"
+        "    root = logging.getLogger()\n"
+        "    root.addHandler(handler)\n"
+        "    root.setLevel(level)\n"
+        "    return handler\n"
+        "\n"
+        "# Thread-local span context for tracing\n"
+        "_span_ctx = threading.local()\n"
+        "\n"
+        "class Span:\n"
+        "    '''Context manager for tracing spans.\n"
+        "    \n"
+        "    Usage:\n"
+        "        with erlang.Span('operation-name', key='value') as span:\n"
+        "            do_work()\n"
+        "            span.event('checkpoint', items=10)\n"
+        "    '''\n"
+        "    def __init__(self, name, **attrs):\n"
+        "        self.name = name\n"
+        "        self.span_id = random.getrandbits(64)\n"
+        "        self.attrs = attrs\n"
+        "        self._prev = None\n"
+        "\n"
+        "    def __enter__(self):\n"
+        "        self._prev = getattr(_span_ctx, 'current', None)\n"
+        "        _span_ctx.current = self.span_id\n"
+        "        erlang._trace_start(self.name, self.span_id, self._prev, self.attrs)\n"
+        "        return self\n"
+        "\n"
+        "    def __exit__(self, et, ev, tb):\n"
+        "        status = 'error' if et else 'ok'\n"
+        "        attrs = {}\n"
+        "        if et:\n"
+        "            attrs['exception'] = str(ev)\n"
+        "        erlang._trace_end(self.span_id, status, attrs)\n"
+        "        _span_ctx.current = self._prev\n"
+        "        return False\n"
+        "\n"
+        "    def event(self, name, **attrs):\n"
+        "        '''Add an event to this span.'''\n"
+        "        erlang._trace_event(self.span_id, name, attrs)\n"
+        "\n"
+        "def trace(name=None):\n"
+        "    '''Decorator to trace a function.\n"
+        "    \n"
+        "    Usage:\n"
+        "        @erlang.trace()\n"
+        "        def my_function():\n"
+        "            pass\n"
+        "    '''\n"
+        "    def decorator(fn):\n"
+        "        span_name = name or f'{fn.__module__}.{fn.__qualname__}'\n"
+        "        def wrapper(*a, **kw):\n"
+        "            with Span(span_name):\n"
+        "                return fn(*a, **kw)\n"
+        "        return wrapper\n"
+        "    return decorator\n"
+        "\n"
+        "# Add to erlang module\n"
+        "erlang.ErlangHandler = ErlangHandler\n"
+        "erlang.setup_logging = setup_logging\n"
+        "erlang.Span = Span\n"
+        "erlang.trace = trace\n";
+
+    PyObject *log_globals = PyDict_New();
+    if (log_globals != NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(log_globals, "__builtins__", builtins);
+
+        /* Import erlang module into globals so the code can reference it */
+        PyObject *sys_modules = PySys_GetObject("modules");
+        if (sys_modules != NULL) {
+            PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
+            if (erlang_mod != NULL) {
+                PyDict_SetItemString(log_globals, "erlang", erlang_mod);
+            }
+        }
+
+        PyObject *result = PyRun_String(erlang_logging_code, Py_file_input, log_globals, log_globals);
+        if (result == NULL) {
+            /* Non-fatal - logging features just won't be available */
+            PyErr_Print();
+            PyErr_Clear();
+        } else {
+            Py_DECREF(result);
+        }
+        Py_DECREF(log_globals);
     }
 
     return 0;

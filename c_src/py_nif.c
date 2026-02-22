@@ -120,6 +120,12 @@ ERL_NIF_TERM ATOM_ASYNC_RESULT;
 ERL_NIF_TERM ATOM_ASYNC_ERROR;
 ERL_NIF_TERM ATOM_SUSPENDED;
 
+/* Logging atoms */
+ERL_NIF_TERM ATOM_PY_LOG;
+ERL_NIF_TERM ATOM_SPAN_START;
+ERL_NIF_TERM ATOM_SPAN_END;
+ERL_NIF_TERM ATOM_SPAN_EVENT;
+
 /* ============================================================================
  * Forward declarations for cross-module functions
  * ============================================================================ */
@@ -134,6 +140,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 
 #include "py_convert.c"
 #include "py_exec.c"
+#include "py_logging.c"
 #include "py_callback.c"
 #include "py_thread_worker.c"
 #include "py_event_loop.c"
@@ -1903,6 +1910,12 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ASYNC_ERROR = enif_make_atom(env, "async_error");
     ATOM_SUSPENDED = enif_make_atom(env, "suspended");
 
+    /* Logging atoms */
+    ATOM_PY_LOG = enif_make_atom(env, "py_log");
+    ATOM_SPAN_START = enif_make_atom(env, "span_start");
+    ATOM_SPAN_END = enif_make_atom(env, "span_end");
+    ATOM_SPAN_EVENT = enif_make_atom(env, "span_event");
+
     /* Initialize event loop module */
     if (event_loop_init(env) < 0) {
         return -1;
@@ -2002,6 +2015,12 @@ static ErlNifFunc nif_funcs[] = {
     /* Callback name registry (prevents torch introspection issues) */
     {"register_callback_name", 1, nif_register_callback_name, 0},
     {"unregister_callback_name", 1, nif_unregister_callback_name, 0},
+
+    /* Logging and tracing */
+    {"set_log_receiver", 2, nif_set_log_receiver, 0},
+    {"clear_log_receiver", 0, nif_clear_log_receiver, 0},
+    {"set_trace_receiver", 1, nif_set_trace_receiver, 0},
+    {"clear_trace_receiver", 0, nif_clear_trace_receiver, 0},
 
     /* Erlang-native event loop NIFs */
     {"event_loop_new", 0, nif_event_loop_new, 0},

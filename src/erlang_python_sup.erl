@@ -69,6 +69,26 @@ init([]) ->
         modules => [py_thread_handler]
     },
 
+    %% Python logging integration
+    LoggerSpec = #{
+        id => py_logger,
+        start => {py_logger, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_logger]
+    },
+
+    %% Python tracing integration
+    TracerSpec = #{
+        id => py_tracer,
+        start => {py_tracer, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_tracer]
+    },
+
     %% Main worker pool
     PoolSpec = #{
         id => py_pool,
@@ -109,7 +129,8 @@ init([]) ->
         modules => [py_event_loop]
     },
 
-    Children = [CallbackSpec, ThreadHandlerSpec, PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec],
+    Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
+                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

@@ -29,6 +29,8 @@ Key features:
 - **Streaming** - Iterate over Python generators chunk-by-chunk
 - **Virtual environments** - Activate venvs for dependency isolation
 - **AI/ML ready** - Examples for embeddings, semantic search, RAG, and LLMs
+- **Logging integration** - Python logging forwarded to Erlang logger
+- **Distributed tracing** - Span-based tracing from Python code
 
 ## Requirements
 
@@ -320,6 +322,71 @@ ok = py:activate_venv(<<"/path/to/venv">>).
 ok = py:deactivate_venv().
 ```
 
+## Logging and Tracing
+
+### Python Logging to Erlang Logger
+
+Forward Python `logging` messages to Erlang's `logger`:
+
+```erlang
+%% Configure Python logging
+ok = py:configure_logging(#{level => info}).
+
+%% Python logs now appear in Erlang logger
+ok = py:exec(<<"
+import logging
+logging.info('Hello from Python!')
+logging.warning('Something needs attention')
+">>).
+```
+
+From Python, you can also set up logging explicitly:
+
+```python
+import erlang
+erlang.setup_logging(level=20)  # 20 = INFO
+```
+
+### Distributed Tracing
+
+Collect trace spans from Python code:
+
+```erlang
+%% Enable tracing
+ok = py:enable_tracing().
+
+%% Run Python code with spans
+ok = py:exec(<<"
+import erlang
+
+with erlang.Span('process-request', user_id=123):
+    with erlang.Span('query-database'):
+        pass  # database work
+    with erlang.Span('format-response'):
+        pass  # formatting work
+">>).
+
+%% Retrieve collected spans
+{ok, Spans} = py:get_traces().
+%% Spans = [#{name => <<"query-database">>, status => ok, duration_us => 42, ...}, ...]
+
+%% Clean up
+ok = py:clear_traces().
+ok = py:disable_tracing().
+```
+
+Use the `@erlang.trace()` decorator for automatic function tracing:
+
+```python
+import erlang
+
+@erlang.trace()
+def my_function():
+    return compute_something()
+```
+
+See [docs/logging.md](docs/logging.md) for details.
+
 ## Examples
 
 The `examples/` directory contains runnable demonstrations:
@@ -358,6 +425,11 @@ escript examples/erlang_concurrency.erl
 ### Elixir Integration
 ```bash
 elixir --erl "-pa _build/default/lib/erlang_python/ebin" examples/elixir_example.exs
+```
+
+### Logging and Tracing
+```bash
+escript examples/logging_example.erl
 ```
 
 ## API Reference
@@ -405,6 +477,22 @@ py:unregister_function(Name).
 {ok, Collected} = py:gc().
 ok = py:tracemalloc_start().
 ok = py:tracemalloc_stop().
+```
+
+### Logging
+
+```erlang
+ok = py:configure_logging().
+ok = py:configure_logging(#{level => info, format => <<"%(name)s: %(message)s">>}).
+```
+
+### Tracing
+
+```erlang
+ok = py:enable_tracing().
+ok = py:disable_tracing().
+{ok, Spans} = py:get_traces().
+ok = py:clear_traces().
 ```
 
 ## Type Mappings
@@ -482,6 +570,8 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Scalability](docs/scalability.md)
 - [Streaming](docs/streaming.md)
 - [Threading](docs/threading.md)
+- [Logging and Tracing](docs/logging.md)
+- [Sandbox](docs/sandbox.md)
 - [Changelog](https://github.com/benoitc/erlang-python/releases)
 
 ## License
