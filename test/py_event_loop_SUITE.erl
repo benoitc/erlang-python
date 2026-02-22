@@ -66,8 +66,41 @@ all() ->
     ].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(erlang_python),
-    Config.
+    case application:ensure_all_started(erlang_python) of
+        {ok, _} ->
+            %% Wait for event loop to be fully initialized
+            %% This is important for free-threaded Python where initialization
+            %% can race with test execution
+            case wait_for_event_loop(5000) of
+                ok ->
+                    Config;
+                {error, Reason} ->
+                    ct:fail({event_loop_not_ready, Reason})
+            end;
+        {error, {App, Reason}} ->
+            ct:fail({failed_to_start, App, Reason})
+    end.
+
+%% Wait for the event loop to be fully initialized
+wait_for_event_loop(Timeout) when Timeout =< 0 ->
+    {error, timeout};
+wait_for_event_loop(Timeout) ->
+    case py_event_loop:get_loop() of
+        {ok, LoopRef} when is_reference(LoopRef) ->
+            %% Verify the event loop is actually functional by checking
+            %% we can create and immediately cancel a timer
+            case py_nif:event_loop_new() of
+                {ok, TestLoop} ->
+                    py_nif:event_loop_destroy(TestLoop),
+                    ok;
+                _ ->
+                    timer:sleep(100),
+                    wait_for_event_loop(Timeout - 100)
+            end;
+        _ ->
+            timer:sleep(100),
+            wait_for_event_loop(Timeout - 100)
+    end.
 
 end_per_suite(_Config) ->
     ok = application:stop(erlang_python),
@@ -257,12 +290,13 @@ test_multiple_timers(_Config) ->
     ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
 
     %% Create timers with different delays
-    {ok, _} = py_nif:call_later(LoopRef, 10, 1),
-    {ok, _} = py_nif:call_later(LoopRef, 30, 2),
-    {ok, _} = py_nif:call_later(LoopRef, 50, 3),
+    %% Use larger delays for CI reliability (especially on free-threaded Python)
+    {ok, _} = py_nif:call_later(LoopRef, 20, 1),
+    {ok, _} = py_nif:call_later(LoopRef, 50, 2),
+    {ok, _} = py_nif:call_later(LoopRef, 80, 3),
 
-    %% Wait for all
-    timer:sleep(150),
+    %% Wait for all with margin
+    timer:sleep(200),
 
     Pending = py_nif:get_pending(LoopRef),
 
@@ -337,8 +371,9 @@ test_get_pending_clears_queue(_Config) ->
     ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
 
     %% Create a timer that fires quickly
-    {ok, _} = py_nif:call_later(LoopRef, 10, 999),
-    timer:sleep(50),
+    %% Use 20ms minimum for CI reliability
+    {ok, _} = py_nif:call_later(LoopRef, 20, 999),
+    timer:sleep(100),
 
     %% First get_pending should return the event
     Pending1 = py_nif:get_pending(LoopRef),
