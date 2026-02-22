@@ -102,9 +102,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             if not pel._is_initialized():
                 raise RuntimeError("Erlang event loop not initialized. "
                                  "Make sure erlang_python application is started.")
-        except ImportError:
-            # Fallback for testing without actual NIF
-            self._pel = _MockNifModule()
+        except ImportError as e:
+            raise RuntimeError(
+                "py_event_loop module not available. "
+                "Ensure erlang_python NIF is loaded before using ErlangEventLoop."
+            ) from e
 
         # Callback management
         self._readers = {}  # fd -> (callback, args, callback_id, fd_key)
@@ -1378,83 +1380,6 @@ class _ErlangServer:
 
 # Import errno for _ErlangServer
 import errno
-
-
-class _MockNifModule:
-    """Mock NIF module for testing without actual Erlang integration."""
-
-    def __init__(self):
-        self.readers = {}
-        self.writers = {}
-        self.pending = []
-        self._counter = 0
-
-    def _is_initialized(self):
-        return True
-
-    def _poll_events(self, timeout_ms):
-        import time
-        time.sleep(min(timeout_ms, 10) / 1000.0)
-        return len(self.pending)
-
-    def _get_pending(self):
-        result = list(self.pending)
-        self.pending.clear()
-        return result
-
-    def _run_once_native(self, timeout_ms):
-        """Combined poll + get_pending returning integer event types."""
-        import time
-        time.sleep(min(timeout_ms, 10) / 1000.0)
-        # Convert string event types to integers
-        result = []
-        for callback_id, event_type in self.pending:
-            if isinstance(event_type, str):
-                if event_type == 'read':
-                    event_type = EVENT_TYPE_READ
-                elif event_type == 'write':
-                    event_type = EVENT_TYPE_WRITE
-                else:
-                    event_type = EVENT_TYPE_TIMER
-            result.append((callback_id, event_type))
-        self.pending.clear()
-        return result
-
-    def _wakeup(self):
-        pass
-
-    def _add_pending(self, callback_id, type_str):
-        self.pending.append((callback_id, type_str))
-
-    def _add_reader(self, fd, callback_id):
-        self._counter += 1
-        self.readers[fd] = (callback_id, self._counter)
-        return self._counter
-
-    def _remove_reader(self, fd_key):
-        for fd, (cid, key) in list(self.readers.items()):
-            if key == fd_key:
-                del self.readers[fd]
-                break
-
-    def _add_writer(self, fd, callback_id):
-        self._counter += 1
-        self.writers[fd] = (callback_id, self._counter)
-        return self._counter
-
-    def _remove_writer(self, fd_key):
-        for fd, (cid, key) in list(self.writers.items()):
-            if key == fd_key:
-                del self.writers[fd]
-                break
-
-    def _schedule_timer(self, delay_ms, callback_id):
-        """Mock timer scheduling."""
-        return callback_id  # Return callback_id as timer_ref
-
-    def _cancel_timer(self, timer_ref):
-        """Mock timer cancellation."""
-        pass
 
 
 def get_event_loop_policy():
