@@ -86,6 +86,9 @@ static const char *EVENT_LOOP_CAPSULE_NAME = "erlang_python.event_loop";
 /** @brief Module attribute name for storing the event loop */
 static const char *EVENT_LOOP_ATTR_NAME = "_loop";
 
+/* Forward declaration for fallback in get_interpreter_event_loop */
+static erlang_event_loop_t *g_python_event_loop;
+
 /**
  * Get the py_event_loop module for the current interpreter.
  * MUST be called with GIL held.
@@ -102,30 +105,39 @@ static PyObject *get_event_loop_module(void) {
 /**
  * Get the event loop for the current Python interpreter.
  * MUST be called with GIL held.
- * Retrieves from py_event_loop._loop module attribute.
+ * Retrieves from py_event_loop._loop module attribute, falling back
+ * to the global g_python_event_loop for backward compatibility.
  *
  * @return Event loop pointer or NULL if not set
  */
 static erlang_event_loop_t *get_interpreter_event_loop(void) {
     PyObject *module = get_event_loop_module();
     if (module == NULL) {
-        return NULL;
+        /* Module not loaded yet - fall back to global */
+        return g_python_event_loop;
     }
 
     PyObject *capsule = PyObject_GetAttrString(module, EVENT_LOOP_ATTR_NAME);
     if (capsule == NULL) {
         PyErr_Clear();  /* Attribute doesn't exist */
-        return NULL;
+        /* Fall back to global for backward compatibility */
+        return g_python_event_loop;
     }
 
     if (!PyCapsule_IsValid(capsule, EVENT_LOOP_CAPSULE_NAME)) {
         Py_DECREF(capsule);
-        return NULL;
+        /* Invalid capsule - fall back to global */
+        return g_python_event_loop;
     }
 
     erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(
         capsule, EVENT_LOOP_CAPSULE_NAME);
     Py_DECREF(capsule);
+
+    /* If capsule contained NULL, fall back to global */
+    if (loop == NULL) {
+        return g_python_event_loop;
+    }
 
     return loop;
 }
@@ -171,9 +183,6 @@ static int set_interpreter_event_loop(erlang_event_loop_t *loop) {
 /* ============================================================================
  * Resource Callbacks
  * ============================================================================ */
-
-/* Global Python event loop pointer - kept for fast access from C code */
-static erlang_event_loop_t *g_python_event_loop;
 
 /* Forward declaration */
 int create_default_event_loop(ErlNifEnv *env);
