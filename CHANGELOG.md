@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.6.0 (2026-02-22)
+
+### Added
+
+- **Python Logging Integration** - Forward Python's `logging` module to Erlang's `logger`
+  - `py:configure_logging/0,1` - Setup Python logging to forward to Erlang
+  - `erlang.ErlangHandler` - Python logging handler that sends to Erlang
+  - `erlang.setup_logging(level, format)` - Configure logging from Python
+  - Fire-and-forget architecture using `enif_send()` for non-blocking messaging
+  - Level filtering at NIF level for performance (skip message creation for filtered logs)
+  - Log metadata includes module, line number, and function name
+  - Thread-safe - works from any Python thread
+
+- **Distributed Tracing** - Collect trace spans from Python code
+  - `py:enable_tracing/0`, `py:disable_tracing/0` - Enable/disable span collection
+  - `py:get_traces/0` - Retrieve collected spans
+  - `py:clear_traces/0` - Clear collected spans
+  - `erlang.Span(name, **attrs)` - Context manager for creating spans
+  - `erlang.trace(name)` - Decorator for tracing functions
+  - Span events via `span.event(name, **attrs)`
+  - Automatic parent/child span linking via thread-local storage
+  - Error status capture with exception details
+  - Duration tracking in microseconds
+
+- **New Erlang modules**
+  - `py_logger` - gen_server receiving log messages from Python workers
+  - `py_tracer` - gen_server collecting and managing trace spans
+
+- **New C source**
+  - `c_src/py_logging.c` - NIF implementations for logging and tracing
+
+- **Documentation and examples**
+  - `docs/logging.md` - Logging and tracing documentation
+  - `examples/logging_example.erl` - Working escript example
+  - Updated `docs/getting-started.md` with logging/tracing section
+
+- **New test suite**
+  - `test/py_logging_SUITE.erl` - 9 tests for logging and tracing
+
+- `ATOM_NIL` for Elixir `nil` compatibility in type conversions
+
+### Performance
+
+- **Type conversion optimizations** - Faster Python ↔ Erlang marshalling
+  - Use `enif_is_identical` for atom comparison instead of `strcmp`
+  - Use `PyLong_AsLongLongAndOverflow` to avoid exception machinery
+  - Cache `numpy.ndarray` type at init for fast isinstance checks
+  - Stack allocate small tuples/maps (≤16 elements) to avoid heap allocation
+  - Use `enif_make_map_from_arrays` for O(n) map building vs O(n²) puts
+  - Reorder type checks for web workloads (strings/dicts first)
+  - UTF-8 decode with bytes fallback for invalid sequences
+
+- **Fire-and-forget NIF architecture** - Log and trace calls never block Python execution
+  - Uses `enif_send()` to dispatch messages asynchronously to Erlang processes
+  - Python code continues immediately after sending, no round-trip wait
+- **NIF-level log filtering** - Messages below threshold are discarded before term creation
+  - Volatile bool flags for O(1) receiver availability checks
+  - Level threshold stored in C global, no Erlang callback needed
+- **Minimal term allocation** - Direct Erlang term building without intermediate structures
+  - Timestamps captured at NIF level using `enif_monotonic_time()`
+
 ## 1.5.0 (2026-02-18)
 
 ### Added
