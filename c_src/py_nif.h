@@ -734,6 +734,23 @@ extern __thread PyObject *tl_pending_args;
 /** @brief Timeout deadline (nanoseconds, monotonic clock) */
 extern __thread uint64_t tl_timeout_deadline;
 
+/* Logging/Tracing global state */
+
+/** @brief PID of the Erlang process receiving log messages */
+extern ErlNifPid g_log_receiver_pid;
+
+/** @brief Flag: log receiver is registered */
+extern volatile bool g_has_log_receiver;
+
+/** @brief Minimum log level threshold (Python levelno) */
+extern volatile int g_log_level_threshold;
+
+/** @brief PID of the Erlang process receiving trace spans */
+extern ErlNifPid g_trace_receiver_pid;
+
+/** @brief Flag: trace receiver is registered */
+extern volatile bool g_has_trace_receiver;
+
 /** @brief Flag: timeout checking is enabled */
 extern __thread bool tl_timeout_enabled;
 
@@ -767,6 +784,12 @@ extern ERL_NIF_TERM ATOM_ERLANG_CALLBACK;/**< @brief `erlang_callback` atom */
 extern ERL_NIF_TERM ATOM_ASYNC_RESULT;   /**< @brief `async_result` atom */
 extern ERL_NIF_TERM ATOM_ASYNC_ERROR;    /**< @brief `async_error` atom */
 extern ERL_NIF_TERM ATOM_SUSPENDED;      /**< @brief `suspended` atom */
+
+/* Logging atoms */
+extern ERL_NIF_TERM ATOM_PY_LOG;         /**< @brief `py_log` atom */
+extern ERL_NIF_TERM ATOM_SPAN_START;     /**< @brief `span_start` atom */
+extern ERL_NIF_TERM ATOM_SPAN_END;       /**< @brief `span_end` atom */
+extern ERL_NIF_TERM ATOM_SPAN_EVENT;     /**< @brief `span_event` atom */
 
 /** @} */
 

@@ -98,7 +98,14 @@
     with_context/1,
     ctx_call/4, ctx_call/5, ctx_call/6,
     ctx_eval/2, ctx_eval/3, ctx_eval/4,
-    ctx_exec/2
+    ctx_exec/2,
+    %% Logging and tracing
+    configure_logging/0,
+    configure_logging/1,
+    enable_tracing/0,
+    disable_tracing/0,
+    get_traces/0,
+    clear_traces/0
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -819,3 +826,84 @@ ctx_exec(#py_ctx{ref = CtxRef}, Code) ->
         {ok, _} -> ok;
         Error -> Error
     end.
+
+%%% ============================================================================
+%%% Logging and Tracing API
+%%% ============================================================================
+
+%% @doc Configure Python logging to forward to Erlang logger.
+%% Uses default settings (debug level, default format).
+-spec configure_logging() -> ok | {error, term()}.
+configure_logging() ->
+    configure_logging(#{}).
+
+%% @doc Configure Python logging with options.
+%% Options:
+%%   level => debug | info | warning | error (default: debug)
+%%   format => string() - Python format string (optional)
+%%
+%% Example:
+%% ```
+%% ok = py:configure_logging(#{level => info}).
+%% '''
+-spec configure_logging(map()) -> ok | {error, term()}.
+configure_logging(Opts) ->
+    Level = maps:get(level, Opts, debug),
+    LevelInt = case Level of
+        debug -> 10;
+        info -> 20;
+        warning -> 30;
+        error -> 40;
+        critical -> 50;
+        _ -> 10
+    end,
+    Format = maps:get(format, Opts, undefined),
+    %% Use __import__ for single-expression evaluation
+    Code = case Format of
+        undefined ->
+            iolist_to_binary([
+                "__import__('erlang').setup_logging(",
+                integer_to_binary(LevelInt),
+                ")"
+            ]);
+        F when is_binary(F) ->
+            iolist_to_binary([
+                "__import__('erlang').setup_logging(",
+                integer_to_binary(LevelInt),
+                ", '", F, "')"
+            ]);
+        F when is_list(F) ->
+            iolist_to_binary([
+                "__import__('erlang').setup_logging(",
+                integer_to_binary(LevelInt),
+                ", '", F, "')"
+            ])
+    end,
+    case eval(Code) of
+        {ok, _} -> ok;
+        Error -> Error
+    end.
+
+%% @doc Enable distributed tracing from Python.
+%% After enabling, Python code can create spans with erlang.Span().
+-spec enable_tracing() -> ok.
+enable_tracing() ->
+    py_tracer:enable().
+
+%% @doc Disable distributed tracing.
+-spec disable_tracing() -> ok.
+disable_tracing() ->
+    py_tracer:disable().
+
+%% @doc Get all collected trace spans.
+%% Returns a list of span maps with keys:
+%%   name, span_id, parent_id, start_time, end_time, duration_us,
+%%   status, attributes, events
+-spec get_traces() -> {ok, [map()]}.
+get_traces() ->
+    py_tracer:get_spans().
+
+%% @doc Clear all collected trace spans.
+-spec clear_traces() -> ok.
+clear_traces() ->
+    py_tracer:clear().
