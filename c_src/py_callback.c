@@ -1654,8 +1654,21 @@ static void *async_event_loop_thread(void *arg) {
         return NULL;
     }
 
-    /* Create new event loop */
-    PyObject *loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
+    /* Create a default selector event loop directly, bypassing the policy.
+     * Worker threads should NOT use ErlangEventLoop since it requires the
+     * main thread's event router. Using SelectorEventLoop ensures these
+     * background threads have their own independent event loops. */
+    PyObject *selector_loop_class = PyObject_GetAttrString(asyncio, "SelectorEventLoop");
+    PyObject *loop = NULL;
+    if (selector_loop_class != NULL) {
+        loop = PyObject_CallObject(selector_loop_class, NULL);
+        Py_DECREF(selector_loop_class);
+    }
+    if (loop == NULL) {
+        /* Fallback to new_event_loop if SelectorEventLoop not available */
+        PyErr_Clear();
+        loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
+    }
     if (loop == NULL) {
         PyErr_Print();
         Py_DECREF(asyncio);
@@ -1664,7 +1677,7 @@ static void *async_event_loop_thread(void *arg) {
         return NULL;
     }
 
-    /* Set as current loop */
+    /* Set as current loop for this thread */
     PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", loop);
     Py_XDECREF(set_result);
 

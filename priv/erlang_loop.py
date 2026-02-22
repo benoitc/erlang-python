@@ -319,8 +319,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         try:
             timer_ref = self._pel._schedule_timer(delay_ms, callback_id)
             self._timer_refs[callback_id] = timer_ref
-        except (AttributeError, RuntimeError):
-            pass  # Fallback: mock module or no router
+        except AttributeError:
+            pass  # Fallback: mock module doesn't have _schedule_timer
+        except RuntimeError as e:
+            # Fail fast on initialization errors - don't silently hang
+            raise RuntimeError(f"Timer scheduling failed: {e}") from e
 
         return handle
 
@@ -849,10 +852,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                     dispatch = self._dispatch
                     for callback_id, event_type in pending:
                         dispatch(callback_id, event_type)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except AttributeError:
+                pass  # Mock module without these methods
+            except RuntimeError as e:
+                # Fail fast on initialization errors - don't silently hang
+                raise RuntimeError(f"Event loop poll failed: {e}") from e
+        except RuntimeError as e:
+            # Fail fast on initialization errors - don't silently hang
+            raise RuntimeError(f"Event loop poll failed: {e}") from e
 
     def _dispatch(self, callback_id, event_type):
         """Dispatch a callback based on event type.
@@ -1458,7 +1465,14 @@ class _MockNifModule:
 
 
 def get_event_loop_policy():
-    """Get an event loop policy that uses ErlangEventLoop."""
+    """Get an event loop policy that uses ErlangEventLoop for the main thread.
+
+    Non-main threads get the default SelectorEventLoop to avoid conflicts
+    with the Erlang-native event loop which is designed for the main thread.
+    """
+    # Capture main thread ID at policy creation time
+    main_thread_id = threading.main_thread().ident
+
     class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
         def __init__(self):
             self._local = threading.local()
@@ -1472,6 +1486,12 @@ def get_event_loop_policy():
             self._local.loop = loop
 
         def new_event_loop(self):
-            return ErlangEventLoop()
+            # Only use ErlangEventLoop for the main thread
+            # Worker threads should use the default selector-based loop
+            if threading.current_thread().ident == main_thread_id:
+                return ErlangEventLoop()
+            else:
+                # Return default selector event loop for non-main threads
+                return asyncio.SelectorEventLoop()
 
     return ErlangEventLoopPolicy()

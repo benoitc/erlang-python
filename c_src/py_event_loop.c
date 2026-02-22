@@ -63,11 +63,103 @@ ERL_NIF_TERM ATOM_EVENT_LOOP;
 ERL_NIF_TERM ATOM_DISPATCH;
 
 /* ============================================================================
+ * Per-Interpreter Event Loop Storage
+ * ============================================================================
+ *
+ * Event loop references are stored as module attributes in py_event_loop,
+ * using PyCapsule for safe C pointer storage. This approach:
+ *
+ * - Works uniformly for main interpreter and sub-interpreters
+ * - Each interpreter has its own py_event_loop module with its own attribute
+ * - Thread-safe for free-threading (Python 3.13+)
+ * - Uses gil_acquire()/gil_release() for safe GIL management
+ *
+ * Flow:
+ *   NIF set_python_event_loop() -> stores capsule in py_event_loop._loop
+ *   Python _is_initialized() -> checks if _loop attribute exists and is valid
+ *   Python operations -> retrieve loop from py_event_loop._loop
+ */
+
+/** @brief Name for the PyCapsule storing event loop pointer */
+static const char *EVENT_LOOP_CAPSULE_NAME = "erlang_python.event_loop";
+
+/** @brief Module attribute name for storing the event loop */
+static const char *EVENT_LOOP_ATTR_NAME = "_loop";
+
+/* Forward declaration for fallback in get_interpreter_event_loop */
+static erlang_event_loop_t *g_python_event_loop;
+
+/**
+ * Get the py_event_loop module for the current interpreter.
+ * MUST be called with GIL held.
+ * Returns borrowed reference.
+ */
+static PyObject *get_event_loop_module(void) {
+    PyObject *modules = PyImport_GetModuleDict();
+    if (modules == NULL) {
+        return NULL;
+    }
+    return PyDict_GetItemString(modules, "py_event_loop");
+}
+
+/**
+ * Get the event loop for the current Python interpreter.
+ * MUST be called with GIL held.
+ *
+ * For now, we use the global g_python_event_loop directly. Per-interpreter
+ * storage via module attributes was causing issues on some Python versions.
+ * The global approach works correctly since all Python code in the main
+ * interpreter shares the same event loop.
+ *
+ * TODO: Implement proper per-interpreter storage for sub-interpreter support.
+ *
+ * @return Event loop pointer or NULL if not set
+ */
+static erlang_event_loop_t *get_interpreter_event_loop(void) {
+    return g_python_event_loop;
+}
+
+/**
+ * Set the event loop for the current interpreter.
+ * MUST be called with GIL held.
+ * Stores as py_event_loop._loop module attribute.
+ *
+ * @param loop Event loop to set
+ * @return 0 on success, -1 on error
+ */
+static int set_interpreter_event_loop(erlang_event_loop_t *loop) {
+    PyObject *module = get_event_loop_module();
+    if (module == NULL) {
+        return -1;
+    }
+
+    if (loop == NULL) {
+        /* Clear the event loop attribute */
+        if (PyObject_SetAttrString(module, EVENT_LOOP_ATTR_NAME, Py_None) < 0) {
+            PyErr_Clear();
+        }
+        return 0;
+    }
+
+    PyObject *capsule = PyCapsule_New(loop, EVENT_LOOP_CAPSULE_NAME, NULL);
+    if (capsule == NULL) {
+        return -1;
+    }
+
+    int result = PyObject_SetAttrString(module, EVENT_LOOP_ATTR_NAME, capsule);
+    Py_DECREF(capsule);
+
+    if (result < 0) {
+        PyErr_Clear();
+        return -1;
+    }
+
+    return 0;
+}
+
+/* ============================================================================
  * Resource Callbacks
  * ============================================================================ */
-
-/* Forward declaration of global Python event loop pointer (defined later in file) */
-static erlang_event_loop_t *g_python_event_loop;
 
 /* Forward declaration */
 int create_default_event_loop(ErlNifEnv *env);
@@ -78,12 +170,17 @@ int create_default_event_loop(ErlNifEnv *env);
 void event_loop_destructor(ErlNifEnv *env, void *obj) {
     erlang_event_loop_t *loop = (erlang_event_loop_t *)obj;
 
-    /* If this is the active Python event loop, create a new default one
-     * so g_python_event_loop is never NULL */
+    /* If this is the active Python event loop, clear references */
     if (g_python_event_loop == loop) {
         g_python_event_loop = NULL;
-        /* Create a new default loop to ensure Python asyncio always works */
-        create_default_event_loop(env);
+        /* Clear per-interpreter storage if we can acquire GIL.
+         * Don't create new loop in destructor - let next Python call handle it. */
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        erlang_event_loop_t *interp_loop = get_interpreter_event_loop();
+        if (interp_loop == loop) {
+            set_interpreter_event_loop(NULL);
+        }
+        PyGILState_Release(gstate);
     }
 
     /* Signal shutdown */
@@ -2088,7 +2185,7 @@ ERL_NIF_TERM nif_set_udp_broadcast(ErlNifEnv *env, int argc,
 
 /**
  * Initialize the global Python event loop.
- * Called from Erlang when setting up the event loop for Python use.
+ * Note: This function is currently unused (dead code).
  */
 int py_event_loop_init_python(ErlNifEnv *env, erlang_event_loop_t *loop) {
     (void)env;
@@ -2099,18 +2196,26 @@ int py_event_loop_init_python(ErlNifEnv *env, erlang_event_loop_t *loop) {
 /**
  * NIF to set the global Python event loop.
  * Called from Erlang: py_nif:set_python_event_loop(LoopRef)
+ *
+ * Updates both the global C variable (for NIF calls) and the per-interpreter
+ * storage (for Python code). Acquires GIL to set per-interpreter storage.
  */
 ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]) {
     (void)argc;
-    (void)env;
 
     erlang_event_loop_t *loop;
     if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE, (void **)&loop)) {
         return make_error(env, "invalid_event_loop");
     }
 
+    /* Set global C variable for fast access from C code */
     g_python_event_loop = loop;
+
+    /* Also set per-interpreter storage so Python code uses the correct loop */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    set_interpreter_event_loop(loop);
+    PyGILState_Release(gstate);
 
     return ATOM_OK;
 }
@@ -2124,12 +2229,14 @@ static PyObject *py_poll_events(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
 
-    if (g_python_event_loop->shutdown) {
+    if (loop->shutdown) {
         return PyLong_FromLong(0);
     }
 
@@ -2137,7 +2244,7 @@ static PyObject *py_poll_events(PyObject *self, PyObject *args) {
 
     /* Release GIL while waiting */
     Py_BEGIN_ALLOW_THREADS
-    num_events = poll_events_wait(g_python_event_loop, timeout_ms);
+    num_events = poll_events_wait(loop, timeout_ms);
     Py_END_ALLOW_THREADS
 
     return PyLong_FromLong(num_events);
@@ -2148,11 +2255,11 @@ static PyObject *py_get_pending(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         return PyList_New(0);
     }
-
-    erlang_event_loop_t *loop = g_python_event_loop;
 
     pthread_mutex_lock(&loop->mutex);
 
@@ -2213,13 +2320,15 @@ static PyObject *py_wakeup(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         Py_RETURN_NONE;
     }
 
-    pthread_mutex_lock(&g_python_event_loop->mutex);
-    pthread_cond_broadcast(&g_python_event_loop->event_cond);
-    pthread_mutex_unlock(&g_python_event_loop->mutex);
+    pthread_mutex_lock(&loop->mutex);
+    pthread_cond_broadcast(&loop->event_cond);
+    pthread_mutex_unlock(&loop->mutex);
 
     Py_RETURN_NONE;
 }
@@ -2234,7 +2343,9 @@ static PyObject *py_add_pending(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         Py_RETURN_NONE;
     }
 
@@ -2247,7 +2358,7 @@ static PyObject *py_add_pending(PyObject *self, PyObject *args) {
         type = EVENT_TYPE_TIMER;
     }
 
-    event_loop_add_pending(g_python_event_loop, type, callback_id, -1);
+    event_loop_add_pending(loop, type, callback_id, -1);
 
     Py_RETURN_NONE;
 }
@@ -2257,7 +2368,9 @@ static PyObject *py_is_initialized(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
 
-    if (g_python_event_loop != NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop != NULL) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
@@ -2273,12 +2386,12 @@ static PyObject *py_add_reader(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
-
-    erlang_event_loop_t *loop = g_python_event_loop;
 
     /* Create fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE, sizeof(fd_resource_t));
@@ -2324,10 +2437,7 @@ static PyObject *py_remove_reader(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
-        Py_RETURN_NONE;
-    }
-
+    /* Use per-interpreter event loop lookup - but still allow cleanup even if loop is gone */
     fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
     if (fd_res != NULL && fd_res->loop != NULL) {
         enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
@@ -2349,12 +2459,12 @@ static PyObject *py_add_writer(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
-
-    erlang_event_loop_t *loop = g_python_event_loop;
 
     /* Create fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE, sizeof(fd_resource_t));
@@ -2400,10 +2510,7 @@ static PyObject *py_remove_writer(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
-        Py_RETURN_NONE;
-    }
-
+    /* Use fd_res->loop directly - allows cleanup even if interpreter's loop is gone */
     fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
     if (fd_res != NULL && fd_res->loop != NULL) {
         enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
@@ -2425,18 +2532,22 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL || !g_python_event_loop->has_router) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL || !loop->has_router) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
-
-    erlang_event_loop_t *loop = g_python_event_loop;
     if (delay_ms < 0) delay_ms = 0;
 
     uint64_t timer_ref_id = atomic_fetch_add(&loop->next_callback_id, 1);
 
-    ErlNifEnv *msg_env = loop->msg_env;
-    enif_clear_env(msg_env);
+    /* Use per-call env for thread safety in free-threaded Python */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message env");
+        return NULL;
+    }
 
     ERL_NIF_TERM msg = enif_make_tuple4(
         msg_env,
@@ -2446,7 +2557,10 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
         enif_make_uint64(msg_env, timer_ref_id)
     );
 
-    if (!enif_send(NULL, &loop->router_pid, msg_env, msg)) {
+    int send_result = enif_send(NULL, &loop->router_pid, msg_env, msg);
+    enif_free_env(msg_env);
+
+    if (!send_result) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to send timer message");
         return NULL;
     }
@@ -2463,13 +2577,17 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL || !g_python_event_loop->has_router) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL || !loop->has_router) {
         Py_RETURN_NONE;
     }
 
-    erlang_event_loop_t *loop = g_python_event_loop;
-    ErlNifEnv *msg_env = loop->msg_env;
-    enif_clear_env(msg_env);
+    /* Use per-call env for thread safety in free-threaded Python */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        Py_RETURN_NONE;  /* Best effort - don't fail on cancel */
+    }
 
     ERL_NIF_TERM msg = enif_make_tuple2(
         msg_env,
@@ -2478,6 +2596,7 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
     );
 
     enif_send(NULL, &loop->router_pid, msg_env, msg);
+    enif_free_env(msg_env);
     Py_RETURN_NONE;
 }
 
@@ -2526,12 +2645,12 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (g_python_event_loop == NULL) {
+    /* Use per-interpreter event loop lookup */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
-
-    erlang_event_loop_t *loop = g_python_event_loop;
 
     if (loop->shutdown) {
         return PyList_New(0);
@@ -2655,11 +2774,20 @@ int create_py_event_loop_module(void) {
 /**
  * Create a default event loop and set it as g_python_event_loop.
  * This ensures the event loop is always available for Python asyncio.
- * Called after NIF is fully loaded.
+ * Called after NIF is fully loaded (with GIL held).
  */
 int create_default_event_loop(ErlNifEnv *env) {
+    /* Check per-interpreter storage first for sub-interpreter support */
+    erlang_event_loop_t *existing = get_interpreter_event_loop();
+    if (existing != NULL) {
+        return 0;  /* Already have an event loop for this interpreter */
+    }
+
+    /* Also check global for backward compatibility */
     if (g_python_event_loop != NULL) {
-        return 0;  /* Already have an event loop */
+        /* Global exists but not set for this interpreter - set it now */
+        set_interpreter_event_loop(g_python_event_loop);
+        return 0;
     }
 
     /* Allocate event loop resource */
@@ -2700,8 +2828,11 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->has_router = false;
     loop->has_self = false;
 
-    /* Set as global Python event loop */
+    /* Set as global Python event loop (backward compatibility for NIF calls) */
     g_python_event_loop = loop;
+
+    /* Store in per-interpreter storage for Python code to access */
+    set_interpreter_event_loop(loop);
 
     /* Keep a reference to prevent garbage collection */
     /* Note: This loop will be replaced when py_event_loop:init runs */

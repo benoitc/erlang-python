@@ -1303,4 +1303,74 @@ static PyObject *thread_worker_call(const char *func_name, size_t func_name_len,
 
 /** @} */
 
+/* ============================================================================
+ * Safe GIL/Thread State Acquisition
+ * ============================================================================
+ *
+ * These helpers provide safe GIL acquisition that works across:
+ * - Python 3.9-3.11 (standard GIL)
+ * - Python 3.12-3.13 (stricter thread state checks)
+ * - Python 3.13t free-threaded (no GIL, but thread attachment required)
+ *
+ * The pattern follows PyO3's Python::attach() approach:
+ * 1. Check if already attached via PyGILState_Check()
+ * 2. If not, use PyGILState_Ensure() to attach
+ * 3. Track whether we acquired so we release correctly
+ *
+ * Per Python docs, PyGILState_Ensure/Release work in free-threaded builds
+ * to manage thread attachment even without a GIL.
+ */
+
+/**
+ * @defgroup gil_helpers Safe GIL/Thread State Helpers
+ * @brief Thread-safe GIL acquisition for Python 3.12+ compatibility
+ * @{
+ */
+
+/**
+ * @brief Guard structure for safe GIL acquisition/release
+ */
+typedef struct {
+    PyGILState_STATE gstate;  /**< GIL state from PyGILState_Ensure */
+    int acquired;             /**< 1 if we acquired, 0 if already held */
+} gil_guard_t;
+
+/**
+ * @brief Safely acquire the GIL/attach to Python runtime.
+ *
+ * This function is reentrant - if the current thread already holds the GIL
+ * (or is attached in free-threaded builds), it returns immediately without
+ * double-acquiring.
+ *
+ * @return Guard structure that must be passed to gil_release()
+ */
+static inline gil_guard_t gil_acquire(void) {
+    gil_guard_t guard = {.gstate = PyGILState_UNLOCKED, .acquired = 0};
+
+    /* Check if already attached to Python runtime */
+    if (PyGILState_Check()) {
+        return guard;
+    }
+
+    /* Attach to Python runtime (acquires GIL in GIL-enabled builds) */
+    guard.gstate = PyGILState_Ensure();
+    guard.acquired = 1;
+    return guard;
+}
+
+/**
+ * @brief Release the GIL/detach from Python runtime.
+ *
+ * Only releases if we actually acquired in gil_acquire().
+ *
+ * @param guard The guard structure returned by gil_acquire()
+ */
+static inline void gil_release(gil_guard_t guard) {
+    if (guard.acquired) {
+        PyGILState_Release(guard.gstate);
+    }
+}
+
+/** @} */
+
 #endif /* PY_NIF_H */
