@@ -89,6 +89,10 @@ init([]) ->
     %% Register callbacks on startup
     register_callbacks(),
 
+    %% Set isolation mode from app env (default: global)
+    IsolationMode = application:get_env(erlang_python, event_loop_isolation, global),
+    ok = py_nif:set_isolation_mode(IsolationMode),
+
     %% Create and initialize the event loop immediately
     case py_nif:event_loop_new() of
         {ok, LoopRef} ->

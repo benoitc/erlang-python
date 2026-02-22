@@ -10,7 +10,11 @@
     {env, [
         {num_workers, 4},
         {python_path, ""},
-        {worker_timeout, 30000}
+        {worker_timeout, 30000},
+        %% Event loop isolation mode:
+        %% - global: all ErlangEventLoop instances share the global loop (default)
+        %% - per_loop: each ErlangEventLoop creates its own isolated native loop
+        {event_loop_isolation, global}
     ]},
     {modules, []},
     {licenses, ["Apache-2.0"]},

@@ -99,18 +99,33 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         Args:
             loop_handle: Optional native loop handle (capsule) for per-loop
-                isolation. If None, uses the global/default loop set by Erlang.
-                Pass a handle from _loop_new() for independent multi-loop usage.
+                isolation. If None, behavior depends on isolation mode:
+                - global: uses the shared global loop set by Erlang
+                - per_loop: creates a new isolated loop handle
         """
         try:
             import py_event_loop as pel
             self._pel = pel
-            if loop_handle is None:
-                # Use legacy global loop - check it's initialized
-                if not pel._is_initialized():
-                    raise RuntimeError("Erlang event loop not initialized. "
-                                     "Make sure erlang_python application is started.")
-            self._loop_handle = loop_handle
+
+            if loop_handle is not None:
+                # Explicit handle provided - use it directly
+                self._loop_handle = loop_handle
+            else:
+                # Check isolation mode to determine behavior
+                try:
+                    isolation_mode = pel._get_isolation_mode()
+                except AttributeError:
+                    isolation_mode = "global"  # Fallback for old NIF
+
+                if isolation_mode == "per_loop":
+                    # Create a new isolated loop handle
+                    self._loop_handle = pel._loop_new()
+                else:
+                    # Use legacy global loop - check it's initialized
+                    if not pel._is_initialized():
+                        raise RuntimeError("Erlang event loop not initialized. "
+                                         "Make sure erlang_python application is started.")
+                    self._loop_handle = None
         except ImportError:
             # Fallback for testing without actual NIF
             self._pel = _MockNifModule()

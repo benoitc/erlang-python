@@ -119,6 +119,7 @@
     set_udp_broadcast/2,
     %% Python event loop integration
     set_python_event_loop/1,
+    set_isolation_mode/1,
     %% ASGI optimizations
     asgi_build_scope/1,
     asgi_run/5,
@@ -761,6 +762,13 @@ set_udp_broadcast(_Fd, _Enable) ->
 %% This makes the event loop available to Python asyncio code.
 -spec set_python_event_loop(reference()) -> ok | {error, term()}.
 set_python_event_loop(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Set the event loop isolation mode.
+%% - global: all ErlangEventLoop instances share the global loop (default)
+%% - per_loop: each ErlangEventLoop creates its own isolated native loop
+-spec set_isolation_mode(global | per_loop) -> ok | {error, term()}.
+set_isolation_mode(_Mode) ->
     ?NIF_STUB.
 
 %%% ============================================================================

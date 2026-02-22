@@ -1923,6 +1923,7 @@ static ErlNifFunc nif_funcs[] = {
     {"set_udp_broadcast", 2, nif_set_udp_broadcast, 0},
     /* Python event loop integration */
     {"set_python_event_loop", 1, nif_set_python_event_loop, 0},
+    {"set_isolation_mode", 1, nif_set_isolation_mode, 0},
 
     /* ASGI optimizations */
     {"asgi_build_scope", 1, nif_asgi_build_scope, ERL_NIF_DIRTY_JOB_IO_BOUND},

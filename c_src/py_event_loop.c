@@ -89,6 +89,9 @@ static const char *EVENT_LOOP_ATTR_NAME = "_loop";
 /* Forward declaration for fallback in get_interpreter_event_loop */
 static erlang_event_loop_t *g_python_event_loop;
 
+/* Global flag for isolation mode - set by Erlang via NIF */
+static volatile int g_isolation_mode = 0;  /* 0 = global, 1 = per_loop */
+
 /**
  * Get the py_event_loop module for the current interpreter.
  * MUST be called with GIL held.
@@ -2302,6 +2305,30 @@ ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
     return ATOM_OK;
 }
 
+/**
+ * set_isolation_mode(Mode) -> ok
+ *
+ * Set the event loop isolation mode.
+ * Called from Erlang: py_nif:set_isolation_mode(global | per_loop)
+ */
+ERL_NIF_TERM nif_set_isolation_mode(ErlNifEnv *env, int argc,
+                                     const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    if (enif_is_atom(env, argv[0])) {
+        char atom_buf[32];
+        if (enif_get_atom(env, argv[0], atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+            if (strcmp(atom_buf, "per_loop") == 0) {
+                g_isolation_mode = 1;
+            } else {
+                g_isolation_mode = 0;  /* global or any other value */
+            }
+            return ATOM_OK;
+        }
+    }
+    return make_error(env, "invalid_mode");
+}
+
 /* Python function: _poll_events(timeout_ms) -> num_events */
 static PyObject *py_poll_events(PyObject *self, PyObject *args) {
     (void)self;
@@ -2456,6 +2483,17 @@ static PyObject *py_is_initialized(PyObject *self, PyObject *args) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
+}
+
+/* Python function: _get_isolation_mode() -> str ("global" or "per_loop") */
+static PyObject *py_get_isolation_mode(PyObject *self, PyObject *args) {
+    (void)self;
+    (void)args;
+
+    if (g_isolation_mode == 1) {
+        return PyUnicode_FromString("per_loop");
+    }
+    return PyUnicode_FromString("global");
 }
 
 /* Python function: _add_reader(fd, callback_id) -> fd_key */
@@ -3391,6 +3429,7 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_wakeup", py_wakeup, METH_NOARGS, "Wake up the event loop"},
     {"_add_pending", py_add_pending, METH_VARARGS, "Add a pending event"},
     {"_is_initialized", py_is_initialized, METH_NOARGS, "Check if event loop is initialized"},
+    {"_get_isolation_mode", py_get_isolation_mode, METH_NOARGS, "Get event loop isolation mode (global or per_loop)"},
     {"_add_reader", py_add_reader, METH_VARARGS, "Register fd for read monitoring"},
     {"_remove_reader", py_remove_reader, METH_VARARGS, "Stop monitoring fd for reads"},
     {"_add_writer", py_add_writer, METH_VARARGS, "Register fd for write monitoring"},
