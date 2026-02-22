@@ -92,6 +92,8 @@
     get_fd_callback_id/2,
     reselect_reader/2,
     reselect_writer/2,
+    reselect_reader_fd/1,
+    reselect_writer_fd/1,
     %% FD lifecycle management (uvloop-like API)
     handle_fd_event/2,
     stop_reader/1,
@@ -117,6 +119,8 @@
     set_udp_broadcast/2,
     %% Python event loop integration
     set_python_event_loop/1,
+    set_isolation_mode/1,
+    set_shared_router/1,
     %% ASGI optimizations
     asgi_build_scope/1,
     asgi_run/5,
@@ -606,6 +610,20 @@ reselect_reader(_LoopRef, _FdRes) ->
 reselect_writer(_LoopRef, _FdRes) ->
     ?NIF_STUB.
 
+%% @doc Re-register an fd resource for read monitoring using fd_res->loop.
+%% This variant doesn't require LoopRef since the fd resource already
+%% has a back-reference to its parent loop.
+-spec reselect_reader_fd(reference()) -> ok | {error, term()}.
+reselect_reader_fd(_FdRes) ->
+    ?NIF_STUB.
+
+%% @doc Re-register an fd resource for write monitoring using fd_res->loop.
+%% This variant doesn't require LoopRef since the fd resource already
+%% has a back-reference to its parent loop.
+-spec reselect_writer_fd(reference()) -> ok | {error, term()}.
+reselect_writer_fd(_FdRes) ->
+    ?NIF_STUB.
+
 %%% ============================================================================
 %%% FD Lifecycle Management (uvloop-like API)
 %%% ============================================================================
@@ -745,6 +763,20 @@ set_udp_broadcast(_Fd, _Enable) ->
 %% This makes the event loop available to Python asyncio code.
 -spec set_python_event_loop(reference()) -> ok | {error, term()}.
 set_python_event_loop(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Set the event loop isolation mode.
+%% - global: all ErlangEventLoop instances share the global loop (default)
+%% - per_loop: each ErlangEventLoop creates its own isolated native loop
+-spec set_isolation_mode(global | per_loop) -> ok | {error, term()}.
+set_isolation_mode(_Mode) ->
+    ?NIF_STUB.
+
+%% @doc Set the shared router PID for per-loop created loops.
+%% All loops created via _loop_new() in Python will use this router
+%% for FD monitoring and timer operations.
+-spec set_shared_router(pid()) -> ok | {error, term()}.
+set_shared_router(_RouterPid) ->
     ?NIF_STUB.
 
 %%% ============================================================================

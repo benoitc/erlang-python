@@ -94,6 +94,9 @@ init([]) ->
         {ok, LoopRef} ->
             {ok, RouterPid} = py_event_router:start_link(LoopRef),
             ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+            %% Set shared router for per-loop created loops
+            %% All loops created via _loop_new() in Python will use this router
+            ok = py_nif:set_shared_router(RouterPid),
             %% Make the event loop available to Python
             ok = py_nif:set_python_event_loop(LoopRef),
             %% Set ErlangEventLoop as the default asyncio policy

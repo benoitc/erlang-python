@@ -1896,6 +1896,8 @@ static ErlNifFunc nif_funcs[] = {
     {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0},
     {"reselect_reader", 2, nif_reselect_reader, 0},
     {"reselect_writer", 2, nif_reselect_writer, 0},
+    {"reselect_reader_fd", 1, nif_reselect_reader_fd, 0},
+    {"reselect_writer_fd", 1, nif_reselect_writer_fd, 0},
     /* FD lifecycle management (uvloop-like API) */
     {"handle_fd_event", 2, nif_handle_fd_event, 0},
     {"stop_reader", 1, nif_stop_reader, 0},
@@ -1921,6 +1923,8 @@ static ErlNifFunc nif_funcs[] = {
     {"set_udp_broadcast", 2, nif_set_udp_broadcast, 0},
     /* Python event loop integration */
     {"set_python_event_loop", 1, nif_set_python_event_loop, 0},
+    {"set_isolation_mode", 1, nif_set_isolation_mode, 0},
+    {"set_shared_router", 1, nif_set_shared_router, 0},
 
     /* ASGI optimizations */
     {"asgi_build_scope", 1, nif_asgi_build_scope, ERL_NIF_DIRTY_JOB_IO_BOUND},

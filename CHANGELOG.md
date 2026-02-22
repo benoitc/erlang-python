@@ -18,6 +18,12 @@
 
 ### Added
 
+- **Isolated Event Loops** - Create isolated event loops with `ErlangEventLoop(isolated=True)`
+  - Each isolated loop has its own pending queue
+  - Full asyncio support (timers, FD operations) via shared router
+  - Useful for multi-threaded Python applications
+  - See `docs/asyncio.md` for usage and architecture details
+
 - **Python Logging Integration** - Forward Python's `logging` module to Erlang's `logger`
   - `py:configure_logging/0,1` - Setup Python logging to forward to Erlang
   - `erlang.ErlangHandler` - Python logging handler that sends to Erlang
