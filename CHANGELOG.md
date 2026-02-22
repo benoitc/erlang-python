@@ -61,6 +61,15 @@
 - **Minimal term allocation** - Direct Erlang term building without intermediate structures
   - Timestamps captured at NIF level using `enif_monotonic_time()`
 
+### Fixed
+
+- **Python 3.12+ event loop thread isolation** - Fixed asyncio timeouts on Python 3.12+
+  - `ErlangEventLoop` now only used for main thread; worker threads get `SelectorEventLoop`
+  - Async worker threads bypass the policy to create `SelectorEventLoop` directly
+  - Per-call `ErlNifEnv` for thread-safe timer scheduling in free-threaded mode
+  - Fail-fast error handling in `erlang_loop.py` instead of silent hangs
+  - Added `gil_acquire()`/`gil_release()` helpers to avoid GIL double-acquisition
+
 ## 1.5.0 (2026-02-18)
 
 ### Added
