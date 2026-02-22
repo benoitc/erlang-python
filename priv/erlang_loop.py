@@ -1465,7 +1465,14 @@ class _MockNifModule:
 
 
 def get_event_loop_policy():
-    """Get an event loop policy that uses ErlangEventLoop."""
+    """Get an event loop policy that uses ErlangEventLoop for the main thread.
+
+    Non-main threads get the default SelectorEventLoop to avoid conflicts
+    with the Erlang-native event loop which is designed for the main thread.
+    """
+    # Capture main thread ID at policy creation time
+    main_thread_id = threading.main_thread().ident
+
     class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
         def __init__(self):
             self._local = threading.local()
@@ -1479,6 +1486,12 @@ def get_event_loop_policy():
             self._local.loop = loop
 
         def new_event_loop(self):
-            return ErlangEventLoop()
+            # Only use ErlangEventLoop for the main thread
+            # Worker threads should use the default selector-based loop
+            if threading.current_thread().ident == main_thread_id:
+                return ErlangEventLoop()
+            else:
+                # Return default selector event loop for non-main threads
+                return asyncio.SelectorEventLoop()
 
     return ErlangEventLoopPolicy()

@@ -105,41 +105,18 @@ static PyObject *get_event_loop_module(void) {
 /**
  * Get the event loop for the current Python interpreter.
  * MUST be called with GIL held.
- * Retrieves from py_event_loop._loop module attribute, falling back
- * to the global g_python_event_loop for backward compatibility.
+ *
+ * For now, we use the global g_python_event_loop directly. Per-interpreter
+ * storage via module attributes was causing issues on some Python versions.
+ * The global approach works correctly since all Python code in the main
+ * interpreter shares the same event loop.
+ *
+ * TODO: Implement proper per-interpreter storage for sub-interpreter support.
  *
  * @return Event loop pointer or NULL if not set
  */
 static erlang_event_loop_t *get_interpreter_event_loop(void) {
-    PyObject *module = get_event_loop_module();
-    if (module == NULL) {
-        /* Module not loaded yet - fall back to global */
-        return g_python_event_loop;
-    }
-
-    PyObject *capsule = PyObject_GetAttrString(module, EVENT_LOOP_ATTR_NAME);
-    if (capsule == NULL) {
-        PyErr_Clear();  /* Attribute doesn't exist */
-        /* Fall back to global for backward compatibility */
-        return g_python_event_loop;
-    }
-
-    if (!PyCapsule_IsValid(capsule, EVENT_LOOP_CAPSULE_NAME)) {
-        Py_DECREF(capsule);
-        /* Invalid capsule - fall back to global */
-        return g_python_event_loop;
-    }
-
-    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(
-        capsule, EVENT_LOOP_CAPSULE_NAME);
-    Py_DECREF(capsule);
-
-    /* If capsule contained NULL, fall back to global */
-    if (loop == NULL) {
-        return g_python_event_loop;
-    }
-
-    return loop;
+    return g_python_event_loop;
 }
 
 /**
