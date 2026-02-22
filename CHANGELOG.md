@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.7.0 (2026-02-23)
+
+### Added
+
+- **Shared Router Architecture for Event Loops**
+  - Single `py_event_router` process handles all event loops (both shared and isolated)
+  - Timer and FD messages include loop identity for correct dispatch
+  - Eliminates need for per-loop router processes
+  - Handle-based Python C API using PyCapsule for loop references
+
+- **Isolated Event Loops** - Create isolated event loops with `ErlangEventLoop(isolated=True)`
+  - Default (`isolated=False`): uses the shared global loop managed by Erlang
+  - Isolated (`isolated=True`): creates a dedicated loop with its own pending queue
+  - Full asyncio support (timers, FD operations) for both modes
+  - Useful for multi-threaded Python applications where each thread needs its own loop
+  - See `docs/asyncio.md` for usage and architecture details
+
 ## 1.6.1 (2026-02-22)
 
 ### Fixed
@@ -17,12 +34,6 @@
 ## 1.6.0 (2026-02-22)
 
 ### Added
-
-- **Isolated Event Loops** - Create isolated event loops with `ErlangEventLoop(isolated=True)`
-  - Each isolated loop has its own pending queue
-  - Full asyncio support (timers, FD operations) via shared router
-  - Useful for multi-threaded Python applications
-  - See `docs/asyncio.md` for usage and architecture details
 
 - **Python Logging Integration** - Forward Python's `logging` module to Erlang's `logger`
   - `py:configure_logging/0,1` - Setup Python logging to forward to Erlang
