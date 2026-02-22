@@ -571,7 +571,6 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Streaming](docs/streaming.md)
 - [Threading](docs/threading.md)
 - [Logging and Tracing](docs/logging.md)
-- [Sandbox](docs/sandbox.md)
 - [Changelog](https://github.com/benoitc/erlang-python/releases)
 
 ## License
