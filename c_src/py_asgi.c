@@ -1099,6 +1099,92 @@ static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
                 Py_INCREF(ASGI_EMPTY_BYTES);
                 py_value = ASGI_EMPTY_BYTES;
             }
+        } else if (py_key == ASGI_KEY_HEADERS) {
+            /*
+             * ASGI spec requires headers to be list[tuple[bytes, bytes]].
+             * The Erlang representation is a list of [name_binary, value_binary] pairs.
+             * We must convert binaries to Python bytes (not str) for ASGI compliance.
+             */
+            unsigned int headers_len;
+            if (enif_get_list_length(env, value, &headers_len)) {
+                py_value = PyList_New(headers_len);
+                if (py_value == NULL) {
+                    if (!key_borrowed) {
+                        Py_DECREF(py_key);
+                    }
+                    enif_map_iterator_destroy(env, &iter);
+                    Py_DECREF(scope);
+                    return NULL;
+                }
+
+                ERL_NIF_TERM head, tail = value;
+                for (unsigned int idx = 0; idx < headers_len; idx++) {
+                    if (!enif_get_list_cell(env, tail, &head, &tail)) {
+                        Py_DECREF(py_value);
+                        py_value = NULL;
+                        break;
+                    }
+
+                    /* Each header is a 2-element list [name, value] or tuple {name, value} */
+                    ERL_NIF_TERM hname_term, hvalue_term;
+                    int harity;
+                    const ERL_NIF_TERM *htuple;
+                    ERL_NIF_TERM hhead, htail;
+
+                    if (enif_get_tuple(env, head, &harity, &htuple) && harity == 2) {
+                        /* Tuple format: {name, value} */
+                        hname_term = htuple[0];
+                        hvalue_term = htuple[1];
+                    } else if (enif_get_list_cell(env, head, &hhead, &htail)) {
+                        /* List format: [name, value] */
+                        hname_term = hhead;
+                        if (!enif_get_list_cell(env, htail, &hvalue_term, &htail)) {
+                            Py_DECREF(py_value);
+                            py_value = NULL;
+                            break;
+                        }
+                    } else {
+                        Py_DECREF(py_value);
+                        py_value = NULL;
+                        break;
+                    }
+
+                    /* Extract binaries and convert to Python bytes */
+                    ErlNifBinary name_bin, value_bin;
+                    if (!enif_inspect_binary(env, hname_term, &name_bin) ||
+                        !enif_inspect_binary(env, hvalue_term, &value_bin)) {
+                        Py_DECREF(py_value);
+                        py_value = NULL;
+                        break;
+                    }
+
+                    /* Create tuple(bytes, bytes) per ASGI spec */
+                    PyObject *py_name = PyBytes_FromStringAndSize(
+                        (char *)name_bin.data, name_bin.size);
+                    PyObject *py_hvalue = PyBytes_FromStringAndSize(
+                        (char *)value_bin.data, value_bin.size);
+
+                    if (py_name == NULL || py_hvalue == NULL) {
+                        Py_XDECREF(py_name);
+                        Py_XDECREF(py_hvalue);
+                        Py_DECREF(py_value);
+                        py_value = NULL;
+                        break;
+                    }
+
+                    PyObject *header_tuple = PyTuple_Pack(2, py_name, py_hvalue);
+                    Py_DECREF(py_name);
+                    Py_DECREF(py_hvalue);
+
+                    if (header_tuple == NULL) {
+                        Py_DECREF(py_value);
+                        py_value = NULL;
+                        break;
+                    }
+
+                    PyList_SET_ITEM(py_value, idx, header_tuple);  /* Steals reference */
+                }
+            }
         }
 
         /* Generic conversion if no optimization applied */

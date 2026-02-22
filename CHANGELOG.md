@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.6.1 (2026-02-22)
+
+### Fixed
+
+- **ASGI headers now correctly use bytes instead of str** - Fixed ASGI spec compliance
+  issue where headers were being converted to Python `str` objects instead of `bytes`.
+  The ASGI specification requires headers to be `list[tuple[bytes, bytes]]`. This was
+  causing authentication failures and form parsing issues with frameworks like Starlette
+  and FastAPI, which search for headers using bytes keys (e.g., `b"content-type"`).
+  - Added explicit header handling in `asgi_scope_from_map()` to bypass generic conversion
+  - Headers are now correctly converted using `PyBytes_FromStringAndSize()`
+  - Supports both list `[name, value]` and tuple `{name, value}` header formats from Erlang
+  - Fixes GitHub issue #1
+
 ## 1.6.0 (2026-02-22)
 
 ### Added
