@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1 (2026-02-23)
+
+### Fixed
+
+- **Hex package missing priv directory** - Added explicit `files` configuration to include
+  `priv/erlang_loop.py` and other necessary files in the hex.pm package
+
 ## 1.7.0 (2026-02-23)
 
 ### Added
