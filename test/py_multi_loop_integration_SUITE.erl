@@ -21,7 +21,8 @@
     test_per_loop_mode_enabled/1,
     test_two_loops_concurrent_sleep/1,
     test_two_loops_concurrent_gather/1,
-    test_isolated_loop_tcp_echo/1
+    test_isolated_loop_tcp_echo/1,
+    test_two_loops_with_timers/1
 ]).
 
 all() ->
@@ -29,7 +30,8 @@ all() ->
         test_per_loop_mode_enabled,
         test_two_loops_concurrent_sleep,
         test_two_loops_concurrent_gather,
-        test_isolated_loop_tcp_echo
+        test_isolated_loop_tcp_echo,
+        test_two_loops_with_timers
     ].
 
 init_per_suite(Config) ->
@@ -254,5 +256,61 @@ for loop in reversed(loops):
 # Verify all closed
 for loop in loops:
     assert loop.is_closed(), 'Loop not closed'
+">>),
+    ok.
+
+%% ============================================================================
+%% Test: Two loops with timer callbacks (call_later)
+%% ============================================================================
+%%
+%% Tests that per-loop created loops can use timers (via shared router).
+%% This verifies that the shared router is properly set up and working.
+
+test_two_loops_with_timers(_Config) ->
+    ok = py:exec(<<"
+import time
+from erlang_loop import ErlangEventLoop
+
+# Test timer in a single loop first
+loop = ErlangEventLoop()
+timer_fired = []
+
+def timer_callback():
+    timer_fired.append(time.time())
+
+# Schedule a 50ms timer
+handle = loop.call_later(0.05, timer_callback)
+
+# Run the loop to process the timer
+start = time.time()
+deadline = start + 0.5  # 500ms timeout
+
+while time.time() < deadline and not timer_fired:
+    loop._run_once()
+    time.sleep(0.01)
+
+assert len(timer_fired) > 0, f'Timer did not fire within timeout, elapsed={time.time()-start:.3f}s'
+
+loop.close()
+
+# Now test two loops sequentially
+for loop_id in ['loop_a', 'loop_b']:
+    loop = ErlangEventLoop()
+    timer_result = []
+
+    def make_cb(lid):
+        def cb():
+            timer_result.append(lid)
+        return cb
+
+    loop.call_later(0.03, make_cb(loop_id))
+
+    start = time.time()
+    while time.time() < start + 0.3 and not timer_result:
+        loop._run_once()
+        time.sleep(0.01)
+
+    assert timer_result == [loop_id], f'Loop {loop_id} timer failed: {timer_result}'
+    loop.close()
 ">>),
     ok.

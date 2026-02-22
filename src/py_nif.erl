@@ -120,6 +120,7 @@
     %% Python event loop integration
     set_python_event_loop/1,
     set_isolation_mode/1,
+    set_shared_router/1,
     %% ASGI optimizations
     asgi_build_scope/1,
     asgi_run/5,
@@ -769,6 +770,13 @@ set_python_event_loop(_LoopRef) ->
 %% - per_loop: each ErlangEventLoop creates its own isolated native loop
 -spec set_isolation_mode(global | per_loop) -> ok | {error, term()}.
 set_isolation_mode(_Mode) ->
+    ?NIF_STUB.
+
+%% @doc Set the shared router PID for per-loop created loops.
+%% All loops created via _loop_new() in Python will use this router
+%% for FD monitoring and timer operations.
+-spec set_shared_router(pid()) -> ok | {error, term()}.
+set_shared_router(_RouterPid) ->
     ?NIF_STUB.
 
 %%% ============================================================================

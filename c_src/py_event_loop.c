@@ -92,6 +92,10 @@ static erlang_event_loop_t *g_python_event_loop;
 /* Global flag for isolation mode - set by Erlang via NIF */
 static volatile int g_isolation_mode = 0;  /* 0 = global, 1 = per_loop */
 
+/* Global shared router PID - set during init, used by all loops in per_loop mode */
+static ErlNifPid g_shared_router;
+static volatile int g_shared_router_valid = 0;
+
 /**
  * Get the py_event_loop module for the current interpreter.
  * MUST be called with GIL held.
@@ -2329,6 +2333,21 @@ ERL_NIF_TERM nif_set_isolation_mode(ErlNifEnv *env, int argc,
     return make_error(env, "invalid_mode");
 }
 
+/**
+ * Set the shared router PID for per-loop created loops.
+ * This router will be used by all loops created via _loop_new().
+ */
+ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    if (!enif_get_local_pid(env, argv[0], &g_shared_router)) {
+        return make_error(env, "invalid_pid");
+    }
+    g_shared_router_valid = 1;
+    return ATOM_OK;
+}
+
 /* Python function: _poll_events(timeout_ms) -> num_events */
 static PyObject *py_poll_events(PyObject *self, PyObject *args) {
     (void)self;
@@ -2952,6 +2971,12 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     loop->event_freelist = NULL;
     loop->freelist_count = 0;
 
+    /* Use shared router if available (for per-loop mode) */
+    if (g_shared_router_valid) {
+        loop->router_pid = g_shared_router;
+        loop->has_router = true;
+    }
+
     /* Create a capsule wrapping the loop pointer */
     PyObject *capsule = PyCapsule_New(loop, LOOP_CAPSULE_NAME, loop_capsule_destructor);
     if (capsule == NULL) {
@@ -3260,9 +3285,13 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    ERL_NIF_TERM msg = enif_make_tuple4(
+    /* Include loop resource in message so router dispatches to correct loop */
+    ERL_NIF_TERM loop_term = enif_make_resource(msg_env, loop);
+
+    ERL_NIF_TERM msg = enif_make_tuple5(
         msg_env,
         ATOM_START_TIMER,
+        loop_term,
         enif_make_int(msg_env, delay_ms),
         enif_make_uint64(msg_env, callback_id),
         enif_make_uint64(msg_env, timer_ref_id)

@@ -42,8 +42,9 @@
 
 -record(state, {
     loop_ref :: reference(),
-    %% Map of TimerRef -> {ErlangTimerRef, CallbackId}
-    timers = #{} :: #{reference() => {reference(), non_neg_integer()}}
+    %% Map of TimerRef -> {LoopRef, ErlangTimerRef, CallbackId}
+    %% LoopRef is included to dispatch to the correct loop for per-loop timers
+    timers = #{} :: #{non_neg_integer() => {reference(), reference(), non_neg_integer()}}
 }).
 
 %% ============================================================================
@@ -100,12 +101,21 @@ handle_info({select, FdRes, _Ref, ready_output}, State) ->
     py_nif:reselect_writer_fd(FdRes),
     {noreply, State};
 
-%% Handle timer start request from call_later NIF
-handle_info({start_timer, DelayMs, CallbackId, TimerRef}, State) ->
+%% Handle timer start request from call_later NIF (new format with LoopRef)
+handle_info({start_timer, LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
     #state{timers = Timers} = State,
     %% Create the actual Erlang timer
-    ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef, CallbackId}),
-    NewTimers = maps:put(TimerRef, {ErlTimerRef, CallbackId}, Timers),
+    ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
+    %% Store LoopRef so we dispatch to the correct loop
+    NewTimers = maps:put(TimerRef, {LoopRef, ErlTimerRef, CallbackId}, Timers),
+    {noreply, State#state{timers = NewTimers}};
+
+%% Handle timer start request (legacy format without LoopRef - uses state's loop_ref)
+handle_info({start_timer, DelayMs, CallbackId, TimerRef}, State) ->
+    #state{loop_ref = LoopRef, timers = Timers} = State,
+    %% Create the actual Erlang timer
+    ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
+    NewTimers = maps:put(TimerRef, {LoopRef, ErlTimerRef, CallbackId}, Timers),
     {noreply, State#state{timers = NewTimers}};
 
 %% Handle timer cancellation
@@ -114,20 +124,26 @@ handle_info({cancel_timer, TimerRef}, State) ->
     case maps:get(TimerRef, Timers, undefined) of
         undefined ->
             {noreply, State};
-        {ErlTimerRef, _CallbackId} ->
+        {_LoopRef, ErlTimerRef, _CallbackId} ->
             erlang:cancel_timer(ErlTimerRef),
             NewTimers = maps:remove(TimerRef, Timers),
             {noreply, State#state{timers = NewTimers}}
     end;
 
 %% Handle timer expiration
-handle_info({timeout, TimerRef, CallbackId}, State) ->
-    #state{loop_ref = LoopRef, timers = Timers} = State,
-    %% Dispatch the timer callback
-    py_nif:dispatch_timer(LoopRef, CallbackId),
-    %% Remove from active timers
-    NewTimers = maps:remove(TimerRef, Timers),
-    {noreply, State#state{timers = NewTimers}};
+handle_info({timeout, TimerRef}, State) ->
+    #state{timers = Timers} = State,
+    case maps:get(TimerRef, Timers, undefined) of
+        undefined ->
+            %% Timer was cancelled
+            {noreply, State};
+        {LoopRef, _ErlTimerRef, CallbackId} ->
+            %% Dispatch the timer callback to the correct loop
+            py_nif:dispatch_timer(LoopRef, CallbackId),
+            %% Remove from active timers
+            NewTimers = maps:remove(TimerRef, Timers),
+            {noreply, State#state{timers = NewTimers}}
+    end;
 
 %% Handle select stop notifications
 handle_info({select, _FdRes, _Ref, cancelled}, State) ->
@@ -139,7 +155,7 @@ handle_info(_Info, State) ->
 
 terminate(_Reason, #state{timers = Timers}) ->
     %% Cancel all pending timers
-    maps:foreach(fun(_TimerRef, {ErlTimerRef, _CallbackId}) ->
+    maps:foreach(fun(_TimerRef, {_LoopRef, ErlTimerRef, _CallbackId}) ->
         erlang:cancel_timer(ErlTimerRef)
     end, Timers),
     ok.
