@@ -78,6 +78,8 @@
     event_loop_new/0,
     event_loop_destroy/1,
     event_loop_set_router/2,
+    event_loop_set_event_proc/2,
+    poll_via_proc/2,
     event_loop_wakeup/1,
     add_reader/3,
     remove_reader/2,
@@ -520,10 +522,24 @@ event_loop_new() ->
 event_loop_destroy(_LoopRef) ->
     ?NIF_STUB.
 
-%% @doc Set the router process for an event loop.
+%% @doc Set the router process for an event loop (legacy architecture).
 %% The router receives enif_select messages and timer events.
 -spec event_loop_set_router(reference(), pid()) -> ok | {error, term()}.
 event_loop_set_router(_LoopRef, _RouterPid) ->
+    ?NIF_STUB.
+
+%% @doc Set the event process for an event loop (new architecture).
+%% The event process uses Erlang mailbox as the event queue - no pthread_cond.
+%% FD events and timers are delivered directly to this process.
+-spec event_loop_set_event_proc(reference(), pid()) -> ok | {error, term()}.
+event_loop_set_event_proc(_LoopRef, _EventProcPid) ->
+    ?NIF_STUB.
+
+%% @doc Poll for events via the event process.
+%% Sends {poll, self(), Ref, TimeoutMs} to event process.
+%% Returns {ok, Ref} - caller should receive {events, Ref, Events}.
+-spec poll_via_proc(reference(), non_neg_integer()) -> {ok, reference()} | {error, term()}.
+poll_via_proc(_LoopRef, _TimeoutMs) ->
     ?NIF_STUB.
 
 %% @doc Wake up an event loop from a wait.

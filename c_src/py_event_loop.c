@@ -511,6 +511,104 @@ ERL_NIF_TERM nif_event_loop_set_router(ErlNifEnv *env, int argc,
 }
 
 /**
+ * event_loop_set_event_proc(LoopRef, EventProcPid) -> ok
+ *
+ * Set the event process for the new architecture.
+ */
+ERL_NIF_TERM nif_event_loop_set_event_proc(ErlNifEnv *env, int argc,
+                                            const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!enif_get_local_pid(env, argv[1], &loop->event_proc_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+
+    loop->has_event_proc = true;
+
+    /* Also set as router for compatibility with FD registration */
+    loop->router_pid = loop->event_proc_pid;
+    loop->has_router = true;
+
+    return ATOM_OK;
+}
+
+/**
+ * poll_via_proc(LoopRef, TimeoutMs) -> [{CallbackId, Type}]
+ *
+ * Poll for events via the event process. This NIF:
+ * 1. Sends {poll, self(), Ref, TimeoutMs} to event process
+ * 2. Waits for {events, Ref, Events} response
+ * 3. Converts Events to Erlang term and returns
+ *
+ * This replaces the pthread_cond based waiting with Erlang message passing.
+ */
+ERL_NIF_TERM nif_poll_via_proc(ErlNifEnv *env, int argc,
+                                const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!loop->has_event_proc) {
+        return make_error(env, "no_event_proc");
+    }
+
+    int timeout_ms;
+    if (!enif_get_int(env, argv[1], &timeout_ms)) {
+        return make_error(env, "invalid_timeout");
+    }
+
+    if (loop->shutdown) {
+        return enif_make_list(env, 0);
+    }
+
+    /* Create message env for sending to event process */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    /* Create unique ref for this poll request */
+    ERL_NIF_TERM ref = enif_make_ref(msg_env);
+
+    /* Get self PID */
+    ErlNifPid self_pid;
+    if (enif_self(env, &self_pid) == NULL) {
+        enif_free_env(msg_env);
+        return make_error(env, "no_self");
+    }
+
+    /* Send {poll, From, Ref, TimeoutMs} to event process */
+    ERL_NIF_TERM poll_msg = enif_make_tuple4(
+        msg_env,
+        enif_make_atom(msg_env, "poll"),
+        enif_make_pid(msg_env, &self_pid),
+        ref,
+        enif_make_int(msg_env, timeout_ms)
+    );
+
+    if (!enif_send(env, &loop->event_proc_pid, msg_env, poll_msg)) {
+        enif_free_env(msg_env);
+        return make_error(env, "send_failed");
+    }
+
+    enif_free_env(msg_env);
+
+    /* The actual waiting happens in Erlang - this NIF returns the ref
+     * and the caller should do a receive for {events, Ref, Events} */
+    return enif_make_tuple2(env, ATOM_OK, ref);
+}
+
+/**
  * add_reader(LoopRef, Fd, CallbackId) -> {ok, FdRef}
  */
 ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,

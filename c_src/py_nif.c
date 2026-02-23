@@ -1882,6 +1882,8 @@ static ErlNifFunc nif_funcs[] = {
     {"event_loop_new", 0, nif_event_loop_new, 0},
     {"event_loop_destroy", 1, nif_event_loop_destroy, 0},
     {"event_loop_set_router", 2, nif_event_loop_set_router, 0},
+    {"event_loop_set_event_proc", 2, nif_event_loop_set_event_proc, 0},
+    {"poll_via_proc", 2, nif_poll_via_proc, 0},
     {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},

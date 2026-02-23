@@ -170,11 +170,17 @@ typedef struct {
  * - Synchronization primitives
  */
 typedef struct erlang_event_loop {
-    /** @brief PID of the py_event_router gen_server */
+    /** @brief PID of the py_event_router gen_server (legacy) */
     ErlNifPid router_pid;
 
-    /** @brief Whether router_pid has been set */
+    /** @brief Whether router_pid has been set (legacy) */
     bool has_router;
+
+    /** @brief PID of the py_event_loop_proc process (new architecture) */
+    ErlNifPid event_proc_pid;
+
+    /** @brief Whether event_proc_pid has been set */
+    bool has_event_proc;
 
     /** @brief Mutex protecting the event loop state */
     pthread_mutex_t mutex;
@@ -307,6 +313,28 @@ ERL_NIF_TERM nif_event_loop_destroy(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_event_loop_set_router(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Set the event process for an event loop (new architecture)
+ *
+ * The event process receives FD events and timer messages directly,
+ * using the Erlang mailbox as the event queue.
+ *
+ * NIF: event_loop_set_event_proc(LoopRef, EventProcPid) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_event_proc(ErlNifEnv *env, int argc,
+                                            const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Poll for events via the event process (new architecture)
+ *
+ * Sends {poll, CallerPid, Ref, TimeoutMs} to event process and waits
+ * for {events, Ref, Events} response. Uses Erlang mailbox as queue.
+ *
+ * NIF: poll_via_proc(LoopRef, TimeoutMs) -> [{CallbackId, Type}]
+ */
+ERL_NIF_TERM nif_poll_via_proc(ErlNifEnv *env, int argc,
+                                const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Register a file descriptor for read monitoring
