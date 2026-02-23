@@ -564,6 +564,7 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 ## Documentation
 
 - [Getting Started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
 - [AI Integration Guide](docs/ai-integration.md)
 - [Type Conversion](docs/type-conversion.md)
 - [Context Affinity](docs/context-affinity.md)

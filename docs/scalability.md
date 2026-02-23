@@ -98,7 +98,6 @@ This allows your application to implement backpressure or shed load gracefully.
 
         %% Worker pool sizes
         {num_workers, 4},
-        {num_async_workers, 2},
         {num_subinterp_workers, 4}
     ]}
 ].
