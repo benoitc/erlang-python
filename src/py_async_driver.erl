@@ -116,9 +116,16 @@ submit(Module, Func, Args, Kwargs, _Opts) ->
     end.
 
 %% @doc Get the event loop process.
+%% Uses persistent_term for fast cached lookup instead of gen_server:call.
 -spec get_event_proc() -> {ok, pid()} | {error, not_started}.
 get_event_proc() ->
-    gen_server:call(?MODULE, get_event_proc).
+    case persistent_term:get({?MODULE, event_proc}, undefined) of
+        undefined ->
+            %% Fall back to gen_server:call if not yet cached
+            gen_server:call(?MODULE, get_event_proc);
+        Pid when is_pid(Pid) ->
+            {ok, Pid}
+    end.
 
 %% ============================================================================
 %% gen_server callbacks
@@ -132,6 +139,9 @@ init([]) ->
 
     %% Start the event loop process
     {ok, EventProc} = py_event_loop_proc:start_link(LoopRef),
+
+    %% Cache the event proc pid for fast lookup
+    persistent_term:put({?MODULE, event_proc}, EventProc),
 
     {ok, #state{
         event_proc = EventProc,
@@ -152,12 +162,16 @@ handle_info({'EXIT', EventProc, Reason}, #state{event_proc = EventProc} = State)
     error_logger:warning_msg("py_async_driver: event loop proc died: ~p, restarting~n", [Reason]),
     LoopRef = make_ref(),
     {ok, NewEventProc} = py_event_loop_proc:start_link(LoopRef),
+    %% Update cached pid
+    persistent_term:put({?MODULE, event_proc}, NewEventProc),
     {noreply, State#state{event_proc = NewEventProc, loop_ref = LoopRef}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{event_proc = EventProc}) ->
+    %% Clear cached pid
+    persistent_term:erase({?MODULE, event_proc}),
     py_event_loop_proc:stop(EventProc),
     ok.
 

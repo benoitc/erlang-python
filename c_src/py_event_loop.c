@@ -3019,12 +3019,13 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
         PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
         if (tuple == NULL) {
             Py_DECREF(list);
-            /* Return remaining events to freelist (Phase 7 optimization) */
+            /* Return ALL events to freelist, not just from current onward */
             pthread_mutex_lock(&loop->mutex);
-            while (current != NULL) {
-                pending_event_t *next = current->next;
-                return_pending_event(loop, current);
-                current = next;
+            pending_event_t *cleanup = snapshot_head;
+            while (cleanup != NULL) {
+                pending_event_t *next = cleanup->next;
+                return_pending_event(loop, cleanup);
+                cleanup = next;
             }
             pthread_mutex_unlock(&loop->mutex);
             return NULL;
@@ -3272,12 +3273,13 @@ static PyObject *py_run_once_for(PyObject *self, PyObject *args) {
         PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
         if (tuple == NULL) {
             Py_DECREF(list);
-            /* Return remaining events to freelist */
+            /* Return ALL events to freelist, not just from current onward */
             pthread_mutex_lock(&loop->mutex);
-            while (current != NULL) {
-                pending_event_t *next = current->next;
-                return_pending_event(loop, current);
-                current = next;
+            pending_event_t *cleanup = snapshot_head;
+            while (cleanup != NULL) {
+                pending_event_t *next = cleanup->next;
+                return_pending_event(loop, cleanup);
+                cleanup = next;
             }
             pthread_mutex_unlock(&loop->mutex);
             return NULL;

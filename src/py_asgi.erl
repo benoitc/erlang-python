@@ -152,11 +152,12 @@ run_async(Module, Callable, Scope, Body) ->
 %% @returns {ok, Ref} where Ref is used with await_response
 -spec run_async(binary(), binary(), scope(), binary(), map()) ->
     {ok, reference()} | {error, term()}.
-run_async(Module, Callable, Scope, Body, _Opts) ->
+run_async(Module, Callable, Scope, Body, Opts) ->
+    Runner = maps:get(runner, Opts, <<"asgi_async_runner">>),
     FullScope = ensure_scope_defaults(Scope),
     %% Submit via py_async_driver to the async runner
     py_async_driver:submit(
-        <<"asgi_async_runner">>,
+        Runner,
         <<"run_asgi">>,
         [Module, Callable, FullScope, Body],
         #{}

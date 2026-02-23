@@ -208,12 +208,10 @@ handle_msg({call_result, CallbackId, Result}, State) ->
 handle_msg({call_error, CallbackId, Error}, State) ->
     handle_call_error(CallbackId, Error, State);
 
-handle_msg({'DOWN', _MonRef, process, Pid, _Reason}, State) ->
-    %% Waiter died
-    case State#state.waiter of
-        {Pid, _, _, _} -> loop(State#state{waiter = undefined});
-        _ -> loop(State)
-    end;
+handle_msg({'DOWN', _MonRef, process, _Pid, _Reason}, State) ->
+    %% Monitor down - in loop/1 context, waiter is always undefined
+    %% (waiter monitors are handled in wait_loop/1 directly)
+    loop(State);
 
 handle_msg(stop, _State) ->
     ok;
@@ -482,6 +480,10 @@ handle_call_error_in_wait(CallbackId, Error, State) ->
 %% Helpers
 %% ============================================================================
 
+%% In loop/1 context, waiter is always undefined - events are dispatched
+%% immediately when they occur. The wait_loop/1 handles waking the waiter inline.
+%% This function is kept for clarity and potential future use.
+-dialyzer({nowarn_function, maybe_wake_waiter/1}).
 maybe_wake_waiter(State = #state{waiter = undefined}) ->
     State;
 maybe_wake_waiter(State = #state{waiter = {From, Ref, MonRef, TRef}, pending = Pending}) ->
