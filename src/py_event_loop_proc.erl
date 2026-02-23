@@ -57,8 +57,8 @@
     timers = #{} :: #{non_neg_integer() => {reference(), non_neg_integer()}},
     %% FD resources for callback lookup: #{FdRes => {ReadCallbackId, WriteCallbackId}}
     fd_callbacks = #{} :: #{reference() => {non_neg_integer(), non_neg_integer()}},
-    %% Waiting poller: {From, MonitorRef} | undefined
-    waiter = undefined :: {pid(), reference()} | undefined,
+    %% Waiting poller: {From, Ref, MonRef, TRef} | undefined
+    waiter = undefined :: {pid(), reference(), reference(), reference() | undefined} | undefined,
     %% Timer ref counter
     timer_counter = 0 :: non_neg_integer(),
     %% Registered call handlers: #{CallbackId => {Caller, Ref}}
@@ -211,7 +211,7 @@ handle_msg({call_error, CallbackId, Error}, State) ->
 handle_msg({'DOWN', _MonRef, process, Pid, _Reason}, State) ->
     %% Waiter died
     case State#state.waiter of
-        {Pid, _} -> loop(State#state{waiter = undefined});
+        {Pid, _, _, _} -> loop(State#state{waiter = undefined});
         _ -> loop(State)
     end;
 
