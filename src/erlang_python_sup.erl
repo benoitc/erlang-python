@@ -49,6 +49,9 @@ init([]) ->
     %% Register state functions as callbacks for Python access
     ok = py_state:register_callbacks(),
 
+    %% Initialize callback ID generator for event-driven operations
+    ok = py_callback_id:init(),
+
     %% Callback registry - must start before pool
     CallbackSpec = #{
         id => py_callback,
