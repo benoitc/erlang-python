@@ -157,14 +157,44 @@ call(Module, Func, Args, Kwargs, Timeout) ->
 
 %% @private
 do_call(Module, Func, Args, Kwargs, Timeout) ->
-    Ref = make_ref(),
-    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-    Request = {call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs},
     case get_binding() of
-        {bound, Worker} -> py_pool:direct_request(Worker, Request);
-        unbound -> py_pool:request(Request)
-    end,
-    await(Ref, Timeout).
+        {bound, Worker} ->
+            %% Bound processes use py_pool to preserve Python state
+            Ref = make_ref(),
+            TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
+            Request = {call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs},
+            py_pool:direct_request(Worker, Request),
+            await(Ref, Timeout);
+        unbound ->
+            %% Unbound processes use event-driven submit_call
+            do_call_event_driven(Module, Func, Args, Kwargs, Timeout)
+    end.
+
+%% @private Event-driven call via submit_call NIF
+do_call_event_driven(Module, Func, Args, Kwargs, Timeout) ->
+    case py_async_driver:get_event_proc() of
+        {ok, EventProc} ->
+            CallbackId = py_callback_id:next(),
+            Ref = make_ref(),
+            ok = py_event_loop_proc:register_call(EventProc, CallbackId, Ref),
+            ModBin = py_util:to_binary(Module),
+            FuncBin = py_util:to_binary(Func),
+            case py_nif:submit_call(EventProc, CallbackId, ModBin, FuncBin, Args, Kwargs) of
+                ok ->
+                    receive
+                        {py_result, Ref, Result} -> {ok, Result};
+                        {py_error, Ref, Error} -> {error, Error}
+                    after Timeout ->
+                        py_event_loop_proc:unregister_call(EventProc, CallbackId),
+                        {error, timeout}
+                    end;
+                {error, Reason} ->
+                    py_event_loop_proc:unregister_call(EventProc, CallbackId),
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, {event_proc_unavailable, Reason}}
+    end.
 
 %% @private Get binding if process is bound
 get_binding() ->
