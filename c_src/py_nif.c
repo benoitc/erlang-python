@@ -1852,15 +1852,6 @@ static ErlNifFunc nif_funcs[] = {
     {"send_callback_response", 2, nif_send_callback_response, 0},
     {"resume_callback", 2, nif_resume_callback, 0},
 
-    /* Async worker management */
-    {"async_worker_new", 0, nif_async_worker_new, 0},
-    {"async_worker_destroy", 1, nif_async_worker_destroy, 0},
-
-    /* Async execution - dirty I/O NIFs */
-    {"async_call", 6, nif_async_call, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"async_gather", 3, nif_async_gather, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"async_stream", 6, nif_async_stream, ERL_NIF_DIRTY_JOB_IO_BOUND},
-
     /* Sub-interpreter support */
     {"subinterp_supported", 0, nif_subinterp_supported, 0},
     {"subinterp_worker_new", 0, nif_subinterp_worker_new, 0},

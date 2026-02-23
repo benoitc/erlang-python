@@ -19,7 +19,7 @@
 %%%   <li>py_callback - Callback registry for Python to Erlang calls</li>
 %%%   <li>py_state - Shared state storage accessible from Python</li>
 %%%   <li>py_pool - Main worker pool for synchronous Python calls</li>
-%%%   <li>py_async_pool - Worker pool for asyncio coroutines</li>
+%%%   <li>py_async_driver - Unified event-driven async driver</li>
 %%%   <li>py_subinterp_pool - Worker pool for sub-interpreter parallelism</li>
 %%% </ul>
 %%% @private
@@ -34,7 +34,6 @@ start_link() ->
 
 init([]) ->
     NumWorkers = application:get_env(erlang_python, num_workers, 4),
-    NumAsyncWorkers = application:get_env(erlang_python, num_async_workers, 2),
     NumSubinterpWorkers = application:get_env(erlang_python, num_subinterp_workers, 4),
 
     %% Initialize the semaphore ETS table for rate limiting
@@ -102,16 +101,6 @@ init([]) ->
         modules => [py_pool]
     },
 
-    %% Async worker pool (for asyncio coroutines)
-    AsyncPoolSpec = #{
-        id => py_async_pool,
-        start => {py_async_pool, start_link, [NumAsyncWorkers]},
-        restart => permanent,
-        shutdown => 5000,
-        type => worker,
-        modules => [py_async_pool]
-    },
-
     %% Sub-interpreter pool (for true parallelism with per-interpreter GIL)
     SubinterpPoolSpec = #{
         id => py_subinterp_pool,
@@ -143,8 +132,7 @@ init([]) ->
     },
 
     Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec,
-                AsyncDriverSpec],
+                PoolSpec, SubinterpPoolSpec, EventLoopSpec, AsyncDriverSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

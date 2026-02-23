@@ -452,37 +452,59 @@ async_await(Ref, Timeout) ->
 %% '''
 -spec async_gather([{py_module(), py_func(), py_args()}]) -> py_result().
 async_gather(Calls) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_gather, Ref, self(), Calls}),
-    async_await(Ref, ?DEFAULT_TIMEOUT).
+    %% Submit all calls concurrently via py_async_driver
+    Refs = lists:map(fun({M, F, A}) ->
+        case py_async_driver:submit(
+                py_util:to_binary(M),
+                py_util:to_binary(F),
+                A,
+                #{}) of
+            {ok, Ref} -> Ref;
+            {error, Reason} -> {error, Reason}
+        end
+    end, Calls),
+
+    %% Check if any submissions failed
+    case lists:any(fun({error, _}) -> true; (_) -> false end, Refs) of
+        true ->
+            %% Return first error
+            {error, _} = hd([E || E = {error, _} <- Refs]);
+        false ->
+            %% Await all results in order
+            gather_results(Refs, [], ?DEFAULT_TIMEOUT)
+    end.
+
+%% @private
+gather_results([], Acc, _Timeout) ->
+    {ok, lists:reverse(Acc)};
+gather_results([Ref | Rest], Acc, Timeout) ->
+    case async_await(Ref, Timeout) of
+        {ok, Result} ->
+            gather_results(Rest, [Result | Acc], Timeout);
+        {error, _} = Error ->
+            Error
+    end.
 
 %% @doc Stream results from a Python async generator.
-%% Returns a list of all yielded values.
+%% Collects all yielded values and returns them as a list.
 -spec async_stream(py_module(), py_func(), py_args()) -> py_result().
 async_stream(Module, Func, Args) ->
     async_stream(Module, Func, Args, #{}).
 
 %% @doc Stream results from a Python async generator with kwargs.
+%% Uses async_stream_helper to collect all values from the async generator.
 -spec async_stream(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
 async_stream(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_stream, Ref, self(), Module, Func, Args, Kwargs}),
-    async_stream_collect(Ref, []).
-
-%% @private
-async_stream_collect(Ref, Acc) ->
-    receive
-        {py_response, Ref, {ok, Result}} ->
-            %% Got final result (async generator collected)
-            {ok, Result};
-        {py_chunk, Ref, Chunk} ->
-            async_stream_collect(Ref, [Chunk | Acc]);
-        {py_end, Ref} ->
-            {ok, lists:reverse(Acc)};
-        {py_error, Ref, Error} ->
-            {error, Error}
-    after ?DEFAULT_TIMEOUT ->
-        {error, timeout}
+    %% Use async_stream_helper Python module to collect async generator values
+    case py_async_driver:submit(
+            <<"async_stream_helper">>,
+            <<"collect_async_gen">>,
+            [py_util:to_binary(Module), py_util:to_binary(Func), Args, Kwargs],
+            #{}) of
+        {ok, Ref} ->
+            async_await(Ref, ?DEFAULT_TIMEOUT);
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %%% ============================================================================

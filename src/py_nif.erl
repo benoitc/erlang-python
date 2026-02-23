@@ -45,12 +45,6 @@
     set_callback_handler/2,
     send_callback_response/2,
     resume_callback/2,
-    %% Async workers
-    async_worker_new/0,
-    async_worker_destroy/1,
-    async_call/6,
-    async_gather/3,
-    async_stream/6,
     %% Sub-interpreters (Python 3.12+)
     subinterp_supported/0,
     subinterp_worker_new/0,
@@ -330,45 +324,6 @@ send_callback_response(_Fd, _Response) ->
 -spec resume_callback(reference(), binary()) ->
     {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
 resume_callback(_StateRef, _Result) ->
-    ?NIF_STUB.
-
-%%% ============================================================================
-%%% Async Worker Support
-%%% ============================================================================
-
-%% @doc Create a new async worker with background event loop.
-%% Returns an opaque reference to be used with async functions.
--spec async_worker_new() -> {ok, reference()} | {error, term()}.
-async_worker_new() ->
-    ?NIF_STUB.
-
-%% @doc Destroy an async worker.
--spec async_worker_destroy(reference()) -> ok.
-async_worker_destroy(_WorkerRef) ->
-    ?NIF_STUB.
-
-%% @doc Submit an async call to the event loop.
-%% Args: AsyncWorkerRef, Module, Func, Args, Kwargs, CallerPid
-%% Returns: {ok, AsyncId} | {ok, {immediate, Result}} | {error, term()}
--spec async_call(reference(), binary(), binary(), list(), map(), pid()) ->
-    {ok, non_neg_integer() | {immediate, term()}} | {error, term()}.
-async_call(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
-    ?NIF_STUB.
-
-%% @doc Execute multiple async calls concurrently using asyncio.gather.
-%% Args: AsyncWorkerRef, CallsList (list of {Module, Func, Args}), CallerPid
-%% Returns: {ok, AsyncId} | {ok, {immediate, Results}} | {error, term()}
--spec async_gather(reference(), [{binary(), binary(), list()}], pid()) ->
-    {ok, non_neg_integer() | {immediate, list()}} | {error, term()}.
-async_gather(_WorkerRef, _Calls, _CallerPid) ->
-    ?NIF_STUB.
-
-%% @doc Stream from an async generator.
-%% Args: AsyncWorkerRef, Module, Func, Args, Kwargs, CallerPid
-%% Returns: {ok, AsyncId} | {error, term()}
--spec async_stream(reference(), binary(), binary(), list(), map(), pid()) ->
-    {ok, non_neg_integer()} | {error, term()}.
-async_stream(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
     ?NIF_STUB.
 
 %%% ============================================================================
