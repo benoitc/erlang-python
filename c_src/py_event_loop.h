@@ -50,7 +50,7 @@
 #define EVENT_FREELIST_SIZE 256
 
 /** @brief Size of pending event hash set for O(1) duplicate detection */
-#define PENDING_HASH_SIZE 128
+#define PENDING_HASH_SIZE 512
 
 /** @brief Event types for pending callbacks */
 typedef enum {
@@ -495,15 +495,30 @@ ERL_NIF_TERM nif_reselect_writer(ErlNifEnv *env, int argc,
                                   const ERL_NIF_TERM argv[]);
 
 /**
- * @brief Handle a select event (dispatch + auto-reselect)
+ * @brief Handle a select event (dispatch only, no auto-reselect)
  *
- * Combined function that gets callback ID, dispatches to pending queue,
- * and auto-reselects for persistent watcher behavior.
+ * Gets callback ID and dispatches to pending queue.
+ * Does NOT auto-reselect - caller must explicitly reselect.
  *
  * NIF: handle_fd_event(FdRef, Type) -> ok | {error, Reason}
  */
 ERL_NIF_TERM nif_handle_fd_event(ErlNifEnv *env, int argc,
                                   const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Handle a select event and reselect in one NIF call
+ *
+ * Combined function that:
+ * 1. Gets callback ID from fd_res
+ * 2. Dispatches to pending queue
+ * 3. Re-registers with enif_select for next event
+ *
+ * This reduces NIF overhead by combining two operations.
+ *
+ * NIF: handle_fd_event_and_reselect(FdRef, Type) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Stop read monitoring without closing the FD

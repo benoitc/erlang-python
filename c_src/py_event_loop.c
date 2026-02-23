@@ -1087,6 +1087,74 @@ ERL_NIF_TERM nif_handle_fd_event(ErlNifEnv *env, int argc,
 }
 
 /**
+ * handle_fd_event_and_reselect(FdRes, Type) -> ok | {error, Reason}
+ *
+ * Combined NIF that handles a select event and reselects in one call.
+ * This reduces NIF overhead by combining:
+ * 1. Get callback ID from fd_res
+ * 2. Dispatch to pending queue
+ * 3. Re-register with enif_select
+ *
+ * Type: read | write
+ */
+ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    /* Check if FD is still open */
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return ATOM_OK;  /* Silently ignore events on closing FDs */
+    }
+
+    erlang_event_loop_t *loop = fd_res->loop;
+    if (loop == NULL) {
+        return make_error(env, "no_loop");
+    }
+
+    /* Determine type and get callback ID */
+    bool is_read = enif_compare(argv[1], ATOM_READ) == 0;
+    uint64_t callback_id;
+    bool is_active;
+
+    if (is_read) {
+        callback_id = fd_res->read_callback_id;
+        is_active = fd_res->reader_active;
+    } else {
+        callback_id = fd_res->write_callback_id;
+        is_active = fd_res->writer_active;
+    }
+
+    if (!is_active || callback_id == 0) {
+        return ATOM_OK;  /* Watcher was stopped, ignore */
+    }
+
+    /* Add to pending queue */
+    event_type_t event_type = is_read ? EVENT_TYPE_READ : EVENT_TYPE_WRITE;
+    event_loop_add_pending(loop, event_type, callback_id, fd_res->fd);
+
+    /* Re-register with enif_select for next event */
+    if (!loop->has_router) {
+        return make_error(env, "no_router");
+    }
+
+    int select_mode = is_read ? ERL_NIF_SELECT_READ : ERL_NIF_SELECT_WRITE;
+    int ret = enif_select(env, (ErlNifEvent)fd_res->fd, select_mode,
+                          fd_res, &loop->router_pid, enif_make_ref(env));
+
+    if (ret < 0) {
+        /* Event was queued but reselect failed - log but don't fail */
+        return make_error(env, "reselect_failed");
+    }
+
+    return ATOM_OK;
+}
+
+/**
  * event_loop_wakeup(LoopRef) -> ok
  *
  * Wakes up any threads waiting in poll_events.
@@ -1274,6 +1342,9 @@ void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
     event->fd = fd;
     event->next = NULL;
 
+    /* Track if queue was empty before insert for wake optimization */
+    bool was_empty = (loop->pending_head == NULL);
+
     if (loop->pending_tail == NULL) {
         loop->pending_head = event;
         loop->pending_tail = event;
@@ -1286,7 +1357,11 @@ void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
     pending_hash_insert(loop, callback_id, type);
 
     atomic_fetch_add(&loop->pending_count, 1);
-    pthread_cond_signal(&loop->event_cond);
+
+    /* Only wake poller on 0->1 transition to reduce contention */
+    if (was_empty) {
+        pthread_cond_signal(&loop->event_cond);
+    }
 
     pthread_mutex_unlock(&loop->mutex);
 }
@@ -2800,23 +2875,46 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
     poll_events_wait(loop, timeout_ms);
     Py_END_ALLOW_THREADS
 
-    /* Build pending list with GIL held */
+    /*
+     * Phase 1: Snapshot pending list under lock (fast - just pointer swap)
+     * This minimizes lock contention by doing minimal work under the mutex.
+     */
     pthread_mutex_lock(&loop->mutex);
 
-    /* Pre-allocate using atomic counter - single traversal */
+    pending_event_t *snapshot_head = loop->pending_head;
     int count = atomic_load(&loop->pending_count);
-    if (count == 0) {
-        pthread_mutex_unlock(&loop->mutex);
+
+    /* Clear the queue under lock */
+    loop->pending_head = NULL;
+    loop->pending_tail = NULL;
+    atomic_store(&loop->pending_count, 0);
+    pending_hash_clear(loop);
+
+    pthread_mutex_unlock(&loop->mutex);
+
+    /*
+     * Phase 2: Build Python list outside lock (no contention)
+     * Memory allocation and Python operations happen without holding the mutex.
+     */
+    if (count == 0 || snapshot_head == NULL) {
         return PyList_New(0);
     }
 
     PyObject *list = PyList_New(count);
     if (list == NULL) {
+        /* Return events to freelist on error */
+        pthread_mutex_lock(&loop->mutex);
+        pending_event_t *current = snapshot_head;
+        while (current != NULL) {
+            pending_event_t *next = current->next;
+            return_pending_event(loop, current);
+            current = next;
+        }
         pthread_mutex_unlock(&loop->mutex);
         return NULL;
     }
 
-    pending_event_t *current = loop->pending_head;
+    pending_event_t *current = snapshot_head;
     int i = 0;
     while (current != NULL && i < count) {
         /* Use optimized direct tuple creation (Phase 9+10 optimization) */
@@ -2824,40 +2922,29 @@ static PyObject *py_run_once(PyObject *self, PyObject *args) {
         if (tuple == NULL) {
             Py_DECREF(list);
             /* Return remaining events to freelist (Phase 7 optimization) */
+            pthread_mutex_lock(&loop->mutex);
             while (current != NULL) {
                 pending_event_t *next = current->next;
                 return_pending_event(loop, current);
                 current = next;
             }
-            loop->pending_head = NULL;
-            loop->pending_tail = NULL;
-            atomic_store(&loop->pending_count, 0);
-            pending_hash_clear(loop);
             pthread_mutex_unlock(&loop->mutex);
             return NULL;
         }
         PyList_SET_ITEM(list, i++, tuple);
-
-        pending_event_t *next = current->next;
-        /* Return to freelist for reuse (Phase 7 optimization) */
-        return_pending_event(loop, current);
-        current = next;
+        current = current->next;
     }
 
-    /* Handle any remaining events (if count was stale) */
+    /*
+     * Phase 3: Return events to freelist under lock
+     */
+    pthread_mutex_lock(&loop->mutex);
+    current = snapshot_head;
     while (current != NULL) {
         pending_event_t *next = current->next;
         return_pending_event(loop, current);
         current = next;
     }
-
-    loop->pending_head = NULL;
-    loop->pending_tail = NULL;
-    atomic_store(&loop->pending_count, 0);
-
-    /* Clear the hash set since we're consuming all pending events */
-    pending_hash_clear(loop);
-
     pthread_mutex_unlock(&loop->mutex);
 
     return list;
@@ -3042,57 +3129,75 @@ static PyObject *py_run_once_for(PyObject *self, PyObject *args) {
     poll_events_wait(loop, timeout_ms);
     Py_END_ALLOW_THREADS
 
-    /* Build pending list with GIL held */
+    /*
+     * Phase 1: Snapshot pending list under lock (fast - just pointer swap)
+     * This minimizes lock contention by doing minimal work under the mutex.
+     */
     pthread_mutex_lock(&loop->mutex);
 
+    pending_event_t *snapshot_head = loop->pending_head;
     int count = atomic_load(&loop->pending_count);
-    if (count == 0) {
-        pthread_mutex_unlock(&loop->mutex);
-        return PyList_New(0);
-    }
 
-    PyObject *list = PyList_New(count);
-    if (list == NULL) {
-        pthread_mutex_unlock(&loop->mutex);
-        return NULL;
-    }
-
-    pending_event_t *current = loop->pending_head;
-    int i = 0;
-    while (current != NULL && i < count) {
-        PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
-        if (tuple == NULL) {
-            Py_DECREF(list);
-            while (current != NULL) {
-                pending_event_t *next = current->next;
-                return_pending_event(loop, current);
-                current = next;
-            }
-            loop->pending_head = NULL;
-            loop->pending_tail = NULL;
-            atomic_store(&loop->pending_count, 0);
-            pending_hash_clear(loop);
-            pthread_mutex_unlock(&loop->mutex);
-            return NULL;
-        }
-        PyList_SET_ITEM(list, i++, tuple);
-
-        pending_event_t *next = current->next;
-        return_pending_event(loop, current);
-        current = next;
-    }
-
-    while (current != NULL) {
-        pending_event_t *next = current->next;
-        return_pending_event(loop, current);
-        current = next;
-    }
-
+    /* Clear the queue under lock */
     loop->pending_head = NULL;
     loop->pending_tail = NULL;
     atomic_store(&loop->pending_count, 0);
     pending_hash_clear(loop);
 
+    pthread_mutex_unlock(&loop->mutex);
+
+    /*
+     * Phase 2: Build Python list outside lock (no contention)
+     * Memory allocation and Python operations happen without holding the mutex.
+     */
+    if (count == 0 || snapshot_head == NULL) {
+        return PyList_New(0);
+    }
+
+    PyObject *list = PyList_New(count);
+    if (list == NULL) {
+        /* Return events to freelist on error */
+        pthread_mutex_lock(&loop->mutex);
+        pending_event_t *current = snapshot_head;
+        while (current != NULL) {
+            pending_event_t *next = current->next;
+            return_pending_event(loop, current);
+            current = next;
+        }
+        pthread_mutex_unlock(&loop->mutex);
+        return NULL;
+    }
+
+    pending_event_t *current = snapshot_head;
+    int i = 0;
+    while (current != NULL && i < count) {
+        PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
+        if (tuple == NULL) {
+            Py_DECREF(list);
+            /* Return remaining events to freelist */
+            pthread_mutex_lock(&loop->mutex);
+            while (current != NULL) {
+                pending_event_t *next = current->next;
+                return_pending_event(loop, current);
+                current = next;
+            }
+            pthread_mutex_unlock(&loop->mutex);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, i++, tuple);
+        current = current->next;
+    }
+
+    /*
+     * Phase 3: Return events to freelist under lock
+     */
+    pthread_mutex_lock(&loop->mutex);
+    current = snapshot_head;
+    while (current != NULL) {
+        pending_event_t *next = current->next;
+        return_pending_event(loop, current);
+        current = next;
+    }
     pthread_mutex_unlock(&loop->mutex);
 
     return list;

@@ -77,6 +77,8 @@ stop(Pid) ->
 
 init([LoopRef]) ->
     process_flag(trap_exit, true),
+    %% Use off_heap mailbox to reduce GC pressure under high message load
+    process_flag(message_queue_data, off_heap),
     {ok, #state{loop_ref = LoopRef}}.
 
 handle_call(_Request, _From, State) ->
@@ -87,18 +89,14 @@ handle_cast(_Msg, State) ->
 
 %% Handle enif_select messages for read readiness
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
-    py_nif:handle_fd_event(FdRes, read),
-    %% Re-register for more events (enif_select is one-shot)
-    %% Uses fd_res->loop internally, no need to pass LoopRef
-    py_nif:reselect_reader_fd(FdRes),
+    %% Combined NIF: dispatch to pending queue + re-register for more events
+    py_nif:handle_fd_event_and_reselect(FdRes, read),
     {noreply, State};
 
 %% Handle enif_select messages for write readiness
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
-    py_nif:handle_fd_event(FdRes, write),
-    %% Re-register for more events (enif_select is one-shot)
-    %% Uses fd_res->loop internally, no need to pass LoopRef
-    py_nif:reselect_writer_fd(FdRes),
+    %% Combined NIF: dispatch to pending queue + re-register for more events
+    py_nif:handle_fd_event_and_reselect(FdRes, write),
     {noreply, State};
 
 %% Handle timer start request from call_later NIF (new format with LoopRef)
@@ -168,4 +166,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% ============================================================================
 
 %% Note: get_fd_callback_id is no longer needed locally since handle_fd_event
-%% combines get_callback_id + dispatch + auto-reselect in a single NIF call.
+%% combines get_callback_id + dispatch in a single NIF call. The caller must
+%% explicitly call reselect_reader_fd/reselect_writer_fd after handle_fd_event
+%% since enif_select is one-shot and does not auto-reselect.

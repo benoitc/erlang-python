@@ -96,6 +96,7 @@
     reselect_writer_fd/1,
     %% FD lifecycle management (uvloop-like API)
     handle_fd_event/2,
+    handle_fd_event_and_reselect/2,
     stop_reader/1,
     start_reader/1,
     stop_writer/1,
@@ -628,12 +629,21 @@ reselect_writer_fd(_FdRes) ->
 %%% FD Lifecycle Management (uvloop-like API)
 %%% ============================================================================
 
-%% @doc Handle a select event (dispatch + auto-reselect).
+%% @doc Handle a select event (dispatch only, no auto-reselect).
 %% Called by py_event_router when receiving {select, FdRes, Ref, ready_input/output}.
-%% This combines get_fd_callback_id + dispatch_callback + reselect into one NIF call.
+%% This combines get_fd_callback_id + dispatch_callback into one NIF call.
+%% Does NOT auto-reselect - caller must explicitly call reselect_*_fd.
 %% Type: read | write
 -spec handle_fd_event(reference(), read | write) -> ok | {error, term()}.
 handle_fd_event(_FdRef, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Handle a select event and reselect in one NIF call.
+%% Combines: get callback ID, dispatch to pending queue, re-register with enif_select.
+%% This reduces NIF overhead by combining two operations.
+%% Type: read | write
+-spec handle_fd_event_and_reselect(reference(), read | write) -> ok | {error, term()}.
+handle_fd_event_and_reselect(_FdRef, _Type) ->
     ?NIF_STUB.
 
 %% @doc Stop/pause read monitoring without closing the FD.
