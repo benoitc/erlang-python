@@ -57,6 +57,22 @@
     environ/0
 ]).
 
+%% Pre-defined WSGI environ defaults (compile-time constant for zero allocation)
+-define(WSGI_ENVIRON_DEFAULTS, #{
+    <<"REQUEST_METHOD">> => <<"GET">>,
+    <<"SCRIPT_NAME">> => <<>>,
+    <<"PATH_INFO">> => <<"/">>,
+    <<"QUERY_STRING">> => <<>>,
+    <<"SERVER_NAME">> => <<"localhost">>,
+    <<"SERVER_PORT">> => <<"80">>,
+    <<"SERVER_PROTOCOL">> => <<"HTTP/1.1">>,
+    <<"wsgi.version">> => {1, 0},
+    <<"wsgi.url_scheme">> => <<"http">>,
+    <<"wsgi.multithread">> => true,
+    <<"wsgi.multiprocess">> => true,
+    <<"wsgi.run_once">> => false
+}).
+
 %% WSGI environ dictionary.
 -type environ() :: #{
     binary() => binary() | integer() | atom()
@@ -100,20 +116,8 @@ run(Module, Callable, Environ, Opts) ->
 %%% ============================================================================
 
 %% @private
-%% Ensure all required WSGI environ fields have defaults
+%% Ensure all required WSGI environ fields have defaults.
+%% Uses compile-time constant ?WSGI_ENVIRON_DEFAULTS to avoid
+%% map allocation on each request.
 ensure_environ_defaults(Environ) ->
-    Defaults = #{
-        <<"REQUEST_METHOD">> => <<"GET">>,
-        <<"SCRIPT_NAME">> => <<>>,
-        <<"PATH_INFO">> => <<"/">>,
-        <<"QUERY_STRING">> => <<>>,
-        <<"SERVER_NAME">> => <<"localhost">>,
-        <<"SERVER_PORT">> => <<"80">>,
-        <<"SERVER_PROTOCOL">> => <<"HTTP/1.1">>,
-        <<"wsgi.version">> => {1, 0},
-        <<"wsgi.url_scheme">> => <<"http">>,
-        <<"wsgi.multithread">> => true,
-        <<"wsgi.multiprocess">> => true,
-        <<"wsgi.run_once">> => false
-    },
-    maps:merge(Defaults, Environ).
+    maps:merge(?WSGI_ENVIRON_DEFAULTS, Environ).

@@ -64,6 +64,20 @@
     scope_opts/0
 ]).
 
+%% Pre-defined ASGI scope defaults (compile-time constant for zero allocation)
+%% Note: raw_path is set dynamically based on path in ensure_scope_defaults/1
+-define(ASGI_SCOPE_DEFAULTS, #{
+    type => <<"http">>,
+    asgi => #{<<"version">> => <<"3.0">>, <<"spec_version">> => <<"2.3">>},
+    http_version => <<"1.1">>,
+    method => <<"GET">>,
+    scheme => <<"http">>,
+    query_string => <<>>,
+    root_path => <<>>,
+    headers => [],
+    state => #{}
+}).
+
 %% ASGI scope dictionary.
 -type scope() :: #{
     type := binary(),
@@ -149,18 +163,13 @@ build_scope(Scope, Opts) ->
 %%% ============================================================================
 
 %% @private
-%% Ensure all required ASGI scope fields have defaults
+%% Ensure all required ASGI scope fields have defaults.
+%% Uses compile-time constant ?ASGI_SCOPE_DEFAULTS to avoid
+%% map allocation on each request.
 ensure_scope_defaults(Scope) ->
-    Defaults = #{
-        type => <<"http">>,
-        asgi => #{<<"version">> => <<"3.0">>, <<"spec_version">> => <<"2.3">>},
-        http_version => <<"1.1">>,
-        method => <<"GET">>,
-        scheme => <<"http">>,
-        raw_path => maps:get(path, Scope, <<"/">>),
-        query_string => <<>>,
-        root_path => <<>>,
-        headers => [],
-        state => #{}
-    },
-    maps:merge(Defaults, Scope).
+    %% raw_path defaults to path if not provided
+    WithRawPath = case maps:is_key(raw_path, Scope) of
+        true -> Scope;
+        false -> Scope#{raw_path => maps:get(path, Scope, <<"/">>)}
+    end,
+    maps:merge(?ASGI_SCOPE_DEFAULTS, WithRawPath).

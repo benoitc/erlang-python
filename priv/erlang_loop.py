@@ -1208,7 +1208,7 @@ class _ErlangDatagramTransport(transports.DatagramTransport):
         self._sock = sock
         self._protocol = protocol
         self._address = address  # Default remote address (for connected UDP)
-        self._buffer = []  # List of (data, addr) tuples
+        self._buffer = deque()  # Deque of (data, addr) tuples for O(1) popleft
         self._closing = False
         self._conn_lost = 0
         self._fileno = sock.fileno()  # Cache fileno to avoid repeated calls
@@ -1286,14 +1286,14 @@ class _ErlangDatagramTransport(transports.DatagramTransport):
             except (BlockingIOError, InterruptedError):
                 return
             except OSError as exc:
-                self._buffer.pop(0)
+                self._buffer.popleft()
                 self._protocol.error_received(exc)
                 return
             except Exception as exc:
                 self._fatal_error(exc, 'Fatal write error on datagram transport')
                 return
 
-            self._buffer.pop(0)
+            self._buffer.popleft()
 
         self._loop.remove_writer(self._fileno)
         if self._closing:
