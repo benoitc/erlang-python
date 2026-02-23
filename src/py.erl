@@ -384,20 +384,29 @@ async_call(Module, Func, Args) ->
 %% @doc Call a Python async function with keyword arguments.
 -spec async_call(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
 async_call(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_call, Ref, self(), Module, Func, Args, Kwargs}),
-    Ref.
+    case py_async_driver:submit(
+            py_util:to_binary(Module),
+            py_util:to_binary(Func),
+            Args,
+            Kwargs) of
+        {ok, Ref} -> Ref;
+        {error, Reason} -> error({async_call_failed, Reason})
+    end.
 
 %% @doc Wait for an async call to complete.
 -spec async_await(py_ref()) -> py_result().
 async_await(Ref) ->
-    await(Ref, ?DEFAULT_TIMEOUT).
+    async_await(Ref, ?DEFAULT_TIMEOUT).
 
 %% @doc Wait for an async call with timeout.
-%% Note: Identical to await/2 - provided for API symmetry with async_call.
 -spec async_await(py_ref(), timeout()) -> py_result().
 async_await(Ref, Timeout) ->
-    await(Ref, Timeout).
+    receive
+        {py_result, Ref, Result} -> {ok, Result};
+        {py_error, Ref, Error} -> {error, Error}
+    after Timeout ->
+        {error, timeout}
+    end.
 
 %% @doc Execute multiple async calls concurrently using asyncio.gather.
 %% Takes a list of {Module, Func, Args} tuples and executes them all
