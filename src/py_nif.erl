@@ -128,7 +128,10 @@
     asgi_build_scope/1,
     asgi_run/5,
     %% WSGI optimizations
-    wsgi_run/4
+    wsgi_run/4,
+    %% Non-blocking submit (Phase 3 unified event-driven architecture)
+    submit_call/6,
+    submit_coroutine/6
 ]).
 
 -on_load(load_nif/0).
@@ -890,4 +893,44 @@ asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
 -spec wsgi_run(binary(), binary(), binary(), map()) ->
     {ok, {binary(), [{binary(), binary()}], binary()}} | {error, term()}.
 wsgi_run(_Runner, _Module, _Callable, _EnvironMap) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Non-blocking Submit NIFs (Phase 3 unified event-driven architecture)
+%%% ============================================================================
+
+%% @doc Submit a Python function call for non-blocking execution.
+%%
+%% The call is queued to a background worker thread. When complete,
+%% the result is sent to EventProcPid as:
+%%   {call_result, CallbackId, Result} or
+%%   {call_error, CallbackId, Error}
+%%
+%% @param EventProcPid PID of event loop process to receive result
+%% @param CallbackId Unique callback ID for correlation
+%% @param Module Python module name (binary)
+%% @param Func Python function name (binary)
+%% @param Args Arguments list
+%% @param Kwargs Keyword arguments map
+%% @returns ok | {error, Reason}
+-spec submit_call(pid(), non_neg_integer(), binary(), binary(), list(), map()) ->
+    ok | {error, term()}.
+submit_call(_EventProcPid, _CallbackId, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Submit an asyncio coroutine for non-blocking execution.
+%%
+%% The coroutine is queued to a background worker thread and run
+%% in an asyncio event loop. Result delivery is the same as submit_call.
+%%
+%% @param EventProcPid PID of event loop process to receive result
+%% @param CallbackId Unique callback ID for correlation
+%% @param Module Python module name (binary)
+%% @param Func Python async function name (binary)
+%% @param Args Arguments list
+%% @param Kwargs Keyword arguments map
+%% @returns ok | {error, Reason}
+-spec submit_coroutine(pid(), non_neg_integer(), binary(), binary(), list(), map()) ->
+    ok | {error, term()}.
+submit_coroutine(_EventProcPid, _CallbackId, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.

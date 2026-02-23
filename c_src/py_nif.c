@@ -39,6 +39,7 @@
 #include "py_nif.h"
 #include "py_asgi.h"
 #include "py_wsgi.h"
+#include "py_submit.h"
 
 /* ============================================================================
  * Global state definitions
@@ -143,6 +144,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_callback.c"
 #include "py_thread_worker.c"
 #include "py_event_loop.c"
+#include "py_submit.c"
 #include "py_asgi.c"
 #include "py_wsgi.c"
 
@@ -1782,6 +1784,14 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         return -1;
     }
 
+    /* Initialize submit module atoms */
+    submit_init_atoms(env);
+
+    /* Initialize submit work queue */
+    if (submit_init() < 0) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1794,6 +1804,8 @@ static int upgrade(ErlNifEnv *env, void **priv_data, void **old_priv_data,
 static void unload(ErlNifEnv *env, void *priv_data) {
     (void)env;
     (void)priv_data;
+    /* Clean up submit work queue */
+    submit_cleanup();
     /* Clean up cached function references */
     cleanup_callback_cache();
     /* Clean up callback name registry */
@@ -1934,7 +1946,11 @@ static ErlNifFunc nif_funcs[] = {
     {"asgi_run", 5, nif_asgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND},
 
     /* WSGI optimizations */
-    {"wsgi_run", 4, nif_wsgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND}
+    {"wsgi_run", 4, nif_wsgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND},
+
+    /* Non-blocking submit NIFs (Phase 3 unified event-driven architecture) */
+    {"submit_call", 6, nif_submit_call, 0},
+    {"submit_coroutine", 6, nif_submit_coroutine, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)
