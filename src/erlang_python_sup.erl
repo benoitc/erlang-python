@@ -132,8 +132,19 @@ init([]) ->
         modules => [py_event_loop]
     },
 
+    %% Async driver (unified event-driven async)
+    AsyncDriverSpec = #{
+        id => py_async_driver,
+        start => {py_async_driver, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_async_driver]
+    },
+
     Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec],
+                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec,
+                AsyncDriverSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},
