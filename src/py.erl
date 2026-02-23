@@ -482,8 +482,23 @@ gather_results([Ref | Rest], Acc, Timeout) ->
         {ok, Result} ->
             gather_results(Rest, [Result | Acc], Timeout);
         {error, _} = Error ->
+            %% Drain remaining refs to avoid mailbox leaks
+            drain_refs(Rest),
             Error
     end.
+
+%% @private
+%% Drain pending py_result/py_error messages for the given refs
+drain_refs([]) ->
+    ok;
+drain_refs([Ref | Rest]) ->
+    receive
+        {py_result, Ref, _} -> ok;
+        {py_error, Ref, _} -> ok
+    after 0 ->
+        ok
+    end,
+    drain_refs(Rest).
 
 %% @doc Stream results from a Python async generator.
 %% Collects all yielded values and returns them as a list.

@@ -374,8 +374,17 @@ wait_loop(State = #state{waiter = {From, Ref, MonRef, TRef}}) ->
             handle_start_timer_in_wait(TimerFrom, TimerCallRef, DelayMs, CallbackId, State);
 
         {cancel_timer, CancelTimerRef} ->
-            handle_cancel_timer(CancelTimerRef, State),
-            wait_loop(State);
+            %% Inline timer cancellation to stay in wait_loop (don't call handle_cancel_timer
+            %% which tail-calls loop/1 and would escape wait mode)
+            NewState = case maps:get(CancelTimerRef, State#state.timers, undefined) of
+                undefined ->
+                    State;
+                {ErlTimerRef, _CallbackId} ->
+                    erlang:cancel_timer(ErlTimerRef),
+                    NewTimers = maps:remove(CancelTimerRef, State#state.timers),
+                    State#state{timers = NewTimers}
+            end,
+            wait_loop(NewState);
 
         {register_call, CallbackId, Caller, CallRef} ->
             CallHandlers = maps:put(CallbackId, {Caller, CallRef}, State#state.call_handlers),
