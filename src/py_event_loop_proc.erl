@@ -29,6 +29,10 @@
 %% - {poll, From, TimeoutMs} - Get pending events
 %% - {start_timer, DelayMs, CallbackId} - Start a timer
 %% - {cancel_timer, TimerRef} - Cancel a timer
+%% - {register_call, CallbackId, Caller, Ref} - Register call handler
+%% - {unregister_call, CallbackId} - Unregister call handler
+%% - {call_result, CallbackId, Result} - Dispatch result to caller
+%% - {call_error, CallbackId, Error} - Dispatch error to caller
 %% - stop - Shutdown
 -module(py_event_loop_proc).
 
@@ -39,7 +43,10 @@
     poll/2,
     start_timer/3,
     cancel_timer/2,
-    get_pid/1
+    get_pid/1,
+    %% Call result handling
+    register_call/3,
+    unregister_call/2
 ]).
 
 -record(state, {
@@ -53,7 +60,10 @@
     %% Waiting poller: {From, MonitorRef} | undefined
     waiter = undefined :: {pid(), reference()} | undefined,
     %% Timer ref counter
-    timer_counter = 0 :: non_neg_integer()
+    timer_counter = 0 :: non_neg_integer(),
+    %% Registered call handlers: #{CallbackId => {Caller, Ref}}
+    %% Used to dispatch call_result/call_error to waiting callers
+    call_handlers = #{} :: #{non_neg_integer() => {pid(), reference()}}
 }).
 
 %% ============================================================================
@@ -112,6 +122,21 @@ cancel_timer(Pid, TimerRef) ->
 -spec get_pid(pid()) -> pid().
 get_pid(Pid) -> Pid.
 
+%% @doc Register a call handler to receive result/error for CallbackId.
+%% When call_result or call_error arrives for this CallbackId,
+%% the message {py_result, Ref, Result} or {py_error, Ref, Error}
+%% will be sent to Caller.
+-spec register_call(pid(), non_neg_integer(), reference()) -> ok.
+register_call(Pid, CallbackId, Ref) ->
+    Pid ! {register_call, CallbackId, self(), Ref},
+    ok.
+
+%% @doc Unregister a call handler. Safe to call even if result already delivered.
+-spec unregister_call(pid(), non_neg_integer()) -> ok.
+unregister_call(Pid, CallbackId) ->
+    Pid ! {unregister_call, CallbackId},
+    ok.
+
 %% ============================================================================
 %% Internal - Process Loop
 %% ============================================================================
@@ -168,6 +193,20 @@ handle_msg({register_fd, FdRes, ReadCallbackId, WriteCallbackId}, State) ->
 handle_msg({unregister_fd, FdRes}, State) ->
     FdCallbacks = maps:remove(FdRes, State#state.fd_callbacks),
     loop(State#state{fd_callbacks = FdCallbacks});
+
+handle_msg({register_call, CallbackId, Caller, Ref}, State) ->
+    CallHandlers = maps:put(CallbackId, {Caller, Ref}, State#state.call_handlers),
+    loop(State#state{call_handlers = CallHandlers});
+
+handle_msg({unregister_call, CallbackId}, State) ->
+    CallHandlers = maps:remove(CallbackId, State#state.call_handlers),
+    loop(State#state{call_handlers = CallHandlers});
+
+handle_msg({call_result, CallbackId, Result}, State) ->
+    handle_call_result(CallbackId, Result, State);
+
+handle_msg({call_error, CallbackId, Error}, State) ->
+    handle_call_error(CallbackId, Error, State);
 
 handle_msg({'DOWN', _MonRef, process, Pid, _Reason}, State) ->
     %% Waiter died
@@ -229,6 +268,28 @@ handle_timer_fired(TimerRef, State) ->
                 timers = NewTimers
             }),
             loop(State2)
+    end.
+
+handle_call_result(CallbackId, Result, State) ->
+    case maps:get(CallbackId, State#state.call_handlers, undefined) of
+        undefined ->
+            %% Handler was unregistered or result already delivered, ignore
+            loop(State);
+        {Caller, Ref} ->
+            Caller ! {py_result, Ref, Result},
+            CallHandlers = maps:remove(CallbackId, State#state.call_handlers),
+            loop(State#state{call_handlers = CallHandlers})
+    end.
+
+handle_call_error(CallbackId, Error, State) ->
+    case maps:get(CallbackId, State#state.call_handlers, undefined) of
+        undefined ->
+            %% Handler was unregistered, ignore
+            loop(State);
+        {Caller, Ref} ->
+            Caller ! {py_error, Ref, Error},
+            CallHandlers = maps:remove(CallbackId, State#state.call_handlers),
+            loop(State#state{call_handlers = CallHandlers})
     end.
 
 handle_poll(From, Ref, TimeoutMs, State) ->
@@ -316,6 +377,20 @@ wait_loop(State = #state{waiter = {From, Ref, MonRef, TRef}}) ->
             handle_cancel_timer(CancelTimerRef, State),
             wait_loop(State);
 
+        {register_call, CallbackId, Caller, CallRef} ->
+            CallHandlers = maps:put(CallbackId, {Caller, CallRef}, State#state.call_handlers),
+            wait_loop(State#state{call_handlers = CallHandlers});
+
+        {unregister_call, CallbackId} ->
+            CallHandlers = maps:remove(CallbackId, State#state.call_handlers),
+            wait_loop(State#state{call_handlers = CallHandlers});
+
+        {call_result, CallbackId, Result} ->
+            handle_call_result_in_wait(CallbackId, Result, State);
+
+        {call_error, CallbackId, Error} ->
+            handle_call_error_in_wait(CallbackId, Error, State);
+
         stop ->
             cancel_poll_timeout(TRef),
             demonitor(MonRef, [flush]),
@@ -372,6 +447,27 @@ handle_start_timer_in_wait(From, CallRef, DelayMs, CallbackId, State) ->
         timers = NewTimers,
         timer_counter = TimerRef
     }).
+
+handle_call_result_in_wait(CallbackId, Result, State) ->
+    case maps:get(CallbackId, State#state.call_handlers, undefined) of
+        undefined ->
+            %% Handler was unregistered, ignore
+            wait_loop(State);
+        {Caller, Ref} ->
+            Caller ! {py_result, Ref, Result},
+            CallHandlers = maps:remove(CallbackId, State#state.call_handlers),
+            wait_loop(State#state{call_handlers = CallHandlers})
+    end.
+
+handle_call_error_in_wait(CallbackId, Error, State) ->
+    case maps:get(CallbackId, State#state.call_handlers, undefined) of
+        undefined ->
+            wait_loop(State);
+        {Caller, Ref} ->
+            Caller ! {py_error, Ref, Error},
+            CallHandlers = maps:remove(CallbackId, State#state.call_handlers),
+            wait_loop(State#state{call_handlers = CallHandlers})
+    end.
 
 %% ============================================================================
 %% Helpers
