@@ -55,6 +55,10 @@
 -export([
     run/4,
     run/5,
+    run_async/4,
+    run_async/5,
+    await_response/1,
+    await_response/2,
     build_scope/1,
     build_scope/2
 ]).
@@ -122,6 +126,67 @@ run(Module, Callable, Scope, Body, Opts) ->
     Runner = maps:get(runner, Opts, <<"hornbeam_asgi_runner">>),
     FullScope = ensure_scope_defaults(Scope),
     py_nif:asgi_run(Runner, Module, Callable, FullScope, Body).
+
+%% @doc Execute an ASGI application asynchronously.
+%%
+%% Returns immediately with a reference. Use await_response/1,2 to get the result.
+%% This allows concurrent ASGI request handling through the unified event loop.
+%%
+%% @param Module Python module containing the ASGI application
+%% @param Callable Name of the ASGI callable
+%% @param Scope ASGI scope map
+%% @param Body Request body as binary
+%% @returns {ok, Ref} where Ref is used with await_response
+-spec run_async(binary(), binary(), scope(), binary()) ->
+    {ok, reference()} | {error, term()}.
+run_async(Module, Callable, Scope, Body) ->
+    run_async(Module, Callable, Scope, Body, #{}).
+
+%% @doc Execute an ASGI application asynchronously with options.
+%%
+%% @param Module Python module containing the ASGI application
+%% @param Callable Name of the ASGI callable
+%% @param Scope ASGI scope map
+%% @param Body Request body as binary
+%% @param Opts Additional options
+%% @returns {ok, Ref} where Ref is used with await_response
+-spec run_async(binary(), binary(), scope(), binary(), map()) ->
+    {ok, reference()} | {error, term()}.
+run_async(Module, Callable, Scope, Body, _Opts) ->
+    FullScope = ensure_scope_defaults(Scope),
+    %% Submit via py_async_driver to the async runner
+    py_async_driver:submit(
+        <<"asgi_async_runner">>,
+        <<"run_asgi">>,
+        [Module, Callable, FullScope, Body],
+        #{}
+    ).
+
+%% @doc Wait for an async ASGI response.
+%%
+%% @param Ref Reference from run_async/4,5
+%% @returns {ok, {Status, Headers, Body}} on success
+-spec await_response(reference()) ->
+    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
+await_response(Ref) ->
+    await_response(Ref, 30000).
+
+%% @doc Wait for an async ASGI response with timeout.
+%%
+%% @param Ref Reference from run_async/4,5
+%% @param Timeout Timeout in milliseconds
+%% @returns {ok, {Status, Headers, Body}} on success
+-spec await_response(reference(), timeout()) ->
+    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
+await_response(Ref, Timeout) ->
+    receive
+        {py_result, Ref, {Status, Headers, Body}} ->
+            {ok, {Status, Headers, Body}};
+        {py_error, Ref, Error} ->
+            {error, Error}
+    after Timeout ->
+        {error, timeout}
+    end.
 
 %% @doc Build an optimized Python scope dict.
 %%
