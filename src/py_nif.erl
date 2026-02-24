@@ -91,6 +91,7 @@
     get_pending/1,
     dispatch_callback/3,
     dispatch_timer/2,
+    dispatch_sleep_complete/2,
     get_fd_callback_id/2,
     reselect_reader/2,
     reselect_writer/2,
@@ -604,6 +605,12 @@ dispatch_callback(_LoopRef, _CallbackId, _Type) ->
 %% Called when a timer expires.
 -spec dispatch_timer(reference(), non_neg_integer()) -> ok.
 dispatch_timer(_LoopRef, _CallbackId) ->
+    ?NIF_STUB.
+
+%% @doc Signal that a synchronous sleep has completed.
+%% Called from Erlang when a sleep timer expires.
+-spec dispatch_sleep_complete(reference(), non_neg_integer()) -> ok.
+dispatch_sleep_complete(_LoopRef, _SleepId) ->
     ?NIF_STUB.
 
 %% @doc Get callback ID from an fd resource.

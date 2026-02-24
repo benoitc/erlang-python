@@ -1895,6 +1895,7 @@ static ErlNifFunc nif_funcs[] = {
     {"get_pending", 1, nif_get_pending, 0},
     {"dispatch_callback", 3, nif_dispatch_callback, 0},
     {"dispatch_timer", 2, nif_dispatch_timer, 0},
+    {"dispatch_sleep_complete", 2, nif_dispatch_sleep_complete, 0},
     {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0},
     {"reselect_reader", 2, nif_reselect_reader, 0},
     {"reselect_writer", 2, nif_reselect_writer, 0},

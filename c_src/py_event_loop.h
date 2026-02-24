@@ -239,6 +239,20 @@ typedef struct erlang_event_loop {
 
     /** @brief Count of occupied slots in hash set */
     int pending_hash_count;
+
+    /* ========== Synchronous Sleep Support ========== */
+
+    /** @brief Current synchronous sleep ID being waited on */
+    _Atomic uint64_t sync_sleep_id;
+
+    /** @brief Flag indicating sleep has completed */
+    _Atomic bool sync_sleep_complete;
+
+    /** @brief Condition variable for sleep completion notification */
+    pthread_cond_t sync_sleep_cond;
+
+    /** @brief Whether sync_sleep_cond has been initialized */
+    bool sync_sleep_cond_initialized;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -440,6 +454,16 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_event_loop_wakeup(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Signal that a synchronous sleep has completed
+ *
+ * Called from Erlang when a sleep timer expires.
+ *
+ * NIF: dispatch_sleep_complete(LoopRef, SleepId) -> ok
+ */
+ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
 
 /* ============================================================================
  * Internal Helper Functions
