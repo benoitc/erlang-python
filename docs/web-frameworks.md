@@ -363,9 +363,36 @@ parse_wsgi_status(Status) ->
     binary_to_integer(CodeBin).
 ```
 
+## Performance Tips
+
+### Use erlang_asyncio for Sleep Operations
+
+For ASGI handlers that use `await asyncio.sleep()`, consider using `erlang_asyncio.sleep()` instead. This eliminates Python event loop overhead (~0.5-1ms per call) by using Erlang's native timer system:
+
+```python
+# In your ASGI application
+import erlang_asyncio
+
+async def delay_handler(scope, receive, send):
+    # More efficient than asyncio.sleep()
+    await erlang_asyncio.sleep(0.001)  # 1ms delay
+
+    await send({
+        'type': 'http.response.start',
+        'status': 200,
+        'headers': [[b'content-type', b'text/plain']],
+    })
+    await send({
+        'type': 'http.response.body',
+        'body': b'OK',
+    })
+```
+
+For endpoints with short delays (1-10ms), this can improve throughput by 2-3x. See [Asyncio](asyncio.md#erlang_asyncio-module) for the full API.
+
 ## See Also
 
 - [Getting Started](getting-started.md) - Basic usage guide
-- [Asyncio](asyncio.md) - Async event loop integration
+- [Asyncio](asyncio.md) - Async event loop integration and erlang_asyncio module
 - [Threading](threading.md) - Thread support and callbacks
 - [Scalability](scalability.md) - Performance tuning

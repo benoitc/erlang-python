@@ -571,6 +571,8 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Streaming](docs/streaming.md)
 - [Threading](docs/threading.md)
 - [Logging and Tracing](docs/logging.md)
+- [Asyncio Event Loop](docs/asyncio.md) - Erlang-native asyncio with TCP/UDP support
+- [Web Frameworks](docs/web-frameworks.md) - ASGI/WSGI integration
 - [Changelog](https://github.com/benoitc/erlang-python/releases)
 
 ## License
