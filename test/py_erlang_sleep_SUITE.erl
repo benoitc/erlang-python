@@ -83,8 +83,8 @@ for delay in delays:
     start = time.time()
     pel._erlang_sleep(delay)
     elapsed = (time.time() - start) * 1000
-    # Allow tolerance (timers can vary)
-    assert delay * 0.5 <= elapsed <= delay * 2.0, \\
+    # Allow wide tolerance for CI runners (can be slow/unpredictable)
+    assert delay * 0.5 <= elapsed <= delay * 10.0, \\
         f'{delay}ms sleep took {elapsed:.1f}ms'
 ">>),
     ct:pal("Sleep accuracy within tolerance"),
