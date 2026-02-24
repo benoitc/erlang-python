@@ -78,6 +78,8 @@
     event_loop_new/0,
     event_loop_destroy/1,
     event_loop_set_router/2,
+    event_loop_set_worker/2,
+    event_loop_set_id/2,
     event_loop_wakeup/1,
     add_reader/3,
     remove_reader/2,
@@ -519,10 +521,21 @@ event_loop_new() ->
 event_loop_destroy(_LoopRef) ->
     ?NIF_STUB.
 
-%% @doc Set the router process for an event loop.
+%% @doc Set the router process for an event loop (legacy).
 %% The router receives enif_select messages and timer events.
 -spec event_loop_set_router(reference(), pid()) -> ok | {error, term()}.
 event_loop_set_router(_LoopRef, _RouterPid) ->
+    ?NIF_STUB.
+
+%% @doc Set the worker process for an event loop (scalable I/O model).
+%% The worker receives FD events and timers directly.
+-spec event_loop_set_worker(reference(), pid()) -> ok | {error, term()}.
+event_loop_set_worker(_LoopRef, _WorkerPid) ->
+    ?NIF_STUB.
+
+%% @doc Set the loop identifier for multi-loop routing.
+-spec event_loop_set_id(reference(), binary() | atom()) -> ok | {error, term()}.
+event_loop_set_id(_LoopRef, _LoopId) ->
     ?NIF_STUB.
 
 %% @doc Wake up an event loop from a wait.

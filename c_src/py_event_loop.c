@@ -511,6 +511,66 @@ ERL_NIF_TERM nif_event_loop_set_router(ErlNifEnv *env, int argc,
 }
 
 /**
+ * event_loop_set_worker(LoopRef, WorkerPid) -> ok
+ * Scalable I/O model: set the worker process for direct event routing.
+ */
+ERL_NIF_TERM nif_event_loop_set_worker(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!enif_get_local_pid(env, argv[1], &loop->worker_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+
+    loop->has_worker = true;
+
+    /* Also set as router for compatibility */
+    if (!loop->has_router) {
+        loop->router_pid = loop->worker_pid;
+        loop->has_router = true;
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * event_loop_set_id(LoopRef, LoopId) -> ok
+ */
+ERL_NIF_TERM nif_event_loop_set_id(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    ErlNifBinary id_bin;
+    if (!enif_inspect_binary(env, argv[1], &id_bin)) {
+        char atom_buf[64];
+        if (!enif_get_atom(env, argv[1], atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+            return make_error(env, "invalid_id");
+        }
+        strncpy(loop->loop_id, atom_buf, sizeof(loop->loop_id) - 1);
+        loop->loop_id[sizeof(loop->loop_id) - 1] = '\0';
+    } else {
+        size_t copy_len = id_bin.size < sizeof(loop->loop_id) - 1 ?
+                          id_bin.size : sizeof(loop->loop_id) - 1;
+        memcpy(loop->loop_id, id_bin.data, copy_len);
+        loop->loop_id[copy_len] = '\0';
+    }
+
+    return ATOM_OK;
+}
+
+/**
  * add_reader(LoopRef, Fd, CallbackId) -> {ok, FdRef}
  */
 ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
@@ -533,9 +593,11 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
@@ -547,7 +609,7 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     fd_res->fd = fd;
     fd_res->read_callback_id = callback_id;
     fd_res->write_callback_id = 0;
-    fd_res->owner_pid = loop->router_pid;
+    fd_res->owner_pid = *target_pid;
     fd_res->reader_active = true;
     fd_res->writer_active = false;
     fd_res->loop = loop;
@@ -558,14 +620,14 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     fd_res->owns_fd = false;
 
     /* Monitor owner process for cleanup on death */
-    if (enif_monitor_process(env, fd_res, &loop->router_pid,
+    if (enif_monitor_process(env, fd_res, target_pid,
                              &fd_res->owner_monitor) == 0) {
         fd_res->monitor_active = true;
     }
 
     /* Register with Erlang scheduler for read monitoring */
     int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_READ,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         if (fd_res->monitor_active) {
@@ -643,9 +705,11 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
@@ -657,7 +721,7 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     fd_res->fd = fd;
     fd_res->read_callback_id = 0;
     fd_res->write_callback_id = callback_id;
-    fd_res->owner_pid = loop->router_pid;
+    fd_res->owner_pid = *target_pid;
     fd_res->reader_active = false;
     fd_res->writer_active = true;
     fd_res->loop = loop;
@@ -668,14 +732,14 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     fd_res->owns_fd = false;
 
     /* Monitor owner process for cleanup on death */
-    if (enif_monitor_process(env, fd_res, &loop->router_pid,
+    if (enif_monitor_process(env, fd_res, target_pid,
                              &fd_res->owner_monitor) == 0) {
         fd_res->monitor_active = true;
     }
 
     /* Register with Erlang scheduler for write monitoring */
     int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         if (fd_res->monitor_active) {
@@ -755,14 +819,16 @@ ERL_NIF_TERM nif_call_later(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
     /* Create timer reference */
     ERL_NIF_TERM timer_ref = enif_make_ref(env);
 
-    /* Send message to router: {start_timer, DelayMs, CallbackId, TimerRef} */
+    /* Send message to target: {start_timer, DelayMs, CallbackId, TimerRef} */
     ERL_NIF_TERM msg = enif_make_tuple4(
         env,
         ATOM_START_TIMER,
@@ -771,7 +837,7 @@ ERL_NIF_TERM nif_call_later(ErlNifEnv *env, int argc,
         timer_ref
     );
 
-    if (!enif_send(env, &loop->router_pid, NULL, msg)) {
+    if (!enif_send(env, target_pid, NULL, msg)) {
         return make_error(env, "send_failed");
     }
 
@@ -793,14 +859,16 @@ ERL_NIF_TERM nif_cancel_timer(ErlNifEnv *env, int argc,
 
     ERL_NIF_TERM timer_ref = argv[1];
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
-    /* Send message to router: {cancel_timer, TimerRef} */
+    /* Send message to target: {cancel_timer, TimerRef} */
     ERL_NIF_TERM msg = enif_make_tuple2(env, ATOM_CANCEL_TIMER, timer_ref);
 
-    if (!enif_send(env, &loop->router_pid, NULL, msg)) {
+    if (!enif_send(env, target_pid, NULL, msg)) {
         return make_error(env, "send_failed");
     }
 

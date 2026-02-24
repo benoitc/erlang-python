@@ -165,16 +165,26 @@ typedef struct {
  * @brief Main state for the Erlang-backed asyncio event loop
  *
  * This structure maintains all state needed for the event loop:
- * - Reference to the Erlang router process
+ * - Reference to the Erlang worker process (scalable I/O model)
+ * - Reference to the Erlang router process (legacy)
  * - Pending events queue
  * - Synchronization primitives
  */
 typedef struct erlang_event_loop {
-    /** @brief PID of the py_event_router gen_server */
+    /** @brief PID of the py_event_router gen_server (legacy) */
     ErlNifPid router_pid;
 
     /** @brief Whether router_pid has been set */
     bool has_router;
+
+    /** @brief PID of the py_event_worker gen_server (scalable I/O model) */
+    ErlNifPid worker_pid;
+
+    /** @brief Whether worker_pid has been set */
+    bool has_worker;
+
+    /** @brief Loop identifier for routing */
+    char loop_id[64];
 
     /** @brief Mutex protecting the event loop state */
     pthread_mutex_t mutex;
@@ -301,12 +311,28 @@ ERL_NIF_TERM nif_event_loop_destroy(ErlNifEnv *env, int argc,
                                      const ERL_NIF_TERM argv[]);
 
 /**
- * @brief Set the router PID for the event loop
+ * @brief Set the router PID for the event loop (legacy)
  *
  * NIF: event_loop_set_router(LoopRef, RouterPid) -> ok | {error, Reason}
  */
 ERL_NIF_TERM nif_event_loop_set_router(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Set the worker PID for the event loop (scalable I/O model)
+ *
+ * NIF: event_loop_set_worker(LoopRef, WorkerPid) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_worker(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Set the loop identifier
+ *
+ * NIF: event_loop_set_id(LoopRef, LoopId) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_id(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Register a file descriptor for read monitoring
