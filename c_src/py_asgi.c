@@ -154,6 +154,70 @@ static int init_interp_state(asgi_interp_state_t *state) {
     state->empty_bytes = PyBytes_FromStringAndSize("", 0);
     if (!state->empty_bytes) return -1;
 
+    /* Pre-interned header names (bytes) for common HTTP headers */
+    state->header_host = PyBytes_FromStringAndSize("host", 4);
+    if (!state->header_host) return -1;
+    state->header_accept = PyBytes_FromStringAndSize("accept", 6);
+    if (!state->header_accept) return -1;
+    state->header_content_type = PyBytes_FromStringAndSize("content-type", 12);
+    if (!state->header_content_type) return -1;
+    state->header_content_length = PyBytes_FromStringAndSize("content-length", 14);
+    if (!state->header_content_length) return -1;
+    state->header_user_agent = PyBytes_FromStringAndSize("user-agent", 10);
+    if (!state->header_user_agent) return -1;
+    state->header_cookie = PyBytes_FromStringAndSize("cookie", 6);
+    if (!state->header_cookie) return -1;
+    state->header_authorization = PyBytes_FromStringAndSize("authorization", 13);
+    if (!state->header_authorization) return -1;
+    state->header_cache_control = PyBytes_FromStringAndSize("cache-control", 13);
+    if (!state->header_cache_control) return -1;
+    state->header_connection = PyBytes_FromStringAndSize("connection", 10);
+    if (!state->header_connection) return -1;
+    state->header_accept_encoding = PyBytes_FromStringAndSize("accept-encoding", 15);
+    if (!state->header_accept_encoding) return -1;
+    state->header_accept_language = PyBytes_FromStringAndSize("accept-language", 15);
+    if (!state->header_accept_language) return -1;
+    state->header_referer = PyBytes_FromStringAndSize("referer", 7);
+    if (!state->header_referer) return -1;
+    state->header_origin = PyBytes_FromStringAndSize("origin", 6);
+    if (!state->header_origin) return -1;
+    state->header_if_none_match = PyBytes_FromStringAndSize("if-none-match", 13);
+    if (!state->header_if_none_match) return -1;
+    state->header_if_modified_since = PyBytes_FromStringAndSize("if-modified-since", 17);
+    if (!state->header_if_modified_since) return -1;
+    state->header_x_forwarded_for = PyBytes_FromStringAndSize("x-forwarded-for", 15);
+    if (!state->header_x_forwarded_for) return -1;
+
+    /* Cached HTTP status code integers */
+    state->status_200 = PyLong_FromLong(200);
+    if (!state->status_200) return -1;
+    state->status_201 = PyLong_FromLong(201);
+    if (!state->status_201) return -1;
+    state->status_204 = PyLong_FromLong(204);
+    if (!state->status_204) return -1;
+    state->status_301 = PyLong_FromLong(301);
+    if (!state->status_301) return -1;
+    state->status_302 = PyLong_FromLong(302);
+    if (!state->status_302) return -1;
+    state->status_304 = PyLong_FromLong(304);
+    if (!state->status_304) return -1;
+    state->status_400 = PyLong_FromLong(400);
+    if (!state->status_400) return -1;
+    state->status_401 = PyLong_FromLong(401);
+    if (!state->status_401) return -1;
+    state->status_403 = PyLong_FromLong(403);
+    if (!state->status_403) return -1;
+    state->status_404 = PyLong_FromLong(404);
+    if (!state->status_404) return -1;
+    state->status_405 = PyLong_FromLong(405);
+    if (!state->status_405) return -1;
+    state->status_500 = PyLong_FromLong(500);
+    if (!state->status_500) return -1;
+    state->status_502 = PyLong_FromLong(502);
+    if (!state->status_502) return -1;
+    state->status_503 = PyLong_FromLong(503);
+    if (!state->status_503) return -1;
+
     /* Build ASGI subdict: {"version": "3.0", "spec_version": "2.3"} */
     state->asgi_subdict = PyDict_New();
     if (!state->asgi_subdict) return -1;
@@ -224,6 +288,40 @@ static void cleanup_interp_state(asgi_interp_state_t *state) {
     Py_XDECREF(state->method_trace);
     Py_XDECREF(state->empty_string);
     Py_XDECREF(state->empty_bytes);
+
+    /* Clean up pre-interned header names */
+    Py_XDECREF(state->header_host);
+    Py_XDECREF(state->header_accept);
+    Py_XDECREF(state->header_content_type);
+    Py_XDECREF(state->header_content_length);
+    Py_XDECREF(state->header_user_agent);
+    Py_XDECREF(state->header_cookie);
+    Py_XDECREF(state->header_authorization);
+    Py_XDECREF(state->header_cache_control);
+    Py_XDECREF(state->header_connection);
+    Py_XDECREF(state->header_accept_encoding);
+    Py_XDECREF(state->header_accept_language);
+    Py_XDECREF(state->header_referer);
+    Py_XDECREF(state->header_origin);
+    Py_XDECREF(state->header_if_none_match);
+    Py_XDECREF(state->header_if_modified_since);
+    Py_XDECREF(state->header_x_forwarded_for);
+
+    /* Clean up cached status codes */
+    Py_XDECREF(state->status_200);
+    Py_XDECREF(state->status_201);
+    Py_XDECREF(state->status_204);
+    Py_XDECREF(state->status_301);
+    Py_XDECREF(state->status_302);
+    Py_XDECREF(state->status_304);
+    Py_XDECREF(state->status_400);
+    Py_XDECREF(state->status_401);
+    Py_XDECREF(state->status_403);
+    Py_XDECREF(state->status_404);
+    Py_XDECREF(state->status_405);
+    Py_XDECREF(state->status_500);
+    Py_XDECREF(state->status_502);
+    Py_XDECREF(state->status_503);
 
     state->initialized = false;
 }
@@ -562,6 +660,103 @@ static PyObject *asgi_get_scheme(int scheme) {
     }
 }
 
+/**
+ * @brief Get cached header name or create new bytes object
+ *
+ * Uses length-based dispatch for efficient lookup of common HTTP header names.
+ * Returns a new reference (either Py_INCREF'd cached value or new PyBytes).
+ */
+static PyObject *get_cached_header_name(asgi_interp_state_t *state,
+                                        const unsigned char *name, size_t len) {
+    switch (len) {
+        case 4:
+            if (memcmp(name, "host", 4) == 0) {
+                Py_INCREF(state->header_host);
+                return state->header_host;
+            }
+            break;
+        case 6:
+            if (memcmp(name, "accept", 6) == 0) {
+                Py_INCREF(state->header_accept);
+                return state->header_accept;
+            }
+            if (memcmp(name, "cookie", 6) == 0) {
+                Py_INCREF(state->header_cookie);
+                return state->header_cookie;
+            }
+            if (memcmp(name, "origin", 6) == 0) {
+                Py_INCREF(state->header_origin);
+                return state->header_origin;
+            }
+            break;
+        case 7:
+            if (memcmp(name, "referer", 7) == 0) {
+                Py_INCREF(state->header_referer);
+                return state->header_referer;
+            }
+            break;
+        case 10:
+            if (memcmp(name, "user-agent", 10) == 0) {
+                Py_INCREF(state->header_user_agent);
+                return state->header_user_agent;
+            }
+            if (memcmp(name, "connection", 10) == 0) {
+                Py_INCREF(state->header_connection);
+                return state->header_connection;
+            }
+            break;
+        case 12:
+            if (memcmp(name, "content-type", 12) == 0) {
+                Py_INCREF(state->header_content_type);
+                return state->header_content_type;
+            }
+            break;
+        case 13:
+            if (memcmp(name, "authorization", 13) == 0) {
+                Py_INCREF(state->header_authorization);
+                return state->header_authorization;
+            }
+            if (memcmp(name, "cache-control", 13) == 0) {
+                Py_INCREF(state->header_cache_control);
+                return state->header_cache_control;
+            }
+            if (memcmp(name, "if-none-match", 13) == 0) {
+                Py_INCREF(state->header_if_none_match);
+                return state->header_if_none_match;
+            }
+            break;
+        case 14:
+            if (memcmp(name, "content-length", 14) == 0) {
+                Py_INCREF(state->header_content_length);
+                return state->header_content_length;
+            }
+            break;
+        case 15:
+            if (memcmp(name, "accept-encoding", 15) == 0) {
+                Py_INCREF(state->header_accept_encoding);
+                return state->header_accept_encoding;
+            }
+            if (memcmp(name, "accept-language", 15) == 0) {
+                Py_INCREF(state->header_accept_language);
+                return state->header_accept_language;
+            }
+            if (memcmp(name, "x-forwarded-for", 15) == 0) {
+                Py_INCREF(state->header_x_forwarded_for);
+                return state->header_x_forwarded_for;
+            }
+            break;
+        case 17:
+            if (memcmp(name, "if-modified-since", 17) == 0) {
+                Py_INCREF(state->header_if_modified_since);
+                return state->header_if_modified_since;
+            }
+            break;
+    }
+
+    /* Uncommon header - create new bytes object */
+    return PyBytes_FromStringAndSize((char *)name, len);
+}
+
 /* ============================================================================
  * Response Pool Functions
  * ============================================================================ */
@@ -796,6 +991,8 @@ static PyObject *asgi_build_scope(const asgi_scope_data_t *data) {
     Py_DECREF(root_path);
 
     /* headers: list of [name, value] pairs (both bytes) */
+    /* Use cached header names for common headers */
+    asgi_interp_state_t *state = get_asgi_interp_state();
     PyObject *headers = PyList_New(data->headers_count);
     if (headers == NULL) {
         goto error;
@@ -807,8 +1004,8 @@ static PyObject *asgi_build_scope(const asgi_scope_data_t *data) {
             goto error;
         }
 
-        PyObject *name = PyBytes_FromStringAndSize(
-            (char *)data->headers[i].name, data->headers[i].name_len);
+        PyObject *name = get_cached_header_name(
+            state, data->headers[i].name, data->headers[i].name_len);
         PyObject *value = PyBytes_FromStringAndSize(
             (char *)data->headers[i].value, data->headers[i].value_len);
 
@@ -1159,8 +1356,10 @@ static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
                     }
 
                     /* Create tuple(bytes, bytes) per ASGI spec */
-                    PyObject *py_name = PyBytes_FromStringAndSize(
-                        (char *)name_bin.data, name_bin.size);
+                    /* Use cached header name for common headers */
+                    asgi_interp_state_t *state = get_asgi_interp_state();
+                    PyObject *py_name = get_cached_header_name(
+                        state, name_bin.data, name_bin.size);
                     PyObject *py_hvalue = PyBytes_FromStringAndSize(
                         (char *)value_bin.data, value_bin.size);
 
@@ -1220,6 +1419,100 @@ static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
 
     enif_map_iterator_destroy(env, &iter);
     return scope;
+}
+
+/* ============================================================================
+ * Direct Response Extraction
+ * ============================================================================ */
+
+/**
+ * @brief Extract ASGI response tuple directly to Erlang terms
+ *
+ * Optimized response conversion that directly extracts (status, headers, body)
+ * tuple elements without going through generic py_to_term(). Falls back to
+ * py_to_term() for non-standard responses.
+ *
+ * Expected Python format: tuple(int, list[tuple[bytes, bytes]], bytes)
+ * Output Erlang format: {Status, [{Header, Value}, ...], Body}
+ */
+static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
+    /* Validate 3-element tuple, fallback to py_to_term if not */
+    if (!PyTuple_Check(result) || PyTuple_Size(result) != 3) {
+        return py_to_term(env, result);
+    }
+
+    /* Get tuple elements (borrowed references) */
+    PyObject *py_status = PyTuple_GET_ITEM(result, 0);
+    PyObject *py_headers = PyTuple_GET_ITEM(result, 1);
+    PyObject *py_body = PyTuple_GET_ITEM(result, 2);
+
+    /* Validate types */
+    if (!PyLong_Check(py_status) || !PyList_Check(py_headers) || !PyBytes_Check(py_body)) {
+        return py_to_term(env, result);
+    }
+
+    /* Extract status code directly */
+    long status = PyLong_AsLong(py_status);
+    if (status == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        return py_to_term(env, result);
+    }
+    ERL_NIF_TERM erl_status = enif_make_int(env, (int)status);
+
+    /* Extract headers list - iterate backwards for efficient cons-cell building */
+    Py_ssize_t headers_len = PyList_Size(py_headers);
+    ERL_NIF_TERM erl_headers = enif_make_list(env, 0);  /* Start with empty list */
+
+    for (Py_ssize_t i = headers_len - 1; i >= 0; i--) {
+        PyObject *header_item = PyList_GET_ITEM(py_headers, i);
+
+        /* Each header should be a 2-element tuple/list of bytes */
+        PyObject *py_name = NULL;
+        PyObject *py_value = NULL;
+
+        if (PyTuple_Check(header_item) && PyTuple_Size(header_item) == 2) {
+            py_name = PyTuple_GET_ITEM(header_item, 0);
+            py_value = PyTuple_GET_ITEM(header_item, 1);
+        } else if (PyList_Check(header_item) && PyList_Size(header_item) == 2) {
+            py_name = PyList_GET_ITEM(header_item, 0);
+            py_value = PyList_GET_ITEM(header_item, 1);
+        } else {
+            /* Invalid header format, fallback */
+            return py_to_term(env, result);
+        }
+
+        /* Both name and value must be bytes */
+        if (!PyBytes_Check(py_name) || !PyBytes_Check(py_value)) {
+            return py_to_term(env, result);
+        }
+
+        /* Convert header name */
+        char *name_data = PyBytes_AS_STRING(py_name);
+        Py_ssize_t name_len = PyBytes_GET_SIZE(py_name);
+        ERL_NIF_TERM erl_name;
+        unsigned char *name_buf = enif_make_new_binary(env, name_len, &erl_name);
+        memcpy(name_buf, name_data, name_len);
+
+        /* Convert header value */
+        char *value_data = PyBytes_AS_STRING(py_value);
+        Py_ssize_t value_len = PyBytes_GET_SIZE(py_value);
+        ERL_NIF_TERM erl_value;
+        unsigned char *value_buf = enif_make_new_binary(env, value_len, &erl_value);
+        memcpy(value_buf, value_data, value_len);
+
+        /* Create header tuple and prepend to list */
+        ERL_NIF_TERM header_tuple = enif_make_tuple2(env, erl_name, erl_value);
+        erl_headers = enif_make_list_cell(env, header_tuple, erl_headers);
+    }
+
+    /* Extract body directly */
+    char *body_data = PyBytes_AS_STRING(py_body);
+    Py_ssize_t body_len = PyBytes_GET_SIZE(py_body);
+    ERL_NIF_TERM erl_body;
+    unsigned char *body_buf = enif_make_new_binary(env, body_len, &erl_body);
+    memcpy(body_buf, body_data, body_len);
+
+    return enif_make_tuple3(env, erl_status, erl_headers, erl_body);
 }
 
 /* ============================================================================
@@ -1379,8 +1672,8 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         goto cleanup;
     }
 
-    /* Convert result to Erlang term */
-    ERL_NIF_TERM term_result = py_to_term(env, run_result);
+    /* Convert result to Erlang term using optimized extraction */
+    ERL_NIF_TERM term_result = extract_asgi_response(env, run_result);
     Py_DECREF(run_result);
 
     result = enif_make_tuple2(env, ATOM_OK, term_result);

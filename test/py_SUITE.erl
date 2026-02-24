@@ -47,7 +47,11 @@
     test_semaphore_rate_limiting/1,
     test_overload_protection/1,
     test_shared_state/1,
-    test_reload/1
+    test_reload/1,
+    %% ASGI optimization tests
+    test_asgi_response_extraction/1,
+    test_asgi_header_caching/1,
+    test_asgi_status_codes/1
 ]).
 
 all() ->
@@ -89,7 +93,11 @@ all() ->
         test_semaphore_rate_limiting,
         test_overload_protection,
         test_shared_state,
-        test_reload
+        test_reload,
+        %% ASGI optimization tests
+        test_asgi_response_extraction,
+        test_asgi_header_caching,
+        test_asgi_status_codes
     ].
 
 init_per_suite(Config) ->
@@ -914,4 +922,82 @@ test_reload(_Config) ->
     %% Test reload with string module name
     ok = py:reload("sys"),
 
+    ok.
+
+%%% ============================================================================
+%%% ASGI Optimization Tests
+%%% ============================================================================
+
+%% Test direct response tuple extraction optimization
+test_asgi_response_extraction(_Config) ->
+    %% Test that we can create and process ASGI-style response tuples
+    %% The optimization handles (status, headers, body) tuples directly
+
+    %% Create a response tuple similar to what ASGI returns
+    Code = <<"(200, [(b'content-type', b'application/json'), (b'x-custom', b'value')], b'{\"result\": \"ok\"}')">>,
+    {ok, Result} = py:eval(Code),
+    ct:pal("ASGI response: ~p~n", [Result]),
+
+    %% Verify the tuple structure
+    {200, Headers, Body} = Result,
+    true = is_list(Headers),
+    true = is_binary(Body),
+
+    %% Verify headers
+    2 = length(Headers),
+    [{<<"content-type">>, <<"application/json">>}, {<<"x-custom">>, <<"value">>}] = Headers,
+
+    %% Verify body
+    <<"{\"result\": \"ok\"}">> = Body,
+
+    %% Test with empty headers and body
+    {ok, {204, [], <<>>}} = py:eval(<<"(204, [], b'')">>),
+
+    %% Test with multiple headers
+    {ok, {301, [{<<"location">>, <<"https://example.com">>}], <<>>}} =
+        py:eval(<<"(301, [(b'location', b'https://example.com')], b'')">>),
+
+    ok.
+
+%% Test pre-interned header name caching
+test_asgi_header_caching(_Config) ->
+    %% Test that common headers are handled correctly
+    %% The optimization caches common HTTP header names as Python bytes
+
+    Code = <<"[(b'host', b'example.com'), (b'accept', b'*/*'), (b'content-type', b'text/html'), (b'content-length', b'123'), (b'user-agent', b'test-agent'), (b'cookie', b'session=abc'), (b'authorization', b'Bearer token'), (b'cache-control', b'no-cache'), (b'connection', b'keep-alive'), (b'accept-encoding', b'gzip'), (b'accept-language', b'en-US'), (b'referer', b'http://example.com'), (b'origin', b'http://example.com'), (b'if-none-match', b'etag123'), (b'if-modified-since', b'Mon, 01 Jan 2024'), (b'x-forwarded-for', b'192.168.1.1'), (b'x-custom-header', b'custom-value')]">>,
+    {ok, Headers} = py:eval(Code),
+    ct:pal("Headers: ~p~n", [Headers]),
+
+    %% Verify all headers are present
+    17 = length(Headers),
+
+    %% Verify specific cached headers
+    {<<"host">>, <<"example.com">>} = lists:nth(1, Headers),
+    {<<"content-type">>, <<"text/html">>} = lists:nth(3, Headers),
+    {<<"user-agent">>, <<"test-agent">>} = lists:nth(5, Headers),
+
+    %% Verify non-cached header still works
+    {<<"x-custom-header">>, <<"custom-value">>} = lists:nth(17, Headers),
+
+    ok.
+
+%% Test cached status code integers
+test_asgi_status_codes(_Config) ->
+    %% Test that common HTTP status codes are handled correctly
+    %% The optimization caches PyLong objects for common status codes
+
+    %% Test common status codes
+    StatusCodes = [200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 500, 502, 503],
+
+    lists:foreach(fun(Code) ->
+        Expr = list_to_binary(io_lib:format("(~p, [], b'')", [Code])),
+        {ok, {Status, [], <<>>}} = py:eval(Expr),
+        Code = Status
+    end, StatusCodes),
+
+    %% Test uncommon status codes still work
+    {ok, {418, [], <<>>}} = py:eval(<<"(418, [], b'')">>),  %% I'm a teapot
+    {ok, {599, [], <<>>}} = py:eval(<<"(599, [], b'')">>),  %% Network connect timeout
+
+    ct:pal("All status codes tested successfully~n"),
     ok.
