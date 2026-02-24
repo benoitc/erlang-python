@@ -50,6 +50,12 @@ static pthread_mutex_t g_interp_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Flag: ASGI subsystem is initialized (not per-interpreter) */
 static bool g_asgi_initialized = false;
 
+/* ASGI-specific Erlang atoms for scope map keys */
+ERL_NIF_TERM ATOM_ASGI_PATH;
+ERL_NIF_TERM ATOM_ASGI_HEADERS;
+ERL_NIF_TERM ATOM_ASGI_CLIENT;
+ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
+
 /**
  * @brief Initialize a single interpreter state
  */
@@ -425,6 +431,197 @@ void cleanup_all_asgi_interp_states(void) {
 
     pthread_mutex_unlock(&g_interp_state_mutex);
 }
+
+/* ============================================================================
+ * Thread-Local Scope Template Cache
+ * ============================================================================
+ * For repeated requests to the same path, most scope values are identical.
+ * Cache scope templates and clone them for subsequent requests, updating
+ * only the dynamic fields (client, headers, query_string).
+ */
+
+typedef struct {
+    uint64_t path_hash;           /* FNV-1a hash of path */
+    size_t path_len;              /* Length of path for collision check */
+    PyObject *scope_template;     /* Pre-built scope with static fields */
+    PyInterpreterState *interp;   /* Interpreter that owns scope_template */
+} scope_cache_entry_t;
+
+typedef struct {
+    scope_cache_entry_t entries[SCOPE_CACHE_SIZE];
+    bool initialized;
+} scope_cache_t;
+
+static __thread scope_cache_t *tl_scope_cache = NULL;
+
+/**
+ * @brief FNV-1a hash for path strings
+ */
+static inline uint64_t hash_path(const unsigned char *path, size_t len) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (uint64_t)path[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+/**
+ * @brief Initialize thread-local scope cache
+ */
+static int asgi_init_scope_cache(void) {
+    if (tl_scope_cache != NULL && tl_scope_cache->initialized) {
+        return 0;
+    }
+
+    tl_scope_cache = enif_alloc(sizeof(scope_cache_t));
+    if (tl_scope_cache == NULL) {
+        return -1;
+    }
+
+    memset(tl_scope_cache, 0, sizeof(scope_cache_t));
+    tl_scope_cache->initialized = true;
+    return 0;
+}
+
+/**
+ * @brief Clean up thread-local scope cache
+ */
+static void asgi_cleanup_scope_cache(void) {
+    if (tl_scope_cache == NULL) {
+        return;
+    }
+
+    for (int i = 0; i < SCOPE_CACHE_SIZE; i++) {
+        Py_XDECREF(tl_scope_cache->entries[i].scope_template);
+    }
+
+    enif_free(tl_scope_cache);
+    tl_scope_cache = NULL;
+}
+
+/**
+ * @brief Update dynamic fields in a cloned scope
+ *
+ * Updates client, headers, and query_string which vary per request.
+ */
+static int update_dynamic_scope_fields(ErlNifEnv *env, PyObject *scope,
+                                        ERL_NIF_TERM scope_map) {
+    ERL_NIF_TERM value;
+    asgi_interp_state_t *state = get_asgi_interp_state();
+    if (!state) return -1;
+
+    /* Update client - use Erlang atom for map lookup, Python key for dict */
+    if (enif_get_map_value(env, scope_map, ATOM_ASGI_CLIENT, &value)) {
+        PyObject *py_client = term_to_py(env, value);
+        if (py_client == NULL) return -1;
+        if (PyDict_SetItem(scope, state->key_client, py_client) < 0) {
+            Py_DECREF(py_client);
+            return -1;
+        }
+        Py_DECREF(py_client);
+    }
+
+    /* Update headers - use Erlang atom for map lookup */
+    if (enif_get_map_value(env, scope_map, ATOM_ASGI_HEADERS, &value)) {
+        unsigned int headers_len;
+        if (enif_get_list_length(env, value, &headers_len)) {
+            PyObject *py_headers = PyList_New(headers_len);
+            if (py_headers == NULL) return -1;
+
+            ERL_NIF_TERM head, tail = value;
+            for (unsigned int idx = 0; idx < headers_len; idx++) {
+                if (!enif_get_list_cell(env, tail, &head, &tail)) {
+                    Py_DECREF(py_headers);
+                    return -1;
+                }
+
+                ERL_NIF_TERM hname_term, hvalue_term;
+                int harity;
+                const ERL_NIF_TERM *htuple;
+                ERL_NIF_TERM hhead, htail;
+
+                if (enif_get_tuple(env, head, &harity, &htuple) && harity == 2) {
+                    hname_term = htuple[0];
+                    hvalue_term = htuple[1];
+                } else if (enif_get_list_cell(env, head, &hhead, &htail)) {
+                    hname_term = hhead;
+                    if (!enif_get_list_cell(env, htail, &hvalue_term, &htail)) {
+                        Py_DECREF(py_headers);
+                        return -1;
+                    }
+                } else {
+                    Py_DECREF(py_headers);
+                    return -1;
+                }
+
+                ErlNifBinary name_bin, value_bin;
+                if (!enif_inspect_binary(env, hname_term, &name_bin) ||
+                    !enif_inspect_binary(env, hvalue_term, &value_bin)) {
+                    Py_DECREF(py_headers);
+                    return -1;
+                }
+
+                PyObject *py_name = get_cached_header_name(state, name_bin.data, name_bin.size);
+                PyObject *py_hvalue = PyBytes_FromStringAndSize((char *)value_bin.data, value_bin.size);
+
+                if (py_name == NULL || py_hvalue == NULL) {
+                    Py_XDECREF(py_name);
+                    Py_XDECREF(py_hvalue);
+                    Py_DECREF(py_headers);
+                    return -1;
+                }
+
+                PyObject *header_tuple = PyTuple_Pack(2, py_name, py_hvalue);
+                Py_DECREF(py_name);
+                Py_DECREF(py_hvalue);
+
+                if (header_tuple == NULL) {
+                    Py_DECREF(py_headers);
+                    return -1;
+                }
+
+                PyList_SET_ITEM(py_headers, idx, header_tuple);
+            }
+
+            if (PyDict_SetItem(scope, state->key_headers, py_headers) < 0) {
+                Py_DECREF(py_headers);
+                return -1;
+            }
+            Py_DECREF(py_headers);
+        }
+    }
+
+    /* Update query_string - use Erlang atom for map lookup */
+    if (enif_get_map_value(env, scope_map, ATOM_ASGI_QUERY_STRING, &value)) {
+        ErlNifBinary qs_bin;
+        PyObject *py_qs;
+        if (enif_inspect_binary(env, value, &qs_bin)) {
+            if (qs_bin.size == 0) {
+                Py_INCREF(state->empty_bytes);
+                py_qs = state->empty_bytes;
+            } else {
+                py_qs = PyBytes_FromStringAndSize((char *)qs_bin.data, qs_bin.size);
+            }
+            if (py_qs == NULL) return -1;
+            if (PyDict_SetItem(scope, state->key_query_string, py_qs) < 0) {
+                Py_DECREF(py_qs);
+                return -1;
+            }
+            Py_DECREF(py_qs);
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Get scope from cache or create new one
+ *
+ * For paths that are in the cache, clones the template and updates
+ * dynamic fields. For cache misses, builds full scope and caches template.
+ */
+static PyObject *get_cached_scope(ErlNifEnv *env, ERL_NIF_TERM scope_map);
 
 /* ============================================================================
  * Thread-Local Response Pool
@@ -1422,6 +1619,106 @@ static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
 }
 
 /* ============================================================================
+ * Scope Template Caching
+ * ============================================================================ */
+
+/**
+ * @brief Get scope from cache or create new one
+ *
+ * For paths that are in the cache, clones the template and updates
+ * dynamic fields. For cache misses, builds full scope and caches template.
+ */
+static PyObject *get_cached_scope(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
+    /* Initialize cache on first use */
+    if (tl_scope_cache == NULL || !tl_scope_cache->initialized) {
+        if (asgi_init_scope_cache() < 0) {
+            /* Fallback to uncached */
+            return asgi_scope_from_map(env, scope_map);
+        }
+    }
+
+    asgi_interp_state_t *state = get_asgi_interp_state();
+    if (!state) {
+        return asgi_scope_from_map(env, scope_map);
+    }
+
+    /* Get current interpreter for subinterpreter/free-threading safety */
+    PyInterpreterState *current_interp = PyInterpreterState_Get();
+
+    /* Extract path for cache lookup - use Erlang atom */
+    ERL_NIF_TERM path_term;
+    if (!enif_get_map_value(env, scope_map, ATOM_ASGI_PATH, &path_term)) {
+        return asgi_scope_from_map(env, scope_map);
+    }
+
+    ErlNifBinary path_bin;
+    if (!enif_inspect_binary(env, path_term, &path_bin)) {
+        return asgi_scope_from_map(env, scope_map);
+    }
+
+    uint64_t path_hash = hash_path(path_bin.data, path_bin.size);
+    int idx = path_hash % SCOPE_CACHE_SIZE;
+
+    scope_cache_entry_t *entry = &tl_scope_cache->entries[idx];
+
+    /* Cache hit check: hash matches, path length matches, AND same interpreter
+     * The interpreter check is critical for subinterpreter/free-threading safety:
+     * PyObjects from different interpreters cannot be shared. */
+    if (entry->path_hash == path_hash &&
+        entry->path_len == path_bin.size &&
+        entry->interp == current_interp &&
+        entry->scope_template != NULL) {
+        /* Cache hit - clone template and update dynamic fields */
+        PyObject *scope = PyDict_Copy(entry->scope_template);
+        if (scope == NULL) {
+            return asgi_scope_from_map(env, scope_map);
+        }
+
+        if (update_dynamic_scope_fields(env, scope, scope_map) < 0) {
+            Py_DECREF(scope);
+            return asgi_scope_from_map(env, scope_map);
+        }
+
+        return scope;
+    }
+
+    /* Cache miss or interpreter mismatch - build full scope */
+    PyObject *scope = asgi_scope_from_map(env, scope_map);
+    if (scope == NULL) {
+        return NULL;
+    }
+
+    /* Create template by copying scope and removing dynamic fields */
+    PyObject *template = PyDict_Copy(scope);
+    if (template != NULL) {
+        /* Remove dynamic fields from template */
+        PyDict_DelItem(template, state->key_client);
+        PyDict_DelItem(template, state->key_headers);
+        PyDict_DelItem(template, state->key_query_string);
+        PyErr_Clear();  /* DelItem may fail if key doesn't exist */
+
+        /* If replacing entry from different interpreter, release old reference
+         * Note: In free-threading mode, we might need the other interpreter's GIL
+         * to safely decref, but since we're using thread-local storage, each thread
+         * should only ever see entries from its own interpreter transitions. */
+        if (entry->scope_template != NULL && entry->interp != current_interp) {
+            /* Different interpreter - can't safely decref, just overwrite
+             * This may leak in edge cases but is safe */
+            entry->scope_template = NULL;
+        }
+
+        /* Update cache with current interpreter tracking */
+        Py_XDECREF(entry->scope_template);
+        entry->path_hash = path_hash;
+        entry->path_len = path_bin.size;
+        entry->scope_template = template;
+        entry->interp = current_interp;
+    }
+
+    return scope;
+}
+
+/* ============================================================================
  * Direct Response Extraction
  * ============================================================================ */
 
@@ -1532,7 +1829,8 @@ static ERL_NIF_TERM nif_asgi_build_scope(ErlNifEnv *env, int argc, const ERL_NIF
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    PyObject *scope = asgi_scope_from_map(env, argv[0]);
+    /* Use cached scope for better performance with repeated paths */
+    PyObject *scope = get_cached_scope(env, argv[0]);
     if (scope == NULL) {
         ERL_NIF_TERM error = make_py_error(env);
         PyGILState_Release(gstate);
@@ -1613,8 +1911,8 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         goto cleanup;
     }
 
-    /* Build optimized scope dict from Erlang map */
-    PyObject *scope = asgi_scope_from_map(env, argv[3]);
+    /* Build optimized scope dict from Erlang map (with caching) */
+    PyObject *scope = get_cached_scope(env, argv[3]);
     if (scope == NULL) {
         Py_DECREF(asgi_app);
         result = make_py_error(env);

@@ -90,6 +90,21 @@
  */
 #define ASGI_MAX_INTERPRETERS 64
 
+/**
+ * @def SCOPE_CACHE_SIZE
+ * @brief Number of scope templates to cache per thread
+ */
+#define SCOPE_CACHE_SIZE 64
+
+/* ============================================================================
+ * ASGI Erlang Atoms
+ * ============================================================================ */
+
+extern ERL_NIF_TERM ATOM_ASGI_PATH;
+extern ERL_NIF_TERM ATOM_ASGI_HEADERS;
+extern ERL_NIF_TERM ATOM_ASGI_CLIENT;
+extern ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
+
 /* ============================================================================
  * Per-Interpreter State (Sub-interpreter & Free-threading Support)
  * ============================================================================ */

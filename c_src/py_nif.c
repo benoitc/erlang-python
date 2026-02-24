@@ -1777,6 +1777,12 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_SPAN_END = enif_make_atom(env, "span_end");
     ATOM_SPAN_EVENT = enif_make_atom(env, "span_event");
 
+    /* ASGI scope atoms */
+    ATOM_ASGI_PATH = enif_make_atom(env, "path");
+    ATOM_ASGI_HEADERS = enif_make_atom(env, "headers");
+    ATOM_ASGI_CLIENT = enif_make_atom(env, "client");
+    ATOM_ASGI_QUERY_STRING = enif_make_atom(env, "query_string");
+
     /* Initialize event loop module */
     if (event_loop_init(env) < 0) {
         return -1;
