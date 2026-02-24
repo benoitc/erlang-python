@@ -550,6 +550,47 @@ The `erlang_asyncio` module provides asyncio-compatible primitives that use Erla
 
 Unlike the standard `asyncio` module which uses Python's polling-based event loop, `erlang_asyncio` uses Erlang's `erlang:send_after/3` for timers and integrates directly with the BEAM scheduler. This eliminates Python event loop overhead (~0.5-1ms per operation) and provides more precise timing.
 
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         erlang_asyncio.sleep()                          │
+│                                                                         │
+│   Python                           Erlang                               │
+│   ──────                           ──────                               │
+│                                                                         │
+│   ┌─────────────────┐              ┌─────────────────────────────────┐  │
+│   │ erlang_asyncio  │              │         py_event_worker         │  │
+│   │    .sleep(0.1)  │              │                                 │  │
+│   └────────┬────────┘              │  handle_info({sleep_wait,...})  │  │
+│            │                       │         │                       │  │
+│            ▼                       │         ▼                       │  │
+│   ┌─────────────────┐              │  erlang:send_after(100ms)       │  │
+│   │ py_event_loop.  │──{sleep_wait,│         │                       │  │
+│   │ _erlang_sleep() │   100, Id}──▶│         ▼                       │  │
+│   └────────┬────────┘              │  handle_info({sleep_complete})  │  │
+│            │                       │         │                       │  │
+│   ┌────────▼────────┐              │         ▼                       │  │
+│   │  Release GIL    │              │  py_nif:dispatch_sleep_complete │  │
+│   │  pthread_cond_  │◀─────────────│         │                       │  │
+│   │     wait()      │   signal     └─────────┼───────────────────────┘  │
+│   └────────┬────────┘                        │                          │
+│            │                                 │                          │
+│            ▼                                 ▼                          │
+│   ┌─────────────────┐              ┌─────────────────────────────────┐  │
+│   │  Reacquire GIL  │              │  pthread_cond_broadcast()       │  │
+│   │  Return result  │              │  (wakes Python thread)          │  │
+│   └─────────────────┘              └─────────────────────────────────┘  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key features:**
+- **GIL released during sleep** - Python thread doesn't hold the GIL while waiting
+- **BEAM scheduler integration** - Uses Erlang's native timer system
+- **Zero CPU usage** - Condition variable wait, no polling
+- **Sub-millisecond precision** - Timers managed by BEAM scheduler
+
 ### Basic Usage
 
 ```python
