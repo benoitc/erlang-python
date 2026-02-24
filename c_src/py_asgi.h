@@ -105,6 +105,9 @@ extern ERL_NIF_TERM ATOM_ASGI_HEADERS;
 extern ERL_NIF_TERM ATOM_ASGI_CLIENT;
 extern ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
 
+/* Resource type for zero-copy body buffers */
+extern ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE;
+
 /* ============================================================================
  * Per-Interpreter State (Sub-interpreter & Free-threading Support)
  * ============================================================================ */

@@ -1783,6 +1783,12 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ASGI_CLIENT = enif_make_atom(env, "client");
     ATOM_ASGI_QUERY_STRING = enif_make_atom(env, "query_string");
 
+    /* ASGI buffer resource type for zero-copy body handling */
+    ASGI_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "asgi_buffer",
+        asgi_buffer_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
     /* Initialize event loop module */
     if (event_loop_init(env) < 0) {
         return -1;

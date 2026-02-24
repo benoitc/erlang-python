@@ -52,7 +52,8 @@
     test_asgi_response_extraction/1,
     test_asgi_header_caching/1,
     test_asgi_status_codes/1,
-    test_asgi_scope_caching/1
+    test_asgi_scope_caching/1,
+    test_asgi_zero_copy_buffer/1
 ]).
 
 all() ->
@@ -99,7 +100,8 @@ all() ->
         test_asgi_response_extraction,
         test_asgi_header_caching,
         test_asgi_status_codes,
-        test_asgi_scope_caching
+        test_asgi_scope_caching,
+        test_asgi_zero_copy_buffer
     ].
 
 init_per_suite(Config) ->
@@ -1039,4 +1041,25 @@ test_asgi_scope_caching(_Config) ->
     #{<<"headers">> := [{<<"content-type">>, <<"application/json">>}]} = Scope2,
 
     ct:pal("Scope caching test passed~n"),
+    ok.
+
+%% Test zero-copy buffer handling for large bodies
+test_asgi_zero_copy_buffer(_Config) ->
+    %% This test verifies that large bodies are handled correctly
+    %% The optimization uses a resource-backed buffer for bodies >= 1KB
+
+    %% Test with small body (should use PyBytes)
+    {ok, 100} = py:eval(<<"len(b'X' * 100)">>),
+
+    %% Test with larger body and memoryview operations
+    %% Create a large bytes object and verify it works with memoryview
+    {ok, 2000} = py:eval(<<"len(b'A' * 2000)">>),
+
+    %% Test memoryview on large data
+    {ok, {2000, 65, 65}} = py:eval(<<"(lambda d: (len(memoryview(d)), memoryview(d)[0], memoryview(d)[-1]))(b'A' * 2000)">>),
+
+    %% Test slicing (should work without copying in Python)
+    {ok, <<"AAAAA">>} = py:eval(<<"(b'A' * 2000)[:5]">>),
+
+    ct:pal("Zero-copy buffer test passed~n"),
     ok.

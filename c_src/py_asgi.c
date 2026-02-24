@@ -56,6 +56,180 @@ ERL_NIF_TERM ATOM_ASGI_HEADERS;
 ERL_NIF_TERM ATOM_ASGI_CLIENT;
 ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
 
+/* Resource type for zero-copy body buffers */
+ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE = NULL;
+
+/* ============================================================================
+ * Zero-Copy Buffer Resource
+ * ============================================================================
+ * A NIF resource that holds binary data and can be exposed to Python via
+ * the buffer protocol. This enables zero-copy access within Python while
+ * ensuring the data stays valid as long as Python holds references.
+ */
+
+typedef struct {
+    unsigned char *data;    /* Binary data */
+    size_t size;            /* Data size */
+    int ref_count;          /* Python reference count for buffer views */
+} asgi_buffer_resource_t;
+
+/**
+ * @brief Destructor for buffer resources
+ */
+static void asgi_buffer_resource_dtor(ErlNifEnv *env, void *obj) {
+    (void)env;
+    asgi_buffer_resource_t *buf = (asgi_buffer_resource_t *)obj;
+    if (buf->data != NULL) {
+        enif_free(buf->data);
+        buf->data = NULL;
+    }
+}
+
+/* ============================================================================
+ * Python Buffer Object
+ * ============================================================================
+ * A Python object that wraps an ASGI buffer resource and exposes it via
+ * the buffer protocol for zero-copy access.
+ */
+
+typedef struct {
+    PyObject_HEAD
+    asgi_buffer_resource_t *resource;  /* NIF resource (we hold a reference) */
+    void *resource_ref;                /* For releasing the resource */
+} AsgiBufferObject;
+
+static PyTypeObject AsgiBufferType;  /* Forward declaration */
+
+/**
+ * @brief Release buffer callback for Python buffer protocol
+ */
+static void AsgiBuffer_releasebuffer(PyObject *obj, Py_buffer *view) {
+    (void)view;
+    AsgiBufferObject *self = (AsgiBufferObject *)obj;
+    if (self->resource != NULL) {
+        self->resource->ref_count--;
+    }
+}
+
+/**
+ * @brief Get buffer callback for Python buffer protocol
+ */
+static int AsgiBuffer_getbuffer(PyObject *obj, Py_buffer *view, int flags) {
+    AsgiBufferObject *self = (AsgiBufferObject *)obj;
+
+    if (self->resource == NULL || self->resource->data == NULL) {
+        PyErr_SetString(PyExc_BufferError, "Buffer has been released");
+        return -1;
+    }
+
+    /* Fill in the buffer structure */
+    view->obj = obj;
+    view->buf = self->resource->data;
+    view->len = self->resource->size;
+    view->readonly = 1;
+    view->itemsize = 1;
+    view->format = (flags & PyBUF_FORMAT) ? "B" : NULL;
+    view->ndim = 1;
+    view->shape = (flags & PyBUF_ND) ? &view->len : NULL;
+    view->strides = (flags & PyBUF_STRIDES) ? &view->itemsize : NULL;
+    view->suboffsets = NULL;
+    view->internal = NULL;
+
+    self->resource->ref_count++;
+    Py_INCREF(obj);
+
+    return 0;
+}
+
+static PyBufferProcs AsgiBuffer_as_buffer = {
+    .bf_getbuffer = AsgiBuffer_getbuffer,
+    .bf_releasebuffer = AsgiBuffer_releasebuffer,
+};
+
+/**
+ * @brief Deallocate buffer object
+ */
+static void AsgiBuffer_dealloc(AsgiBufferObject *self) {
+    if (self->resource_ref != NULL) {
+        enif_release_resource(self->resource_ref);
+        self->resource_ref = NULL;
+        self->resource = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+/**
+ * @brief Get length of buffer
+ */
+static Py_ssize_t AsgiBuffer_length(AsgiBufferObject *self) {
+    if (self->resource == NULL) {
+        return 0;
+    }
+    return (Py_ssize_t)self->resource->size;
+}
+
+/**
+ * @brief Get bytes representation
+ */
+static PyObject *AsgiBuffer_bytes(AsgiBufferObject *self) {
+    if (self->resource == NULL || self->resource->data == NULL) {
+        return PyBytes_FromStringAndSize("", 0);
+    }
+    return PyBytes_FromStringAndSize((char *)self->resource->data,
+                                      self->resource->size);
+}
+
+static PyMethodDef AsgiBuffer_methods[] = {
+    {"__bytes__", (PyCFunction)AsgiBuffer_bytes, METH_NOARGS,
+     "Return bytes copy of buffer"},
+    {NULL}
+};
+
+static PySequenceMethods AsgiBuffer_as_sequence = {
+    .sq_length = (lenfunc)AsgiBuffer_length,
+};
+
+static PyTypeObject AsgiBufferType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang_python.AsgiBuffer",
+    .tp_doc = "Zero-copy ASGI body buffer",
+    .tp_basicsize = sizeof(AsgiBufferObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)AsgiBuffer_dealloc,
+    .tp_as_buffer = &AsgiBuffer_as_buffer,
+    .tp_as_sequence = &AsgiBuffer_as_sequence,
+    .tp_methods = AsgiBuffer_methods,
+};
+
+/**
+ * @brief Create an AsgiBuffer from a NIF resource
+ */
+static PyObject *AsgiBuffer_from_resource(asgi_buffer_resource_t *resource,
+                                           void *resource_ref) {
+    AsgiBufferObject *obj = PyObject_New(AsgiBufferObject, &AsgiBufferType);
+    if (obj == NULL) {
+        return NULL;
+    }
+
+    obj->resource = resource;
+    obj->resource_ref = resource_ref;
+    /* Keep the resource alive */
+    enif_keep_resource(resource_ref);
+
+    return (PyObject *)obj;
+}
+
+/**
+ * @brief Initialize the AsgiBuffer type (call during module init)
+ */
+static int AsgiBuffer_init_type(void) {
+    if (PyType_Ready(&AsgiBufferType) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 /**
  * @brief Initialize a single interpreter state
  */
@@ -730,6 +904,11 @@ static int asgi_scope_init(void) {
         return 0;
     }
 
+    /* Initialize the AsgiBuffer Python type for zero-copy body handling */
+    if (AsgiBuffer_init_type() < 0) {
+        return -1;
+    }
+
     /* Initialize per-interpreter state for current interpreter */
     asgi_interp_state_t *state = get_asgi_interp_state();
     if (!state) {
@@ -1330,20 +1509,53 @@ static PyObject *asgi_binary_to_buffer(ErlNifEnv *env, ERL_NIF_TERM binary) {
         return NULL;
     }
 
-    /* For small bodies, copy to bytes */
+    /* For small bodies, copy to bytes - overhead of resource not worth it */
     if (bin.size < ASGI_ZERO_COPY_THRESHOLD) {
         return PyBytes_FromStringAndSize((char *)bin.data, bin.size);
     }
 
-    /* For large bodies, create a memoryview
-     * Note: This requires the Erlang binary to stay valid during processing.
-     * The memoryview points directly to the binary's memory. */
+    /* For large bodies, use resource-backed buffer for zero-copy Python access.
+     *
+     * This approach:
+     * 1. Copies data once into a NIF resource
+     * 2. Resource stays alive as long as Python holds references
+     * 3. Python can slice/view the buffer without additional copies
+     * 4. Works safely with async code since resource lifetime is managed
+     */
+    if (ASGI_BUFFER_RESOURCE_TYPE == NULL) {
+        /* Fallback if resource type not initialized */
+        return PyBytes_FromStringAndSize((char *)bin.data, bin.size);
+    }
 
-    /* Create a bytes object that we'll use as the buffer source.
-     * For true zero-copy, we'd need to implement a custom buffer object
-     * that wraps the Erlang binary. For now, we still copy but use
-     * efficient memoryview semantics for subsequent processing. */
-    return PyBytes_FromStringAndSize((char *)bin.data, bin.size);
+    /* Allocate resource */
+    asgi_buffer_resource_t *resource = enif_alloc_resource(
+        ASGI_BUFFER_RESOURCE_TYPE, sizeof(asgi_buffer_resource_t));
+    if (resource == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    /* Allocate and copy data */
+    resource->data = enif_alloc(bin.size);
+    if (resource->data == NULL) {
+        enif_release_resource(resource);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    memcpy(resource->data, bin.data, bin.size);
+    resource->size = bin.size;
+    resource->ref_count = 0;
+
+    /* Create Python buffer object wrapping the resource */
+    PyObject *buffer = AsgiBuffer_from_resource(resource, resource);
+    /* Release our reference - Python now owns it */
+    enif_release_resource(resource);
+
+    if (buffer == NULL) {
+        return NULL;
+    }
+
+    return buffer;
 }
 
 /* ============================================================================
