@@ -1155,6 +1155,68 @@ ERL_NIF_TERM nif_handle_fd_event(ErlNifEnv *env, int argc,
 }
 
 /**
+ * handle_fd_event_and_reselect(FdRes, Type) -> ok | {error, Reason}
+ *
+ * Combined operation: handles FD event AND reselects for next event.
+ * This eliminates one roundtrip - the worker can dispatch and reselect
+ * in a single NIF call.
+ *
+ * Safe because:
+ * - Duplicate detection in pending queue prevents flooding
+ * - OTP 28+ has optimized pollset for frequently re-enabled FDs
+ *
+ * Type: read | write
+ */
+ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    /* Check if FD is still open */
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return ATOM_OK;  /* Silently ignore events on closing FDs */
+    }
+
+    erlang_event_loop_t *loop = fd_res->loop;
+    if (loop == NULL) {
+        return make_error(env, "no_loop");
+    }
+
+    /* Determine type and get callback ID */
+    bool is_read = enif_compare(argv[1], ATOM_READ) == 0;
+    uint64_t callback_id;
+    bool is_active;
+
+    if (is_read) {
+        callback_id = fd_res->read_callback_id;
+        is_active = fd_res->reader_active;
+    } else {
+        callback_id = fd_res->write_callback_id;
+        is_active = fd_res->writer_active;
+    }
+
+    if (!is_active || callback_id == 0) {
+        return ATOM_OK;  /* Watcher was stopped, ignore */
+    }
+
+    /* Add to pending queue (has duplicate detection) */
+    event_type_t event_type = is_read ? EVENT_TYPE_READ : EVENT_TYPE_WRITE;
+    event_loop_add_pending(loop, event_type, callback_id, fd_res->fd);
+
+    /* Immediately reselect for next event */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    int select_flags = is_read ? ERL_NIF_SELECT_READ : ERL_NIF_SELECT_WRITE;
+    enif_select(env, (ErlNifEvent)fd_res->fd, select_flags,
+                fd_res, target_pid, enif_make_ref(env));
+
+    return ATOM_OK;
+}
+
+/**
  * event_loop_wakeup(LoopRef) -> ok
  *
  * Wakes up any threads waiting in poll_events.

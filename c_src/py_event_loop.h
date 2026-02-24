@@ -532,6 +532,16 @@ ERL_NIF_TERM nif_handle_fd_event(ErlNifEnv *env, int argc,
                                   const ERL_NIF_TERM argv[]);
 
 /**
+ * @brief Handle FD event and immediately reselect for next event
+ *
+ * Combined operation that eliminates one roundtrip.
+ *
+ * NIF: handle_fd_event_and_reselect(FdRef, Type) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]);
+
+/**
  * @brief Stop read monitoring without closing the FD
  *
  * Pauses monitoring. Can be resumed with start_reader.

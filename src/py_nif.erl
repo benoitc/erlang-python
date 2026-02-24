@@ -98,6 +98,7 @@
     reselect_writer_fd/1,
     %% FD lifecycle management (uvloop-like API)
     handle_fd_event/2,
+    handle_fd_event_and_reselect/2,
     stop_reader/1,
     start_reader/1,
     stop_writer/1,
@@ -647,6 +648,13 @@ reselect_writer_fd(_FdRes) ->
 %% Type: read | write
 -spec handle_fd_event(reference(), read | write) -> ok | {error, term()}.
 handle_fd_event(_FdRef, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Handle FD event and immediately reselect for next event.
+%% Combined operation that eliminates one roundtrip - dispatch and reselect in one NIF call.
+%% Type: read | write
+-spec handle_fd_event_and_reselect(reference(), read | write) -> ok | {error, term()}.
+handle_fd_event_and_reselect(_FdRef, _Type) ->
     ?NIF_STUB.
 
 %% @doc Stop/pause read monitoring without closing the FD.

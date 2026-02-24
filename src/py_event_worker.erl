@@ -45,7 +45,7 @@ handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
     #state{loop_ref = LoopRef, stats = Stats} = State,
-    py_nif:handle_fd_event(FdRes, read),
+    py_nif:handle_fd_event_and_reselect(FdRes, read),
     py_nif:event_loop_wakeup(LoopRef),
     NewStats = Stats#{select_count => maps:get(select_count, Stats, 0) + 1,
                       dispatch_count => maps:get(dispatch_count, Stats, 0) + 1},
@@ -53,7 +53,7 @@ handle_info({select, FdRes, _Ref, ready_input}, State) ->
 
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
     #state{loop_ref = LoopRef, stats = Stats} = State,
-    py_nif:handle_fd_event(FdRes, write),
+    py_nif:handle_fd_event_and_reselect(FdRes, write),
     py_nif:event_loop_wakeup(LoopRef),
     NewStats = Stats#{select_count => maps:get(select_count, Stats, 0) + 1,
                       dispatch_count => maps:get(dispatch_count, Stats, 0) + 1},
