@@ -13,6 +13,56 @@ The `ErlangEventLoop` is a custom asyncio event loop backed by Erlang's schedule
 - **Full GIL release during waits** - Python's Global Interpreter Lock is released while waiting for events
 - **Native Erlang scheduler integration** - I/O events are handled by BEAM's scheduler
 
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          ErlangEventLoop Architecture                        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Python (asyncio)                    Erlang (BEAM)                          │
+│   ────────────────                    ─────────────                          │
+│                                                                              │
+│   ┌──────────────────┐                ┌────────────────────────────────────┐ │
+│   │  ErlangEventLoop │                │           py_event_worker          │ │
+│   │                  │                │                                    │ │
+│   │  call_later()  ──┼─{timer,ms,id}─▶│  erlang:send_after(ms, self, {})   │ │
+│   │  call_at()       │                │         │                          │ │
+│   │                  │                │         ▼                          │ │
+│   │  add_reader()  ──┼──{add_fd,fd}──▶│  enif_select(fd, READ)             │ │
+│   │  add_writer()    │                │         │                          │ │
+│   │                  │                │         ▼                          │ │
+│   │                  │◀──{fd_ready}───│  handle_info({select, ...})        │ │
+│   │                  │◀──{timeout}────│  handle_info({timeout, ...})       │ │
+│   │                  │                │                                    │ │
+│   │  _run_once()     │                └────────────────────────────────────┘ │
+│   │      │           │                                                       │
+│   │      ▼           │                ┌────────────────────────────────────┐ │
+│   │  process pending │                │           py_event_router          │ │
+│   │  callbacks       │                │                                    │ │
+│   └──────────────────┘                │  Routes events to correct loop     │ │
+│                                       │  based on resource backref         │ │
+│   ┌──────────────────┐                └────────────────────────────────────┘ │
+│   │  erlang_asyncio  │                                                       │
+│   │                  │                ┌────────────────────────────────────┐ │
+│   │  sleep()       ──┼─{sleep_wait}──▶│  erlang:send_after() + cond_wait   │ │
+│   │  gather()        │                │                                    │ │
+│   │  wait_for()      │◀──{complete}───│  pthread_cond_broadcast()          │ │
+│   │  create_task()   │                └────────────────────────────────────┘ │
+│   └──────────────────┘                                                       │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Components:**
+
+| Component | Role |
+|-----------|------|
+| `ErlangEventLoop` | Python asyncio event loop using Erlang for I/O and timers |
+| `py_event_worker` | Erlang gen_server managing FDs and timers for a Python context |
+| `py_event_router` | Routes timer/FD events to the correct event loop instance |
+| `erlang_asyncio` | High-level asyncio-compatible API with direct Erlang integration |
+
 ## Usage
 
 ```python
