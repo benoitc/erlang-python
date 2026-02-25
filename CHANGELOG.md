@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.1 (2026-02-25)
+
+### Fixed
+
+- **ASGI scope caching bug** - HTTP method was not treated as a dynamic field in the
+  scope template cache. This caused incorrect method values when the same path was
+  accessed with different HTTP methods (e.g., GET /path followed by POST /path would
+  return method="GET" for both requests).
+
 ## 1.8.0 (2026-02-25)
 
 ### Added
