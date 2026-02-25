@@ -145,6 +145,8 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_event_loop.c"
 #include "py_asgi.c"
 #include "py_wsgi.c"
+#include "py_worker_pool.h"
+#include "py_worker_pool.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -1784,6 +1786,9 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ASGI_QUERY_STRING = enif_make_atom(env, "query_string");
     ATOM_ASGI_METHOD = enif_make_atom(env, "method");
 
+    /* Worker pool atoms */
+    pool_atoms_init(env);
+
     /* ASGI buffer resource type for zero-copy body handling */
     ASGI_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "asgi_buffer",
@@ -1952,9 +1957,19 @@ static ErlNifFunc nif_funcs[] = {
     /* ASGI optimizations */
     {"asgi_build_scope", 1, nif_asgi_build_scope, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"asgi_run", 5, nif_asgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND},
+#ifdef ASGI_PROFILING
+    {"asgi_profile_stats", 0, nif_asgi_profile_stats, 0},
+    {"asgi_profile_reset", 0, nif_asgi_profile_reset, 0},
+#endif
 
     /* WSGI optimizations */
-    {"wsgi_run", 4, nif_wsgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND}
+    {"wsgi_run", 4, nif_wsgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND},
+
+    /* Worker pool */
+    {"pool_start", 1, nif_pool_start, 0},
+    {"pool_stop", 0, nif_pool_stop, 0},
+    {"pool_submit", 5, nif_pool_submit, 0},
+    {"pool_stats", 0, nif_pool_stats, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

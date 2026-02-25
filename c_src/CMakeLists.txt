@@ -50,6 +50,13 @@ endif()
 # Performance build option (for maximum optimization)
 option(PERF_BUILD "Enable aggressive performance optimizations (-O3, LTO, native arch)" OFF)
 
+# ASGI profiling option (for internal timing analysis)
+option(ASGI_PROFILING "Enable ASGI internal profiling" OFF)
+if(ASGI_PROFILING)
+    message(STATUS "ASGI profiling enabled - timing instrumentation active")
+    add_definitions(-DASGI_PROFILING)
+endif()
+
 if(PERF_BUILD)
     message(STATUS "Performance build enabled - using aggressive optimizations")
     # Override compiler flags for maximum performance

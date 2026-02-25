@@ -128,8 +128,16 @@
     %% ASGI optimizations
     asgi_build_scope/1,
     asgi_run/5,
+    %% ASGI profiling (only available when compiled with -DASGI_PROFILING)
+    asgi_profile_stats/0,
+    asgi_profile_reset/0,
     %% WSGI optimizations
-    wsgi_run/4
+    wsgi_run/4,
+    %% Worker pool
+    pool_start/1,
+    pool_stop/0,
+    pool_submit/5,
+    pool_stats/0
 ]).
 
 -on_load(load_nif/0).
@@ -867,6 +875,34 @@ asgi_build_scope(_ScopeMap) ->
 asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
     ?NIF_STUB.
 
+%% @doc Get ASGI profiling statistics.
+%%
+%% Only available when NIF is compiled with -DASGI_PROFILING.
+%% Returns timing breakdown for each phase of ASGI request handling:
+%% - gil_acquire_us: Time to acquire Python GIL
+%% - string_conv_us: Time to convert binary strings
+%% - module_import_us: Time to import Python module
+%% - get_callable_us: Time to get ASGI callable
+%% - scope_build_us: Time to build scope dict
+%% - body_conv_us: Time to convert body binary
+%% - runner_import_us: Time to import runner module
+%% - runner_call_us: Time to call the runner (includes Python ASGI execution)
+%% - response_extract_us: Time to extract response
+%% - gil_release_us: Time to release GIL
+%% - total_us: Total time
+%%
+%% @returns {ok, StatsMap} or {error, not_available} if profiling not enabled
+-spec asgi_profile_stats() -> {ok, map()} | {error, term()}.
+asgi_profile_stats() ->
+    {error, profiling_not_enabled}.
+
+%% @doc Reset ASGI profiling statistics.
+%%
+%% Only available when NIF is compiled with -DASGI_PROFILING.
+-spec asgi_profile_reset() -> ok | {error, term()}.
+asgi_profile_reset() ->
+    {error, profiling_not_enabled}.
+
 %%% ============================================================================
 %%% WSGI Optimizations
 %%% ============================================================================
@@ -892,4 +928,75 @@ asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
 -spec wsgi_run(binary(), binary(), binary(), map()) ->
     {ok, {binary(), [{binary(), binary()}], binary()}} | {error, term()}.
 wsgi_run(_Runner, _Module, _Callable, _EnvironMap) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Worker Pool
+%%% ============================================================================
+
+%% @doc Start the worker pool with the specified number of workers.
+%%
+%% Creates a pool of worker threads that process Python operations.
+%% Each worker may have its own subinterpreter (Python 3.12+) for true
+%% parallelism, or share the GIL with optimized batching.
+%%
+%% If NumWorkers is 0, the pool will use the number of CPU cores.
+%%
+%% @param NumWorkers Number of worker threads (0 = auto-detect)
+%% @returns ok on success, or {error, Reason}
+-spec pool_start(non_neg_integer()) -> ok | {error, term()}.
+pool_start(_NumWorkers) ->
+    ?NIF_STUB.
+
+%% @doc Stop the worker pool.
+%%
+%% Signals all workers to shut down and waits for them to terminate.
+%% Any pending requests will receive {error, pool_shutdown}.
+%%
+%% @returns ok
+-spec pool_stop() -> ok.
+pool_stop() ->
+    ?NIF_STUB.
+
+%% @doc Submit a request to the worker pool.
+%%
+%% Submits an asynchronous request to the pool. The caller will receive
+%% a {py_response, RequestId, Result} message when the request completes.
+%%
+%% Request types and arguments:
+%% <ul>
+%% <li>`call' - Module, Func, Args, undefined (or Timeout)</li>
+%% <li>`apply' - Module, Func, Args, Kwargs</li>
+%% <li>`eval' - Code, Locals, undefined, undefined</li>
+%% <li>`exec' - Code, undefined, undefined, undefined</li>
+%% <li>`asgi' - Runner, Module, Callable, {Scope, Body}</li>
+%% <li>`wsgi' - Module, Callable, Environ, undefined</li>
+%% </ul>
+%%
+%% @param Type Request type atom
+%% @param Arg1 First argument (varies by type)
+%% @param Arg2 Second argument (varies by type)
+%% @param Arg3 Third argument (varies by type)
+%% @param Arg4 Fourth argument (varies by type)
+%% @returns {ok, RequestId} on success, or {error, Reason}
+-spec pool_submit(atom(), term(), term(), term(), term()) ->
+    {ok, non_neg_integer()} | {error, term()}.
+pool_submit(_Type, _Arg1, _Arg2, _Arg3, _Arg4) ->
+    ?NIF_STUB.
+
+%% @doc Get worker pool statistics.
+%%
+%% Returns a map with the following keys:
+%% <ul>
+%% <li>`num_workers' - Number of worker threads</li>
+%% <li>`initialized' - Whether the pool is started</li>
+%% <li>`use_subinterpreters' - Whether using subinterpreters (Python 3.12+)</li>
+%% <li>`free_threaded' - Whether using free-threaded Python (3.13+)</li>
+%% <li>`pending_count' - Number of pending requests in queue</li>
+%% <li>`total_enqueued' - Total requests submitted</li>
+%% </ul>
+%%
+%% @returns Stats map
+-spec pool_stats() -> map().
+pool_stats() ->
     ?NIF_STUB.
