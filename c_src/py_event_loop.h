@@ -165,16 +165,26 @@ typedef struct {
  * @brief Main state for the Erlang-backed asyncio event loop
  *
  * This structure maintains all state needed for the event loop:
- * - Reference to the Erlang router process
+ * - Reference to the Erlang worker process (scalable I/O model)
+ * - Reference to the Erlang router process (legacy)
  * - Pending events queue
  * - Synchronization primitives
  */
 typedef struct erlang_event_loop {
-    /** @brief PID of the py_event_router gen_server */
+    /** @brief PID of the py_event_router gen_server (legacy) */
     ErlNifPid router_pid;
 
     /** @brief Whether router_pid has been set */
     bool has_router;
+
+    /** @brief PID of the py_event_worker gen_server (scalable I/O model) */
+    ErlNifPid worker_pid;
+
+    /** @brief Whether worker_pid has been set */
+    bool has_worker;
+
+    /** @brief Loop identifier for routing */
+    char loop_id[64];
 
     /** @brief Mutex protecting the event loop state */
     pthread_mutex_t mutex;
@@ -229,6 +239,20 @@ typedef struct erlang_event_loop {
 
     /** @brief Count of occupied slots in hash set */
     int pending_hash_count;
+
+    /* ========== Synchronous Sleep Support ========== */
+
+    /** @brief Current synchronous sleep ID being waited on */
+    _Atomic uint64_t sync_sleep_id;
+
+    /** @brief Flag indicating sleep has completed */
+    _Atomic bool sync_sleep_complete;
+
+    /** @brief Condition variable for sleep completion notification */
+    pthread_cond_t sync_sleep_cond;
+
+    /** @brief Whether sync_sleep_cond has been initialized */
+    bool sync_sleep_cond_initialized;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -301,12 +325,28 @@ ERL_NIF_TERM nif_event_loop_destroy(ErlNifEnv *env, int argc,
                                      const ERL_NIF_TERM argv[]);
 
 /**
- * @brief Set the router PID for the event loop
+ * @brief Set the router PID for the event loop (legacy)
  *
  * NIF: event_loop_set_router(LoopRef, RouterPid) -> ok | {error, Reason}
  */
 ERL_NIF_TERM nif_event_loop_set_router(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Set the worker PID for the event loop (scalable I/O model)
+ *
+ * NIF: event_loop_set_worker(LoopRef, WorkerPid) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_worker(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Set the loop identifier
+ *
+ * NIF: event_loop_set_id(LoopRef, LoopId) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_id(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Register a file descriptor for read monitoring
@@ -415,6 +455,16 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
 ERL_NIF_TERM nif_event_loop_wakeup(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]);
 
+/**
+ * @brief Signal that a synchronous sleep has completed
+ *
+ * Called from Erlang when a sleep timer expires.
+ *
+ * NIF: dispatch_sleep_complete(LoopRef, SleepId) -> ok
+ */
+ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
+
 /* ============================================================================
  * Internal Helper Functions
  * ============================================================================ */
@@ -504,6 +554,16 @@ ERL_NIF_TERM nif_reselect_writer(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_handle_fd_event(ErlNifEnv *env, int argc,
                                   const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Handle FD event and immediately reselect for next event
+ *
+ * Combined operation that eliminates one roundtrip.
+ *
+ * NIF: handle_fd_event_and_reselect(FdRef, Type) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Stop read monitoring without closing the FD

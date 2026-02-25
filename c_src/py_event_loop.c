@@ -193,9 +193,12 @@ void event_loop_destructor(ErlNifEnv *env, void *obj) {
     /* Signal shutdown */
     loop->shutdown = true;
 
-    /* Wake up any waiting threads */
+    /* Wake up any waiting threads (including sync sleep waiters) */
     pthread_mutex_lock(&loop->mutex);
     pthread_cond_broadcast(&loop->event_cond);
+    if (loop->sync_sleep_cond_initialized) {
+        pthread_cond_broadcast(&loop->sync_sleep_cond);
+    }
     pthread_mutex_unlock(&loop->mutex);
 
     /* Clear pending events (returns them to freelist) */
@@ -220,6 +223,9 @@ void event_loop_destructor(ErlNifEnv *env, void *obj) {
     /* Destroy synchronization primitives */
     pthread_mutex_destroy(&loop->mutex);
     pthread_cond_destroy(&loop->event_cond);
+    if (loop->sync_sleep_cond_initialized) {
+        pthread_cond_destroy(&loop->sync_sleep_cond);
+    }
 }
 
 /**
@@ -441,8 +447,19 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
         return make_error(env, "cond_init_failed");
     }
 
+    if (pthread_cond_init(&loop->sync_sleep_cond, NULL) != 0) {
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_release_resource(loop);
+        return make_error(env, "sleep_cond_init_failed");
+    }
+    loop->sync_sleep_cond_initialized = true;
+    atomic_store(&loop->sync_sleep_id, 0);
+    atomic_store(&loop->sync_sleep_complete, false);
+
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
+        pthread_cond_destroy(&loop->sync_sleep_cond);
         pthread_cond_destroy(&loop->event_cond);
         pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
@@ -511,6 +528,66 @@ ERL_NIF_TERM nif_event_loop_set_router(ErlNifEnv *env, int argc,
 }
 
 /**
+ * event_loop_set_worker(LoopRef, WorkerPid) -> ok
+ * Scalable I/O model: set the worker process for direct event routing.
+ */
+ERL_NIF_TERM nif_event_loop_set_worker(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!enif_get_local_pid(env, argv[1], &loop->worker_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+
+    loop->has_worker = true;
+
+    /* Also set as router for compatibility */
+    if (!loop->has_router) {
+        loop->router_pid = loop->worker_pid;
+        loop->has_router = true;
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * event_loop_set_id(LoopRef, LoopId) -> ok
+ */
+ERL_NIF_TERM nif_event_loop_set_id(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    ErlNifBinary id_bin;
+    if (!enif_inspect_binary(env, argv[1], &id_bin)) {
+        char atom_buf[64];
+        if (!enif_get_atom(env, argv[1], atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+            return make_error(env, "invalid_id");
+        }
+        strncpy(loop->loop_id, atom_buf, sizeof(loop->loop_id) - 1);
+        loop->loop_id[sizeof(loop->loop_id) - 1] = '\0';
+    } else {
+        size_t copy_len = id_bin.size < sizeof(loop->loop_id) - 1 ?
+                          id_bin.size : sizeof(loop->loop_id) - 1;
+        memcpy(loop->loop_id, id_bin.data, copy_len);
+        loop->loop_id[copy_len] = '\0';
+    }
+
+    return ATOM_OK;
+}
+
+/**
  * add_reader(LoopRef, Fd, CallbackId) -> {ok, FdRef}
  */
 ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
@@ -533,9 +610,11 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
@@ -547,7 +626,7 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     fd_res->fd = fd;
     fd_res->read_callback_id = callback_id;
     fd_res->write_callback_id = 0;
-    fd_res->owner_pid = loop->router_pid;
+    fd_res->owner_pid = *target_pid;
     fd_res->reader_active = true;
     fd_res->writer_active = false;
     fd_res->loop = loop;
@@ -558,14 +637,14 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     fd_res->owns_fd = false;
 
     /* Monitor owner process for cleanup on death */
-    if (enif_monitor_process(env, fd_res, &loop->router_pid,
+    if (enif_monitor_process(env, fd_res, target_pid,
                              &fd_res->owner_monitor) == 0) {
         fd_res->monitor_active = true;
     }
 
     /* Register with Erlang scheduler for read monitoring */
     int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_READ,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         if (fd_res->monitor_active) {
@@ -643,9 +722,11 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
@@ -657,7 +738,7 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     fd_res->fd = fd;
     fd_res->read_callback_id = 0;
     fd_res->write_callback_id = callback_id;
-    fd_res->owner_pid = loop->router_pid;
+    fd_res->owner_pid = *target_pid;
     fd_res->reader_active = false;
     fd_res->writer_active = true;
     fd_res->loop = loop;
@@ -668,14 +749,14 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     fd_res->owns_fd = false;
 
     /* Monitor owner process for cleanup on death */
-    if (enif_monitor_process(env, fd_res, &loop->router_pid,
+    if (enif_monitor_process(env, fd_res, target_pid,
                              &fd_res->owner_monitor) == 0) {
         fd_res->monitor_active = true;
     }
 
     /* Register with Erlang scheduler for write monitoring */
     int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         if (fd_res->monitor_active) {
@@ -755,14 +836,16 @@ ERL_NIF_TERM nif_call_later(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
     /* Create timer reference */
     ERL_NIF_TERM timer_ref = enif_make_ref(env);
 
-    /* Send message to router: {start_timer, DelayMs, CallbackId, TimerRef} */
+    /* Send message to target: {start_timer, DelayMs, CallbackId, TimerRef} */
     ERL_NIF_TERM msg = enif_make_tuple4(
         env,
         ATOM_START_TIMER,
@@ -771,7 +854,7 @@ ERL_NIF_TERM nif_call_later(ErlNifEnv *env, int argc,
         timer_ref
     );
 
-    if (!enif_send(env, &loop->router_pid, NULL, msg)) {
+    if (!enif_send(env, target_pid, NULL, msg)) {
         return make_error(env, "send_failed");
     }
 
@@ -793,14 +876,16 @@ ERL_NIF_TERM nif_cancel_timer(ErlNifEnv *env, int argc,
 
     ERL_NIF_TERM timer_ref = argv[1];
 
-    if (!loop->has_router) {
+    /* Scalable I/O: prefer worker, fall back to router */
+    if (!loop->has_worker && !loop->has_router) {
         return make_error(env, "no_router");
     }
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
 
-    /* Send message to router: {cancel_timer, TimerRef} */
+    /* Send message to target: {cancel_timer, TimerRef} */
     ERL_NIF_TERM msg = enif_make_tuple2(env, ATOM_CANCEL_TIMER, timer_ref);
 
-    if (!enif_send(env, &loop->router_pid, NULL, msg)) {
+    if (!enif_send(env, target_pid, NULL, msg)) {
         return make_error(env, "send_failed");
     }
 
@@ -1027,6 +1112,38 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
 }
 
 /**
+ * dispatch_sleep_complete(LoopRef, SleepId) -> ok
+ *
+ * Called from Erlang when a synchronous sleep timer expires.
+ * Signals the waiting Python thread to wake up.
+ */
+ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    ErlNifUInt64 sleep_id;
+    if (!enif_get_uint64(env, argv[1], &sleep_id)) {
+        return make_error(env, "invalid_sleep_id");
+    }
+
+    /* Only signal if this is the sleep we're waiting for */
+    pthread_mutex_lock(&loop->mutex);
+    if (atomic_load(&loop->sync_sleep_id) == sleep_id) {
+        atomic_store(&loop->sync_sleep_complete, true);
+        pthread_cond_broadcast(&loop->sync_sleep_cond);
+    }
+    pthread_mutex_unlock(&loop->mutex);
+
+    return ATOM_OK;
+}
+
+/**
  * handle_fd_event(FdRes, Type) -> ok | {error, Reason}
  *
  * Handles a select event by dispatching callback to pending queue.
@@ -1082,6 +1199,68 @@ ERL_NIF_TERM nif_handle_fd_event(ErlNifEnv *env, int argc,
     /* Note: No auto-reselect here. Python event loop should call start_reader/start_writer
      * after reading/writing data to re-enable monitoring. This prevents infinite loops
      * when FD remains ready (level-triggered behavior). */
+
+    return ATOM_OK;
+}
+
+/**
+ * handle_fd_event_and_reselect(FdRes, Type) -> ok | {error, Reason}
+ *
+ * Combined operation: handles FD event AND reselects for next event.
+ * This eliminates one roundtrip - the worker can dispatch and reselect
+ * in a single NIF call.
+ *
+ * Safe because:
+ * - Duplicate detection in pending queue prevents flooding
+ * - OTP 28+ has optimized pollset for frequently re-enabled FDs
+ *
+ * Type: read | write
+ */
+ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    /* Check if FD is still open */
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return ATOM_OK;  /* Silently ignore events on closing FDs */
+    }
+
+    erlang_event_loop_t *loop = fd_res->loop;
+    if (loop == NULL) {
+        return make_error(env, "no_loop");
+    }
+
+    /* Determine type and get callback ID */
+    bool is_read = enif_compare(argv[1], ATOM_READ) == 0;
+    uint64_t callback_id;
+    bool is_active;
+
+    if (is_read) {
+        callback_id = fd_res->read_callback_id;
+        is_active = fd_res->reader_active;
+    } else {
+        callback_id = fd_res->write_callback_id;
+        is_active = fd_res->writer_active;
+    }
+
+    if (!is_active || callback_id == 0) {
+        return ATOM_OK;  /* Watcher was stopped, ignore */
+    }
+
+    /* Add to pending queue (has duplicate detection) */
+    event_type_t event_type = is_read ? EVENT_TYPE_READ : EVENT_TYPE_WRITE;
+    event_loop_add_pending(loop, event_type, callback_id, fd_res->fd);
+
+    /* Immediately reselect for next event */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    int select_flags = is_read ? ERL_NIF_SELECT_READ : ERL_NIF_SELECT_WRITE;
+    enif_select(env, (ErlNifEvent)fd_res->fd, select_flags,
+                fd_res, target_pid, enif_make_ref(env));
 
     return ATOM_OK;
 }
@@ -1377,8 +1556,10 @@ ERL_NIF_TERM nif_reselect_reader(ErlNifEnv *env, int argc,
     }
 
     /* Re-register with Erlang scheduler for read monitoring */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -1417,8 +1598,10 @@ ERL_NIF_TERM nif_reselect_writer(ErlNifEnv *env, int argc,
     }
 
     /* Re-register with Erlang scheduler for write monitoring */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -1453,13 +1636,15 @@ ERL_NIF_TERM nif_reselect_reader_fd(ErlNifEnv *env, int argc,
 
     /* Use the loop stored in the fd resource */
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !loop->has_router) {
+    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
         return make_error(env, "no_loop");
     }
 
     /* Re-register with Erlang scheduler for read monitoring */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -1494,13 +1679,15 @@ ERL_NIF_TERM nif_reselect_writer_fd(ErlNifEnv *env, int argc,
 
     /* Use the loop stored in the fd resource */
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !loop->has_router) {
+    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
         return make_error(env, "no_loop");
     }
 
     /* Re-register with Erlang scheduler for write monitoring */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, &loop->router_pid, enif_make_ref(env));
+                          fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -1565,13 +1752,15 @@ ERL_NIF_TERM nif_start_reader(ErlNifEnv *env, int argc,
     }
 
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !loop->has_router) {
+    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
         return make_error(env, "no_loop");
     }
 
     /* Register with Erlang scheduler for read monitoring */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
-                          fd_res, &loop->router_pid, ATOM_UNDEFINED);
+                          fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         return make_error(env, "select_failed");
@@ -1638,13 +1827,15 @@ ERL_NIF_TERM nif_start_writer(ErlNifEnv *env, int argc,
     }
 
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !loop->has_router) {
+    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
         return make_error(env, "no_loop");
     }
 
     /* Register with Erlang scheduler for write monitoring */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, &loop->router_pid, ATOM_UNDEFINED);
+                          fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         return make_error(env, "select_failed");
@@ -2545,7 +2736,8 @@ static PyObject *py_add_reader(PyObject *self, PyObject *args) {
     fd_res->write_callback_id = 0;
     fd_res->reader_active = true;
     fd_res->writer_active = false;
-    fd_res->owner_pid = loop->router_pid;
+    /* Use worker_pid when available for scalable I/O */
+    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
 
     /* Initialize lifecycle management fields */
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
@@ -2553,8 +2745,10 @@ static PyObject *py_add_reader(PyObject *self, PyObject *args) {
     fd_res->owns_fd = false;
 
     /* Register with enif_select using the loop's persistent msg_env */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
-                          ERL_NIF_SELECT_READ, fd_res, &loop->router_pid, ATOM_UNDEFINED);
+                          ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         enif_release_resource(fd_res);
@@ -2618,7 +2812,8 @@ static PyObject *py_add_writer(PyObject *self, PyObject *args) {
     fd_res->write_callback_id = callback_id;
     fd_res->reader_active = false;
     fd_res->writer_active = true;
-    fd_res->owner_pid = loop->router_pid;
+    /* Use worker_pid when available for scalable I/O */
+    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
 
     /* Initialize lifecycle management fields */
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
@@ -2626,8 +2821,10 @@ static PyObject *py_add_writer(PyObject *self, PyObject *args) {
     fd_res->owns_fd = false;
 
     /* Register with enif_select using the loop's persistent msg_env */
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
-                          ERL_NIF_SELECT_WRITE, fd_res, &loop->router_pid, ATOM_UNDEFINED);
+                          ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         enif_release_resource(fd_res);
@@ -2673,7 +2870,7 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
 
     /* Use per-interpreter event loop lookup */
     erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || !loop->has_router) {
+    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
@@ -2696,7 +2893,9 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
         enif_make_uint64(msg_env, timer_ref_id)
     );
 
-    int send_result = enif_send(NULL, &loop->router_pid, msg_env, msg);
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    int send_result = enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
 
     if (!send_result) {
@@ -2718,7 +2917,7 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
 
     /* Use per-interpreter event loop lookup */
     erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || !loop->has_router) {
+    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
         Py_RETURN_NONE;
     }
 
@@ -2734,7 +2933,9 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
         enif_make_uint64(msg_env, timer_ref_id)
     );
 
-    enif_send(NULL, &loop->router_pid, msg_env, msg);
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
     Py_RETURN_NONE;
 }
@@ -3114,8 +3315,8 @@ static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!loop->has_router) {
-        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router");
+    if (!loop->has_router && !loop->has_worker) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
 
@@ -3131,13 +3332,16 @@ static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
     fd_res->write_callback_id = 0;
     fd_res->reader_active = true;
     fd_res->writer_active = false;
-    fd_res->owner_pid = loop->router_pid;
+    /* Use worker_pid when available for scalable I/O */
+    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
     fd_res->monitor_active = false;
     fd_res->owns_fd = false;
 
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
-                          ERL_NIF_SELECT_READ, fd_res, &loop->router_pid, ATOM_UNDEFINED);
+                          ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         enif_release_resource(fd_res);
@@ -3192,8 +3396,8 @@ static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!loop->has_router) {
-        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router");
+    if (!loop->has_router && !loop->has_worker) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
 
@@ -3209,13 +3413,16 @@ static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
     fd_res->write_callback_id = callback_id;
     fd_res->reader_active = false;
     fd_res->writer_active = true;
-    fd_res->owner_pid = loop->router_pid;
+    /* Use worker_pid when available for scalable I/O */
+    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
     fd_res->monitor_active = false;
     fd_res->owns_fd = false;
 
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
-                          ERL_NIF_SELECT_WRITE, fd_res, &loop->router_pid, ATOM_UNDEFINED);
+                          ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         enif_release_resource(fd_res);
@@ -3270,8 +3477,8 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!loop->has_router) {
-        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router");
+    if (!loop->has_router && !loop->has_worker) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
 
@@ -3297,7 +3504,9 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         enif_make_uint64(msg_env, timer_ref_id)
     );
 
-    int send_result = enif_send(NULL, &loop->router_pid, msg_env, msg);
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    int send_result = enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
 
     if (!send_result) {
@@ -3324,7 +3533,7 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
         Py_RETURN_NONE;
     }
 
-    if (!loop->has_router) {
+    if (!loop->has_router && !loop->has_worker) {
         Py_RETURN_NONE;
     }
 
@@ -3339,7 +3548,9 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
         enif_make_uint64(msg_env, timer_ref_id)
     );
 
-    enif_send(NULL, &loop->router_pid, msg_env, msg);
+    /* Use worker_pid when available for scalable I/O */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
     Py_RETURN_NONE;
 }
@@ -3449,6 +3660,89 @@ static PyObject *py_get_pending_for(PyObject *self, PyObject *args) {
     return list;
 }
 
+/**
+ * Python function: _erlang_sleep(delay_ms) -> None
+ *
+ * Synchronous sleep that uses Erlang's timer system instead of asyncio.
+ * Sends {sleep_wait, DelayMs, SleepId} to the worker, then blocks waiting
+ * for the sleep completion signal.
+ *
+ * This is called from the ASGI fast path when asyncio.sleep() is detected,
+ * avoiding the need to create a full event loop.
+ */
+static PyObject *py_erlang_sleep(PyObject *self, PyObject *args) {
+    (void)self;
+    int delay_ms;
+
+    if (!PyArg_ParseTuple(args, "i", &delay_ms)) {
+        return NULL;
+    }
+
+    /* For zero or negative delay, return immediately */
+    if (delay_ms <= 0) {
+        Py_RETURN_NONE;
+    }
+
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL || loop->shutdown) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
+        return NULL;
+    }
+
+    /* Check if we have a worker to send to */
+    if (!loop->has_worker && !loop->has_router) {
+        PyErr_SetString(PyExc_RuntimeError, "No worker or router configured");
+        return NULL;
+    }
+
+    /* Generate a unique sleep ID */
+    uint64_t sleep_id = atomic_fetch_add(&loop->next_callback_id, 1);
+
+    /* Send {sleep_wait, DelayMs, SleepId} to worker */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
+        return NULL;
+    }
+
+    ERL_NIF_TERM msg = enif_make_tuple3(
+        msg_env,
+        enif_make_atom(msg_env, "sleep_wait"),
+        enif_make_int(msg_env, delay_ms),
+        enif_make_uint64(msg_env, sleep_id)
+    );
+
+    /* Use worker_pid when available, otherwise fall back to router_pid */
+    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    if (!enif_send(NULL, target_pid, msg_env, msg)) {
+        enif_free_env(msg_env);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to send sleep message");
+        return NULL;
+    }
+    enif_free_env(msg_env);
+
+    /* Set up for waiting on this sleep */
+    pthread_mutex_lock(&loop->mutex);
+    atomic_store(&loop->sync_sleep_id, sleep_id);
+    atomic_store(&loop->sync_sleep_complete, false);
+
+    /* Release GIL and wait for completion */
+    Py_BEGIN_ALLOW_THREADS
+    while (!atomic_load(&loop->sync_sleep_complete) && !loop->shutdown) {
+        pthread_cond_wait(&loop->sync_sleep_cond, &loop->mutex);
+    }
+    Py_END_ALLOW_THREADS
+
+    pthread_mutex_unlock(&loop->mutex);
+
+    if (loop->shutdown) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop shutdown during sleep");
+        return NULL;
+    }
+
+    Py_RETURN_NONE;
+}
+
 /* Module method definitions */
 static PyMethodDef PyEventLoopMethods[] = {
     /* Legacy API (uses global event loop) */
@@ -3478,6 +3772,8 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_remove_writer_for", py_remove_writer_for, METH_VARARGS, "Stop monitoring fd for writes on specific loop"},
     {"_schedule_timer_for", py_schedule_timer_for, METH_VARARGS, "Schedule timer on specific loop"},
     {"_cancel_timer_for", py_cancel_timer_for, METH_VARARGS, "Cancel timer on specific loop"},
+    /* Synchronous sleep (for ASGI fast path) */
+    {"_erlang_sleep", py_erlang_sleep, METH_VARARGS, "Synchronous sleep using Erlang timer"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -3552,8 +3848,19 @@ int create_default_event_loop(ErlNifEnv *env) {
         return -1;
     }
 
+    if (pthread_cond_init(&loop->sync_sleep_cond, NULL) != 0) {
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_release_resource(loop);
+        return -1;
+    }
+    loop->sync_sleep_cond_initialized = true;
+    atomic_store(&loop->sync_sleep_id, 0);
+    atomic_store(&loop->sync_sleep_complete, false);
+
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
+        pthread_cond_destroy(&loop->sync_sleep_cond);
         pthread_cond_destroy(&loop->event_cond);
         pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);

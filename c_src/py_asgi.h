@@ -90,6 +90,38 @@
  */
 #define ASGI_MAX_INTERPRETERS 64
 
+/**
+ * @def SCOPE_CACHE_SIZE
+ * @brief Number of scope templates to cache per thread
+ */
+#define SCOPE_CACHE_SIZE 64
+
+/**
+ * @def LAZY_HEADERS_THRESHOLD
+ * @brief Minimum number of headers to use lazy conversion
+ *
+ * For small header counts, eager conversion is faster due to lower overhead.
+ * Only use lazy conversion when there are enough headers to benefit.
+ */
+#ifndef LAZY_HEADERS_THRESHOLD
+#define LAZY_HEADERS_THRESHOLD 4
+#endif
+
+/* ============================================================================
+ * ASGI Erlang Atoms
+ * ============================================================================ */
+
+extern ERL_NIF_TERM ATOM_ASGI_PATH;
+extern ERL_NIF_TERM ATOM_ASGI_HEADERS;
+extern ERL_NIF_TERM ATOM_ASGI_CLIENT;
+extern ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
+
+/* Resource type for zero-copy body buffers */
+extern ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE;
+
+/* Resource type for lazy header conversion */
+extern ErlNifResourceType *ASGI_LAZY_HEADERS_RESOURCE_TYPE;
+
 /* ============================================================================
  * Per-Interpreter State (Sub-interpreter & Free-threading Support)
  * ============================================================================ */
@@ -170,6 +202,40 @@ typedef struct asgi_interp_state {
     /* Empty values */
     PyObject *empty_string;         /**< "" */
     PyObject *empty_bytes;          /**< b"" */
+
+    /* Pre-interned header names (bytes) for common HTTP headers */
+    PyObject *header_host;              /**< b"host" */
+    PyObject *header_accept;            /**< b"accept" */
+    PyObject *header_content_type;      /**< b"content-type" */
+    PyObject *header_content_length;    /**< b"content-length" */
+    PyObject *header_user_agent;        /**< b"user-agent" */
+    PyObject *header_cookie;            /**< b"cookie" */
+    PyObject *header_authorization;     /**< b"authorization" */
+    PyObject *header_cache_control;     /**< b"cache-control" */
+    PyObject *header_connection;        /**< b"connection" */
+    PyObject *header_accept_encoding;   /**< b"accept-encoding" */
+    PyObject *header_accept_language;   /**< b"accept-language" */
+    PyObject *header_referer;           /**< b"referer" */
+    PyObject *header_origin;            /**< b"origin" */
+    PyObject *header_if_none_match;     /**< b"if-none-match" */
+    PyObject *header_if_modified_since; /**< b"if-modified-since" */
+    PyObject *header_x_forwarded_for;   /**< b"x-forwarded-for" */
+
+    /* Cached HTTP status code integers */
+    PyObject *status_200;   /**< 200 OK */
+    PyObject *status_201;   /**< 201 Created */
+    PyObject *status_204;   /**< 204 No Content */
+    PyObject *status_301;   /**< 301 Moved Permanently */
+    PyObject *status_302;   /**< 302 Found */
+    PyObject *status_304;   /**< 304 Not Modified */
+    PyObject *status_400;   /**< 400 Bad Request */
+    PyObject *status_401;   /**< 401 Unauthorized */
+    PyObject *status_403;   /**< 403 Forbidden */
+    PyObject *status_404;   /**< 404 Not Found */
+    PyObject *status_405;   /**< 405 Method Not Allowed */
+    PyObject *status_500;   /**< 500 Internal Server Error */
+    PyObject *status_502;   /**< 502 Bad Gateway */
+    PyObject *status_503;   /**< 503 Service Unavailable */
 } asgi_interp_state_t;
 
 /**
@@ -549,6 +615,36 @@ static PyObject *asgi_binary_to_buffer(ErlNifEnv *env, ERL_NIF_TERM binary);
  * @pre GIL must be held
  */
 static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map);
+
+/**
+ * @brief Get cached header name or create new bytes object
+ *
+ * Looks up common header names in cache, falling back to creating
+ * a new bytes object for uncommon headers.
+ *
+ * @param state Per-interpreter ASGI state
+ * @param name Header name bytes
+ * @param len Header name length
+ * @return Python bytes object (new reference)
+ *
+ * @pre GIL must be held
+ */
+static PyObject *get_cached_header_name(asgi_interp_state_t *state,
+                                        const unsigned char *name, size_t len);
+
+/**
+ * @brief Extract ASGI response tuple directly to Erlang terms
+ *
+ * Optimized response conversion that directly extracts (status, headers, body)
+ * tuple elements without going through generic py_to_term().
+ *
+ * @param env NIF environment
+ * @param result Python result (expected: tuple(int, list, bytes))
+ * @return Erlang term {Status, Headers, Body} or generic conversion fallback
+ *
+ * @pre GIL must be held
+ */
+static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result);
 
 /** @} */
 

@@ -119,6 +119,26 @@ init([]) ->
         modules => [py_subinterp_pool]
     },
 
+    %% Event worker registry (for scalable I/O model)
+    WorkerRegistrySpec = #{
+        id => py_event_worker_registry,
+        start => {py_event_worker_registry, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_event_worker_registry]
+    },
+
+    %% Event worker supervisor (for dynamic workers)
+    WorkerSupSpec = #{
+        id => py_event_worker_sup,
+        start => {py_event_worker_sup, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [py_event_worker_sup]
+    },
+
     %% Event loop manager (for Erlang-native asyncio)
     EventLoopSpec = #{
         id => py_event_loop,
@@ -130,7 +150,8 @@ init([]) ->
     },
 
     Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec, EventLoopSpec],
+                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec,
+                WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

@@ -22,6 +22,23 @@ Compared to generic `py:call()`-based handling:
 | Direct NIF | +25-30% | +25-30% |
 | **Total** | ~60-80% | ~60-80% |
 
+#### ASGI NIF Optimizations
+
+The ASGI module includes six additional NIF-level optimizations:
+
+| Optimization | Improvement | Description |
+|--------------|-------------|-------------|
+| Direct Response Extraction | 5-10% | Extract `(status, headers, body)` directly to Erlang terms |
+| Pre-Interned Headers | 3-5% | 16 common HTTP headers cached as PyBytes |
+| Cached Status Codes | 1-2% | 14 common status codes cached as PyLong |
+| Zero-Copy Body | 10-15% | Large bodies (≥1KB) use buffer protocol |
+| Scope Template Caching | 15-20% | Thread-local cache of 64 scope templates |
+| Lazy Header Conversion | 5-10% | Headers converted on-demand (≥4 headers) |
+
+**Total expected improvement: 40-60%** for typical ASGI workloads on top of the base optimizations.
+
+These optimizations are automatic and require no code changes.
+
 ## ASGI Support
 
 ### Basic Usage
@@ -363,9 +380,36 @@ parse_wsgi_status(Status) ->
     binary_to_integer(CodeBin).
 ```
 
+## Performance Tips
+
+### Use erlang_asyncio for Sleep Operations
+
+For ASGI handlers that use `await asyncio.sleep()`, consider using `erlang_asyncio.sleep()` instead. This eliminates Python event loop overhead (~0.5-1ms per call) by using Erlang's native timer system:
+
+```python
+# In your ASGI application
+import erlang_asyncio
+
+async def delay_handler(scope, receive, send):
+    # More efficient than asyncio.sleep()
+    await erlang_asyncio.sleep(0.001)  # 1ms delay
+
+    await send({
+        'type': 'http.response.start',
+        'status': 200,
+        'headers': [[b'content-type', b'text/plain']],
+    })
+    await send({
+        'type': 'http.response.body',
+        'body': b'OK',
+    })
+```
+
+For endpoints with short delays (1-10ms), this can improve throughput by 2-3x. See [Asyncio](asyncio.md#erlang_asyncio-module) for the full API.
+
 ## See Also
 
 - [Getting Started](getting-started.md) - Basic usage guide
-- [Asyncio](asyncio.md) - Async event loop integration
+- [Asyncio](asyncio.md) - Async event loop integration and erlang_asyncio module
 - [Threading](threading.md) - Thread support and callbacks
 - [Scalability](scalability.md) - Performance tuning

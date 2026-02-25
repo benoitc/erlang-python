@@ -1777,6 +1777,24 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_SPAN_END = enif_make_atom(env, "span_end");
     ATOM_SPAN_EVENT = enif_make_atom(env, "span_event");
 
+    /* ASGI scope atoms */
+    ATOM_ASGI_PATH = enif_make_atom(env, "path");
+    ATOM_ASGI_HEADERS = enif_make_atom(env, "headers");
+    ATOM_ASGI_CLIENT = enif_make_atom(env, "client");
+    ATOM_ASGI_QUERY_STRING = enif_make_atom(env, "query_string");
+
+    /* ASGI buffer resource type for zero-copy body handling */
+    ASGI_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "asgi_buffer",
+        asgi_buffer_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
+    /* ASGI lazy headers resource type for on-demand header conversion */
+    ASGI_LAZY_HEADERS_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "asgi_lazy_headers",
+        lazy_headers_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
     /* Initialize event loop module */
     if (event_loop_init(env) < 0) {
         return -1;
@@ -1882,6 +1900,8 @@ static ErlNifFunc nif_funcs[] = {
     {"event_loop_new", 0, nif_event_loop_new, 0},
     {"event_loop_destroy", 1, nif_event_loop_destroy, 0},
     {"event_loop_set_router", 2, nif_event_loop_set_router, 0},
+    {"event_loop_set_worker", 2, nif_event_loop_set_worker, 0},
+    {"event_loop_set_id", 2, nif_event_loop_set_id, 0},
     {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
@@ -1893,6 +1913,7 @@ static ErlNifFunc nif_funcs[] = {
     {"get_pending", 1, nif_get_pending, 0},
     {"dispatch_callback", 3, nif_dispatch_callback, 0},
     {"dispatch_timer", 2, nif_dispatch_timer, 0},
+    {"dispatch_sleep_complete", 2, nif_dispatch_sleep_complete, 0},
     {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0},
     {"reselect_reader", 2, nif_reselect_reader, 0},
     {"reselect_writer", 2, nif_reselect_writer, 0},
@@ -1900,6 +1921,7 @@ static ErlNifFunc nif_funcs[] = {
     {"reselect_writer_fd", 1, nif_reselect_writer_fd, 0},
     /* FD lifecycle management (uvloop-like API) */
     {"handle_fd_event", 2, nif_handle_fd_event, 0},
+    {"handle_fd_event_and_reselect", 2, nif_handle_fd_event_and_reselect, 0},
     {"stop_reader", 1, nif_stop_reader, 0},
     {"start_reader", 1, nif_start_reader, 0},
     {"stop_writer", 1, nif_stop_writer, 0},

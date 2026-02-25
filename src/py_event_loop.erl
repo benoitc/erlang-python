@@ -42,6 +42,8 @@
 
 -record(state, {
     loop_ref :: reference() | undefined,
+    worker_pid :: pid() | undefined,
+    worker_id :: binary(),
     router_pid :: pid() | undefined
 }).
 
@@ -92,16 +94,26 @@ init([]) ->
     %% Create and initialize the event loop immediately
     case py_nif:event_loop_new() of
         {ok, LoopRef} ->
+            %% Scalable I/O model: use dedicated worker process
+            WorkerId = <<"default">>,
+            {ok, WorkerPid} = py_event_worker:start_link(WorkerId, LoopRef),
+            ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
+            ok = py_nif:event_loop_set_id(LoopRef, WorkerId),
+
+            %% Also start legacy router for backward compatibility
             {ok, RouterPid} = py_event_router:start_link(LoopRef),
-            ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
-            %% Set shared router for per-loop created loops
-            %% All loops created via _loop_new() in Python will use this router
             ok = py_nif:set_shared_router(RouterPid),
+
             %% Make the event loop available to Python
             ok = py_nif:set_python_event_loop(LoopRef),
             %% Set ErlangEventLoop as the default asyncio policy
             ok = set_default_policy(),
-            {ok, #state{loop_ref = LoopRef, router_pid = RouterPid}};
+            {ok, #state{
+                loop_ref = LoopRef,
+                worker_pid = WorkerPid,
+                worker_id = WorkerId,
+                router_pid = RouterPid
+            }};
         {error, Reason} ->
             {stop, {event_loop_init_failed, Reason}}
     end.
@@ -126,14 +138,21 @@ set_default_policy() ->
     end.
 
 handle_call(get_loop, _From, #state{loop_ref = undefined} = State) ->
-    %% Create event loop and router on demand
+    %% Create event loop and worker on demand
     case py_nif:event_loop_new() of
         {ok, LoopRef} ->
+            WorkerId = <<"default">>,
+            {ok, WorkerPid} = py_event_worker:start_link(WorkerId, LoopRef),
+            ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
+            ok = py_nif:event_loop_set_id(LoopRef, WorkerId),
             {ok, RouterPid} = py_event_router:start_link(LoopRef),
-            ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
-            %% Make the event loop available to Python
             ok = py_nif:set_python_event_loop(LoopRef),
-            NewState = State#state{loop_ref = LoopRef, router_pid = RouterPid},
+            NewState = State#state{
+                loop_ref = LoopRef,
+                worker_pid = WorkerPid,
+                worker_id = WorkerId,
+                router_pid = RouterPid
+            },
             {reply, {ok, LoopRef}, NewState};
         {error, _} = Error ->
             {reply, Error, State}
@@ -151,13 +170,18 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{loop_ref = LoopRef, router_pid = RouterPid}) ->
+terminate(_Reason, #state{loop_ref = LoopRef, worker_pid = WorkerPid, router_pid = RouterPid}) ->
     %% Reset asyncio policy back to default before destroying the loop
     reset_default_policy(),
-    %% Clean up router
+    %% Clean up worker (scalable I/O model)
+    case WorkerPid of
+        undefined -> ok;
+        WPid -> py_event_worker:stop(WPid)
+    end,
+    %% Clean up legacy router
     case RouterPid of
         undefined -> ok;
-        Pid -> py_event_router:stop(Pid)
+        RPid -> py_event_router:stop(RPid)
     end,
     %% Clean up event loop
     case LoopRef of

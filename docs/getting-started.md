@@ -8,7 +8,15 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {erlang_python, {git, "https://github.com/benoitc/erlang-python.git", {tag, "v1.2.0"}}}
+    {erlang_python, "1.8.0"}
+]}.
+```
+
+Or from git:
+
+```erlang
+{deps, [
+    {erlang_python, {git, "https://github.com/benoitc/erlang-python.git", {branch, "main"}}}
 ]}.
 ```
 
@@ -342,6 +350,28 @@ elixir --erl "-pa _build/default/lib/erlang_python/ebin" examples/elixir_example
 
 This demonstrates basic calls, data conversion, callbacks, parallel processing (10x speedup), and AI integration.
 
+## Using erlang_asyncio
+
+For async Python code that uses `await asyncio.sleep()`, you can use `erlang_asyncio` for better performance. This module uses Erlang's native timer system instead of Python's event loop:
+
+```python
+import erlang_asyncio
+
+async def my_handler():
+    # Uses Erlang's erlang:send_after/3 - no Python event loop overhead
+    await erlang_asyncio.sleep(0.1)  # 100ms
+    return "done"
+
+# Run a coroutine
+result = erlang_asyncio.run(my_handler())
+
+# Also supports gather, wait_for, create_task, etc.
+async def main():
+    results = await erlang_asyncio.gather(task1(), task2(), task3())
+```
+
+This is especially useful in ASGI handlers where sleep operations are common. See [Asyncio](asyncio.md) for the full API reference.
+
 ## Next Steps
 
 - See [Type Conversion](type-conversion.md) for detailed type mapping
@@ -352,3 +382,4 @@ This demonstrates basic calls, data conversion, callbacks, parallel processing (
 - See [Logging and Tracing](logging.md) for Python logging and distributed tracing
 - See [AI Integration](ai-integration.md) for ML/AI examples
 - See [Asyncio Event Loop](asyncio.md) for the Erlang-native asyncio implementation with TCP and UDP support
+- See [Web Frameworks](web-frameworks.md) for ASGI/WSGI integration

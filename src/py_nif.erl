@@ -78,6 +78,8 @@
     event_loop_new/0,
     event_loop_destroy/1,
     event_loop_set_router/2,
+    event_loop_set_worker/2,
+    event_loop_set_id/2,
     event_loop_wakeup/1,
     add_reader/3,
     remove_reader/2,
@@ -89,6 +91,7 @@
     get_pending/1,
     dispatch_callback/3,
     dispatch_timer/2,
+    dispatch_sleep_complete/2,
     get_fd_callback_id/2,
     reselect_reader/2,
     reselect_writer/2,
@@ -96,6 +99,7 @@
     reselect_writer_fd/1,
     %% FD lifecycle management (uvloop-like API)
     handle_fd_event/2,
+    handle_fd_event_and_reselect/2,
     stop_reader/1,
     start_reader/1,
     stop_writer/1,
@@ -519,10 +523,21 @@ event_loop_new() ->
 event_loop_destroy(_LoopRef) ->
     ?NIF_STUB.
 
-%% @doc Set the router process for an event loop.
+%% @doc Set the router process for an event loop (legacy).
 %% The router receives enif_select messages and timer events.
 -spec event_loop_set_router(reference(), pid()) -> ok | {error, term()}.
 event_loop_set_router(_LoopRef, _RouterPid) ->
+    ?NIF_STUB.
+
+%% @doc Set the worker process for an event loop (scalable I/O model).
+%% The worker receives FD events and timers directly.
+-spec event_loop_set_worker(reference(), pid()) -> ok | {error, term()}.
+event_loop_set_worker(_LoopRef, _WorkerPid) ->
+    ?NIF_STUB.
+
+%% @doc Set the loop identifier for multi-loop routing.
+-spec event_loop_set_id(reference(), binary() | atom()) -> ok | {error, term()}.
+event_loop_set_id(_LoopRef, _LoopId) ->
     ?NIF_STUB.
 
 %% @doc Wake up an event loop from a wait.
@@ -592,6 +607,12 @@ dispatch_callback(_LoopRef, _CallbackId, _Type) ->
 dispatch_timer(_LoopRef, _CallbackId) ->
     ?NIF_STUB.
 
+%% @doc Signal that a synchronous sleep has completed.
+%% Called from Erlang when a sleep timer expires.
+-spec dispatch_sleep_complete(reference(), non_neg_integer()) -> ok.
+dispatch_sleep_complete(_LoopRef, _SleepId) ->
+    ?NIF_STUB.
+
 %% @doc Get callback ID from an fd resource.
 %% Type is read or write.
 -spec get_fd_callback_id(reference(), read | write) -> non_neg_integer() | undefined.
@@ -634,6 +655,13 @@ reselect_writer_fd(_FdRes) ->
 %% Type: read | write
 -spec handle_fd_event(reference(), read | write) -> ok | {error, term()}.
 handle_fd_event(_FdRef, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Handle FD event and immediately reselect for next event.
+%% Combined operation that eliminates one roundtrip - dispatch and reselect in one NIF call.
+%% Type: read | write
+-spec handle_fd_event_and_reselect(reference(), read | write) -> ok | {error, term()}.
+handle_fd_event_and_reselect(_FdRef, _Type) ->
     ?NIF_STUB.
 
 %% @doc Stop/pause read monitoring without closing the FD.
