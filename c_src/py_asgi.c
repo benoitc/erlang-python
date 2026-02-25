@@ -230,6 +230,457 @@ static int AsgiBuffer_init_type(void) {
     return 0;
 }
 
+/* ============================================================================
+ * Lazy Header List
+ * ============================================================================
+ * A Python sequence type that wraps Erlang header data and converts headers
+ * on-demand. Most ASGI apps only access 2-3 headers, so this avoids converting
+ * all headers upfront.
+ */
+
+/**
+ * @brief Resource type for lazy headers (defined in header, initialized in py_nif.c)
+ */
+ErlNifResourceType *ASGI_LAZY_HEADERS_RESOURCE_TYPE = NULL;
+
+/**
+ * @brief Single header data (copied from Erlang binary)
+ */
+typedef struct {
+    unsigned char *name;        /**< Header name bytes */
+    size_t name_len;            /**< Header name length */
+    unsigned char *value;       /**< Header value bytes */
+    size_t value_len;           /**< Header value length */
+} lazy_header_t;
+
+/**
+ * @brief Resource holding all header data
+ */
+typedef struct {
+    lazy_header_t *headers;     /**< Array of headers */
+    size_t count;               /**< Number of headers */
+    PyObject **converted;       /**< Cache of converted tuples (NULL if not converted) */
+    bool fully_converted;       /**< True if all headers have been converted */
+} lazy_headers_resource_t;
+
+/**
+ * @brief Destructor for lazy headers resource
+ */
+static void lazy_headers_resource_dtor(ErlNifEnv *env, void *obj) {
+    (void)env;
+    lazy_headers_resource_t *res = (lazy_headers_resource_t *)obj;
+
+    if (res->headers != NULL) {
+        for (size_t i = 0; i < res->count; i++) {
+            if (res->headers[i].name != NULL) {
+                enif_free(res->headers[i].name);
+            }
+            if (res->headers[i].value != NULL) {
+                enif_free(res->headers[i].value);
+            }
+        }
+        enif_free(res->headers);
+        res->headers = NULL;
+    }
+
+    /* Note: converted PyObjects are decreffed by Python when LazyHeaderList is freed */
+    if (res->converted != NULL) {
+        enif_free(res->converted);
+        res->converted = NULL;
+    }
+}
+
+/**
+ * @brief Python object wrapping lazy headers resource
+ */
+typedef struct {
+    PyObject_HEAD
+    lazy_headers_resource_t *resource;  /**< NIF resource */
+    void *resource_ref;                  /**< Resource reference for cleanup */
+} LazyHeaderListObject;
+
+static PyTypeObject LazyHeaderListType;  /* Forward declaration */
+
+/**
+ * @brief Deallocate LazyHeaderList
+ */
+static void LazyHeaderList_dealloc(LazyHeaderListObject *self) {
+    /* Decref any converted headers */
+    if (self->resource != NULL && self->resource->converted != NULL) {
+        for (size_t i = 0; i < self->resource->count; i++) {
+            Py_XDECREF(self->resource->converted[i]);
+        }
+    }
+
+    if (self->resource_ref != NULL) {
+        enif_release_resource(self->resource_ref);
+        self->resource_ref = NULL;
+        self->resource = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+/**
+ * @brief Get length of header list
+ */
+static Py_ssize_t LazyHeaderList_length(LazyHeaderListObject *self) {
+    if (self->resource == NULL) {
+        return 0;
+    }
+    return (Py_ssize_t)self->resource->count;
+}
+
+/**
+ * @brief Convert a single header to Python tuple
+ */
+static PyObject *convert_header_at_index(LazyHeaderListObject *self, Py_ssize_t idx) {
+    lazy_headers_resource_t *res = self->resource;
+
+    if (idx < 0 || (size_t)idx >= res->count) {
+        PyErr_SetString(PyExc_IndexError, "header index out of range");
+        return NULL;
+    }
+
+    /* Check cache first */
+    if (res->converted[idx] != NULL) {
+        Py_INCREF(res->converted[idx]);
+        return res->converted[idx];
+    }
+
+    /* Convert this header */
+    lazy_header_t *h = &res->headers[idx];
+
+    /* Use cached header name for common headers */
+    asgi_interp_state_t *state = get_asgi_interp_state();
+    if (state == NULL) {
+        return NULL;
+    }
+
+    PyObject *name = get_cached_header_name(state, h->name, h->name_len);
+    if (name == NULL) {
+        return NULL;
+    }
+
+    PyObject *value = PyBytes_FromStringAndSize((char *)h->value, h->value_len);
+    if (value == NULL) {
+        Py_DECREF(name);
+        return NULL;
+    }
+
+    PyObject *tuple = PyTuple_Pack(2, name, value);
+    Py_DECREF(name);
+    Py_DECREF(value);
+
+    if (tuple == NULL) {
+        return NULL;
+    }
+
+    /* Cache the result */
+    res->converted[idx] = tuple;
+    Py_INCREF(tuple);  /* One ref for cache, one for return */
+
+    return tuple;
+}
+
+/**
+ * @brief Get item at index (sequence protocol)
+ */
+static PyObject *LazyHeaderList_getitem(LazyHeaderListObject *self, Py_ssize_t idx) {
+    if (self->resource == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "headers resource released");
+        return NULL;
+    }
+
+    /* Handle negative indices */
+    if (idx < 0) {
+        idx += (Py_ssize_t)self->resource->count;
+    }
+
+    return convert_header_at_index(self, idx);
+}
+
+/**
+ * @brief Iterator state for LazyHeaderList
+ */
+typedef struct {
+    PyObject_HEAD
+    LazyHeaderListObject *list;  /**< Reference to the list */
+    Py_ssize_t index;            /**< Current iteration index */
+} LazyHeaderListIterObject;
+
+static PyTypeObject LazyHeaderListIterType;  /* Forward declaration */
+
+static void LazyHeaderListIter_dealloc(LazyHeaderListIterObject *self) {
+    Py_XDECREF(self->list);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *LazyHeaderListIter_next(LazyHeaderListIterObject *self) {
+    if (self->list == NULL || self->list->resource == NULL) {
+        return NULL;  /* StopIteration */
+    }
+
+    if ((size_t)self->index >= self->list->resource->count) {
+        return NULL;  /* StopIteration */
+    }
+
+    PyObject *item = convert_header_at_index(self->list, self->index);
+    self->index++;
+    return item;
+}
+
+static PyTypeObject LazyHeaderListIterType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang_python.LazyHeaderListIter",
+    .tp_basicsize = sizeof(LazyHeaderListIterObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)LazyHeaderListIter_dealloc,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = (iternextfunc)LazyHeaderListIter_next,
+};
+
+/**
+ * @brief Get iterator for LazyHeaderList
+ */
+static PyObject *LazyHeaderList_iter(LazyHeaderListObject *self) {
+    LazyHeaderListIterObject *iter = PyObject_New(LazyHeaderListIterObject,
+                                                   &LazyHeaderListIterType);
+    if (iter == NULL) {
+        return NULL;
+    }
+
+    Py_INCREF(self);
+    iter->list = self;
+    iter->index = 0;
+
+    return (PyObject *)iter;
+}
+
+/**
+ * @brief Check if item is in list (for 'in' operator)
+ */
+static int LazyHeaderList_contains(LazyHeaderListObject *self, PyObject *item) {
+    if (self->resource == NULL) {
+        return 0;
+    }
+
+    /* Must be a 2-tuple of bytes */
+    if (!PyTuple_Check(item) || PyTuple_Size(item) != 2) {
+        return 0;
+    }
+
+    PyObject *search_name = PyTuple_GET_ITEM(item, 0);
+    PyObject *search_value = PyTuple_GET_ITEM(item, 1);
+
+    if (!PyBytes_Check(search_name) || !PyBytes_Check(search_value)) {
+        return 0;
+    }
+
+    char *sn_data = PyBytes_AS_STRING(search_name);
+    Py_ssize_t sn_len = PyBytes_GET_SIZE(search_name);
+    char *sv_data = PyBytes_AS_STRING(search_value);
+    Py_ssize_t sv_len = PyBytes_GET_SIZE(search_value);
+
+    /* Search through headers */
+    for (size_t i = 0; i < self->resource->count; i++) {
+        lazy_header_t *h = &self->resource->headers[i];
+        if (h->name_len == (size_t)sn_len &&
+            h->value_len == (size_t)sv_len &&
+            memcmp(h->name, sn_data, sn_len) == 0 &&
+            memcmp(h->value, sv_data, sv_len) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Convert to regular Python list (for compatibility)
+ */
+static PyObject *LazyHeaderList_tolist(LazyHeaderListObject *self) {
+    if (self->resource == NULL) {
+        return PyList_New(0);
+    }
+
+    PyObject *list = PyList_New(self->resource->count);
+    if (list == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < self->resource->count; i++) {
+        PyObject *item = convert_header_at_index(self, (Py_ssize_t)i);
+        if (item == NULL) {
+            Py_DECREF(list);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, i, item);  /* Steals reference */
+    }
+
+    return list;
+}
+
+static PyMethodDef LazyHeaderList_methods[] = {
+    {"tolist", (PyCFunction)LazyHeaderList_tolist, METH_NOARGS,
+     "Convert to regular Python list"},
+    {NULL}
+};
+
+static PySequenceMethods LazyHeaderList_as_sequence = {
+    .sq_length = (lenfunc)LazyHeaderList_length,
+    .sq_item = (ssizeargfunc)LazyHeaderList_getitem,
+    .sq_contains = (objobjproc)LazyHeaderList_contains,
+};
+
+static PyTypeObject LazyHeaderListType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang_python.LazyHeaderList",
+    .tp_doc = "Lazy ASGI header list - converts headers on demand",
+    .tp_basicsize = sizeof(LazyHeaderListObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)LazyHeaderList_dealloc,
+    .tp_as_sequence = &LazyHeaderList_as_sequence,
+    .tp_iter = (getiterfunc)LazyHeaderList_iter,
+    .tp_methods = LazyHeaderList_methods,
+};
+
+/**
+ * @brief Initialize LazyHeaderList types
+ */
+static int LazyHeaderList_init_types(void) {
+    if (PyType_Ready(&LazyHeaderListType) < 0) {
+        return -1;
+    }
+    if (PyType_Ready(&LazyHeaderListIterType) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Create a LazyHeaderList from Erlang header terms
+ *
+ * Copies all header data from Erlang binaries into a NIF resource,
+ * then wraps that in a Python LazyHeaderList object.
+ *
+ * @param env NIF environment
+ * @param headers_term Erlang list of header pairs
+ * @param count Number of headers (pre-computed)
+ * @return New LazyHeaderList object, or NULL on error
+ */
+static PyObject *LazyHeaderList_from_erlang(ErlNifEnv *env,
+                                             ERL_NIF_TERM headers_term,
+                                             unsigned int count) {
+    /* Allocate resource */
+    lazy_headers_resource_t *res = enif_alloc_resource(
+        ASGI_LAZY_HEADERS_RESOURCE_TYPE, sizeof(lazy_headers_resource_t));
+    if (res == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    memset(res, 0, sizeof(lazy_headers_resource_t));
+    res->count = count;
+
+    /* Allocate header array */
+    res->headers = enif_alloc(sizeof(lazy_header_t) * count);
+    if (res->headers == NULL) {
+        enif_release_resource(res);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    memset(res->headers, 0, sizeof(lazy_header_t) * count);
+
+    /* Allocate conversion cache (NULLs) */
+    res->converted = enif_alloc(sizeof(PyObject *) * count);
+    if (res->converted == NULL) {
+        enif_free(res->headers);
+        enif_release_resource(res);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    memset(res->converted, 0, sizeof(PyObject *) * count);
+
+    /* Copy header data from Erlang */
+    ERL_NIF_TERM head, tail = headers_term;
+    for (unsigned int i = 0; i < count; i++) {
+        if (!enif_get_list_cell(env, tail, &head, &tail)) {
+            goto error;
+        }
+
+        /* Extract header pair: [name, value] or {name, value} */
+        ERL_NIF_TERM name_term, value_term;
+        int arity;
+        const ERL_NIF_TERM *tuple;
+        ERL_NIF_TERM h_head, h_tail;
+
+        if (enif_get_tuple(env, head, &arity, &tuple) && arity == 2) {
+            name_term = tuple[0];
+            value_term = tuple[1];
+        } else if (enif_get_list_cell(env, head, &h_head, &h_tail)) {
+            name_term = h_head;
+            if (!enif_get_list_cell(env, h_tail, &value_term, &h_tail)) {
+                goto error;
+            }
+        } else {
+            goto error;
+        }
+
+        /* Copy name binary */
+        ErlNifBinary name_bin, value_bin;
+        if (!enif_inspect_binary(env, name_term, &name_bin) ||
+            !enif_inspect_binary(env, value_term, &value_bin)) {
+            goto error;
+        }
+
+        res->headers[i].name = enif_alloc(name_bin.size);
+        if (res->headers[i].name == NULL) {
+            goto error;
+        }
+        memcpy(res->headers[i].name, name_bin.data, name_bin.size);
+        res->headers[i].name_len = name_bin.size;
+
+        res->headers[i].value = enif_alloc(value_bin.size);
+        if (res->headers[i].value == NULL) {
+            goto error;
+        }
+        memcpy(res->headers[i].value, value_bin.data, value_bin.size);
+        res->headers[i].value_len = value_bin.size;
+    }
+
+    /* Create Python object */
+    LazyHeaderListObject *obj = PyObject_New(LazyHeaderListObject,
+                                              &LazyHeaderListType);
+    if (obj == NULL) {
+        enif_release_resource(res);
+        return NULL;
+    }
+
+    obj->resource = res;
+    obj->resource_ref = res;
+    /* Resource reference is transferred to Python object */
+
+    return (PyObject *)obj;
+
+error:
+    /* Clean up partially allocated data */
+    for (unsigned int j = 0; j < count; j++) {
+        if (res->headers[j].name != NULL) {
+            enif_free(res->headers[j].name);
+        }
+        if (res->headers[j].value != NULL) {
+            enif_free(res->headers[j].value);
+        }
+    }
+    enif_free(res->headers);
+    enif_free(res->converted);
+    enif_release_resource(res);
+    PyErr_SetString(PyExc_ValueError, "Invalid header format");
+    return NULL;
+}
+
 /**
  * @brief Initialize a single interpreter state
  */
@@ -906,6 +1357,11 @@ static int asgi_scope_init(void) {
 
     /* Initialize the AsgiBuffer Python type for zero-copy body handling */
     if (AsgiBuffer_init_type() < 0) {
+        return -1;
+    }
+
+    /* Initialize the LazyHeaderList Python types for on-demand header conversion */
+    if (LazyHeaderList_init_types() < 0) {
         return -1;
     }
 
@@ -1710,87 +2166,102 @@ static PyObject *asgi_scope_from_map(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
              * ASGI spec requires headers to be list[tuple[bytes, bytes]].
              * The Erlang representation is a list of [name_binary, value_binary] pairs.
              * We must convert binaries to Python bytes (not str) for ASGI compliance.
+             *
+             * Optimization: For large header counts (>= LAZY_HEADERS_THRESHOLD),
+             * use LazyHeaderList which converts headers on-demand. Most ASGI apps
+             * only access 2-3 headers.
              */
             unsigned int headers_len;
             if (enif_get_list_length(env, value, &headers_len)) {
-                py_value = PyList_New(headers_len);
-                if (py_value == NULL) {
-                    if (!key_borrowed) {
-                        Py_DECREF(py_key);
-                    }
-                    enif_map_iterator_destroy(env, &iter);
-                    Py_DECREF(scope);
-                    return NULL;
+                /* Use lazy headers for large header counts */
+                if (headers_len >= LAZY_HEADERS_THRESHOLD &&
+                    ASGI_LAZY_HEADERS_RESOURCE_TYPE != NULL) {
+                    py_value = LazyHeaderList_from_erlang(env, value, headers_len);
+                    /* Falls through to generic handling if LazyHeaderList fails */
                 }
 
-                ERL_NIF_TERM head, tail = value;
-                for (unsigned int idx = 0; idx < headers_len; idx++) {
-                    if (!enif_get_list_cell(env, tail, &head, &tail)) {
-                        Py_DECREF(py_value);
-                        py_value = NULL;
-                        break;
+                /* Fallback to eager conversion for small counts or if lazy failed */
+                if (py_value == NULL) {
+                    PyErr_Clear();  /* Clear any error from lazy attempt */
+                    py_value = PyList_New(headers_len);
+                    if (py_value == NULL) {
+                        if (!key_borrowed) {
+                            Py_DECREF(py_key);
+                        }
+                        enif_map_iterator_destroy(env, &iter);
+                        Py_DECREF(scope);
+                        return NULL;
                     }
 
-                    /* Each header is a 2-element list [name, value] or tuple {name, value} */
-                    ERL_NIF_TERM hname_term, hvalue_term;
-                    int harity;
-                    const ERL_NIF_TERM *htuple;
-                    ERL_NIF_TERM hhead, htail;
-
-                    if (enif_get_tuple(env, head, &harity, &htuple) && harity == 2) {
-                        /* Tuple format: {name, value} */
-                        hname_term = htuple[0];
-                        hvalue_term = htuple[1];
-                    } else if (enif_get_list_cell(env, head, &hhead, &htail)) {
-                        /* List format: [name, value] */
-                        hname_term = hhead;
-                        if (!enif_get_list_cell(env, htail, &hvalue_term, &htail)) {
+                    ERL_NIF_TERM head, tail = value;
+                    for (unsigned int idx = 0; idx < headers_len; idx++) {
+                        if (!enif_get_list_cell(env, tail, &head, &tail)) {
                             Py_DECREF(py_value);
                             py_value = NULL;
                             break;
                         }
-                    } else {
-                        Py_DECREF(py_value);
-                        py_value = NULL;
-                        break;
+
+                        /* Each header is a 2-element list [name, value] or tuple {name, value} */
+                        ERL_NIF_TERM hname_term, hvalue_term;
+                        int harity;
+                        const ERL_NIF_TERM *htuple;
+                        ERL_NIF_TERM hhead, htail;
+
+                        if (enif_get_tuple(env, head, &harity, &htuple) && harity == 2) {
+                            /* Tuple format: {name, value} */
+                            hname_term = htuple[0];
+                            hvalue_term = htuple[1];
+                        } else if (enif_get_list_cell(env, head, &hhead, &htail)) {
+                            /* List format: [name, value] */
+                            hname_term = hhead;
+                            if (!enif_get_list_cell(env, htail, &hvalue_term, &htail)) {
+                                Py_DECREF(py_value);
+                                py_value = NULL;
+                                break;
+                            }
+                        } else {
+                            Py_DECREF(py_value);
+                            py_value = NULL;
+                            break;
+                        }
+
+                        /* Extract binaries and convert to Python bytes */
+                        ErlNifBinary name_bin, value_bin;
+                        if (!enif_inspect_binary(env, hname_term, &name_bin) ||
+                            !enif_inspect_binary(env, hvalue_term, &value_bin)) {
+                            Py_DECREF(py_value);
+                            py_value = NULL;
+                            break;
+                        }
+
+                        /* Create tuple(bytes, bytes) per ASGI spec */
+                        /* Use cached header name for common headers */
+                        asgi_interp_state_t *state = get_asgi_interp_state();
+                        PyObject *py_name = get_cached_header_name(
+                            state, name_bin.data, name_bin.size);
+                        PyObject *py_hvalue = PyBytes_FromStringAndSize(
+                            (char *)value_bin.data, value_bin.size);
+
+                        if (py_name == NULL || py_hvalue == NULL) {
+                            Py_XDECREF(py_name);
+                            Py_XDECREF(py_hvalue);
+                            Py_DECREF(py_value);
+                            py_value = NULL;
+                            break;
+                        }
+
+                        PyObject *header_tuple = PyTuple_Pack(2, py_name, py_hvalue);
+                        Py_DECREF(py_name);
+                        Py_DECREF(py_hvalue);
+
+                        if (header_tuple == NULL) {
+                            Py_DECREF(py_value);
+                            py_value = NULL;
+                            break;
+                        }
+
+                        PyList_SET_ITEM(py_value, idx, header_tuple);  /* Steals reference */
                     }
-
-                    /* Extract binaries and convert to Python bytes */
-                    ErlNifBinary name_bin, value_bin;
-                    if (!enif_inspect_binary(env, hname_term, &name_bin) ||
-                        !enif_inspect_binary(env, hvalue_term, &value_bin)) {
-                        Py_DECREF(py_value);
-                        py_value = NULL;
-                        break;
-                    }
-
-                    /* Create tuple(bytes, bytes) per ASGI spec */
-                    /* Use cached header name for common headers */
-                    asgi_interp_state_t *state = get_asgi_interp_state();
-                    PyObject *py_name = get_cached_header_name(
-                        state, name_bin.data, name_bin.size);
-                    PyObject *py_hvalue = PyBytes_FromStringAndSize(
-                        (char *)value_bin.data, value_bin.size);
-
-                    if (py_name == NULL || py_hvalue == NULL) {
-                        Py_XDECREF(py_name);
-                        Py_XDECREF(py_hvalue);
-                        Py_DECREF(py_value);
-                        py_value = NULL;
-                        break;
-                    }
-
-                    PyObject *header_tuple = PyTuple_Pack(2, py_name, py_hvalue);
-                    Py_DECREF(py_name);
-                    Py_DECREF(py_hvalue);
-
-                    if (header_tuple == NULL) {
-                        Py_DECREF(py_value);
-                        py_value = NULL;
-                        break;
-                    }
-
-                    PyList_SET_ITEM(py_value, idx, header_tuple);  /* Steals reference */
                 }
             }
         }

@@ -1789,6 +1789,12 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         asgi_buffer_resource_dtor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
+    /* ASGI lazy headers resource type for on-demand header conversion */
+    ASGI_LAZY_HEADERS_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "asgi_lazy_headers",
+        lazy_headers_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
     /* Initialize event loop module */
     if (event_loop_init(env) < 0) {
         return -1;

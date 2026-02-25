@@ -96,6 +96,17 @@
  */
 #define SCOPE_CACHE_SIZE 64
 
+/**
+ * @def LAZY_HEADERS_THRESHOLD
+ * @brief Minimum number of headers to use lazy conversion
+ *
+ * For small header counts, eager conversion is faster due to lower overhead.
+ * Only use lazy conversion when there are enough headers to benefit.
+ */
+#ifndef LAZY_HEADERS_THRESHOLD
+#define LAZY_HEADERS_THRESHOLD 4
+#endif
+
 /* ============================================================================
  * ASGI Erlang Atoms
  * ============================================================================ */
@@ -107,6 +118,9 @@ extern ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
 
 /* Resource type for zero-copy body buffers */
 extern ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE;
+
+/* Resource type for lazy header conversion */
+extern ErlNifResourceType *ASGI_LAZY_HEADERS_RESOURCE_TYPE;
 
 /* ============================================================================
  * Per-Interpreter State (Sub-interpreter & Free-threading Support)
