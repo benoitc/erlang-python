@@ -53,6 +53,7 @@
     test_asgi_header_caching/1,
     test_asgi_status_codes/1,
     test_asgi_scope_caching/1,
+    test_asgi_scope_method_caching/1,
     test_asgi_zero_copy_buffer/1,
     test_asgi_lazy_headers/1
 ]).
@@ -102,6 +103,7 @@ all() ->
         test_asgi_header_caching,
         test_asgi_status_codes,
         test_asgi_scope_caching,
+        test_asgi_scope_method_caching,
         test_asgi_zero_copy_buffer,
         test_asgi_lazy_headers
     ].
@@ -1043,6 +1045,65 @@ test_asgi_scope_caching(_Config) ->
     #{<<"headers">> := [{<<"content-type">>, <<"application/json">>}]} = Scope2,
 
     ct:pal("Scope caching test passed~n"),
+    ok.
+
+%% Test that method is correctly updated when scope cache is hit
+%% This verifies the fix for the bug where method was cached with the path
+%% causing GET /path followed by POST /path to return method="GET"
+test_asgi_scope_method_caching(_Config) ->
+    %% This test uses the NIF directly to verify scope caching behavior.
+    %% The scope cache keys on path, so we need to verify that method
+    %% is treated as a dynamic field and updated on cache hits.
+
+    %% Build first scope with GET method
+    Scope1Map = #{
+        type => <<"http">>,
+        asgi => #{version => <<"3.0">>, spec_version => <<"2.3">>},
+        http_version => <<"1.1">>,
+        method => <<"GET">>,
+        scheme => <<"http">>,
+        path => <<"/api/test">>,
+        raw_path => <<"/api/test">>,
+        query_string => <<>>,
+        root_path => <<>>,
+        headers => [{<<"host">>, <<"localhost">>}],
+        server => {<<"localhost">>, 8080},
+        client => {<<"127.0.0.1">>, 12345}
+    },
+    {ok, ScopeRef1} = py_nif:asgi_build_scope(Scope1Map),
+
+    %% Build second scope with POST method on same path (should hit cache)
+    Scope2Map = Scope1Map#{
+        method => <<"POST">>,
+        headers => [{<<"content-type">>, <<"application/json">>}],
+        client => {<<"127.0.0.1">>, 12346}
+    },
+    {ok, ScopeRef2} = py_nif:asgi_build_scope(Scope2Map),
+
+    %% Build third scope with PUT method on same path
+    Scope3Map = Scope1Map#{
+        method => <<"PUT">>,
+        headers => [{<<"content-type">>, <<"text/plain">>}],
+        client => {<<"127.0.0.1">>, 12347}
+    },
+    {ok, ScopeRef3} = py_nif:asgi_build_scope(Scope3Map),
+
+    %% Verify each scope has the correct method by extracting from Python dict
+    {ok, <<"GET">>} = py:eval(<<"scope['method']">>, #{scope => ScopeRef1}),
+    {ok, <<"POST">>} = py:eval(<<"scope['method']">>, #{scope => ScopeRef2}),
+    {ok, <<"PUT">>} = py:eval(<<"scope['method']">>, #{scope => ScopeRef3}),
+
+    %% Also verify other dynamic fields are correctly set
+    {ok, {<<"127.0.0.1">>, 12345}} = py:eval(<<"tuple(scope['client'])">>, #{scope => ScopeRef1}),
+    {ok, {<<"127.0.0.1">>, 12346}} = py:eval(<<"tuple(scope['client'])">>, #{scope => ScopeRef2}),
+    {ok, {<<"127.0.0.1">>, 12347}} = py:eval(<<"tuple(scope['client'])">>, #{scope => ScopeRef3}),
+
+    %% Verify static fields are shared correctly (path should be same)
+    {ok, <<"/api/test">>} = py:eval(<<"scope['path']">>, #{scope => ScopeRef1}),
+    {ok, <<"/api/test">>} = py:eval(<<"scope['path']">>, #{scope => ScopeRef2}),
+    {ok, <<"/api/test">>} = py:eval(<<"scope['path']">>, #{scope => ScopeRef3}),
+
+    ct:pal("Scope method caching test passed~n"),
     ok.
 
 %% Test zero-copy buffer handling for large bodies

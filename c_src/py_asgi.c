@@ -55,6 +55,7 @@ ERL_NIF_TERM ATOM_ASGI_PATH;
 ERL_NIF_TERM ATOM_ASGI_HEADERS;
 ERL_NIF_TERM ATOM_ASGI_CLIENT;
 ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
+ERL_NIF_TERM ATOM_ASGI_METHOD;
 
 /* Resource type for zero-copy body buffers */
 ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE = NULL;
@@ -1128,7 +1129,7 @@ static void asgi_cleanup_scope_cache(void) {
 /**
  * @brief Update dynamic fields in a cloned scope
  *
- * Updates client, headers, and query_string which vary per request.
+ * Updates client, headers, query_string, and method which vary per request.
  */
 static int update_dynamic_scope_fields(ErlNifEnv *env, PyObject *scope,
                                         ERL_NIF_TERM scope_map) {
@@ -1234,6 +1235,20 @@ static int update_dynamic_scope_fields(ErlNifEnv *env, PyObject *scope,
                 return -1;
             }
             Py_DECREF(py_qs);
+        }
+    }
+
+    /* Update method - use Erlang atom for map lookup */
+    if (enif_get_map_value(env, scope_map, ATOM_ASGI_METHOD, &value)) {
+        ErlNifBinary method_bin;
+        if (enif_inspect_binary(env, value, &method_bin)) {
+            PyObject *py_method = asgi_get_method((char *)method_bin.data, method_bin.size);
+            if (py_method == NULL) return -1;
+            if (PyDict_SetItem(scope, state->key_method, py_method) < 0) {
+                Py_DECREF(py_method);
+                return -1;
+            }
+            Py_DECREF(py_method);
         }
     }
 
@@ -2378,6 +2393,7 @@ static PyObject *get_cached_scope(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
         PyDict_DelItem(template, state->key_client);
         PyDict_DelItem(template, state->key_headers);
         PyDict_DelItem(template, state->key_query_string);
+        PyDict_DelItem(template, state->key_method);
         PyErr_Clear();  /* DelItem may fail if key doesn't exist */
 
         /* If replacing entry from different interpreter, release old reference

@@ -115,6 +115,7 @@ extern ERL_NIF_TERM ATOM_ASGI_PATH;
 extern ERL_NIF_TERM ATOM_ASGI_HEADERS;
 extern ERL_NIF_TERM ATOM_ASGI_CLIENT;
 extern ERL_NIF_TERM ATOM_ASGI_QUERY_STRING;
+extern ERL_NIF_TERM ATOM_ASGI_METHOD;
 
 /* Resource type for zero-copy body buffers */
 extern ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE;
