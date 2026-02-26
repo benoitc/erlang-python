@@ -439,23 +439,24 @@ static ERL_NIF_TERM py_pool_process_asgi(py_pool_worker_t *worker,
         return make_py_error(env);
     }
 
-    /* Get 'run' function from runner */
-    PyObject *run_func = PyObject_GetAttrString(runner_module, "run");
+    /* Get 'run_asgi' function from runner (hornbeam interface) */
+    PyObject *run_func = PyObject_GetAttrString(runner_module, "run_asgi");
     if (run_func == NULL) {
         return make_py_error(env);
     }
 
-    /* Get ASGI app module */
-    PyObject *app_module = py_pool_get_module(worker, req->module_name);
-    if (app_module == NULL) {
+    /* Create module_name Python string */
+    PyObject *py_module_name = PyUnicode_FromString(req->module_name);
+    if (py_module_name == NULL) {
         Py_DECREF(run_func);
         return make_py_error(env);
     }
 
-    /* Get ASGI callable */
-    PyObject *app_callable = PyObject_GetAttrString(app_module, req->callable_name);
-    if (app_callable == NULL) {
+    /* Create callable_name Python string */
+    PyObject *py_callable_name = PyUnicode_FromString(req->callable_name);
+    if (py_callable_name == NULL) {
         Py_DECREF(run_func);
+        Py_DECREF(py_module_name);
         return make_py_error(env);
     }
 
@@ -463,7 +464,8 @@ static ERL_NIF_TERM py_pool_process_asgi(py_pool_worker_t *worker,
     PyObject *scope = asgi_scope_from_map(env, req->scope_term);
     if (scope == NULL) {
         Py_DECREF(run_func);
-        Py_DECREF(app_callable);
+        Py_DECREF(py_module_name);
+        Py_DECREF(py_callable_name);
         return make_py_error(env);
     }
 
@@ -472,14 +474,16 @@ static ERL_NIF_TERM py_pool_process_asgi(py_pool_worker_t *worker,
                                                 req->body_len);
     if (body == NULL) {
         Py_DECREF(run_func);
-        Py_DECREF(app_callable);
+        Py_DECREF(py_module_name);
+        Py_DECREF(py_callable_name);
         Py_DECREF(scope);
         return make_py_error(env);
     }
 
-    /* Call runner.run(app, scope, body) */
-    PyObject *args = PyTuple_Pack(3, app_callable, scope, body);
-    Py_DECREF(app_callable);
+    /* Call runner.run_asgi(module_name, callable_name, scope, body) */
+    PyObject *args = PyTuple_Pack(4, py_module_name, py_callable_name, scope, body);
+    Py_DECREF(py_module_name);
+    Py_DECREF(py_callable_name);
     Py_DECREF(scope);
     Py_DECREF(body);
 
@@ -496,7 +500,7 @@ static ERL_NIF_TERM py_pool_process_asgi(py_pool_worker_t *worker,
         return make_py_error(env);
     }
 
-    /* Extract ASGI response using optimized extraction */
+    /* Extract ASGI response using optimized extraction (handles dict or tuple) */
     ERL_NIF_TERM response = extract_asgi_response(env, result);
     Py_DECREF(result);
 

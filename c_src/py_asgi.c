@@ -2487,15 +2487,28 @@ static PyObject *get_cached_scope(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
  * Output Erlang format: {Status, [{Header, Value}, ...], Body}
  */
 static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
-    /* Validate 3-element tuple, fallback to py_to_term if not */
-    if (!PyTuple_Check(result) || PyTuple_Size(result) != 3) {
+    PyObject *py_status = NULL;
+    PyObject *py_headers = NULL;
+    PyObject *py_body = NULL;
+
+    /* Handle both dict format (hornbeam) and tuple format */
+    if (PyDict_Check(result)) {
+        /* Dict format: {'status': int, 'headers': list, 'body': bytes, ...} */
+        py_status = PyDict_GetItemString(result, "status");
+        py_headers = PyDict_GetItemString(result, "headers");
+        py_body = PyDict_GetItemString(result, "body");
+
+        if (py_status == NULL || py_headers == NULL || py_body == NULL) {
+            return py_to_term(env, result);
+        }
+    } else if (PyTuple_Check(result) && PyTuple_Size(result) == 3) {
+        /* Tuple format: (status, headers, body) */
+        py_status = PyTuple_GET_ITEM(result, 0);
+        py_headers = PyTuple_GET_ITEM(result, 1);
+        py_body = PyTuple_GET_ITEM(result, 2);
+    } else {
         return py_to_term(env, result);
     }
-
-    /* Get tuple elements (borrowed references) */
-    PyObject *py_status = PyTuple_GET_ITEM(result, 0);
-    PyObject *py_headers = PyTuple_GET_ITEM(result, 1);
-    PyObject *py_body = PyTuple_GET_ITEM(result, 2);
 
     /* Validate types */
     if (!PyLong_Check(py_status) || !PyList_Check(py_headers) || !PyBytes_Check(py_body)) {
