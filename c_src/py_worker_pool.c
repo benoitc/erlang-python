@@ -215,6 +215,10 @@ static void py_pool_clear_module_cache(py_pool_worker_t *worker) {
  * Response Sending
  * ============================================================================ */
 
+/* Debug: track sent responses */
+static _Atomic uint64_t g_responses_sent = 0;
+static _Atomic uint64_t g_responses_failed = 0;
+
 static void py_pool_send_response(py_pool_request_t *req, ERL_NIF_TERM result) {
     /* Build message: {py_response, RequestId, Result} */
     ERL_NIF_TERM request_id_term = enif_make_uint64(req->msg_env, req->request_id);
@@ -224,7 +228,17 @@ static void py_pool_send_response(py_pool_request_t *req, ERL_NIF_TERM result) {
                                          result);
 
     int send_result = enif_send(NULL, &req->caller_pid, req->msg_env, msg);
-    (void)send_result; /* Ignore send result - process may have exited */
+    if (send_result) {
+        atomic_fetch_add(&g_responses_sent, 1);
+        /* IMPORTANT: enif_send consumes/invalidates the msg_env on success.
+         * Set to NULL to prevent double-free in py_pool_request_free. */
+        req->msg_env = NULL;
+    } else {
+        atomic_fetch_add(&g_responses_failed, 1);
+        fprintf(stderr, "[DEBUG] enif_send FAILED for req_id=%llu\n",
+                (unsigned long long)req->request_id);
+        /* On failure, msg_env is still valid and will be freed in request_free */
+    }
 }
 
 /* ============================================================================
@@ -1137,15 +1151,20 @@ static ERL_NIF_TERM nif_pool_submit(ErlNifEnv *env, int argc,
             return make_error(env, "unknown_request_type");
     }
 
+    /* IMPORTANT: Save request_id BEFORE enqueueing.
+     * Once enqueued, a worker can process and free the request at any time.
+     * Accessing req->request_id after enqueue is use-after-free. */
+    uint64_t request_id = req->request_id;
+
     /* Enqueue request */
     if (py_pool_enqueue(req) != 0) {
         py_pool_request_free(req);
         return make_error(env, "enqueue_failed");
     }
 
-    /* Return {ok, RequestId} */
+    /* Return {ok, RequestId} - using saved ID to avoid use-after-free */
     return enif_make_tuple2(env, ATOM_OK,
-                            enif_make_uint64(env, req->request_id));
+                            enif_make_uint64(env, request_id));
 }
 
 static ERL_NIF_TERM nif_pool_stats(ErlNifEnv *env, int argc,
@@ -1157,7 +1176,7 @@ static ERL_NIF_TERM nif_pool_stats(ErlNifEnv *env, int argc,
     py_pool_get_stats(&stats);
 
     /* Build result map */
-    ERL_NIF_TERM keys[6], values[6];
+    ERL_NIF_TERM keys[8], values[8];
 
     keys[0] = enif_make_atom(env, "num_workers");
     values[0] = enif_make_int(env, stats.num_workers);
@@ -1177,8 +1196,14 @@ static ERL_NIF_TERM nif_pool_stats(ErlNifEnv *env, int argc,
     keys[5] = enif_make_atom(env, "total_enqueued");
     values[5] = enif_make_uint64(env, stats.total_enqueued);
 
+    keys[6] = enif_make_atom(env, "responses_sent");
+    values[6] = enif_make_uint64(env, atomic_load(&g_responses_sent));
+
+    keys[7] = enif_make_atom(env, "responses_failed");
+    values[7] = enif_make_uint64(env, atomic_load(&g_responses_failed));
+
     ERL_NIF_TERM result;
-    enif_make_map_from_arrays(env, keys, values, 6, &result);
+    enif_make_map_from_arrays(env, keys, values, 8, &result);
 
     return result;
 }
