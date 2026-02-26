@@ -223,7 +223,8 @@ static void py_pool_send_response(py_pool_request_t *req, ERL_NIF_TERM result) {
                                          request_id_term,
                                          result);
 
-    enif_send(NULL, &req->caller_pid, req->msg_env, msg);
+    int send_result = enif_send(NULL, &req->caller_pid, req->msg_env, msg);
+    (void)send_result; /* Ignore send result - process may have exited */
 }
 
 /* ============================================================================

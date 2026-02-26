@@ -50,6 +50,61 @@ static pthread_mutex_t g_interp_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Flag: ASGI subsystem is initialized (not per-interpreter) */
 static bool g_asgi_initialized = false;
 
+/* ============================================================================
+ * Internal Profiling Support
+ * ============================================================================
+ * When ASGI_PROFILING is defined, detailed timing of each phase is collected.
+ * Enable with: -DASGI_PROFILING during compilation
+ */
+#ifdef ASGI_PROFILING
+#include <sys/time.h>
+
+typedef struct {
+    uint64_t count;
+    uint64_t gil_acquire_us;
+    uint64_t string_conv_us;
+    uint64_t module_import_us;
+    uint64_t get_callable_us;
+    uint64_t scope_build_us;
+    uint64_t body_conv_us;
+    uint64_t runner_import_us;
+    uint64_t runner_call_us;
+    uint64_t response_extract_us;
+    uint64_t gil_release_us;
+    uint64_t total_us;
+} asgi_profile_stats_t;
+
+static asgi_profile_stats_t g_asgi_profile = {0};
+static pthread_mutex_t g_asgi_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint64_t get_time_us(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
+
+#define PROF_START() uint64_t _prof_start = get_time_us(), _prof_prev = _prof_start, _prof_now
+#define PROF_MARK(field) do { \
+    _prof_now = get_time_us(); \
+    pthread_mutex_lock(&g_asgi_profile_mutex); \
+    g_asgi_profile.field += (_prof_now - _prof_prev); \
+    pthread_mutex_unlock(&g_asgi_profile_mutex); \
+    _prof_prev = _prof_now; \
+} while(0)
+#define PROF_END() do { \
+    _prof_now = get_time_us(); \
+    pthread_mutex_lock(&g_asgi_profile_mutex); \
+    g_asgi_profile.count++; \
+    g_asgi_profile.total_us += (_prof_now - _prof_start); \
+    pthread_mutex_unlock(&g_asgi_profile_mutex); \
+} while(0)
+
+#else
+#define PROF_START()
+#define PROF_MARK(field)
+#define PROF_END()
+#endif /* ASGI_PROFILING */
+
 /* ASGI-specific Erlang atoms for scope map keys */
 ERL_NIF_TERM ATOM_ASGI_PATH;
 ERL_NIF_TERM ATOM_ASGI_HEADERS;
@@ -2555,6 +2610,8 @@ static ERL_NIF_TERM nif_asgi_build_scope(ErlNifEnv *env, int argc, const ERL_NIF
 }
 
 static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    PROF_START();
+
     if (argc < 5) {
         return make_error(env, "badarg");
     }
@@ -2580,6 +2637,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     }
 
     PyGILState_STATE gstate = PyGILState_Ensure();
+    PROF_MARK(gil_acquire_us);
 
     ERL_NIF_TERM result;
 
@@ -2594,6 +2652,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         PyGILState_Release(gstate);
         return make_error(env, "alloc_failed");
     }
+    PROF_MARK(string_conv_us);
 
     /* Import module */
     PyObject *module = PyImport_ImportModule(module_name);
@@ -2601,6 +2660,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(module_import_us);
 
     /* Get ASGI callable */
     PyObject *asgi_app = PyObject_GetAttrString(module, callable_name);
@@ -2609,6 +2669,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(get_callable_us);
 
     /* Build optimized scope dict from Erlang map (with caching) */
     PyObject *scope = get_cached_scope(env, argv[3]);
@@ -2617,6 +2678,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(scope_build_us);
 
     /* Convert body binary */
     PyObject *body = asgi_binary_to_buffer(env, argv[4]);
@@ -2626,6 +2688,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(body_conv_us);
 
     /* Import the ASGI runner module */
     PyObject *runner_module = PyImport_ImportModule(runner_name);
@@ -2653,6 +2716,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_error(env, "runner_module_required");
         goto cleanup;
     }
+    PROF_MARK(runner_import_us);
 
     /* Call _run_asgi_sync(module_name, callable_name, scope, body) */
     PyObject *run_result = PyObject_CallMethod(
@@ -2663,6 +2727,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     Py_DECREF(body);
     Py_DECREF(scope);
     Py_DECREF(asgi_app);
+    PROF_MARK(runner_call_us);
 
     if (run_result == NULL) {
         result = make_py_error(env);
@@ -2672,6 +2737,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     /* Convert result to Erlang term using optimized extraction */
     ERL_NIF_TERM term_result = extract_asgi_response(env, run_result);
     Py_DECREF(run_result);
+    PROF_MARK(response_extract_us);
 
     result = enif_make_tuple2(env, ATOM_OK, term_result);
 
@@ -2680,6 +2746,86 @@ cleanup:
     enif_free(module_name);
     enif_free(callable_name);
     PyGILState_Release(gstate);
+    PROF_MARK(gil_release_us);
+    PROF_END();
 
     return result;
 }
+
+#ifdef ASGI_PROFILING
+/**
+ * @brief Get ASGI profiling statistics
+ * @return Map with timing breakdown
+ */
+static ERL_NIF_TERM nif_asgi_profile_stats(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+    pthread_mutex_lock(&g_asgi_profile_mutex);
+    asgi_profile_stats_t stats = g_asgi_profile;
+    pthread_mutex_unlock(&g_asgi_profile_mutex);
+
+    if (stats.count == 0) {
+        return enif_make_tuple2(env, ATOM_OK,
+            enif_make_new_map(env));
+    }
+
+    ERL_NIF_TERM keys[12], values[12];
+    int i = 0;
+
+    keys[i] = enif_make_atom(env, "count");
+    values[i++] = enif_make_uint64(env, stats.count);
+
+    keys[i] = enif_make_atom(env, "gil_acquire_us");
+    values[i++] = enif_make_uint64(env, stats.gil_acquire_us);
+
+    keys[i] = enif_make_atom(env, "string_conv_us");
+    values[i++] = enif_make_uint64(env, stats.string_conv_us);
+
+    keys[i] = enif_make_atom(env, "module_import_us");
+    values[i++] = enif_make_uint64(env, stats.module_import_us);
+
+    keys[i] = enif_make_atom(env, "get_callable_us");
+    values[i++] = enif_make_uint64(env, stats.get_callable_us);
+
+    keys[i] = enif_make_atom(env, "scope_build_us");
+    values[i++] = enif_make_uint64(env, stats.scope_build_us);
+
+    keys[i] = enif_make_atom(env, "body_conv_us");
+    values[i++] = enif_make_uint64(env, stats.body_conv_us);
+
+    keys[i] = enif_make_atom(env, "runner_import_us");
+    values[i++] = enif_make_uint64(env, stats.runner_import_us);
+
+    keys[i] = enif_make_atom(env, "runner_call_us");
+    values[i++] = enif_make_uint64(env, stats.runner_call_us);
+
+    keys[i] = enif_make_atom(env, "response_extract_us");
+    values[i++] = enif_make_uint64(env, stats.response_extract_us);
+
+    keys[i] = enif_make_atom(env, "gil_release_us");
+    values[i++] = enif_make_uint64(env, stats.gil_release_us);
+
+    keys[i] = enif_make_atom(env, "total_us");
+    values[i++] = enif_make_uint64(env, stats.total_us);
+
+    ERL_NIF_TERM map;
+    enif_make_map_from_arrays(env, keys, values, i, &map);
+
+    return enif_make_tuple2(env, ATOM_OK, map);
+}
+
+/**
+ * @brief Reset ASGI profiling statistics
+ */
+static ERL_NIF_TERM nif_asgi_profile_reset(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+    pthread_mutex_lock(&g_asgi_profile_mutex);
+    memset(&g_asgi_profile, 0, sizeof(g_asgi_profile));
+    pthread_mutex_unlock(&g_asgi_profile_mutex);
+
+    return ATOM_OK;
+}
+#endif /* ASGI_PROFILING */
