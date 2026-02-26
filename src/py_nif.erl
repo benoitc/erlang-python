@@ -56,6 +56,7 @@
     subinterp_worker_new/0,
     subinterp_worker_destroy/1,
     subinterp_call/5,
+    subinterp_asgi_run/6,
     parallel_execute/2,
     %% Execution mode info
     execution_mode/0,
@@ -403,6 +404,14 @@ subinterp_worker_destroy(_WorkerRef) ->
 -spec subinterp_call(reference(), binary(), binary(), list(), map()) ->
     {ok, term()} | {error, term()}.
 subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Run an ASGI application in a sub-interpreter.
+%% This runs ASGI in a subinterpreter with its own GIL for true parallelism.
+%% Args: WorkerRef, Runner (binary), Module (binary), Callable (binary), Scope (map), Body (binary)
+-spec subinterp_asgi_run(reference(), binary(), binary(), binary(), map(), binary()) ->
+    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
+subinterp_asgi_run(_WorkerRef, _Runner, _Module, _Callable, _Scope, _Body) ->
     ?NIF_STUB.
 
 %% @doc Execute multiple calls in parallel across sub-interpreters.

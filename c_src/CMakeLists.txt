@@ -70,7 +70,12 @@ include(FindErlang)
 include_directories(${ERLANG_ERTS_INCLUDE_PATH})
 
 # Find Python using CMake's built-in FindPython3
-# Use PYTHON_CONFIG env variable to hint which Python to use
+#
+# To specify a particular Python installation, set PYTHON_CONFIG env variable:
+#   PYTHON_CONFIG=/opt/local/bin/python3.14-config cmake ...
+#
+# CMake will use its default search order otherwise.
+
 if(DEFINED ENV{PYTHON_CONFIG})
     # Extract prefix from python-config for hinting
     execute_process(
@@ -89,6 +94,56 @@ message(STATUS "Python3 include dirs: ${Python3_INCLUDE_DIRS}")
 message(STATUS "Python3 libraries: ${Python3_LIBRARIES}")
 message(STATUS "Python3 library: ${Python3_LIBRARY}")
 
+# Detect Python features for worker pool optimization
+# We use compile tests to verify actual API availability
+
+include(CheckCSourceCompiles)
+
+# Save and set required variables for compile test
+set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
+set(CMAKE_REQUIRED_LIBRARIES Python3::Python)
+
+# Check for subinterpreter API with per-interpreter GIL (PEP 684, Python 3.12+)
+# This verifies PyInterpreterConfig and PyInterpreterConfig_OWN_GIL are available
+check_c_source_compiles("
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+int main(void) {
+    PyInterpreterConfig config = {
+        .use_main_obmalloc = 0,
+        .allow_fork = 0,
+        .allow_exec = 0,
+        .allow_threads = 1,
+        .allow_daemon_threads = 0,
+        .check_multi_interp_extensions = 1,
+        .gil = PyInterpreterConfig_OWN_GIL,
+    };
+    (void)config;
+    return 0;
+}
+" HAVE_SUBINTERPRETERS)
+
+if(HAVE_SUBINTERPRETERS)
+    message(STATUS "Subinterpreter API detected (PyInterpreterConfig_OWN_GIL available)")
+else()
+    message(STATUS "Subinterpreter API not available, using shared GIL fallback")
+endif()
+
+# Check for free-threaded Python (Python 3.13+ with --disable-gil / nogil build)
+# Free-threaded builds have Py_GIL_DISABLED defined in sysconfig
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print('yes' if sysconfig.get_config_var('Py_GIL_DISABLED') else 'no')"
+    OUTPUT_VARIABLE Python3_FREE_THREADED
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(Python3_FREE_THREADED STREQUAL "yes")
+    set(HAVE_FREE_THREADED TRUE)
+    message(STATUS "Free-threaded Python detected: GIL disabled at runtime")
+else()
+    set(HAVE_FREE_THREADED FALSE)
+endif()
+
 # Create the NIF shared library
 add_library(py_nif MODULE py_nif.c)
 
@@ -102,6 +157,14 @@ elseif(Python3_LIBRARIES)
     list(GET Python3_LIBRARIES 0 Python3_FIRST_LIB)
     target_compile_definitions(py_nif PRIVATE PYTHON_LIBRARY_PATH="${Python3_FIRST_LIB}")
     message(STATUS "Using Python library path for dlopen: ${Python3_FIRST_LIB}")
+endif()
+
+# Add Python feature compile definitions for worker pool optimization
+if(HAVE_SUBINTERPRETERS)
+    target_compile_definitions(py_nif PRIVATE HAVE_SUBINTERPRETERS=1)
+endif()
+if(HAVE_FREE_THREADED)
+    target_compile_definitions(py_nif PRIVATE HAVE_FREE_THREADED=1)
 endif()
 
 # Set output name

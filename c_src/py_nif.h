@@ -557,12 +557,18 @@ typedef struct {
  * Sub-interpreters provide true isolation with their own GIL,
  * enabling parallel Python execution on Python 3.12+.
  *
+ * The mutex ensures thread-safe access when multiple dirty scheduler
+ * threads attempt to use the same worker concurrently.
+ *
  * @note Only available when compiled with Python 3.12+
  *
  * @see nif_subinterp_worker_new
  * @see nif_subinterp_call
  */
 typedef struct {
+    /** @brief Mutex for thread-safe access from multiple dirty schedulers */
+    pthread_mutex_t mutex;
+
     /** @brief Python interpreter state */
     PyInterpreterState *interp;
 

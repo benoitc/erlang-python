@@ -254,6 +254,9 @@ static void subinterp_worker_destructor(ErlNifEnv *env, void *obj) {
         /* Restore previous thread state */
         PyThreadState_Swap(old_tstate);
     }
+
+    /* Destroy the mutex */
+    pthread_mutex_destroy(&worker->mutex);
 }
 #endif
 
@@ -1473,6 +1476,12 @@ static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL
         return make_error(env, "alloc_failed");
     }
 
+    /* Initialize mutex for thread-safe access */
+    if (pthread_mutex_init(&worker->mutex, NULL) != 0) {
+        enif_release_resource(worker);
+        return make_error(env, "mutex_init_failed");
+    }
+
     /* Need the main GIL to create sub-interpreter */
     PyGILState_STATE gstate = PyGILState_Ensure();
 
@@ -1549,6 +1558,9 @@ static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "invalid_func");
     }
 
+    /* Lock mutex for thread-safe access */
+    pthread_mutex_lock(&worker->mutex);
+
     /* Enter the sub-interpreter */
     PyThreadState *saved_tstate = PyThreadState_Swap(NULL);
     PyThreadState_Swap(worker->tstate);
@@ -1558,7 +1570,9 @@ static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_T
     if (module_name == NULL || func_name == NULL) {
         enif_free(module_name);
         enif_free(func_name);
+        PyThreadState_Swap(NULL);
         PyThreadState_Swap(saved_tstate);
+        pthread_mutex_unlock(&worker->mutex);
         return make_error(env, "alloc_failed");
     }
 
@@ -1631,6 +1645,9 @@ cleanup:
         PyThreadState_Swap(saved_tstate);
     }
 
+    /* Unlock mutex */
+    pthread_mutex_unlock(&worker->mutex);
+
     return result;
 }
 
@@ -1682,6 +1699,131 @@ static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF
     return enif_make_tuple2(env, ATOM_OK, result_list);
 }
 
+/**
+ * @brief Run an ASGI application in a subinterpreter
+ *
+ * Args: WorkerRef, Runner, Module, Callable, ScopeMap, Body
+ *
+ * This runs ASGI in a subinterpreter with its own GIL for true parallelism.
+ */
+static ERL_NIF_TERM nif_subinterp_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc < 6) {
+        return make_error(env, "badarg");
+    }
+
+    py_subinterp_worker_t *worker;
+    if (!enif_get_resource(env, argv[0], SUBINTERP_WORKER_RESOURCE_TYPE, (void **)&worker)) {
+        return make_error(env, "invalid_worker");
+    }
+
+    ErlNifBinary runner_bin, module_bin, callable_bin, body_bin;
+    if (!enif_inspect_binary(env, argv[1], &runner_bin)) {
+        return make_error(env, "invalid_runner");
+    }
+    if (!enif_inspect_binary(env, argv[2], &module_bin)) {
+        return make_error(env, "invalid_module");
+    }
+    if (!enif_inspect_binary(env, argv[3], &callable_bin)) {
+        return make_error(env, "invalid_callable");
+    }
+    if (!enif_inspect_binary(env, argv[5], &body_bin)) {
+        return make_error(env, "invalid_body");
+    }
+
+    /* Lock mutex for thread-safe access */
+    pthread_mutex_lock(&worker->mutex);
+
+    /* Enter the sub-interpreter */
+    PyThreadState *saved_tstate = PyThreadState_Swap(NULL);
+    PyThreadState_Swap(worker->tstate);
+
+    char *runner_name = binary_to_string(&runner_bin);
+    char *module_name = binary_to_string(&module_bin);
+    char *callable_name = binary_to_string(&callable_bin);
+    if (runner_name == NULL || module_name == NULL || callable_name == NULL) {
+        enif_free(runner_name);
+        enif_free(module_name);
+        enif_free(callable_name);
+        PyThreadState_Swap(NULL);
+        if (saved_tstate != NULL) {
+            PyThreadState_Swap(saved_tstate);
+        }
+        pthread_mutex_unlock(&worker->mutex);
+        return make_error(env, "alloc_failed");
+    }
+
+    ERL_NIF_TERM result;
+
+    /* Build scope dict from Erlang map */
+    PyObject *scope = asgi_scope_from_map(env, argv[4]);
+    if (scope == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Convert body binary to Python bytes */
+    PyObject *body = PyBytes_FromStringAndSize((const char *)body_bin.data, body_bin.size);
+    if (body == NULL) {
+        Py_DECREF(scope);
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Import the ASGI runner module */
+    PyObject *runner_module = PyImport_ImportModule(runner_name);
+    if (runner_module == NULL) {
+        Py_DECREF(body);
+        Py_DECREF(scope);
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Call _run_asgi_sync(module_name, callable_name, scope, body)
+     * or run_asgi(module_name, callable_name, scope, body) depending on runner */
+    PyObject *run_result = PyObject_CallMethod(
+        runner_module, "run_asgi", "ssOO",
+        module_name, callable_name, scope, body);
+
+    /* Fallback to _run_asgi_sync if run_asgi doesn't exist */
+    if (run_result == NULL && PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        PyErr_Clear();
+        run_result = PyObject_CallMethod(
+            runner_module, "_run_asgi_sync", "ssOO",
+            module_name, callable_name, scope, body);
+    }
+
+    Py_DECREF(runner_module);
+    Py_DECREF(body);
+    Py_DECREF(scope);
+
+    if (run_result == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Convert result to Erlang term using optimized extraction */
+    ERL_NIF_TERM term_result = extract_asgi_response(env, run_result);
+    Py_DECREF(run_result);
+
+    result = enif_make_tuple2(env, ATOM_OK, term_result);
+
+cleanup:
+    enif_free(runner_name);
+    enif_free(module_name);
+    enif_free(callable_name);
+
+    /* Exit the sub-interpreter */
+    PyThreadState_Swap(NULL);
+    if (saved_tstate != NULL) {
+        PyThreadState_Swap(saved_tstate);
+    }
+
+    /* Unlock mutex */
+    pthread_mutex_unlock(&worker->mutex);
+
+    return result;
+}
+
 #else /* !HAVE_SUBINTERPRETERS */
 
 /* Stub implementations for older Python versions */
@@ -1704,6 +1846,12 @@ static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_T
 }
 
 static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+    return make_error(env, "subinterpreters_not_supported");
+}
+
+static ERL_NIF_TERM nif_subinterp_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     (void)argv;
     return make_error(env, "subinterpreters_not_supported");
@@ -1879,6 +2027,7 @@ static ErlNifFunc nif_funcs[] = {
     {"subinterp_worker_destroy", 1, nif_subinterp_worker_destroy, 0},
     {"subinterp_call", 5, nif_subinterp_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"parallel_execute", 2, nif_parallel_execute, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"subinterp_asgi_run", 6, nif_subinterp_asgi_run, ERL_NIF_DIRTY_JOB_CPU_BOUND},
 
     /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},
