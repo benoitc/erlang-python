@@ -37,6 +37,7 @@
     test_subinterp_supported/1,
     test_parallel_execution/1,
     test_venv/1,
+    test_venv_pth/1,
     %% New scalability tests
     test_execution_mode/1,
     test_num_executors/1,
@@ -87,6 +88,7 @@ all() ->
         test_subinterp_supported,
         test_parallel_execution,
         test_venv,
+        test_venv_pth,
         %% Scalability tests
         test_execution_mode,
         test_num_executors,
@@ -634,11 +636,16 @@ test_venv(_Config) ->
     true = is_binary(maps:get(<<"venv_path">>, Info)),
     true = is_binary(maps:get(<<"site_packages">>, Info)),
 
+    %% site-packages must be in sys.path and at position 0
+    {ok, true} = py:eval(<<"sp in __import__('sys').path">>, #{sp => SitePackages}),
+    {ok, 0} = py:eval(<<"__import__('sys').path.index(sp)">>, #{sp => SitePackages}),
+
     %% Deactivate
     ok = py:deactivate_venv(),
 
-    %% Verify deactivated
+    %% Verify deactivated: venv_info and sys.path both restored
     {ok, #{<<"active">> := false}} = py:venv_info(),
+    {ok, false} = py:eval(<<"sp in __import__('sys').path">>, #{sp => SitePackages}),
 
     %% Test error case - invalid path
     {error, _} = py:activate_venv(<<"/nonexistent/path">>),
@@ -646,6 +653,41 @@ test_venv(_Config) ->
     %% Cleanup
     {ok, _} = py:call(shutil, rmtree, [TmpDir], #{ignore_errors => true}),
 
+    ok.
+
+test_venv_pth(_Config) ->
+    %% Verify .pth files are processed (editable installs)
+    TmpDir = <<"/tmp/erlang_python_test_venv_pth">>,
+    PkgSrc = <<"/tmp/erlang_python_test_pth_src">>,
+
+    {ok, PyVer} = py:eval(<<"f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'">>),
+    SitePackages = <<TmpDir/binary, "/lib/", PyVer/binary, "/site-packages">>,
+
+    %% Create fake venv with a .pth file pointing at PkgSrc
+    {ok, _} = py:call(os, makedirs, [SitePackages], #{exist_ok => true}),
+    {ok, _} = py:call(os, makedirs, [PkgSrc], #{exist_ok => true}),
+    PthFile = <<SitePackages/binary, "/test_editable.pth">>,
+    {ok, _} = py:eval(<<"open(pf, 'w').write(pd + '\\n')">>, #{pf => PthFile, pd => PkgSrc}),
+
+    %% Drop a module in PkgSrc so we can verify it's importable
+    ModFile = <<PkgSrc/binary, "/ep_test_editable_mod.py">>,
+    {ok, _} = py:eval(<<"open(f, 'w').write('answer = 42\\n')">>, #{f => ModFile}),
+
+    {ok, false} = py:eval(<<"pd in __import__('sys').path">>, #{pd => PkgSrc}),
+
+    %% Activate and verify paths and import
+    ok = py:activate_venv(TmpDir),
+    {ok, 0} = py:eval(<<"__import__('sys').path.index(sp)">>, #{sp => SitePackages}),
+    {ok, 1} = py:eval(<<"__import__('sys').path.index(pd)">>, #{pd => PkgSrc}),
+    {ok, 42} = py:eval(<<"__import__('ep_test_editable_mod').answer">>),
+
+    %% Deactivate and verify cleanup
+    ok = py:deactivate_venv(),
+    {ok, false} = py:eval(<<"pd in __import__('sys').path">>, #{pd => PkgSrc}),
+    {ok, false} = py:eval(<<"sp in __import__('sys').path">>, #{sp => SitePackages}),
+
+    {ok, _} = py:call(shutil, rmtree, [TmpDir], #{ignore_errors => true}),
+    {ok, _} = py:call(shutil, rmtree, [PkgSrc], #{ignore_errors => true}),
     ok.
 
 %%% ============================================================================
