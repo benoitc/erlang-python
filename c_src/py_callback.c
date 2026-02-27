@@ -694,6 +694,50 @@ static PyObject *ErlangFunction_New(PyObject *name) {
     return (PyObject *)self;
 }
 
+/* ============================================================================
+ * ErlangPid - opaque wrapper for Erlang process identifiers
+ *
+ * ErlangPidObject is defined in py_nif.h for use by py_convert.c
+ * ============================================================================ */
+
+static PyObject *ErlangPid_repr(ErlangPidObject *self) {
+    /* Show the raw term value for debugging — not a stable external format,
+       but distinguishes different PIDs in logs and repls. */
+    return PyUnicode_FromFormat("<erlang.Pid 0x%lx>",
+                                (unsigned long)self->pid.pid);
+}
+
+static PyObject *ErlangPid_richcompare(PyObject *a, PyObject *b, int op) {
+    if (!Py_IS_TYPE(b, &ErlangPidType)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    ErlangPidObject *pa = (ErlangPidObject *)a;
+    ErlangPidObject *pb = (ErlangPidObject *)b;
+    int eq = enif_is_identical(pa->pid.pid, pb->pid.pid);
+    switch (op) {
+        case Py_EQ: return PyBool_FromLong(eq);
+        case Py_NE: return PyBool_FromLong(!eq);
+        default:    Py_RETURN_NOTIMPLEMENTED;
+    }
+}
+
+static Py_hash_t ErlangPid_hash(ErlangPidObject *self) {
+    Py_hash_t h = (Py_hash_t)enif_hash(ERL_NIF_PHASH2, self->pid.pid, 0);
+    if (h == -1) h = -2;  /* -1 is reserved for errors in Python */
+    return h;
+}
+
+PyTypeObject ErlangPidType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang.Pid",
+    .tp_basicsize = sizeof(ErlangPidObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_repr = (reprfunc)ErlangPid_repr,
+    .tp_richcompare = ErlangPid_richcompare,
+    .tp_hash = (hashfunc)ErlangPid_hash,
+    .tp_doc = "Opaque Erlang process identifier",
+};
+
 /**
  * Python implementation of erlang.call(name, *args)
  *
@@ -909,6 +953,68 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     /* Raise exception to abort Python execution */
     PyErr_SetString(SuspensionRequiredException, "callback pending");
     return NULL;
+}
+
+/* ============================================================================
+ * erlang.send() - Fire-and-forget message passing
+ *
+ * Sends a message directly to an Erlang process mailbox via enif_send().
+ * No suspension, no blocking, no reply needed.
+ * ============================================================================ */
+
+/**
+ * @brief Python: erlang.send(pid, term) -> None
+ *
+ * Fire-and-forget message send to an Erlang process.
+ *
+ * @param self Module reference (unused)
+ * @param args Tuple: (pid:erlang.Pid, term:any)
+ * @return None on success, NULL with exception on failure
+ */
+static PyObject *erlang_send_impl(PyObject *self, PyObject *args) {
+    (void)self;
+
+    if (PyTuple_Size(args) != 2) {
+        PyErr_SetString(PyExc_TypeError,
+            "erlang.send requires exactly 2 arguments: (pid, term)");
+        return NULL;
+    }
+
+    PyObject *pid_obj = PyTuple_GetItem(args, 0);
+    PyObject *term_obj = PyTuple_GetItem(args, 1);
+
+    /* Validate PID type */
+    if (!Py_IS_TYPE(pid_obj, &ErlangPidType)) {
+        PyErr_SetString(PyExc_TypeError, "First argument must be an erlang.Pid");
+        return NULL;
+    }
+
+    ErlangPidObject *pid = (ErlangPidObject *)pid_obj;
+
+    /* Allocate a message environment and convert the term */
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
+        return NULL;
+    }
+
+    ERL_NIF_TERM msg = py_to_term(msg_env, term_obj);
+
+    if (PyErr_Occurred()) {
+        enif_free_env(msg_env);
+        return NULL;
+    }
+
+    /* Fire-and-forget send */
+    if (!enif_send(NULL, &pid->pid, msg_env, msg)) {
+        enif_free_env(msg_env);
+        PyErr_SetString(ProcessErrorException,
+            "Failed to send message: process may not exist");
+        return NULL;
+    }
+
+    enif_free_env(msg_env);
+    Py_RETURN_NONE;
 }
 
 /* ============================================================================
@@ -1288,6 +1394,10 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Call a registered Erlang function.\n\n"
      "Usage: erlang.call('func_name', arg1, arg2, ...)\n"
      "Returns: The result from the Erlang function."},
+    {"send", erlang_send_impl, METH_VARARGS,
+     "Send a message to an Erlang process (fire-and-forget).\n\n"
+     "Usage: erlang.send(pid, term)\n"
+     "The pid must be an erlang.Pid object."},
     {"_get_async_callback_fd", get_async_callback_fd, METH_NOARGS,
      "Get the file descriptor for async callback responses.\n"
      "Used internally by async_call() to register with asyncio."},
@@ -1344,6 +1454,11 @@ static int create_erlang_module(void) {
         return -1;
     }
 
+    /* Initialize ErlangPid type */
+    if (PyType_Ready(&ErlangPidType) < 0) {
+        return -1;
+    }
+
     PyObject *module = PyModule_Create(&ErlangModuleDef);
     if (module == NULL) {
         return -1;
@@ -1353,7 +1468,7 @@ static int create_erlang_module(void) {
      * This exception is raised internally when erlang.call() needs to suspend.
      * It carries callback info in args: (callback_id, func_name, args_tuple) */
     SuspensionRequiredException = PyErr_NewException(
-        "erlang.SuspensionRequired", NULL, NULL);
+        "erlang.SuspensionRequired", PyExc_BaseException, NULL);
     if (SuspensionRequiredException == NULL) {
         Py_DECREF(module);
         return -1;
@@ -1365,10 +1480,32 @@ static int create_erlang_module(void) {
         return -1;
     }
 
+    /* Create erlang.ProcessError for dead/unreachable processes */
+    ProcessErrorException = PyErr_NewException(
+        "erlang.ProcessError", NULL, NULL);
+    if (ProcessErrorException == NULL) {
+        Py_DECREF(module);
+        return -1;
+    }
+    Py_INCREF(ProcessErrorException);
+    if (PyModule_AddObject(module, "ProcessError", ProcessErrorException) < 0) {
+        Py_DECREF(ProcessErrorException);
+        Py_DECREF(module);
+        return -1;
+    }
+
     /* Add ErlangFunction type to module (for introspection) */
     Py_INCREF(&ErlangFunctionType);
     if (PyModule_AddObject(module, "Function", (PyObject *)&ErlangFunctionType) < 0) {
         Py_DECREF(&ErlangFunctionType);
+        Py_DECREF(module);
+        return -1;
+    }
+
+    /* Add ErlangPid type to module */
+    Py_INCREF(&ErlangPidType);
+    if (PyModule_AddObject(module, "Pid", (PyObject *)&ErlangPidType) < 0) {
+        Py_DECREF(&ErlangPidType);
         Py_DECREF(module);
         return -1;
     }
