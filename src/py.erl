@@ -105,6 +105,7 @@
     start_contexts/0,
     start_contexts/1,
     stop_contexts/0,
+    contexts_started/0,
     %% py_ref API (Python object references with auto-routing)
     call_method/3,
     getattr/2,
@@ -178,9 +179,9 @@ call(Module, Func, Args, Kwargs, Timeout) ->
 %% @private
 %% Always route through context process - it handles callbacks inline using
 %% suspension-based approach (no separate callback handler, no blocking)
-do_call(Module, Func, Args, Kwargs, _Timeout) ->
+do_call(Module, Func, Args, Kwargs, Timeout) ->
     Ctx = py_context_router:get_context(),
-    py_context:call(Ctx, Module, Func, Args, Kwargs).
+    py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout).
 
 %% @doc Evaluate a Python expression and return the result.
 -spec eval(string() | binary()) -> py_result().
@@ -208,11 +209,11 @@ eval(Code, Locals) ->
     ; (string() | binary(), map(), timeout()) -> py_result().
 eval(Ctx, Code, Locals) when is_pid(Ctx), is_map(Locals) ->
     py_context:eval(Ctx, Code, Locals);
-eval(Code, Locals, _Timeout) ->
+eval(Code, Locals, Timeout) ->
     %% Always route through context process - it handles callbacks inline using
     %% suspension-based approach (no separate callback handler, no blocking)
     Ctx = py_context_router:get_context(),
-    py_context:eval(Ctx, Code, Locals).
+    py_context:eval(Ctx, Code, Locals, Timeout).
 
 %% @doc Execute Python statements (no return value expected).
 -spec exec(string() | binary()) -> ok | {error, term()}.
@@ -868,6 +869,11 @@ start_contexts(Opts) ->
 -spec stop_contexts() -> ok.
 stop_contexts() ->
     py_context_router:stop().
+
+%% @doc Check if contexts have been started.
+-spec contexts_started() -> boolean().
+contexts_started() ->
+    py_context_router:is_started().
 
 %% @doc Get the context for the current process.
 %%

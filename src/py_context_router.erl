@@ -60,6 +60,7 @@
     start/0,
     start/1,
     stop/0,
+    is_started/0,
     get_context/0,
     get_context/1,
     bind_context/1,
@@ -200,6 +201,23 @@ stop() ->
     catch persistent_term:erase(?NUM_CONTEXTS_KEY),
     catch persistent_term:erase(?CONTEXTS_KEY),
     ok.
+
+%% @doc Check if contexts have been started and are still alive.
+%%
+%% @returns true if contexts are running, false otherwise
+-spec is_started() -> boolean().
+is_started() ->
+    case persistent_term:get(?NUM_CONTEXTS_KEY, 0) of
+        0 -> false;
+        _N ->
+            %% Verify at least one context is actually alive
+            %% (persistent_term may have stale data after app restart)
+            case persistent_term:get(?CONTEXT_KEY(1), undefined) of
+                undefined -> false;
+                Pid when is_pid(Pid) -> is_process_alive(Pid);
+                _ -> false
+            end
+    end.
 
 %% @doc Get the context for the current process.
 %%

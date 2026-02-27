@@ -269,9 +269,9 @@ test_nested_types(_Config) ->
     ok.
 
 test_timeout(_Config) ->
-    %% Test that timeout works - use a heavy computation
-    %% sum(range(10**8)) will trigger timeout
-    {error, timeout} = py:eval(<<"sum(range(10**8))">>, #{}, 100),
+    %% Test that timeout works - use time.sleep which guarantees delay
+    %% time.sleep(1) will definitely exceed 100ms timeout
+    {error, timeout} = py:eval(<<"__import__('time').sleep(1)">>, #{}, 100),
 
     %% Test that normal operations complete within timeout
     {ok, 45} = py:eval(<<"sum(range(10))">>, #{}, 5000),

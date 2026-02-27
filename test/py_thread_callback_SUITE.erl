@@ -41,7 +41,11 @@ all() ->
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
-    {ok, _} = py:start_contexts(),
+    %% Only start contexts if not already running (avoids conflict with other suites)
+    case py:contexts_started() of
+        true -> ok;
+        false -> {ok, _} = py:start_contexts()
+    end,
     Config.
 
 end_per_suite(_Config) ->
