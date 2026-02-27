@@ -321,6 +321,25 @@ typedef struct {
     PyObject *obj;
 } py_object_t;
 
+/**
+ * @struct py_ref_t
+ * @brief Python object reference with interpreter ID for auto-routing
+ *
+ * This extends py_object_t by adding the interpreter ID that created
+ * the object. This allows automatic routing of method calls and
+ * attribute access to the correct context.
+ *
+ * @note The interp_id is used by py_context_router to find the owning context
+ * @warning Operations on this ref must be performed in the correct interpreter
+ */
+typedef struct {
+    /** @brief The wrapped Python object (owned reference) */
+    PyObject *obj;
+
+    /** @brief Interpreter ID that owns this object (for routing) */
+    uint32_t interp_id;
+} py_ref_t;
+
 /** @} */
 
 /* ============================================================================
@@ -583,6 +602,155 @@ typedef struct {
 } py_subinterp_worker_t;
 #endif
 
+/**
+ * @struct py_context_t
+ * @brief Process-owned Python context (NO MUTEX)
+ *
+ * A py_context_t is owned by a single Erlang process, which serializes
+ * all access to it. This eliminates mutex contention and enables true
+ * N-way parallelism when combined with subinterpreters.
+ *
+ * Unlike py_subinterp_worker_t, this structure has NO mutex - the owning
+ * Erlang process guarantees exclusive access through message passing.
+ *
+ * @note For Python 3.12+, each context has its own GIL (OWN_GIL)
+ * @note For older Python, contexts share the GIL but still avoid mutex overhead
+ *
+ * @see nif_context_create
+ * @see nif_context_call
+ */
+typedef struct {
+    /** @brief Unique interpreter ID for routing (0 = main, >0 = subinterp) */
+    uint32_t interp_id;
+
+    /** @brief Context mode: true=subinterpreter, false=worker */
+    bool is_subinterp;
+
+    /** @brief Flag indicating context has been destroyed */
+    bool destroyed;
+
+    /** @brief Flag: callback handler is configured */
+    bool has_callback_handler;
+
+    /** @brief PID of Erlang process handling callbacks */
+    ErlNifPid callback_handler;
+
+    /** @brief Pipe for callback responses [read, write] */
+    int callback_pipe[2];
+
+#ifdef HAVE_SUBINTERPRETERS
+    /** @brief Python interpreter state (only for subinterp mode) */
+    PyInterpreterState *interp;
+
+    /** @brief Thread state for this interpreter */
+    PyThreadState *tstate;
+#else
+    /** @brief Worker thread state (non-subinterp mode) */
+    PyThreadState *thread_state;
+#endif
+
+    /** @brief Global namespace dictionary */
+    PyObject *globals;
+
+    /** @brief Local namespace dictionary */
+    PyObject *locals;
+
+    /** @brief Module cache (Dict: module_name -> PyModule) */
+    PyObject *module_cache;
+} py_context_t;
+
+/**
+ * @struct suspended_context_state_t
+ * @brief State for a suspended Python context execution awaiting callback result
+ *
+ * Similar to suspended_state_t but for the process-per-context architecture.
+ * When Python code in a context calls `erlang.call()`, execution is suspended
+ * and this structure captures all state needed to resume after the context
+ * process handles the callback inline.
+ *
+ * @par Key Difference from suspended_state_t:
+ * This uses py_context_t (no mutex) instead of py_worker_t, and is designed
+ * for the recursive receive pattern where the context process handles
+ * callbacks inline without blocking.
+ *
+ * @see nif_context_resume
+ */
+typedef struct {
+    /** @brief Context for replay */
+    py_context_t *ctx;
+
+    /** @brief Unique identifier for this callback */
+    uint64_t callback_id;
+
+    /* Callback invocation info */
+
+    /** @brief Name of Erlang function being called */
+    char *callback_func_name;
+
+    /** @brief Length of callback_func_name */
+    size_t callback_func_len;
+
+    /** @brief Arguments passed to the callback */
+    PyObject *callback_args;
+
+    /* Original request context for replay */
+
+    /** @brief Original request type (PY_REQ_CALL or PY_REQ_EVAL) */
+    int request_type;
+
+    /** @brief Original module name binary (for PY_REQ_CALL) */
+    ErlNifBinary orig_module;
+
+    /** @brief Original function name binary (for PY_REQ_CALL) */
+    ErlNifBinary orig_func;
+
+    /** @brief Original arguments (copied to orig_env) */
+    ERL_NIF_TERM orig_args;
+
+    /** @brief Original keyword arguments */
+    ERL_NIF_TERM orig_kwargs;
+
+    /** @brief Original code for eval replay (for PY_REQ_EVAL) */
+    ErlNifBinary orig_code;
+
+    /** @brief Original locals map for eval replay */
+    ERL_NIF_TERM orig_locals;
+
+    /** @brief Environment owning copied terms */
+    ErlNifEnv *orig_env;
+
+    /* Callback result (set before resume) */
+
+    /** @brief Raw result data from Erlang callback (current callback) */
+    unsigned char *result_data;
+
+    /** @brief Length of result_data */
+    size_t result_len;
+
+    /** @brief Flag: result is available for replay */
+    volatile bool has_result;
+
+    /** @brief Flag: result represents an error */
+    volatile bool is_error;
+
+    /* Sequential callback support - stores all accumulated callback results */
+
+    /** @brief Current callback result index for replay */
+    size_t callback_result_index;
+
+    /** @brief Number of cached callback results (from previous callbacks) */
+    size_t num_callback_results;
+
+    /** @brief Capacity of callback_results array */
+    size_t callback_results_capacity;
+
+    /** @brief Cached callback results array (grows with sequential callbacks) */
+    struct {
+        unsigned char *data;
+        size_t len;
+    } *callback_results;
+} suspended_context_state_t;
+
 /** @} */
 
 /* ============================================================================
@@ -663,6 +831,18 @@ extern ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE;
 extern ErlNifResourceType *SUBINTERP_WORKER_RESOURCE_TYPE;
 #endif
 
+/** @brief Resource type for py_context_t (process-per-context) */
+extern ErlNifResourceType *PY_CONTEXT_RESOURCE_TYPE;
+
+/** @brief Resource type for py_ref_t (Python object with interp_id) */
+extern ErlNifResourceType *PY_REF_RESOURCE_TYPE;
+
+/** @brief Resource type for suspended_context_state_t (context suspension) */
+extern ErlNifResourceType *PY_CONTEXT_SUSPENDED_RESOURCE_TYPE;
+
+/** @brief Atomic counter for unique interpreter IDs */
+extern _Atomic uint32_t g_context_id_counter;
+
 /** @brief Flag: Python interpreter is initialized */
 extern bool g_python_initialized;
 
@@ -718,8 +898,11 @@ extern PyObject *g_numpy_ndarray_type;
 
 /* Thread-local state */
 
-/** @brief Current worker for callback context */
+/** @brief Current worker for callback context (legacy) */
 extern __thread py_worker_t *tl_current_worker;
+
+/** @brief Current context for callback context (new process-per-context API) */
+extern __thread py_context_t *tl_current_context;
 
 /** @brief Current NIF environment for callbacks */
 extern __thread ErlNifEnv *tl_callback_env;

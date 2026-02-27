@@ -46,11 +46,9 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    py:unbind(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    py:unbind(),
     ok.
 
 %% ============================================================================

@@ -592,6 +592,291 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
         enif_make_tuple2(env, func_name_term, args_term));
 }
 
+/* ============================================================================
+ * Context suspension helpers (for process-per-context architecture)
+ *
+ * These functions handle suspension/resume for py_context_t-based execution.
+ * Unlike worker suspension, context suspension doesn't use mutex or condvar -
+ * the context process handles callbacks inline via recursive receive.
+ * ============================================================================ */
+
+/**
+ * Create a suspended context state for a py:call.
+ *
+ * Called when Python code in a context calls erlang.call() and suspension
+ * is required. Captures all state needed to resume after callback completes.
+ *
+ * @param env NIF environment
+ * @param ctx Context executing the Python code
+ * @param module_bin Original module binary
+ * @param func_bin Original function binary
+ * @param args_term Original args term
+ * @param kwargs_term Original kwargs term
+ * @return suspended_context_state_t* or NULL on error
+ */
+static suspended_context_state_t *create_suspended_context_state_for_call(
+    ErlNifEnv *env,
+    py_context_t *ctx,
+    ErlNifBinary *module_bin,
+    ErlNifBinary *func_bin,
+    ERL_NIF_TERM args_term,
+    ERL_NIF_TERM kwargs_term) {
+
+    /* Allocate the suspended context state resource */
+    suspended_context_state_t *state = enif_alloc_resource(
+        PY_CONTEXT_SUSPENDED_RESOURCE_TYPE, sizeof(suspended_context_state_t));
+    if (state == NULL) {
+        return NULL;
+    }
+
+    /* Initialize to zero */
+    memset(state, 0, sizeof(suspended_context_state_t));
+
+    state->ctx = ctx;
+    state->callback_id = tl_pending_callback_id;
+    state->request_type = PY_REQ_CALL;
+
+    /* Copy callback function name */
+    state->callback_func_name = enif_alloc(tl_pending_func_name_len + 1);
+    if (state->callback_func_name == NULL) {
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->callback_func_name, tl_pending_func_name, tl_pending_func_name_len);
+    state->callback_func_name[tl_pending_func_name_len] = '\0';
+    state->callback_func_len = tl_pending_func_name_len;
+
+    /* Store callback args reference */
+    Py_INCREF(tl_pending_args);
+    state->callback_args = tl_pending_args;
+
+    /* Create environment to hold copied terms */
+    state->orig_env = enif_alloc_env();
+    if (state->orig_env == NULL) {
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+
+    /* Copy module binary */
+    if (!enif_alloc_binary(module_bin->size, &state->orig_module)) {
+        enif_free_env(state->orig_env);
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->orig_module.data, module_bin->data, module_bin->size);
+
+    /* Copy function binary */
+    if (!enif_alloc_binary(func_bin->size, &state->orig_func)) {
+        enif_release_binary(&state->orig_module);
+        enif_free_env(state->orig_env);
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->orig_func.data, func_bin->data, func_bin->size);
+
+    /* Copy args and kwargs to our environment */
+    state->orig_args = enif_make_copy(state->orig_env, args_term);
+    state->orig_kwargs = enif_make_copy(state->orig_env, kwargs_term);
+
+    return state;
+}
+
+/**
+ * Create a suspended context state for a py:eval.
+ *
+ * Called when Python code in a context calls erlang.call() during eval
+ * and suspension is required.
+ *
+ * @param env NIF environment
+ * @param ctx Context executing the Python code
+ * @param code_bin Original code binary
+ * @param locals_term Original locals term
+ * @return suspended_context_state_t* or NULL on error
+ */
+static suspended_context_state_t *create_suspended_context_state_for_eval(
+    ErlNifEnv *env,
+    py_context_t *ctx,
+    ErlNifBinary *code_bin,
+    ERL_NIF_TERM locals_term) {
+
+    (void)env;
+
+    /* Allocate the suspended context state resource */
+    suspended_context_state_t *state = enif_alloc_resource(
+        PY_CONTEXT_SUSPENDED_RESOURCE_TYPE, sizeof(suspended_context_state_t));
+    if (state == NULL) {
+        return NULL;
+    }
+
+    /* Initialize to zero */
+    memset(state, 0, sizeof(suspended_context_state_t));
+
+    state->ctx = ctx;
+    state->callback_id = tl_pending_callback_id;
+    state->request_type = PY_REQ_EVAL;
+
+    /* Copy callback function name */
+    state->callback_func_name = enif_alloc(tl_pending_func_name_len + 1);
+    if (state->callback_func_name == NULL) {
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->callback_func_name, tl_pending_func_name, tl_pending_func_name_len);
+    state->callback_func_name[tl_pending_func_name_len] = '\0';
+    state->callback_func_len = tl_pending_func_name_len;
+
+    /* Store callback args reference */
+    Py_INCREF(tl_pending_args);
+    state->callback_args = tl_pending_args;
+
+    /* Create environment to hold copied terms */
+    state->orig_env = enif_alloc_env();
+    if (state->orig_env == NULL) {
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+
+    /* Copy code binary */
+    if (!enif_alloc_binary(code_bin->size, &state->orig_code)) {
+        enif_free_env(state->orig_env);
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->orig_code.data, code_bin->data, code_bin->size);
+
+    /* Copy locals to our environment */
+    state->orig_locals = enif_make_copy(state->orig_env, locals_term);
+
+    return state;
+}
+
+/**
+ * Build the {suspended, ...} result term from a suspended context state.
+ *
+ * @param env NIF environment
+ * @param suspended Suspended context state (resource will be released)
+ * @return ERL_NIF_TERM {suspended, CallbackId, StateRef, {FuncName, Args}}
+ * @note Clears tl_pending_callback
+ */
+static ERL_NIF_TERM build_suspended_context_result(ErlNifEnv *env, suspended_context_state_t *suspended) {
+    ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
+    enif_release_resource(suspended);
+
+    ERL_NIF_TERM callback_id_term = enif_make_uint64(env, tl_pending_callback_id);
+
+    ERL_NIF_TERM func_name_term;
+    unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
+    memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
+
+    ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
+
+    tl_pending_callback = false;
+
+    return enif_make_tuple4(env,
+        ATOM_SUSPENDED,
+        callback_id_term,
+        state_ref,
+        enif_make_tuple2(env, func_name_term, args_term));
+}
+
+/**
+ * Copy accumulated callback results from parent state to nested state.
+ *
+ * When a sequential callback occurs during replay, the nested suspended state
+ * needs to include all callback results from the parent PLUS the current result.
+ * This function copies parent's callback_results array and adds the parent's
+ * current result (result_data) to the end.
+ *
+ * @param nested The nested suspended state being created
+ * @param parent The parent suspended state (current tl_current_context_suspended)
+ * @return 0 on success, -1 on memory allocation failure
+ */
+static int copy_callback_results_to_nested(suspended_context_state_t *nested,
+                                           suspended_context_state_t *parent) {
+    if (parent == NULL) {
+        /* No parent state - nothing to copy */
+        return 0;
+    }
+
+    /*
+     * Calculate total results needed: parent's array + parent's current result.
+     *
+     * IMPORTANT: We check result_data != NULL instead of has_result because
+     * has_result may have been set to false when the result was consumed
+     * during replay, but the result data is still valid and needs to be
+     * copied to the nested state for subsequent replays.
+     */
+    size_t total_results = parent->num_callback_results;
+    bool has_current_result = (parent->result_data != NULL && parent->result_len > 0);
+    if (has_current_result) {
+        total_results += 1;
+    }
+
+    if (total_results == 0) {
+        /* No results to copy */
+        return 0;
+    }
+
+    /* Allocate results array */
+    nested->callback_results = enif_alloc(total_results * sizeof(nested->callback_results[0]));
+    if (nested->callback_results == NULL) {
+        return -1;
+    }
+    nested->callback_results_capacity = total_results;
+    nested->num_callback_results = total_results;
+    nested->callback_result_index = 0;
+
+    /* Copy parent's accumulated results */
+    for (size_t i = 0; i < parent->num_callback_results; i++) {
+        size_t len = parent->callback_results[i].len;
+        nested->callback_results[i].data = enif_alloc(len);
+        if (nested->callback_results[i].data == NULL) {
+            /* Cleanup on failure */
+            for (size_t j = 0; j < i; j++) {
+                enif_free(nested->callback_results[j].data);
+            }
+            enif_free(nested->callback_results);
+            nested->callback_results = NULL;
+            nested->num_callback_results = 0;
+            nested->callback_results_capacity = 0;
+            return -1;
+        }
+        memcpy(nested->callback_results[i].data, parent->callback_results[i].data, len);
+        nested->callback_results[i].len = len;
+    }
+
+    /* Add parent's current result (result_data) as the last element */
+    if (has_current_result) {
+        size_t idx = parent->num_callback_results;
+        nested->callback_results[idx].data = enif_alloc(parent->result_len);
+        if (nested->callback_results[idx].data == NULL) {
+            /* Cleanup on failure */
+            for (size_t j = 0; j < idx; j++) {
+                enif_free(nested->callback_results[j].data);
+            }
+            enif_free(nested->callback_results);
+            nested->callback_results = NULL;
+            nested->num_callback_results = 0;
+            nested->callback_results_capacity = 0;
+            return -1;
+        }
+        memcpy(nested->callback_results[idx].data, parent->result_data, parent->result_len);
+        nested->callback_results[idx].len = parent->result_len;
+    }
+
+    return 0;
+}
+
 /**
  * Helper to parse callback response data into a Python object.
  * Response format: status_byte (0=ok, 1=error) + python_repr_string
@@ -618,18 +903,28 @@ static PyObject *parse_callback_response(unsigned char *response_data, size_t re
 
     PyObject *result = NULL;
     if (status == 0) {
-        /* Try to evaluate the result string as Python literal using cached function */
-        if (g_ast_literal_eval != NULL) {
-            PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
-            if (arg != NULL) {
-                result = PyObject_CallFunctionObjArgs(g_ast_literal_eval, arg, NULL);
-                Py_DECREF(arg);
-                if (result == NULL) {
-                    /* If literal_eval fails, return as string */
-                    PyErr_Clear();
-                    result = PyUnicode_FromStringAndSize(result_str, result_len);
+        /* Try to evaluate the result string as Python literal.
+         * Import ast.literal_eval fresh to support subinterpreters
+         * (the cached g_ast_literal_eval may be from a different interpreter). */
+        PyObject *ast_mod = PyImport_ImportModule("ast");
+        if (ast_mod != NULL) {
+            PyObject *literal_eval = PyObject_GetAttrString(ast_mod, "literal_eval");
+            Py_DECREF(ast_mod);
+            if (literal_eval != NULL) {
+                PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
+                if (arg != NULL) {
+                    result = PyObject_CallFunctionObjArgs(literal_eval, arg, NULL);
+                    Py_DECREF(arg);
+                    if (result == NULL) {
+                        /* If literal_eval fails, return as string */
+                        PyErr_Clear();
+                        result = PyUnicode_FromStringAndSize(result_str, result_len);
+                    }
                 }
+                Py_DECREF(literal_eval);
             }
+        } else {
+            PyErr_Clear();
         }
         if (result == NULL) {
             result = PyUnicode_FromStringAndSize(result_str, result_len);
@@ -713,10 +1008,18 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     (void)self;
 
     /*
-     * Check if this is a call from an executor thread (normal path) or
-     * from a spawned thread (thread worker path).
+     * Check if we have a callback handler available.
+     * Priority:
+     * 1. tl_current_context with suspension enabled (new process-per-context API)
+     * 2. tl_current_context with callback_handler (old blocking pipe mode)
+     * 3. tl_current_worker (legacy worker API)
+     * 4. thread_worker_call (spawned threads)
      */
-    if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
+    bool has_context_suspension = (tl_current_context != NULL && tl_allow_suspension);
+    bool has_context_handler = (tl_current_context != NULL && tl_current_context->has_callback_handler);
+    bool has_worker_handler = (tl_current_worker != NULL && tl_current_worker->has_callback_handler);
+
+    if (!has_context_suspension && !has_context_handler && !has_worker_handler) {
         /*
          * Not an executor thread - use thread worker path.
          * This enables any spawned Python thread to call erlang.call():
@@ -787,15 +1090,77 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         }
     }
 
+    /* Check for context-based suspended state with cached results (context replay case) */
+    if (tl_current_context_suspended != NULL) {
+        /*
+         * Sequential callback support:
+         * When replaying Python code with multiple sequential erlang.call()s,
+         * we need to return results in the same order they were executed.
+         * The callback_results array stores results from previous callbacks,
+         * indexed in call order. The has_result field holds the CURRENT callback's
+         * result (the one that triggered this resume).
+         *
+         * Example: f(g(h(x)))
+         * - Replay 1: h(x) suspended, resumed with h_result
+         *   callback_results = [], has_result = h_result
+         *   h(x) returns h_result, g(...) suspends
+         *
+         * - Replay 2: nested state has callback_results = [h_result], has_result = g_result
+         *   h(x) returns callback_results[0] = h_result
+         *   g(...) returns has_result = g_result
+         *   f(...) suspends
+         *
+         * - Replay 3: nested state has callback_results = [h_result, g_result], has_result = f_result
+         *   h(x) returns callback_results[0] = h_result
+         *   g(...) returns callback_results[1] = g_result
+         *   f(...) returns has_result = f_result
+         *   Done!
+         */
+
+        /* First, check if we have a cached result from a PREVIOUS callback */
+        if (tl_current_context_suspended->callback_result_index <
+            tl_current_context_suspended->num_callback_results) {
+            /* Return cached result from previous callback, advance index */
+            size_t idx = tl_current_context_suspended->callback_result_index++;
+            PyObject *result = parse_callback_response(
+                tl_current_context_suspended->callback_results[idx].data,
+                tl_current_context_suspended->callback_results[idx].len);
+            return result;
+        }
+
+        /* Next, check if this is the CURRENT callback (the one that triggered resume) */
+        if (tl_current_context_suspended->has_result) {
+            /* Verify this is the same callback */
+            if (tl_current_context_suspended->callback_func_len == func_name_len &&
+                memcmp(tl_current_context_suspended->callback_func_name, func_name, func_name_len) == 0) {
+                /* Return the current callback result */
+                PyObject *result = parse_callback_response(
+                    tl_current_context_suspended->result_data,
+                    tl_current_context_suspended->result_len);
+                /* Mark result as consumed */
+                tl_current_context_suspended->has_result = false;
+                return result;
+            }
+        }
+        /* If we get here, this is a NEW callback - will suspend below */
+    }
+
     /*
      * FIX for multiple sequential erlang.call():
-     * If we're in replay context (tl_current_suspended != NULL) but didn't get
+     * If we're in WORKER replay context (tl_current_suspended != NULL) but didn't get
      * a cache hit above, this is a SUBSEQUENT call (e.g., second erlang.call()
-     * in the same Python function). We MUST NOT suspend again - that would
-     * cause an infinite loop where replay always hits this second call.
-     * Instead, fall through to blocking pipe behavior for subsequent calls.
+     * in the same Python function). For WORKER mode, the callback handler process
+     * is still running and will handle this via blocking pipe.
+     *
+     * For CONTEXT replay (tl_current_context_suspended != NULL), we CANNOT block
+     * because there's no callback handler process. Instead, we must suspend again
+     * and let the context process handle the subsequent callback. This works because
+     * the context process re-replays from the beginning, and each callback result
+     * is returned via the cached result mechanism on subsequent replays.
      */
     bool force_blocking = (tl_current_suspended != NULL);
+    /* Note: tl_current_context_suspended is NOT included here - context mode
+     * always uses suspension for callbacks, allowing unlimited nesting via replay */
 
     /* Build args list (remaining args) */
     PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
@@ -841,12 +1206,23 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         uint32_t response_len = 0;
         int read_result;
 
+        /* Get callback handler and pipe from context or worker */
+        ErlNifPid *handler_pid;
+        int read_fd;
+        if (has_context_handler) {
+            handler_pid = &tl_current_context->callback_handler;
+            read_fd = tl_current_context->callback_pipe[0];
+        } else {
+            handler_pid = &tl_current_worker->callback_handler;
+            read_fd = tl_current_worker->callback_pipe[0];
+        }
+
         Py_BEGIN_ALLOW_THREADS
-        enif_send(NULL, &tl_current_worker->callback_handler, msg_env, msg);
+        enif_send(NULL, handler_pid, msg_env, msg);
         enif_free_env(msg_env);
         /* Use 30 second timeout to prevent indefinite blocking */
         read_result = read_length_prefixed_data(
-            tl_current_worker->callback_pipe[0],
+            read_fd,
             &response_data, &response_len, 30000);
         Py_END_ALLOW_THREADS
 

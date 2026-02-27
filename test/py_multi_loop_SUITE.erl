@@ -36,6 +36,7 @@ all() ->
 init_per_suite(Config) ->
     case application:ensure_all_started(erlang_python) of
         {ok, _} ->
+            {ok, _} = py:start_contexts(),
             case wait_for_event_loop(5000) of
                 ok ->
                     Config;

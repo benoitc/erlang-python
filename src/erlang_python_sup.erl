@@ -14,13 +14,12 @@
 
 %%% @doc Top-level supervisor for erlang_python.
 %%%
-%%% Manages the worker pools for Python execution:
+%%% Manages Python execution components:
 %%% <ul>
 %%%   <li>py_callback - Callback registry for Python to Erlang calls</li>
 %%%   <li>py_state - Shared state storage accessible from Python</li>
-%%%   <li>py_pool - Main worker pool for synchronous Python calls</li>
+%%%   <li>py_context_sup - Supervisor for process-per-context workers</li>
 %%%   <li>py_async_pool - Worker pool for asyncio coroutines</li>
-%%%   <li>py_subinterp_pool - Worker pool for sub-interpreter parallelism</li>
 %%% </ul>
 %%% @private
 -module(erlang_python_sup).
@@ -33,9 +32,13 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    NumWorkers = application:get_env(erlang_python, num_workers, 4),
+    NumContexts = application:get_env(erlang_python, num_contexts,
+                                       erlang:system_info(schedulers)),
+    ContextMode = application:get_env(erlang_python, context_mode, auto),
     NumAsyncWorkers = application:get_env(erlang_python, num_async_workers, 2),
-    NumSubinterpWorkers = application:get_env(erlang_python, num_subinterp_workers, 4),
+
+    %% Initialize Python runtime first
+    ok = py_nif:init(),
 
     %% Initialize the semaphore ETS table for rate limiting
     ok = py_semaphore:init(),
@@ -49,7 +52,7 @@ init([]) ->
     %% Register state functions as callbacks for Python access
     ok = py_state:register_callbacks(),
 
-    %% Callback registry - must start before pool
+    %% Callback registry - must start before contexts
     CallbackSpec = #{
         id => py_callback,
         start => {py_callback, start_link, []},
@@ -89,14 +92,24 @@ init([]) ->
         modules => [py_tracer]
     },
 
-    %% Main worker pool
-    PoolSpec = #{
-        id => py_pool,
-        start => {py_pool, start_link, [NumWorkers]},
+    %% Process-per-context supervisor (replaces py_pool and py_subinterp_pool)
+    ContextSupSpec = #{
+        id => py_context_sup,
+        start => {py_context_sup, start_link, []},
         restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [py_context_sup]
+    },
+
+    %% Context router initialization (starts contexts under py_context_sup)
+    ContextRouterInitSpec = #{
+        id => py_context_init,
+        start => {py_context_init, start_link, [#{contexts => NumContexts, mode => ContextMode}]},
+        restart => temporary,
         shutdown => 5000,
         type => worker,
-        modules => [py_pool]
+        modules => [py_context_init]
     },
 
     %% Async worker pool (for asyncio coroutines)
@@ -107,16 +120,6 @@ init([]) ->
         shutdown => 5000,
         type => worker,
         modules => [py_async_pool]
-    },
-
-    %% Sub-interpreter pool (for true parallelism with per-interpreter GIL)
-    SubinterpPoolSpec = #{
-        id => py_subinterp_pool,
-        start => {py_subinterp_pool, start_link, [NumSubinterpWorkers]},
-        restart => permanent,
-        shutdown => 5000,
-        type => worker,
-        modules => [py_subinterp_pool]
     },
 
     %% Event worker registry (for scalable I/O model)
@@ -150,7 +153,7 @@ init([]) ->
     },
 
     Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                PoolSpec, AsyncPoolSpec, SubinterpPoolSpec,
+                ContextSupSpec, ContextRouterInitSpec, AsyncPoolSpec,
                 WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec],
 
     {ok, {

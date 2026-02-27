@@ -95,17 +95,24 @@ message(STATUS "Python3 libraries: ${Python3_LIBRARIES}")
 message(STATUS "Python3 library: ${Python3_LIBRARY}")
 
 # Detect Python features for worker pool optimization
-# We use compile tests to verify actual API availability
+# We use both version checks and compile tests to verify actual API availability
 
 include(CheckCSourceCompiles)
 
-# Save and set required variables for compile test
-set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
-set(CMAKE_REQUIRED_LIBRARIES Python3::Python)
+# First check Python version - subinterpreters with OWN_GIL require Python 3.12+
+if(Python3_VERSION VERSION_GREATER_EQUAL "3.12")
+    message(STATUS "Python ${Python3_VERSION} >= 3.12, checking subinterpreter API...")
 
-# Check for subinterpreter API with per-interpreter GIL (PEP 684, Python 3.12+)
-# This verifies PyInterpreterConfig and PyInterpreterConfig_OWN_GIL are available
-check_c_source_compiles("
+    # Save and set required variables for compile test
+    set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
+    set(CMAKE_REQUIRED_LIBRARIES Python3::Python)
+
+    # Clear any cached result to ensure fresh detection
+    unset(HAVE_SUBINTERPRETERS CACHE)
+
+    # Check for subinterpreter API with per-interpreter GIL (PEP 684, Python 3.12+)
+    # This verifies PyInterpreterConfig and PyInterpreterConfig_OWN_GIL are available
+    check_c_source_compiles("
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 int main(void) {
@@ -123,10 +130,14 @@ int main(void) {
 }
 " HAVE_SUBINTERPRETERS)
 
-if(HAVE_SUBINTERPRETERS)
-    message(STATUS "Subinterpreter API detected (PyInterpreterConfig_OWN_GIL available)")
+    if(HAVE_SUBINTERPRETERS)
+        message(STATUS "Subinterpreter API detected (PyInterpreterConfig_OWN_GIL available)")
+    else()
+        message(STATUS "Subinterpreter API compile test failed, using shared GIL fallback")
+    endif()
 else()
-    message(STATUS "Subinterpreter API not available, using shared GIL fallback")
+    message(STATUS "Python ${Python3_VERSION} < 3.12, subinterpreter API not available")
+    set(HAVE_SUBINTERPRETERS FALSE)
 endif()
 
 # Check for free-threaded Python (Python 3.13+ with --disable-gil / nogil build)

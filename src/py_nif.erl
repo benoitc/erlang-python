@@ -138,7 +138,28 @@
     pool_start/1,
     pool_stop/0,
     pool_submit/5,
-    pool_stats/0
+    pool_stats/0,
+    %% Process-per-context API (no mutex)
+    context_create/1,
+    context_destroy/1,
+    context_call/5,
+    context_eval/3,
+    context_exec/2,
+    context_call_method/4,
+    context_to_term/1,
+    context_interp_id/1,
+    context_set_callback_handler/2,
+    context_get_callback_pipe/1,
+    context_write_callback_response/2,
+    context_resume/3,
+    context_cancel_resume/2,
+    %% py_ref API (Python object references with interp_id)
+    ref_wrap/2,
+    is_ref/1,
+    ref_interp_id/1,
+    ref_to_term/1,
+    ref_getattr/2,
+    ref_call_method/3
 ]).
 
 -on_load(load_nif/0).
@@ -1008,4 +1029,229 @@ pool_submit(_Type, _Arg1, _Arg2, _Arg3, _Arg4) ->
 %% @returns Stats map
 -spec pool_stats() -> map().
 pool_stats() ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Process-per-context API (no mutex)
+%%%
+%%% These NIFs are designed for the process-per-context architecture where
+%%% each Erlang process owns one Python context. Since access is serialized
+%%% by the owning process, no mutex locking is needed.
+%%% ============================================================================
+
+%% @doc Create a new Python context.
+%%
+%% Creates a subinterpreter (Python 3.12+) or worker thread-state based
+%% on the mode parameter. Returns a reference to the context and its
+%% interpreter ID for routing.
+%%
+%% @param Mode `subinterp' or `worker'
+%% @returns {ok, ContextRef, InterpId} | {error, Reason}
+-spec context_create(subinterp | worker) ->
+    {ok, reference(), non_neg_integer()} | {error, term()}.
+context_create(_Mode) ->
+    ?NIF_STUB.
+
+%% @doc Destroy a Python context.
+%%
+%% Cleans up the Python interpreter or thread-state. Should only be
+%% called by the owning process.
+%%
+%% @param ContextRef Reference returned by context_create/1
+%% @returns ok
+-spec context_destroy(reference()) -> ok.
+context_destroy(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Call a Python function in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @param Kwargs Map of keyword arguments
+%% @returns {ok, Result} | {error, Reason}
+-spec context_call(reference(), binary(), binary(), list(), map()) ->
+    {ok, term()} | {error, term()}.
+context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Evaluate a Python expression in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param Code Python code to evaluate
+%% @param Locals Map of local variables
+%% @returns {ok, Result} | {error, Reason}
+-spec context_eval(reference(), binary(), map()) ->
+    {ok, term()} | {error, term()}.
+context_eval(_ContextRef, _Code, _Locals) ->
+    ?NIF_STUB.
+
+%% @doc Execute Python statements in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param Code Python code to execute
+%% @returns ok | {error, Reason}
+-spec context_exec(reference(), binary()) -> ok | {error, term()}.
+context_exec(_ContextRef, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Call a method on a Python object in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param ObjRef Python object reference
+%% @param Method Method name
+%% @param Args List of arguments
+%% @returns {ok, Result} | {error, Reason}
+-spec context_call_method(reference(), reference(), binary(), list()) ->
+    {ok, term()} | {error, term()}.
+context_call_method(_ContextRef, _ObjRef, _Method, _Args) ->
+    ?NIF_STUB.
+
+%% @doc Convert a Python object reference to an Erlang term.
+%%
+%% The reference carries the interpreter ID, allowing automatic routing
+%% to the correct context.
+%%
+%% @param ObjRef Python object reference
+%% @returns {ok, Term} | {error, Reason}
+-spec context_to_term(reference()) -> {ok, term()} | {error, term()}.
+context_to_term(_ObjRef) ->
+    ?NIF_STUB.
+
+%% @doc Get the interpreter ID from a context reference.
+%%
+%% @param ContextRef Context reference
+%% @returns InterpId
+-spec context_interp_id(reference()) -> non_neg_integer().
+context_interp_id(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Set the callback handler pid for a context.
+%%
+%% This must be called before the context can handle erlang.call() callbacks.
+%%
+%% @param ContextRef Context reference
+%% @param Pid Erlang pid to handle callbacks
+%% @returns ok | {error, Reason}
+-spec context_set_callback_handler(reference(), pid()) -> ok | {error, term()}.
+context_set_callback_handler(_ContextRef, _Pid) ->
+    ?NIF_STUB.
+
+%% @doc Get the callback pipe write FD for a context.
+%%
+%% Returns the write end of the callback pipe for sending responses.
+%%
+%% @param ContextRef Context reference
+%% @returns {ok, WriteFd} | {error, Reason}
+-spec context_get_callback_pipe(reference()) -> {ok, integer()} | {error, term()}.
+context_get_callback_pipe(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Write a callback response to the context's pipe.
+%%
+%% Writes a length-prefixed binary response that Python will read.
+%%
+%% @param ContextRef Context reference
+%% @param Data Binary data to write
+%% @returns ok | {error, Reason}
+-spec context_write_callback_response(reference(), binary()) -> ok | {error, term()}.
+context_write_callback_response(_ContextRef, _Data) ->
+    ?NIF_STUB.
+
+%% @doc Resume a suspended context with callback result.
+%%
+%% After handling a callback, call this to resume Python execution with
+%% the callback result. May return {suspended, ...} if Python makes another
+%% erlang.call() during resume (nested callback).
+%%
+%% @param ContextRef Context reference
+%% @param StateRef Suspended state reference from {suspended, _, StateRef, _}
+%% @param Result Binary result to return to Python (format: status_byte + repr)
+%% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
+-spec context_resume(reference(), reference(), binary()) ->
+    {ok, term()} | {error, term()} | {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
+context_resume(_ContextRef, _StateRef, _Result) ->
+    ?NIF_STUB.
+
+%% @doc Cancel a suspended context resume (cleanup on error).
+%%
+%% Called when callback execution fails and resume won't be called.
+%% Allows proper cleanup of the suspended state.
+%%
+%% @param ContextRef Context reference
+%% @param StateRef Suspended state reference
+%% @returns ok
+-spec context_cancel_resume(reference(), reference()) -> ok.
+context_cancel_resume(_ContextRef, _StateRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% py_ref API (Python object references with interp_id)
+%%%
+%%% These functions work with py_ref resources that carry both a Python
+%%% object reference and the interpreter ID that created it. This enables
+%%% automatic routing of method calls and attribute access.
+%%% ============================================================================
+
+%% @doc Wrap a Python object as a py_ref with interp_id.
+%%
+%% @param ContextRef Context that owns the object
+%% @param PyObj Python object reference
+%% @returns {ok, RefTerm} | {error, Reason}
+-spec ref_wrap(reference(), reference()) -> {ok, reference()} | {error, term()}.
+ref_wrap(_ContextRef, _PyObj) ->
+    ?NIF_STUB.
+
+%% @doc Check if a term is a py_ref.
+%%
+%% @param Term Term to check
+%% @returns true | false
+-spec is_ref(term()) -> boolean().
+is_ref(_Term) ->
+    ?NIF_STUB.
+
+%% @doc Get the interpreter ID from a py_ref.
+%%
+%% This is fast - no GIL needed, just reads the stored interp_id.
+%%
+%% @param Ref py_ref reference
+%% @returns InterpId
+-spec ref_interp_id(reference()) -> non_neg_integer().
+ref_interp_id(_Ref) ->
+    ?NIF_STUB.
+
+%% @doc Convert a py_ref to an Erlang term.
+%%
+%% @param Ref py_ref reference
+%% @returns {ok, Term} | {error, Reason}
+-spec ref_to_term(reference()) -> {ok, term()} | {error, term()}.
+ref_to_term(_Ref) ->
+    ?NIF_STUB.
+
+%% @doc Get an attribute from a py_ref object.
+%%
+%% @param Ref py_ref reference
+%% @param AttrName Attribute name (binary)
+%% @returns {ok, Value} | {error, Reason}
+-spec ref_getattr(reference(), binary()) -> {ok, term()} | {error, term()}.
+ref_getattr(_Ref, _AttrName) ->
+    ?NIF_STUB.
+
+%% @doc Call a method on a py_ref object.
+%%
+%% @param Ref py_ref reference
+%% @param Method Method name (binary)
+%% @param Args List of arguments
+%% @returns {ok, Result} | {error, Reason}
+-spec ref_call_method(reference(), binary(), list()) -> {ok, term()} | {error, term()}.
+ref_call_method(_Ref, _Method, _Args) ->
     ?NIF_STUB.
