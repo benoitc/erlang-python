@@ -367,9 +367,26 @@ static void suspended_context_state_destructor(ErlNifEnv *env, void *obj) {
 
     /* Clean up Python objects if Python is still initialized */
     if (g_python_initialized && state->callback_args != NULL) {
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        Py_XDECREF(state->callback_args);
-        PyGILState_Release(gstate);
+#ifdef HAVE_SUBINTERPRETERS
+        /* For subinterpreters, we must switch to the correct interpreter's
+         * thread state before releasing Python objects. Using PyGILState_Ensure
+         * would acquire the main interpreter's GIL, causing memory corruption
+         * when the object belongs to a subinterpreter with its own GIL. */
+        if (state->ctx != NULL && state->ctx->is_subinterp &&
+            !state->ctx->destroyed && state->ctx->tstate != NULL) {
+            /* Switch to the subinterpreter's thread state */
+            PyThreadState *old_tstate = PyThreadState_Swap(state->ctx->tstate);
+            Py_XDECREF(state->callback_args);
+            /* Restore previous thread state */
+            PyThreadState_Swap(old_tstate);
+        } else
+#endif
+        {
+            /* Main interpreter or fallback: use standard GIL */
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Py_XDECREF(state->callback_args);
+            PyGILState_Release(gstate);
+        }
     }
 
     /* Free allocated memory */
