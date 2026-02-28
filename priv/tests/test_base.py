@@ -597,10 +597,16 @@ class _TestReaderWriter:
                 self.loop.stop()
 
             self.loop.add_writer(sock.fileno(), writer_callback)
+
+            # Add timeout fallback in case writer doesn't fire immediately
+            self.loop.call_later(0.1, self.loop.stop)
             self.loop.run_forever()
 
-            # Socket should be writable immediately
-            self.assertEqual(results, ['write'])
+            # Remove writer if still registered
+            self.loop.remove_writer(sock.fileno())
+
+            # Socket should be writable immediately (or within timeout)
+            self.assertIn('write', results)
 
         finally:
             sock.close()

@@ -13,37 +13,31 @@
 # limitations under the License.
 
 """
-Async-aware test runner that properly integrates with ErlangEventLoop.
+Test runner for ErlangEventLoop tests.
 
-Uses erlang.run() to execute tests, ensuring timer callbacks fire
-correctly. This solves the problem where unittest's synchronous model blocks
-the event loop and prevents Erlang timer integration from working.
-
-The unified 'erlang' module now provides both callback support (call, async_call)
-and event loop API (run, new_event_loop, EventLoopPolicy).
+Tests create their own isolated ErlangEventLoop via erlang.new_event_loop()
+and manage it directly. Each test's loop has its own capsule for proper
+timer and FD event routing.
 
 Usage from Erlang:
     {ok, Results} = py:call(Ctx, 'tests.async_test_runner', run_tests,
                             [<<"tests.test_base">>, <<"TestErlang*">>]).
 
-Timer Flow with erlang.run():
-    erlang.run(run_all())
+Test Flow:
+    run_tests() runs synchronously
         │
-        └─→ ErlangEventLoop.run_until_complete()
+        └─→ For each test:
+                test.setUp() creates self.loop = erlang.new_event_loop()
+                    │
+                    └─→ Isolated ErlangEventLoop with own capsule
                 │
-                └─→ _run_once() loop
-                    ├─ Processes ready callbacks
-                    ├─ Calculates timeout from timer heap
-                    └─ Calls _pel._run_once_native(timeout)
-                        │
-                        └─→ Polls Erlang scheduler (GIL released!)
-                            │
-                            └─→ Timer fires via erlang:send_after
-                                │
-                                └─→ Callback dispatched back to Python
+                test runs using self.loop.run_until_complete()
+                    │
+                    └─→ Timers route to this loop's capsule
+                │
+                test.tearDown() closes self.loop
 """
 
-import asyncio
 import fnmatch
 import io
 import sys
@@ -51,22 +45,14 @@ import traceback
 import unittest
 from typing import Dict, Any, List
 
-# Import erlang module for proper event loop integration
-# The unified erlang module now provides both callbacks and event loop API.
-try:
-    import erlang
-    _has_erlang = hasattr(erlang, 'run')
-except ImportError:
-    _has_erlang = False
 
-
-async def run_test_method(test_case, method_name: str, timeout: float = 30.0) -> Dict[str, Any]:
-    """Run a single test method with timeout support using Erlang timers.
+def run_test_method(test_case, method_name: str, timeout: float = 30.0) -> Dict[str, Any]:
+    """Run a single test method.
 
     Args:
         test_case: The test case class
         method_name: Name of the test method to run
-        timeout: Per-test timeout in seconds
+        timeout: Per-test timeout (relies on CT for enforcement)
 
     Returns:
         Dict with test result including name, status, and error if any
@@ -79,54 +65,27 @@ async def run_test_method(test_case, method_name: str, timeout: float = 30.0) ->
     }
 
     try:
-        # Setup
-        if hasattr(test, 'setUp'):
-            setup_method = test.setUp
-            if asyncio.iscoroutinefunction(setup_method):
-                await setup_method()
-            else:
-                setup_method()
-
-        # Run test with timeout using asyncio (backed by Erlang timers)
-        method = getattr(test, method_name)
-        if asyncio.iscoroutinefunction(method):
-            await asyncio.wait_for(method(), timeout=timeout)
-        else:
-            # For sync tests, wrap in executor to avoid blocking the event loop
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, method),
-                timeout=timeout
-            )
-
-    except asyncio.TimeoutError:
-        result['status'] = 'timeout'
-        result['error'] = f"Test timed out after {timeout}s"
+        test.setUp()
+        getattr(test, method_name)()
     except unittest.SkipTest as e:
         result['status'] = 'skipped'
         result['error'] = str(e)
-    except AssertionError as e:
+    except AssertionError:
         result['status'] = 'failure'
         result['error'] = traceback.format_exc()
-    except Exception as e:
+    except Exception:
         result['status'] = 'error'
         result['error'] = traceback.format_exc()
     finally:
         try:
-            if hasattr(test, 'tearDown'):
-                teardown_method = test.tearDown
-                if asyncio.iscoroutinefunction(teardown_method):
-                    await teardown_method()
-                else:
-                    teardown_method()
+            test.tearDown()
         except Exception:
-            # Don't let teardown failures mask test failures
             pass
 
     return result
 
 
-async def run_test_class(test_class, timeout: float = 30.0) -> List[Dict[str, Any]]:
+def run_test_class(test_class, timeout: float = 30.0) -> List[Dict[str, Any]]:
     """Run all test methods in a test class.
 
     Args:
@@ -140,7 +99,7 @@ async def run_test_class(test_class, timeout: float = 30.0) -> List[Dict[str, An
     loader = unittest.TestLoader()
 
     for method_name in loader.getTestCaseNames(test_class):
-        result = await run_test_method(test_class, method_name, timeout)
+        result = run_test_method(test_class, method_name, timeout)
         results.append(result)
 
     return results
@@ -148,12 +107,11 @@ async def run_test_class(test_class, timeout: float = 30.0) -> List[Dict[str, An
 
 def run_tests(module_name: str, pattern: str, timeout: float = 30.0) -> Dict[str, Any]:
     """
-    Run tests matching pattern using ErlangEventLoop.
+    Run tests matching pattern synchronously.
 
-    This function uses erlang.run() to properly execute async code
-    with Erlang's timer integration. This is the key difference from
-    the sync ct_runner - timers actually fire because we're using
-    the Erlang-backed event loop.
+    Each test creates its own isolated ErlangEventLoop via erlang.new_event_loop()
+    and manages it directly. Tests use self.loop.run_until_complete() which
+    works correctly because each loop has its own capsule for timer routing.
 
     Args:
         module_name: Fully qualified module name (e.g., 'tests.test_base')
@@ -176,8 +134,7 @@ def run_tests(module_name: str, pattern: str, timeout: float = 30.0) -> Dict[str
     if isinstance(pattern, bytes):
         pattern = pattern.decode('utf-8')
 
-    async def run_all():
-        """Async inner function to run all matching tests."""
+    try:
         module = __import__(module_name, fromlist=[''])
         all_results = []
 
@@ -187,29 +144,18 @@ def run_tests(module_name: str, pattern: str, timeout: float = 30.0) -> Dict[str
                 obj = getattr(module, name)
                 if isinstance(obj, type) and issubclass(obj, unittest.TestCase):
                     if obj is not unittest.TestCase:
-                        results = await run_test_class(obj, timeout)
+                        results = run_test_class(obj, timeout)
                         all_results.extend(results)
 
-        return all_results
-
-    try:
-        # Use erlang.run() - this properly integrates with Erlang timers!
-        # This is the key difference from ct_runner.py which uses ThreadPoolExecutor
-        if _has_erlang:
-            results = erlang.run(run_all())
-        else:
-            # Fallback for testing outside Erlang VM
-            results = asyncio.run(run_all())
-
         # Aggregate results
-        tests_run = len(results)
-        failures = sum(1 for r in results if r['status'] == 'failure')
-        errors = sum(1 for r in results if r['status'] in ('error', 'timeout'))
-        skipped = sum(1 for r in results if r['status'] == 'skipped')
+        tests_run = len(all_results)
+        failures = sum(1 for r in all_results if r['status'] == 'failure')
+        errors = sum(1 for r in all_results if r['status'] in ('error', 'timeout'))
+        skipped = sum(1 for r in all_results if r['status'] == 'skipped')
 
         # Build failure details for CT reporting
         failure_details = []
-        for r in results:
+        for r in all_results:
             if r['status'] in ('failure', 'error', 'timeout'):
                 failure_details.append({
                     'test': r['name'],
@@ -222,8 +168,8 @@ def run_tests(module_name: str, pattern: str, timeout: float = 30.0) -> Dict[str
             'errors': errors,
             'skipped': skipped,
             'success': failures == 0 and errors == 0,
-            'results': results,
-            'output': _format_results(results),
+            'results': all_results,
+            'output': _format_results(all_results),
             'failure_details': failure_details
         }
     except Exception as e:

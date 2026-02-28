@@ -73,12 +73,7 @@
 %% ============================================================================
 
 all() ->
-    %% Skip: These tests create standalone ErlangEventLoop instances via
-    %% erlang.new_event_loop() and call loop.run_forever(). The timer
-    %% infrastructure for standalone loops needs work - timers fire
-    %% immediately instead of after the scheduled delay.
-    %% TODO: Fix timer scheduling for standalone ErlangEventLoop instances
-    {skip, "Standalone ErlangEventLoop timer scheduling needs implementation"}.
+    [{group, erlang_tests}, {group, comparison_tests}].
 
 groups() ->
     [

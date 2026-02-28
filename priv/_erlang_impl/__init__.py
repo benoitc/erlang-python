@@ -72,9 +72,10 @@ def new_event_loop() -> ErlangEventLoop:
 
     Returns:
         ErlangEventLoop: A new event loop instance backed by Erlang's
-            scheduler via enif_select.
+            scheduler via enif_select. The loop is created in isolated
+            mode to ensure timers and FD events are routed correctly.
     """
-    return ErlangEventLoop()
+    return ErlangEventLoop(isolated=True)
 
 
 def run(main, *, debug=None, **run_kwargs):
