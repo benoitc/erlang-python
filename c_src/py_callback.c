@@ -1961,6 +1961,83 @@ static int create_erlang_module(void) {
         Py_DECREF(log_globals);
     }
 
+    /* Add helper to extend erlang module with Python package exports.
+     * Called from Erlang after priv_dir is added to sys.path.
+     * Follows uvloop's minimal export pattern.
+     */
+    const char *extend_code =
+        "def _extend_erlang_module(priv_dir):\n"
+        "    '''\n"
+        "    Extend the C erlang module with Python event loop exports.\n"
+        "    \n"
+        "    Called from Erlang after priv_dir is set up in sys.path.\n"
+        "    This allows the C 'erlang' module to also provide:\n"
+        "      - erlang.run()\n"
+        "      - erlang.new_event_loop()\n"
+        "      - erlang.install()\n"
+        "      - erlang.EventLoopPolicy\n"
+        "      - erlang.ErlangEventLoop\n"
+        "    \n"
+        "    Args:\n"
+        "        priv_dir: Path to erlang_python priv directory (bytes or str)\n"
+        "    \n"
+        "    Returns:\n"
+        "        True on success, False on failure\n"
+        "    '''\n"
+        "    import sys\n"
+        "    # Handle bytes from Erlang\n"
+        "    if isinstance(priv_dir, bytes):\n"
+        "        priv_dir = priv_dir.decode('utf-8')\n"
+        "    if priv_dir not in sys.path:\n"
+        "        sys.path.insert(0, priv_dir)\n"
+        "    try:\n"
+        "        import _erlang_impl\n"
+        "        import erlang\n"
+        "        # Primary exports (uvloop-compatible)\n"
+        "        erlang.run = _erlang_impl.run\n"
+        "        erlang.new_event_loop = _erlang_impl.new_event_loop\n"
+        "        erlang.ErlangEventLoop = _erlang_impl.ErlangEventLoop\n"
+        "        # Deprecated (Python < 3.16)\n"
+        "        erlang.install = _erlang_impl.install\n"
+        "        erlang.EventLoopPolicy = _erlang_impl.EventLoopPolicy\n"
+        "        erlang.ErlangEventLoopPolicy = _erlang_impl.ErlangEventLoopPolicy\n"
+        "        # Additional exports for compatibility\n"
+        "        erlang.detect_mode = _erlang_impl.detect_mode\n"
+        "        erlang.ExecutionMode = _erlang_impl.ExecutionMode\n"
+        "        return True\n"
+        "    except ImportError as e:\n"
+        "        import sys\n"
+        "        sys.stderr.write(f'Failed to extend erlang module: {e}\\n')\n"
+        "        return False\n"
+        "\n"
+        "import erlang\n"
+        "erlang._extend_erlang_module = _extend_erlang_module\n";
+
+    PyObject *ext_globals = PyDict_New();
+    if (ext_globals != NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(ext_globals, "__builtins__", builtins);
+
+        /* Import erlang module into globals so the code can reference it */
+        PyObject *sys_modules = PySys_GetObject("modules");
+        if (sys_modules != NULL) {
+            PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
+            if (erlang_mod != NULL) {
+                PyDict_SetItemString(ext_globals, "erlang", erlang_mod);
+            }
+        }
+
+        PyObject *result = PyRun_String(extend_code, Py_file_input, ext_globals, ext_globals);
+        if (result == NULL) {
+            /* Non-fatal - extension will be called from Erlang */
+            PyErr_Print();
+            PyErr_Clear();
+        } else {
+            Py_DECREF(result);
+        }
+        Py_DECREF(ext_globals);
+    }
+
     return 0;
 }
 
