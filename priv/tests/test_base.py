@@ -345,8 +345,13 @@ class _TestRunMethods:
     def test_run_until_complete_nested_raises(self):
         """Test that nested run_until_complete raises."""
         async def outer():
-            with self.assertRaises(RuntimeError):
-                self.loop.run_until_complete(asyncio.sleep(0))
+            # Use 0.1 to ensure it goes through timer path, not fast path
+            sleep_coro = asyncio.sleep(0.1)
+            try:
+                with self.assertRaises(RuntimeError):
+                    self.loop.run_until_complete(sleep_coro)
+            finally:
+                sleep_coro.close()
 
         self.loop.run_until_complete(outer())
 
@@ -357,8 +362,12 @@ class _TestRunMethods:
         async def coro():
             pass
 
-        with self.assertRaises(RuntimeError):
-            self.loop.run_until_complete(coro())
+        c = coro()
+        try:
+            with self.assertRaises(RuntimeError):
+                self.loop.run_until_complete(c)
+        finally:
+            c.close()
 
     def test_is_running(self):
         """Test is_running() method."""
@@ -585,31 +594,34 @@ class _TestReaderWriter:
 
     def test_add_remove_writer(self):
         """Test add_writer and remove_writer."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setblocking(False)
+        # Use a socket pair for reliable write readiness
+        rsock, wsock = socket.socketpair()
+        rsock.setblocking(False)
+        wsock.setblocking(False)
 
         try:
             results = []
 
             def writer_callback():
                 results.append('write')
-                self.loop.remove_writer(sock.fileno())
+                self.loop.remove_writer(wsock.fileno())
                 self.loop.stop()
 
-            self.loop.add_writer(sock.fileno(), writer_callback)
+            self.loop.add_writer(wsock.fileno(), writer_callback)
 
             # Add timeout fallback in case writer doesn't fire immediately
             self.loop.call_later(0.1, self.loop.stop)
             self.loop.run_forever()
 
             # Remove writer if still registered
-            self.loop.remove_writer(sock.fileno())
+            self.loop.remove_writer(wsock.fileno())
 
             # Socket should be writable immediately (or within timeout)
             self.assertIn('write', results)
 
         finally:
-            sock.close()
+            rsock.close()
+            wsock.close()
 
 
 class _TestAsyncioIntegration:
@@ -625,6 +637,19 @@ class _TestAsyncioIntegration:
 
         elapsed = self.loop.run_until_complete(main())
         self.assertGreaterEqual(elapsed, 0.04)
+
+    def test_asyncio_sleep_zero_fast_path(self):
+        """Test asyncio.sleep(0) fast path returns immediately."""
+        async def main():
+            start = time.monotonic()
+            # sleep(0) should use fast path and return immediately
+            await asyncio.sleep(0)
+            elapsed = time.monotonic() - start
+            return elapsed
+
+        elapsed = self.loop.run_until_complete(main())
+        # Should complete very quickly (fast path)
+        self.assertLess(elapsed, 0.01)
 
     def test_asyncio_wait_for(self):
         """Test asyncio.wait_for."""

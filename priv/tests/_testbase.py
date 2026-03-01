@@ -56,14 +56,29 @@ except ImportError:
 def _has_subprocess_support():
     """Check if Erlang subprocess is available.
 
-    Returns True if the py_event_loop NIF module has subprocess support.
-    Subprocess requires _subprocess_spawn to be implemented in the NIF.
+    Returns True if the subprocess support is available either through:
+    1. The py_event_loop NIF module with _subprocess_spawn
+    2. The erlang module with call() support for py_subprocess_sup
+
+    Subprocess requires Erlang infrastructure to be running.
     """
+    # Check for NIF-based subprocess support
     try:
         import py_event_loop as pel
-        return hasattr(pel, '_subprocess_spawn')
+        if hasattr(pel, '_subprocess_spawn'):
+            return True
     except ImportError:
-        return False
+        pass
+
+    # Check for erlang module with call() support
+    try:
+        import erlang
+        if hasattr(erlang, 'call'):
+            return True
+    except ImportError:
+        pass
+
+    return False
 
 
 HAS_SUBPROCESS_SUPPORT = _has_subprocess_support()
@@ -138,7 +153,26 @@ class BaseTestCase(unittest.TestCase):
     def tearDown(self):
         """Tear down the test case."""
         if self.loop is not None and not self.loop.is_closed():
+            # Cancel all pending tasks before closing
+            try:
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self.loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+
+            # Shutdown async generators
+            try:
+                self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            except Exception:
+                pass
+
             self.loop.close()
+
         # Force garbage collection to catch resource leaks
         gc.collect()
         gc.collect()
