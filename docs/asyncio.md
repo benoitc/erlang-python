@@ -499,34 +499,9 @@ ok = py_nif:event_loop_set_router(LoopRef, RouterPid).
 
 Events are delivered as Erlang messages, enabling the event loop to participate in BEAM's supervision trees and distributed computing capabilities.
 
-## Isolated Event Loops
+## Event Loop Architecture
 
-By default, all `ErlangEventLoop` instances share a single underlying native event loop managed by Erlang. For multi-threaded applications where each thread needs its own event loop, you can create isolated loops.
-
-### Creating an Isolated Loop
-
-Use the `isolated=True` parameter to create a loop with its own pending queue:
-
-```python
-from erlang_loop import ErlangEventLoop
-
-# Default: uses shared global loop
-shared_loop = ErlangEventLoop()
-
-# Isolated: creates its own native loop
-isolated_loop = ErlangEventLoop(isolated=True)
-```
-
-### When to Use Isolated Loops
-
-| Use Case | Loop Type |
-|----------|-----------|
-| Single-threaded asyncio applications | Default (shared) |
-| Web frameworks (ASGI/WSGI) | Default (shared) |
-| Multi-threaded Python with separate event loops | `isolated=True` |
-| Sub-interpreters | `isolated=True` |
-| Free-threaded Python (3.13+) | `isolated=True` |
-| Testing loop isolation | `isolated=True` |
+Each `ErlangEventLoop` instance has its own isolated capsule with a dedicated pending queue. This ensures that timers and FD events are properly routed to the correct loop instance.
 
 ### Multi-threaded Example
 
@@ -534,9 +509,9 @@ isolated_loop = ErlangEventLoop(isolated=True)
 from erlang_loop import ErlangEventLoop
 import threading
 
-def run_isolated_tasks(loop_id):
-    """Each thread gets its own isolated event loop."""
-    loop = ErlangEventLoop(isolated=True)
+def run_tasks(loop_id):
+    """Each thread gets its own event loop."""
+    loop = ErlangEventLoop()
 
     results = []
 
@@ -558,8 +533,8 @@ def run_isolated_tasks(loop_id):
     return results
 
 # Run in separate threads
-t1 = threading.Thread(target=run_isolated_tasks, args=('loop_a',))
-t2 = threading.Thread(target=run_isolated_tasks, args=('loop_b',))
+t1 = threading.Thread(target=run_tasks, args=('loop_a',))
+t2 = threading.Thread(target=run_tasks, args=('loop_b',))
 
 t1.start()
 t2.start()
@@ -568,7 +543,7 @@ t2.join()
 # Each thread only sees its own callbacks
 ```
 
-### Architecture
+### Internal Architecture
 
 A shared router process handles timer and FD events for all loops:
 
@@ -590,7 +565,7 @@ A shared router process handles timer and FD events for all loops:
     └─────────┘          └─────────┘          └─────────┘
 ```
 
-Each isolated loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The shared router dispatches timer and FD events to the correct loop based on the resource backref.
+Each loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The shared router dispatches timer and FD events to the correct loop based on the capsule backref.
 
 ## erlang_asyncio Module
 
@@ -866,6 +841,61 @@ async def delay_endpoint(ms: int = 100):
     await erlang_asyncio.sleep(ms / 1000.0)
     return {"slept_ms": ms}
 ```
+
+## Async Worker Backend (Internal)
+
+The `py:async_call/3,4` and `py:await/1,2` APIs use an event-driven backend based on `py_event_loop`.
+
+### Architecture
+
+```
+┌─────────────┐     ┌─────────────────┐     ┌──────────────────────┐
+│ Erlang      │     │ C NIF           │     │ py_event_loop        │
+│ py:async_   │     │ (no thread)     │     │ (Erlang process)     │
+│ call()      │     │                 │     │                      │
+└──────┬──────┘     └────────┬────────┘     └──────────┬───────────┘
+       │                     │                         │
+       │ 1. Message to       │                         │
+       │    event_loop       │                         │
+       │─────────────────────┼────────────────────────>│
+       │                     │                         │
+       │ 2. Return Ref       │                         │
+       │<────────────────────┼─────────────────────────│
+       │                     │                         │
+       │                     │   enif_select (wait)    │
+       │                     │   ┌───────────────────┐ │
+       │                     │   │ Run Python        │ │
+       │                     │   │ erlang.send(pid,  │ │
+       │                     │   │   result)         │ │
+       │                     │   └───────────────────┘ │
+       │                     │                         │
+       │ 3. {async_result}   │                         │
+       │<──────────────────────────────────────────────│
+       │     (direct erlang.send from Python)          │
+       │                     │                         │
+```
+
+### Key Components
+
+| Component | Role |
+|-----------|------|
+| `py_event_loop_pool` | Pool manager for event loop-based async execution |
+| `py_event_loop:run_async/2` | Submit coroutine to event loop |
+| `_run_and_send` | Python wrapper that sends result via `erlang.send()` |
+| `nif_event_loop_run_async` | NIF for direct coroutine submission |
+
+### Performance Benefits
+
+| Aspect | Previous (pthread) | Current (event_loop) |
+|--------|-------------------|---------------------|
+| Latency | ~10-20ms polling | <1ms (enif_select) |
+| CPU idle | 100 wakeups/sec | Zero |
+| Threads | N pthreads | 0 extra threads |
+| GIL | Acquire/release in thread | Already held in callback |
+| Shutdown | pthread_join (blocking) | Clean Erlang messages |
+
+The event-driven model eliminates the polling overhead of the previous pthread+usleep
+implementation, resulting in significantly lower latency for async operations.
 
 ## See Also
 

@@ -16,47 +16,42 @@
 Erlang-native asyncio event loop implementation.
 
 This module provides an asyncio event loop backed by Erlang's scheduler
-using enif_select for I/O multiplexing. This replaces Python's polling-based
-event loop with true event-driven callbacks integrated into the BEAM VM.
+using enif_select for I/O multiplexing.
 
-Usage:
-    from erlang_loop import ErlangEventLoop
-    import asyncio
+For the new uvloop-compatible API, use the 'erlang' package:
 
-    loop = ErlangEventLoop(nif_module)
-    asyncio.set_event_loop(loop)
+    import erlang
+    erlang.run(main())
 
-    async def main():
-        await asyncio.sleep(1.0)  # Uses erlang:send_after
-
-    asyncio.run(main())
+This module provides backward compatibility with the original API.
 """
 
 import asyncio
-import time
-import threading
-import sys
+import errno
+import heapq
+import os
 import socket
 import ssl
-import weakref
-import heapq
-from asyncio import events, futures, tasks, protocols, transports
-from asyncio import constants, coroutines, base_events
+import sys
+import threading
+import time
+import warnings
+from asyncio import events, futures, tasks, transports
 from collections import deque
+
+__all__ = [
+    'ErlangEventLoop',
+    'get_event_loop_policy',
+    '_ErlangSocketTransport',
+    '_ErlangDatagramTransport',
+    '_ErlangServer',
+    '_run_and_send',
+]
 
 # Event type constants (match C enum values for fast integer comparison)
 EVENT_TYPE_READ = 1
 EVENT_TYPE_WRITE = 2
 EVENT_TYPE_TIMER = 3
-
-# Try to import selector_events for transport classes
-try:
-    from asyncio import selector_events
-    _SelectorSocketTransport = selector_events._SelectorSocketTransport
-    _SelectorDatagramTransport = selector_events._SelectorDatagramTransport
-except ImportError:
-    _SelectorSocketTransport = None
-    _SelectorDatagramTransport = None
 
 
 class ErlangEventLoop(asyncio.AbstractEventLoop):
@@ -79,7 +74,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
     # Use __slots__ for faster attribute access and reduced memory
     __slots__ = (
-        '_pel', '_loop_handle',  # Native loop handle (capsule) for per-loop isolation
+        '_pel',
         '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
         '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
         '_ready', '_callback_id',
@@ -90,36 +85,24 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         '_ready_append', '_ready_popleft',
     )
 
-    def __init__(self, isolated=False):
+    def __init__(self):
         """Initialize the Erlang event loop.
 
         The event loop is backed by Erlang's scheduler via the py_event_loop
         C module. This module provides direct access to the event loop
         without going through Erlang callbacks.
-
-        Args:
-            isolated: If True, create an isolated event loop with its own
-                pending queue. Useful for multi-threaded applications where
-                each thread needs its own event loop. If False (default),
-                use the shared global loop managed by Erlang.
         """
         try:
             import py_event_loop as pel
             self._pel = pel
 
-            if isolated:
-                # Create a new isolated loop handle
-                self._loop_handle = pel._loop_new()
-            else:
-                # Use shared global loop - check it's initialized
-                if not pel._is_initialized():
-                    raise RuntimeError("Erlang event loop not initialized. "
-                                     "Make sure erlang_python application is started.")
-                self._loop_handle = None
+            # Check it's initialized
+            if not pel._is_initialized():
+                raise RuntimeError("Erlang event loop not initialized. "
+                                 "Make sure erlang_python application is started.")
         except ImportError:
             # Fallback for testing without actual NIF
             self._pel = _MockNifModule()
-            self._loop_handle = None
 
         # Callback management
         self._readers = {}  # fd -> (callback, args, callback_id, fd_key)
@@ -138,9 +121,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._ready_popleft = self._ready.popleft
 
         # Handle object pool for reduced allocations
-        # Trade-off: smaller pool = less GC (better high_concurrency)
-        #            larger pool = more reuse (better large_response)
-        # 150 balances both workloads
         self._handle_pool = []
         self._handle_pool_max = 150
 
@@ -208,7 +188,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             future._log_destroy_pending = False
 
         # Use a single callback reference to ensure proper removal
-        # (two different lambdas would be different objects)
         def _done_callback(f):
             self.stop()
 
@@ -260,10 +239,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             timer_ref = self._timer_refs.get(callback_id)
             if timer_ref is not None:
                 try:
-                    if self._loop_handle is not None:
-                        self._pel._cancel_timer_for(self._loop_handle, timer_ref)
-                    else:
-                        self._pel._cancel_timer(timer_ref)
+                    self._pel._cancel_timer(timer_ref)
                 except (AttributeError, RuntimeError):
                     pass
         self._timers.clear()
@@ -277,22 +253,19 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         for fd in list(self._writers.keys()):
             self.remove_writer(fd)
 
-        # Destroy the native loop handle if we have one
-        if self._loop_handle is not None:
-            try:
-                self._pel._loop_destroy(self._loop_handle)
-            except (AttributeError, RuntimeError):
-                pass
-            self._loop_handle = None
-
         # Shutdown default executor
         if self._default_executor is not None:
             self._default_executor.shutdown(wait=False)
             self._default_executor = None
 
     async def shutdown_asyncgens(self):
-        """Shutdown all active asynchronous generators."""
-        # Not implemented - would need tracking of async generators
+        """Shutdown all active asynchronous generators.
+
+        Note: This is a no-op in ErlangEventLoop. Async generators are
+        managed by Python's garbage collector. For proper cleanup, ensure
+        async generators are explicitly closed or exhausted before loop shutdown.
+        """
+        # No-op: we don't track async generators to avoid global hook issues
         pass
 
     async def shutdown_default_executor(self, timeout=None):
@@ -317,10 +290,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         handle = self.call_soon(callback, *args, context=context)
         # Wake up the event loop
         try:
-            if self._loop_handle is not None:
-                self._pel._wakeup_for(self._loop_handle)
-            else:
-                self._pel._wakeup()
+            self._pel._wakeup()
         except Exception:
             pass
         return handle
@@ -338,7 +308,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         handle = events.TimerHandle(when, callback, args, self, context)
         self._timers[callback_id] = handle
-        self._handle_to_callback_id[id(handle)] = callback_id  # Reverse map for O(1) cancellation
+        self._handle_to_callback_id[id(handle)] = callback_id
 
         # Push to timer heap for O(1) minimum lookup
         heapq.heappush(self._timer_heap, (when, callback_id))
@@ -346,15 +316,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Schedule with Erlang's native timer system
         delay_ms = max(0, int((when - self.time()) * 1000))
         try:
-            if self._loop_handle is not None:
-                timer_ref = self._pel._schedule_timer_for(self._loop_handle, delay_ms, callback_id)
-            else:
-                timer_ref = self._pel._schedule_timer(delay_ms, callback_id)
+            timer_ref = self._pel._schedule_timer(delay_ms, callback_id)
             self._timer_refs[callback_id] = timer_ref
         except AttributeError:
-            pass  # Fallback: mock module doesn't have _schedule_timer
+            pass
         except RuntimeError as e:
-            # Fail fast on initialization errors - don't silently hang
             raise RuntimeError(f"Timer scheduling failed: {e}") from e
 
         return handle
@@ -375,7 +341,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         """Schedule a coroutine to be executed."""
         self._check_closed()
         if self._task_factory is None:
-            # Python 3.9 doesn't support context parameter
             if sys.version_info >= (3, 11):
                 task = tasks.Task(coro, loop=self, name=name, context=context)
             elif sys.version_info >= (3, 8):
@@ -413,12 +378,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         callback_id = self._next_id()
 
         try:
-            if self._loop_handle is not None:
-                fd_key = self._pel._add_reader_for(self._loop_handle, fd, callback_id)
-            else:
-                fd_key = self._pel._add_reader(fd, callback_id)
+            fd_key = self._pel._add_reader(fd, callback_id)
             self._readers[fd] = (callback, args, callback_id, fd_key)
-            self._readers_by_cid[callback_id] = fd  # Reverse map for O(1) dispatch
+            self._readers_by_cid[callback_id] = fd
         except Exception as e:
             raise RuntimeError(f"Failed to add reader: {e}")
 
@@ -429,13 +391,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             callback_id = entry[2]
             fd_key = entry[3] if len(entry) > 3 else None
             del self._readers[fd]
-            self._readers_by_cid.pop(callback_id, None)  # Clean up reverse map
+            self._readers_by_cid.pop(callback_id, None)
             try:
                 if fd_key is not None:
-                    if self._loop_handle is not None:
-                        self._pel._remove_reader_for(self._loop_handle, fd_key)
-                    else:
-                        self._pel._remove_reader(fd_key)
+                    self._pel._remove_reader(fd_key)
             except Exception:
                 pass
             return True
@@ -449,12 +408,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         callback_id = self._next_id()
 
         try:
-            if self._loop_handle is not None:
-                fd_key = self._pel._add_writer_for(self._loop_handle, fd, callback_id)
-            else:
-                fd_key = self._pel._add_writer(fd, callback_id)
+            fd_key = self._pel._add_writer(fd, callback_id)
             self._writers[fd] = (callback, args, callback_id, fd_key)
-            self._writers_by_cid[callback_id] = fd  # Reverse map for O(1) dispatch
+            self._writers_by_cid[callback_id] = fd
         except Exception as e:
             raise RuntimeError(f"Failed to add writer: {e}")
 
@@ -465,13 +421,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             callback_id = entry[2]
             fd_key = entry[3] if len(entry) > 3 else None
             del self._writers[fd]
-            self._writers_by_cid.pop(callback_id, None)  # Clean up reverse map
+            self._writers_by_cid.pop(callback_id, None)
             try:
                 if fd_key is not None:
-                    if self._loop_handle is not None:
-                        self._pel._remove_writer_for(self._loop_handle, fd_key)
-                    else:
-                        self._pel._remove_writer(fd_key)
+                    self._pel._remove_writer(fd_key)
             except Exception:
                 pass
             return True
@@ -490,7 +443,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 data = sock.recv(nbytes)
                 self.call_soon(fut.set_result, data)
             except (BlockingIOError, InterruptedError):
-                return  # Not ready, keep waiting
+                return
             except Exception as e:
                 self.call_soon(fut.set_exception, e)
             self.remove_reader(sock.fileno())
@@ -596,10 +549,8 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             happy_eyeballs_delay=None, interleave=None):
         """Create a streaming transport connection."""
         if sock is not None:
-            # Use provided socket
             sock.setblocking(False)
         else:
-            # Resolve address and connect
             infos = await self.getaddrinfo(
                 host, port, family=family, type=socket.SOCK_STREAM,
                 proto=proto, flags=flags)
@@ -623,7 +574,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                     raise exceptions[0]
                 raise OSError(f'Multiple exceptions: {exceptions}')
 
-        # Create transport and protocol
         protocol = protocol_factory()
         transport = _ErlangSocketTransport(self, sock, protocol)
 
@@ -695,28 +645,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                                        family=0, proto=0, flags=0,
                                        reuse_address=None, reuse_port=None,
                                        allow_broadcast=None, sock=None):
-        """Create datagram (UDP) connection.
-
-        Args:
-            protocol_factory: Factory function returning a DatagramProtocol
-            local_addr: Local (host, port) tuple to bind to
-            remote_addr: Remote (host, port) tuple to connect to (optional)
-            family: Socket family (AF_INET or AF_INET6)
-            proto: Socket protocol number
-            flags: getaddrinfo flags
-            reuse_address: Allow reuse of local address (SO_REUSEADDR)
-            reuse_port: Allow reuse of local port (SO_REUSEPORT)
-            allow_broadcast: Allow sending to broadcast addresses (SO_BROADCAST)
-            sock: Pre-existing socket to use (overrides other options)
-
-        Returns:
-            (transport, protocol) tuple
-        """
+        """Create datagram (UDP) connection."""
         if sock is not None:
-            # Use provided socket
             sock.setblocking(False)
         else:
-            # Determine address family
             if family == 0:
                 if local_addr:
                     family = socket.AF_INET
@@ -725,11 +657,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 else:
                     family = socket.AF_INET
 
-            # Create UDP socket
             sock = socket.socket(family, socket.SOCK_DGRAM, proto)
             sock.setblocking(False)
 
-            # Apply socket options
             if reuse_address:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -737,27 +667,22 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 try:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                 except (AttributeError, OSError):
-                    # SO_REUSEPORT not available on all platforms
                     pass
 
             if allow_broadcast:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-            # Bind to local address
             if local_addr:
                 sock.bind(local_addr)
 
-            # Connect to remote address (makes it a connected UDP socket)
             if remote_addr:
                 sock.connect(remote_addr)
 
-        # Create transport and protocol
         protocol = protocol_factory()
         transport = _ErlangDatagramTransport(
             self, sock, protocol, address=remote_addr
         )
 
-        # Start the transport
         transport._start()
 
         return transport, protocol
@@ -827,12 +752,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
     def _run_once(self):
         """Run one iteration of the event loop."""
-        # Local aliases for hot-path attributes (avoids repeated lookups)
         ready = self._ready
         popleft = self._ready_popleft
         return_handle = self._return_handle
 
-        # Run all ready callbacks (timer cleanup happens lazily during dispatch)
+        # Run all ready callbacks
         ntodo = len(ready)
         for _ in range(ntodo):
             if not ready:
@@ -858,7 +782,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if ready or self._stopping:
             timeout = 0
         elif self._timer_heap:
-            # Lazy cleanup - pop stale/cancelled entries from heap
             timer_heap = self._timer_heap
             timers = self._timers
             while timer_heap:
@@ -867,32 +790,26 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 if handle is None or handle._cancelled:
                     heapq.heappop(timer_heap)
                     continue
-                break  # Found valid minimum
+                break
 
             if timer_heap:
                 when, _ = timer_heap[0]
                 timeout = max(0, int((when - self.time()) * 1000))
-                timeout = max(1, min(timeout, 1000))  # Cap at 1s, min 1ms
+                timeout = max(1, min(timeout, 1000))
             else:
-                # All timers cancelled - bulk cleanup on rare path
                 timers.clear()
                 self._timer_refs.clear()
                 timeout = 1000
         else:
-            timeout = 1000  # 1s max wait
+            timeout = 1000
 
-        # Use combined poll + get_pending (single NIF call, integer event types)
+        # Poll for events
         try:
-            # Use handle-based API when loop_handle is set, legacy otherwise
-            if self._loop_handle is not None:
-                pending = self._pel._run_once_native_for(self._loop_handle, timeout)
-            else:
-                pending = self._pel._run_once_native(timeout)
+            pending = self._pel._run_once_native(timeout)
             dispatch = self._dispatch
             for callback_id, event_type in pending:
                 dispatch(callback_id, event_type)
         except AttributeError:
-            # Fallback for old NIF without _run_once_native
             try:
                 num_events = self._pel._poll_events(timeout)
                 if num_events > 0:
@@ -901,36 +818,27 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                     for callback_id, event_type in pending:
                         dispatch(callback_id, event_type)
             except AttributeError:
-                pass  # Mock module without these methods
+                pass
             except RuntimeError as e:
-                # Fail fast on initialization errors - don't silently hang
                 raise RuntimeError(f"Event loop poll failed: {e}") from e
         except RuntimeError as e:
-            # Fail fast on initialization errors - don't silently hang
             raise RuntimeError(f"Event loop poll failed: {e}") from e
 
     def _dispatch(self, callback_id, event_type):
-        """Dispatch a callback based on event type.
-
-        Uses O(1) reverse map lookup for fd events instead of O(n) iteration.
-        Event types are integers for fast comparison (no string allocation).
-        Inlined lookup: dict.get(None) returns None, so single expression is safe.
-        """
-        # Integer comparison is faster than string - NIF returns integers
-        if event_type == 1:  # EVENT_TYPE_READ
-            # Inlined lookup: _readers.get(None) returns None (safe)
+        """Dispatch a callback based on event type."""
+        if event_type == EVENT_TYPE_READ:
             entry = self._readers.get(self._readers_by_cid.get(callback_id))
             if entry is not None:
                 self._ready_append(self._get_handle(entry[0], entry[1]))
-        elif event_type == 2:  # EVENT_TYPE_WRITE
+        elif event_type == EVENT_TYPE_WRITE:
             entry = self._writers.get(self._writers_by_cid.get(callback_id))
             if entry is not None:
                 self._ready_append(self._get_handle(entry[0], entry[1]))
-        elif event_type == 3:  # EVENT_TYPE_TIMER
+        elif event_type == EVENT_TYPE_TIMER:
             handle = self._timers.pop(callback_id, None)
             if handle is not None:
                 self._timer_refs.pop(callback_id, None)
-                self._handle_to_callback_id.pop(id(handle), None)  # Clean up reverse map
+                self._handle_to_callback_id.pop(id(handle), None)
                 if not handle._cancelled:
                     self._ready_append(handle)
 
@@ -945,11 +853,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             raise RuntimeError('This event loop is already running')
 
     def _timer_handle_cancelled(self, handle):
-        """Called when a TimerHandle is cancelled.
-
-        Uses O(1) reverse map lookup instead of O(n) iteration.
-        """
-        # O(1) lookup via reverse map
+        """Called when a TimerHandle is cancelled."""
         callback_id = self._handle_to_callback_id.pop(id(handle), None)
         if callback_id is not None:
             self._timers.pop(callback_id, None)
@@ -984,7 +888,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     def _return_handle(self, handle):
         """Return a Handle to the pool for reuse."""
         if len(self._handle_pool) < self._handle_pool_max:
-            # Clear references to avoid keeping objects alive
             handle._callback = None
             handle._args = None
             self._handle_pool.append(handle)
@@ -1038,7 +941,7 @@ class _ErlangSocketTransport(transports.Transport):
     )
 
     _buffer_factory = bytearray
-    max_size = 256 * 1024  # 256 KB
+    max_size = 256 * 1024
 
     def __init__(self, loop, sock, protocol, extra=None):
         super().__init__(extra)
@@ -1050,7 +953,7 @@ class _ErlangSocketTransport(transports.Transport):
         self._conn_lost = 0
         self._write_ready = True
         self._paused = False
-        self._fileno = sock.fileno()  # Cache fileno to avoid repeated calls
+        self._fileno = sock.fileno()
         self._extra = extra or {}
         self._extra['socket'] = sock
         try:
@@ -1082,7 +985,6 @@ class _ErlangSocketTransport(transports.Transport):
         if data:
             self._protocol.data_received(data)
         else:
-            # Connection closed
             self._loop.remove_reader(self._fileno)
             self._protocol.eof_received()
 
@@ -1200,18 +1102,18 @@ class _ErlangDatagramTransport(transports.DatagramTransport):
         '_closing', '_conn_lost', '_extra', '_fileno',
     )
 
-    max_size = 256 * 1024  # 256 KB
+    max_size = 256 * 1024
 
     def __init__(self, loop, sock, protocol, address=None, extra=None):
         super().__init__(extra)
         self._loop = loop
         self._sock = sock
         self._protocol = protocol
-        self._address = address  # Default remote address (for connected UDP)
-        self._buffer = deque()  # Deque of (data, addr) tuples for O(1) popleft
+        self._address = address
+        self._buffer = deque()
         self._closing = False
         self._conn_lost = 0
-        self._fileno = sock.fileno()  # Cache fileno to avoid repeated calls
+        self._fileno = sock.fileno()
         self._extra = extra or {}
         self._extra['socket'] = sock
         try:
@@ -1254,7 +1156,6 @@ class _ErlangDatagramTransport(transports.DatagramTransport):
             addr = self._address
 
         if not self._buffer:
-            # Try to send immediately
             try:
                 if addr:
                     self._sock.sendto(data, addr)
@@ -1262,7 +1163,6 @@ class _ErlangDatagramTransport(transports.DatagramTransport):
                     self._sock.send(data)
                 return
             except (BlockingIOError, InterruptedError):
-                # Buffer and wait for write ready
                 self._loop.add_writer(self._fileno, self._write_ready)
             except OSError as exc:
                 self._protocol.error_received(exc)
@@ -1271,7 +1171,6 @@ class _ErlangDatagramTransport(transports.DatagramTransport):
                 self._fatal_error(exc, 'Fatal write error on datagram transport')
                 return
 
-        # Buffer the data
         self._buffer.append((data, addr))
 
     def _write_ready(self):
@@ -1431,10 +1330,6 @@ class _ErlangServer:
             await asyncio.sleep(0)
 
 
-# Import errno for _ErlangServer
-import errno
-
-
 class _MockNifModule:
     """Mock NIF module for testing without actual Erlang integration."""
 
@@ -1448,7 +1343,6 @@ class _MockNifModule:
         return True
 
     def _poll_events(self, timeout_ms):
-        import time
         time.sleep(min(timeout_ms, 10) / 1000.0)
         return len(self.pending)
 
@@ -1459,9 +1353,7 @@ class _MockNifModule:
 
     def _run_once_native(self, timeout_ms):
         """Combined poll + get_pending returning integer event types."""
-        import time
         time.sleep(min(timeout_ms, 10) / 1000.0)
-        # Convert string event types to integers
         result = []
         for callback_id, event_type in self.pending:
             if isinstance(event_type, str):
@@ -1505,7 +1397,7 @@ class _MockNifModule:
 
     def _schedule_timer(self, delay_ms, callback_id):
         """Mock timer scheduling."""
-        return callback_id  # Return callback_id as timer_ref
+        return callback_id
 
     def _cancel_timer(self, timer_ref):
         """Mock timer cancellation."""
@@ -1518,7 +1410,6 @@ def get_event_loop_policy():
     Non-main threads get the default SelectorEventLoop to avoid conflicts
     with the Erlang-native event loop which is designed for the main thread.
     """
-    # Capture main thread ID at policy creation time
     main_thread_id = threading.main_thread().ident
 
     class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
@@ -1534,12 +1425,41 @@ def get_event_loop_policy():
             self._local.loop = loop
 
         def new_event_loop(self):
-            # Only use ErlangEventLoop for the main thread
-            # Worker threads should use the default selector-based loop
             if threading.current_thread().ident == main_thread_id:
                 return ErlangEventLoop()
             else:
-                # Return default selector event loop for non-main threads
                 return asyncio.SelectorEventLoop()
 
     return ErlangEventLoopPolicy()
+
+
+# =============================================================================
+# Async coroutine wrapper for result delivery
+# =============================================================================
+
+async def _run_and_send(coro, caller_pid, ref):
+    """Run a coroutine and send the result to an Erlang caller via erlang.send().
+
+    This function wraps a coroutine and sends its result (or error) to the
+    specified Erlang process using erlang.send(). Used by the async worker
+    backend to deliver results without pthread polling.
+
+    Args:
+        coro: The coroutine to run
+        caller_pid: An erlang.Pid object for the caller process
+        ref: A reference to include in the result message
+
+    The result message format is:
+        ('async_result', ref, ('ok', result)) - on success
+        ('async_result', ref, ('error', error_str)) - on failure
+    """
+    import erlang
+    try:
+        result = await coro
+        erlang.send(caller_pid, ('async_result', ref, ('ok', result)))
+    except asyncio.CancelledError:
+        erlang.send(caller_pid, ('async_result', ref, ('error', 'cancelled')))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        erlang.send(caller_pid, ('async_result', ref, ('error', f'{type(e).__name__}: {e}\n{tb}')))

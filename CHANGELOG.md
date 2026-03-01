@@ -18,9 +18,28 @@
 
 ### Changed
 
+- **Async worker backend replaced with event loop model** - The pthread+usleep
+  polling async workers have been replaced with an event-driven model using
+  `py_event_loop` and `enif_select`:
+  - Removed `py_async_worker.erl` and `py_async_worker_sup.erl`
+  - Removed `py_async_worker_t` and `async_pending_t` structs from C code
+  - Deprecated `async_worker_new`, `async_call`, `async_gather`, `async_stream` NIFs
+  - Added `py_event_loop_pool.erl` for managing event loop-based async execution
+  - Added `py_event_loop:run_async/2` for submitting coroutines to event loops
+  - Added `nif_event_loop_run_async` NIF for direct coroutine submission
+  - Added `_run_and_send` wrapper in Python for result delivery via `erlang.send()`
+  - **Internal change**: `py:async_call/3,4` and `py:await/1,2` API unchanged
+
 - **`SuspensionRequired` base class** - Now inherits from `BaseException` instead
   of `Exception`. This prevents ASGI/WSGI middleware `except Exception` handlers
   from intercepting the suspension control flow used by `erlang.call()`.
+
+### Performance
+
+- **Async coroutine latency reduced from ~10-20ms to <1ms** - The event loop model
+  eliminates pthread polling overhead
+- **Zero CPU usage when idle** - Event-driven instead of usleep-based polling
+- **No extra threads** - Coroutines run on the existing event loop infrastructure
 
 ## 1.8.1 (2026-02-25)
 
@@ -102,16 +121,15 @@
 ### Added
 
 - **Shared Router Architecture for Event Loops**
-  - Single `py_event_router` process handles all event loops (both shared and isolated)
+  - Single `py_event_router` process handles all event loops
   - Timer and FD messages include loop identity for correct dispatch
   - Eliminates need for per-loop router processes
   - Handle-based Python C API using PyCapsule for loop references
 
-- **Isolated Event Loops** - Create isolated event loops with `ErlangEventLoop(isolated=True)`
-  - Default (`isolated=False`): uses the shared global loop managed by Erlang
-  - Isolated (`isolated=True`): creates a dedicated loop with its own pending queue
-  - Full asyncio support (timers, FD operations) for both modes
-  - Useful for multi-threaded Python applications where each thread needs its own loop
+- **Per-Loop Capsule Architecture** - Each `ErlangEventLoop` instance has its own isolated capsule
+  - Dedicated pending queue per loop for proper event routing
+  - Full asyncio support (timers, FD operations) with correct loop isolation
+  - Safe for multi-threaded Python applications where each thread needs its own loop
   - See `docs/asyncio.md` for usage and architecture details
 
 ## 1.6.1 (2026-02-22)

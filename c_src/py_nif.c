@@ -46,7 +46,7 @@
 
 ErlNifResourceType *WORKER_RESOURCE_TYPE = NULL;
 ErlNifResourceType *PYOBJ_RESOURCE_TYPE = NULL;
-ErlNifResourceType *ASYNC_WORKER_RESOURCE_TYPE = NULL;
+/* ASYNC_WORKER_RESOURCE_TYPE removed - async workers replaced by event loop model */
 ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE = NULL;
 #ifdef HAVE_SUBINTERPRETERS
 ErlNifResourceType *SUBINTERP_WORKER_RESOURCE_TYPE = NULL;
@@ -201,56 +201,7 @@ static void pyobj_destructor(ErlNifEnv *env, void *obj) {
     }
 }
 
-static void async_worker_destructor(ErlNifEnv *env, void *obj) {
-    (void)env;
-    py_async_worker_t *worker = (py_async_worker_t *)obj;
-
-    /* Signal shutdown */
-    worker->shutdown = true;
-
-    /* Write to pipe to wake up event loop */
-    if (worker->notify_pipe[1] >= 0) {
-        char c = 'q';
-        (void)write(worker->notify_pipe[1], &c, 1);
-    }
-
-    /* Wait for thread to finish */
-    if (worker->loop_running) {
-        pthread_join(worker->loop_thread, NULL);
-    }
-
-    /* Clean up pending requests */
-    pthread_mutex_lock(&worker->queue_mutex);
-    async_pending_t *p = worker->pending_head;
-    while (p != NULL) {
-        async_pending_t *next = p->next;
-        if (g_python_initialized && p->future != NULL) {
-            PyGILState_STATE gstate = PyGILState_Ensure();
-            Py_DECREF(p->future);
-            PyGILState_Release(gstate);
-        }
-        enif_free(p);
-        p = next;
-    }
-    pthread_mutex_unlock(&worker->queue_mutex);
-
-    pthread_mutex_destroy(&worker->queue_mutex);
-
-    /* Close pipes */
-    if (worker->notify_pipe[0] >= 0) close(worker->notify_pipe[0]);
-    if (worker->notify_pipe[1] >= 0) close(worker->notify_pipe[1]);
-
-    if (worker->msg_env != NULL) {
-        enif_free_env(worker->msg_env);
-    }
-
-    /* Clean up event loop */
-    if (g_python_initialized && worker->event_loop != NULL) {
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        Py_DECREF(worker->event_loop);
-        PyGILState_Release(gstate);
-    }
-}
+/* async_worker_destructor removed - async workers replaced by event loop model */
 
 #ifdef HAVE_SUBINTERPRETERS
 static void subinterp_worker_destructor(ErlNifEnv *env, void *obj) {
@@ -1173,443 +1124,40 @@ static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const E
 }
 
 /* ============================================================================
- * Async worker NIFs
+ * Async worker NIFs (deprecated - replaced by event loop model)
+ *
+ * These NIFs are deprecated and return errors. Use py_event_loop_pool and
+ * py_event_loop:run_async/2 instead.
  * ============================================================================ */
 
 static ERL_NIF_TERM nif_async_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     (void)argv;
-
-    if (!g_python_initialized) {
-        return make_error(env, "python_not_initialized");
-    }
-
-    py_async_worker_t *worker = enif_alloc_resource(ASYNC_WORKER_RESOURCE_TYPE, sizeof(py_async_worker_t));
-    if (worker == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Initialize fields */
-    worker->event_loop = NULL;
-    worker->loop_running = false;
-    worker->shutdown = false;
-    worker->pending_head = NULL;
-    worker->pending_tail = NULL;
-    worker->msg_env = enif_alloc_env();
-
-    /* Create notification pipe */
-    if (pipe(worker->notify_pipe) < 0) {
-        enif_free_env(worker->msg_env);
-        enif_release_resource(worker);
-        return make_error(env, "pipe_failed");
-    }
-
-    /* Initialize mutex */
-    pthread_mutex_init(&worker->queue_mutex, NULL);
-
-    /* Start the event loop thread */
-    if (pthread_create(&worker->loop_thread, NULL, async_event_loop_thread, worker) != 0) {
-        close(worker->notify_pipe[0]);
-        close(worker->notify_pipe[1]);
-        pthread_mutex_destroy(&worker->queue_mutex);
-        enif_free_env(worker->msg_env);
-        enif_release_resource(worker);
-        return make_error(env, "thread_create_failed");
-    }
-
-    /* Wait for event loop to be ready */
-    int max_wait = 100;  /* 1 second max */
-    while (!worker->loop_running && max_wait-- > 0) {
-        usleep(10000);  /* 10ms */
-    }
-
-    if (!worker->loop_running) {
-        worker->shutdown = true;
-        pthread_join(worker->loop_thread, NULL);
-        close(worker->notify_pipe[0]);
-        close(worker->notify_pipe[1]);
-        pthread_mutex_destroy(&worker->queue_mutex);
-        enif_release_resource(worker);
-        return make_error(env, "event_loop_start_failed");
-    }
-
-    ERL_NIF_TERM result = enif_make_resource(env, worker);
-    enif_release_resource(worker);
-
-    return enif_make_tuple2(env, ATOM_OK, result);
+    return make_error(env, "async_workers_deprecated_use_event_loop");
 }
 
 static ERL_NIF_TERM nif_async_worker_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
-    py_async_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], ASYNC_WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-
-    /* Resource destructor will handle cleanup */
+    (void)argv;
     return ATOM_OK;
 }
 
-/* Counter for unique async call IDs */
-static uint64_t g_async_id_counter = 0;
-
 static ERL_NIF_TERM nif_async_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    py_async_worker_t *worker;
-    ErlNifBinary module_bin, func_bin;
-    ErlNifPid caller;
-
-    if (!enif_get_resource(env, argv[0], ASYNC_WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-    if (!worker->loop_running) {
-        return make_error(env, "event_loop_not_running");
-    }
-    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
-        return make_error(env, "invalid_module");
-    }
-    if (!enif_inspect_binary(env, argv[2], &func_bin)) {
-        return make_error(env, "invalid_func");
-    }
-    if (!enif_get_local_pid(env, argv[5], &caller)) {
-        return make_error(env, "invalid_caller");
-    }
-
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Convert module/func names */
-    char *module_name = binary_to_string(&module_bin);
-    char *func_name = binary_to_string(&func_bin);
-    if (module_name == NULL || func_name == NULL) {
-        enif_free(module_name);
-        enif_free(func_name);
-        PyGILState_Release(gstate);
-        return make_error(env, "alloc_failed");
-    }
-
-    ERL_NIF_TERM result;
-
-    /* Import module and get function */
-    PyObject *module = PyImport_ImportModule(module_name);
-    if (module == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    PyObject *func = PyObject_GetAttrString(module, func_name);
-    Py_DECREF(module);
-    if (func == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Convert args list to Python tuple */
-    unsigned int args_len;
-    if (!enif_get_list_length(env, argv[3], &args_len)) {
-        Py_DECREF(func);
-        result = make_error(env, "invalid_args");
-        goto cleanup;
-    }
-
-    PyObject *args = PyTuple_New(args_len);
-    ERL_NIF_TERM head, tail = argv[3];
-    for (unsigned int i = 0; i < args_len; i++) {
-        enif_get_list_cell(env, tail, &head, &tail);
-        PyObject *arg = term_to_py(env, head);
-        if (arg == NULL) {
-            Py_DECREF(args);
-            Py_DECREF(func);
-            result = make_error(env, "arg_conversion_failed");
-            goto cleanup;
-        }
-        PyTuple_SET_ITEM(args, i, arg);
-    }
-
-    /* Convert kwargs */
-    PyObject *kwargs = NULL;
-    if (argc > 4 && enif_is_map(env, argv[4])) {
-        kwargs = term_to_py(env, argv[4]);
-    }
-
-    /* Call the function to get coroutine */
-    PyObject *coro = PyObject_Call(func, args, kwargs);
-    Py_DECREF(func);
-    Py_DECREF(args);
-    Py_XDECREF(kwargs);
-
-    if (coro == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Check if result is a coroutine */
-    PyObject *asyncio = PyImport_ImportModule("asyncio");
-    if (asyncio == NULL) {
-        Py_DECREF(coro);
-        result = make_error(env, "asyncio_import_failed");
-        goto cleanup;
-    }
-
-    PyObject *iscoroutine = PyObject_CallMethod(asyncio, "iscoroutine", "O", coro);
-    bool is_coro = iscoroutine != NULL && PyObject_IsTrue(iscoroutine);
-    Py_XDECREF(iscoroutine);
-
-    if (!is_coro) {
-        Py_DECREF(asyncio);
-        /* Not a coroutine - return result directly */
-        ERL_NIF_TERM term_result = py_to_term(env, coro);
-        Py_DECREF(coro);
-        result = enif_make_tuple2(env, ATOM_OK,
-            enif_make_tuple2(env, enif_make_atom(env, "immediate"), term_result));
-        goto cleanup;
-    }
-
-    /* Submit coroutine to event loop using run_coroutine_threadsafe */
-    PyObject *future = PyObject_CallMethod(asyncio, "run_coroutine_threadsafe",
-        "OO", coro, worker->event_loop);
-    Py_DECREF(coro);
-    Py_DECREF(asyncio);
-
-    if (future == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Create pending entry */
-    uint64_t async_id = __sync_fetch_and_add(&g_async_id_counter, 1);
-
-    async_pending_t *pending = enif_alloc(sizeof(async_pending_t));
-    if (pending == NULL) {
-        Py_DECREF(future);
-        result = make_error(env, "alloc_failed");
-        goto cleanup;
-    }
-    pending->id = async_id;
-    pending->future = future;
-    pending->caller = caller;
-    pending->next = NULL;
-
-    /* Add to pending list */
-    pthread_mutex_lock(&worker->queue_mutex);
-    if (worker->pending_tail == NULL) {
-        worker->pending_head = pending;
-        worker->pending_tail = pending;
-    } else {
-        worker->pending_tail->next = pending;
-        worker->pending_tail = pending;
-    }
-    pthread_mutex_unlock(&worker->queue_mutex);
-
-    result = enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, async_id));
-
-cleanup:
-    enif_free(module_name);
-    enif_free(func_name);
-    PyGILState_Release(gstate);
-
-    return result;
+    (void)argc;
+    (void)argv;
+    return make_error(env, "async_workers_deprecated_use_event_loop");
 }
 
 static ERL_NIF_TERM nif_async_gather(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
-    py_async_worker_t *worker;
-    ErlNifPid caller;
-
-    if (!enif_get_resource(env, argv[0], ASYNC_WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-    if (!worker->loop_running) {
-        return make_error(env, "event_loop_not_running");
-    }
-    if (!enif_get_local_pid(env, argv[2], &caller)) {
-        return make_error(env, "invalid_caller");
-    }
-
-    unsigned int calls_len;
-    if (!enif_get_list_length(env, argv[1], &calls_len)) {
-        return make_error(env, "invalid_calls_list");
-    }
-
-    if (calls_len == 0) {
-        return enif_make_tuple2(env, ATOM_OK,
-            enif_make_tuple2(env, enif_make_atom(env, "immediate"), enif_make_list(env, 0)));
-    }
-
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Import asyncio */
-    PyObject *asyncio = PyImport_ImportModule("asyncio");
-    if (asyncio == NULL) {
-        PyGILState_Release(gstate);
-        return make_error(env, "asyncio_import_failed");
-    }
-
-    /* Build list of coroutines */
-    PyObject *coros = PyList_New(calls_len);
-    ERL_NIF_TERM head, tail = argv[1];
-
-    for (unsigned int i = 0; i < calls_len; i++) {
-        enif_get_list_cell(env, tail, &head, &tail);
-
-        int arity;
-        const ERL_NIF_TERM *tuple;
-        if (!enif_get_tuple(env, head, &arity, &tuple) || arity < 3) {
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            PyGILState_Release(gstate);
-            return make_error(env, "invalid_call_tuple");
-        }
-
-        ErlNifBinary module_bin, func_bin;
-        if (!enif_inspect_binary(env, tuple[0], &module_bin) ||
-            !enif_inspect_binary(env, tuple[1], &func_bin)) {
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            PyGILState_Release(gstate);
-            return make_error(env, "invalid_module_or_func");
-        }
-
-        char module_name[256], func_name[256];
-        if (module_bin.size >= 256 || func_bin.size >= 256) {
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            PyGILState_Release(gstate);
-            return make_error(env, "name_too_long");
-        }
-        memcpy(module_name, module_bin.data, module_bin.size);
-        module_name[module_bin.size] = '\0';
-        memcpy(func_name, func_bin.data, func_bin.size);
-        func_name[func_bin.size] = '\0';
-
-        /* Import module and get function */
-        PyObject *module = PyImport_ImportModule(module_name);
-        if (module == NULL) {
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            ERL_NIF_TERM err = make_py_error(env);
-            PyGILState_Release(gstate);
-            return err;
-        }
-
-        PyObject *func = PyObject_GetAttrString(module, func_name);
-        Py_DECREF(module);
-        if (func == NULL) {
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            ERL_NIF_TERM err = make_py_error(env);
-            PyGILState_Release(gstate);
-            return err;
-        }
-
-        /* Convert args */
-        unsigned int args_len;
-        if (!enif_get_list_length(env, tuple[2], &args_len)) {
-            Py_DECREF(func);
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            PyGILState_Release(gstate);
-            return make_error(env, "invalid_args");
-        }
-
-        PyObject *args = PyTuple_New(args_len);
-        ERL_NIF_TERM arg_head, arg_tail = tuple[2];
-        for (unsigned int j = 0; j < args_len; j++) {
-            enif_get_list_cell(env, arg_tail, &arg_head, &arg_tail);
-            PyObject *arg = term_to_py(env, arg_head);
-            if (arg == NULL) {
-                Py_DECREF(args);
-                Py_DECREF(func);
-                Py_DECREF(coros);
-                Py_DECREF(asyncio);
-                PyGILState_Release(gstate);
-                return make_error(env, "arg_conversion_failed");
-            }
-            PyTuple_SET_ITEM(args, j, arg);
-        }
-
-        /* Call function to get coroutine */
-        PyObject *coro = PyObject_Call(func, args, NULL);
-        Py_DECREF(func);
-        Py_DECREF(args);
-
-        if (coro == NULL) {
-            Py_DECREF(coros);
-            Py_DECREF(asyncio);
-            ERL_NIF_TERM err = make_py_error(env);
-            PyGILState_Release(gstate);
-            return err;
-        }
-
-        PyList_SET_ITEM(coros, i, coro);
-    }
-
-    /* Create asyncio.gather(*coros) */
-    PyObject *gather_args = PyTuple_New(calls_len);
-    for (unsigned int i = 0; i < calls_len; i++) {
-        PyObject *coro = PyList_GetItem(coros, i);
-        Py_INCREF(coro);
-        PyTuple_SET_ITEM(gather_args, i, coro);
-    }
-
-    PyObject *gather_func = PyObject_GetAttrString(asyncio, "gather");
-    PyObject *gather_coro = PyObject_Call(gather_func, gather_args, NULL);
-    Py_DECREF(gather_func);
-    Py_DECREF(gather_args);
-    Py_DECREF(coros);
-
-    if (gather_coro == NULL) {
-        Py_DECREF(asyncio);
-        ERL_NIF_TERM err = make_py_error(env);
-        PyGILState_Release(gstate);
-        return err;
-    }
-
-    /* Submit to event loop */
-    PyObject *future = PyObject_CallMethod(asyncio, "run_coroutine_threadsafe",
-        "OO", gather_coro, worker->event_loop);
-    Py_DECREF(gather_coro);
-    Py_DECREF(asyncio);
-
-    if (future == NULL) {
-        ERL_NIF_TERM err = make_py_error(env);
-        PyGILState_Release(gstate);
-        return err;
-    }
-
-    /* Create pending entry */
-    uint64_t async_id = __sync_fetch_and_add(&g_async_id_counter, 1);
-
-    async_pending_t *pending = enif_alloc(sizeof(async_pending_t));
-    if (pending == NULL) {
-        Py_DECREF(future);
-        PyGILState_Release(gstate);
-        return make_error(env, "alloc_failed");
-    }
-    pending->id = async_id;
-    pending->future = future;
-    pending->caller = caller;
-    pending->next = NULL;
-
-    /* Add to pending list */
-    pthread_mutex_lock(&worker->queue_mutex);
-    if (worker->pending_tail == NULL) {
-        worker->pending_head = pending;
-        worker->pending_tail = pending;
-    } else {
-        worker->pending_tail->next = pending;
-        worker->pending_tail = pending;
-    }
-    pthread_mutex_unlock(&worker->queue_mutex);
-
-    PyGILState_Release(gstate);
-
-    return enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, async_id));
+    (void)argv;
+    return make_error(env, "async_workers_deprecated_use_event_loop");
 }
 
 static ERL_NIF_TERM nif_async_stream(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    /* For now, delegate to async_call - async generators will be handled
-     * in the Erlang layer by collecting results */
-    return nif_async_call(env, argc, argv);
+    (void)argc;
+    (void)argv;
+    return make_error(env, "async_workers_deprecated_use_event_loop");
 }
 
 /* ============================================================================
@@ -3359,9 +2907,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         env, NULL, "py_object", pyobj_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
-    ASYNC_WORKER_RESOURCE_TYPE = enif_open_resource_type(
-        env, NULL, "py_async_worker", async_worker_destructor,
-        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+    /* ASYNC_WORKER_RESOURCE_TYPE removed - replaced by event loop model */
 
     SUSPENDED_STATE_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "py_suspended_state", suspended_state_destructor,
@@ -3389,7 +2935,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
     if (WORKER_RESOURCE_TYPE == NULL || PYOBJ_RESOURCE_TYPE == NULL ||
-        ASYNC_WORKER_RESOURCE_TYPE == NULL || SUSPENDED_STATE_RESOURCE_TYPE == NULL ||
+        SUSPENDED_STATE_RESOURCE_TYPE == NULL ||
         PY_CONTEXT_RESOURCE_TYPE == NULL || PY_REF_RESOURCE_TYPE == NULL ||
         PY_CONTEXT_SUSPENDED_RESOURCE_TYPE == NULL) {
         return -1;
@@ -3557,6 +3103,7 @@ static ErlNifFunc nif_funcs[] = {
     {"event_loop_set_worker", 2, nif_event_loop_set_worker, 0},
     {"event_loop_set_id", 2, nif_event_loop_set_id, 0},
     {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
+    {"event_loop_run_async", 7, nif_event_loop_run_async, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},

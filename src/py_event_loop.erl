@@ -27,7 +27,8 @@
     start_link/0,
     stop/0,
     get_loop/0,
-    register_callbacks/0
+    register_callbacks/0,
+    run_async/2
 ]).
 
 %% gen_server callbacks
@@ -82,6 +83,28 @@ register_callbacks() ->
     py_callback:register(py_event_loop_dispatch_callback, fun cb_dispatch_callback/1),
     py_callback:register(py_event_loop_dispatch_timer, fun cb_dispatch_timer/1),
     ok.
+
+%% @doc Run an async coroutine on the event loop.
+%% The result will be sent to the caller via erlang.send().
+%%
+%% Request should be a map with the following keys:
+%%   ref => reference() - A reference to identify the result
+%%   caller => pid() - The pid to send the result to
+%%   module => atom() | binary() - Python module name
+%%   func => atom() | binary() - Python function name
+%%   args => list() - Arguments to pass to the function
+%%   kwargs => map() - Keyword arguments (optional)
+%%
+%% Returns ok immediately. The result will be sent as:
+%%   {async_result, Ref, {ok, Result}} - on success
+%%   {async_result, Ref, {error, Reason}} - on failure
+-spec run_async(reference(), map()) -> ok | {error, term()}.
+run_async(LoopRef, #{ref := Ref, caller := Caller, module := Module,
+                     func := Func, args := Args} = Request) ->
+    Kwargs = maps:get(kwargs, Request, #{}),
+    ModuleBin = py_util:to_binary(Module),
+    FuncBin = py_util:to_binary(Func),
+    py_nif:event_loop_run_async(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs).
 
 %% ============================================================================
 %% gen_server callbacks

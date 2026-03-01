@@ -152,9 +152,20 @@ init([]) ->
         modules => [py_event_loop]
     },
 
+    %% Event loop pool (for async Python coroutines via event loops)
+    EventLoopPoolSpec = #{
+        id => py_event_loop_pool,
+        start => {py_event_loop_pool, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_event_loop_pool]
+    },
+
     Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                ContextSupSpec, ContextRouterInitSpec, AsyncPoolSpec,
-                WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec],
+                ContextSupSpec, ContextRouterInitSpec,
+                WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec,
+                EventLoopPoolSpec, AsyncPoolSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

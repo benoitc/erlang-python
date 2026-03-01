@@ -456,6 +456,17 @@ ERL_NIF_TERM nif_event_loop_wakeup(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]);
 
 /**
+ * @brief Submit an async coroutine to run on the event loop
+ *
+ * The coroutine result is sent to CallerPid via erlang.send().
+ * This replaces the pthread+usleep polling model with direct message passing.
+ *
+ * NIF: event_loop_run_async(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
+
+/**
  * @brief Signal that a synchronous sleep has completed
  *
  * Called from Erlang when a sleep timer expires.

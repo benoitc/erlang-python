@@ -1287,6 +1287,281 @@ ERL_NIF_TERM nif_event_loop_wakeup(ErlNifEnv *env, int argc,
     return ATOM_OK;
 }
 
+/**
+ * event_loop_run_async(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ *
+ * Submit an async coroutine to run on the event loop. When the coroutine
+ * completes, the result is sent to CallerPid via erlang.send().
+ *
+ * This replaces the pthread+usleep polling model with direct message passing.
+ */
+ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    ErlNifPid caller_pid;
+    ErlNifBinary module_bin, func_bin;
+
+    /* Get loop reference */
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get caller PID */
+    if (!enif_get_local_pid(env, argv[1], &caller_pid)) {
+        return make_error(env, "invalid_caller_pid");
+    }
+
+    /* argv[2] is the reference - we'll pass it to Python */
+    ERL_NIF_TERM ref_term = argv[2];
+
+    /* Get module and function names */
+    if (!enif_inspect_binary(env, argv[3], &module_bin)) {
+        return make_error(env, "invalid_module");
+    }
+    if (!enif_inspect_binary(env, argv[4], &func_bin)) {
+        return make_error(env, "invalid_func");
+    }
+
+    /* Convert args list - argv[5] */
+    /* Convert kwargs map - argv[6] */
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Convert module/func names to C strings */
+    char *module_name = enif_alloc(module_bin.size + 1);
+    char *func_name = enif_alloc(func_bin.size + 1);
+    if (module_name == NULL || func_name == NULL) {
+        enif_free(module_name);
+        enif_free(func_name);
+        PyGILState_Release(gstate);
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(module_name, module_bin.data, module_bin.size);
+    module_name[module_bin.size] = '\0';
+    memcpy(func_name, func_bin.data, func_bin.size);
+    func_name[func_bin.size] = '\0';
+
+    ERL_NIF_TERM result;
+
+    /* Import module and get function */
+    PyObject *module = PyImport_ImportModule(module_name);
+    if (module == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    PyObject *func = PyObject_GetAttrString(module, func_name);
+    Py_DECREF(module);
+    if (func == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Convert args list to Python tuple */
+    unsigned int args_len;
+    if (!enif_get_list_length(env, argv[5], &args_len)) {
+        Py_DECREF(func);
+        result = make_error(env, "invalid_args");
+        goto cleanup;
+    }
+
+    PyObject *args = PyTuple_New(args_len);
+    ERL_NIF_TERM head, tail = argv[5];
+    for (unsigned int i = 0; i < args_len; i++) {
+        enif_get_list_cell(env, tail, &head, &tail);
+        PyObject *arg = term_to_py(env, head);
+        if (arg == NULL) {
+            Py_DECREF(args);
+            Py_DECREF(func);
+            result = make_error(env, "arg_conversion_failed");
+            goto cleanup;
+        }
+        PyTuple_SET_ITEM(args, i, arg);
+    }
+
+    /* Convert kwargs */
+    PyObject *kwargs = NULL;
+    if (argc > 6 && enif_is_map(env, argv[6])) {
+        kwargs = term_to_py(env, argv[6]);
+    }
+
+    /* Call the function to get coroutine */
+    PyObject *coro = PyObject_Call(func, args, kwargs);
+    Py_DECREF(func);
+    Py_DECREF(args);
+    Py_XDECREF(kwargs);
+
+    if (coro == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Check if result is a coroutine */
+    PyObject *asyncio = PyImport_ImportModule("asyncio");
+    if (asyncio == NULL) {
+        Py_DECREF(coro);
+        result = make_error(env, "asyncio_import_failed");
+        goto cleanup;
+    }
+
+    PyObject *iscoroutine = PyObject_CallMethod(asyncio, "iscoroutine", "O", coro);
+    bool is_coro = iscoroutine != NULL && PyObject_IsTrue(iscoroutine);
+    Py_XDECREF(iscoroutine);
+
+    if (!is_coro) {
+        Py_DECREF(asyncio);
+        /* Not a coroutine - convert result and send immediately */
+        PyObject *erlang_mod = PyImport_ImportModule("erlang");
+        if (erlang_mod == NULL) {
+            Py_DECREF(coro);
+            result = make_py_error(env);
+            goto cleanup;
+        }
+
+        /* Create the caller PID object */
+        extern PyTypeObject ErlangPidType;
+        ErlangPidObject *pid_obj = PyObject_New(ErlangPidObject, &ErlangPidType);
+        if (pid_obj == NULL) {
+            Py_DECREF(erlang_mod);
+            Py_DECREF(coro);
+            result = make_error(env, "pid_alloc_failed");
+            goto cleanup;
+        }
+        pid_obj->pid = caller_pid;
+
+        /* Convert ref and result to Python */
+        PyObject *py_ref = term_to_py(env, ref_term);
+        if (py_ref == NULL) {
+            Py_DECREF((PyObject *)pid_obj);
+            Py_DECREF(erlang_mod);
+            Py_DECREF(coro);
+            result = make_error(env, "ref_conversion_failed");
+            goto cleanup;
+        }
+
+        /* Build result tuple: ('async_result', ref, ('ok', result)) */
+        PyObject *ok_tuple = PyTuple_Pack(2, PyUnicode_FromString("ok"), coro);
+        PyObject *msg = PyTuple_Pack(3,
+            PyUnicode_FromString("async_result"),
+            py_ref,
+            ok_tuple);
+
+        /* Send via erlang.send() */
+        PyObject *send_result = PyObject_CallMethod(erlang_mod, "send", "OO",
+                                                     (PyObject *)pid_obj, msg);
+        Py_XDECREF(send_result);
+        Py_DECREF(msg);
+        Py_DECREF(ok_tuple);
+        Py_DECREF(py_ref);
+        Py_DECREF((PyObject *)pid_obj);
+        Py_DECREF(erlang_mod);
+        Py_DECREF(coro);
+
+        result = ATOM_OK;
+        goto cleanup;
+    }
+
+    /* Import erlang_loop to get _run_and_send */
+    PyObject *erlang_loop = PyImport_ImportModule("erlang_loop");
+    if (erlang_loop == NULL) {
+        /* Try _erlang_impl._loop as fallback */
+        PyErr_Clear();
+        erlang_loop = PyImport_ImportModule("_erlang_impl._loop");
+    }
+    if (erlang_loop == NULL) {
+        Py_DECREF(asyncio);
+        Py_DECREF(coro);
+        result = make_error(env, "erlang_loop_import_failed");
+        goto cleanup;
+    }
+
+    PyObject *run_and_send = PyObject_GetAttrString(erlang_loop, "_run_and_send");
+    Py_DECREF(erlang_loop);
+    if (run_and_send == NULL) {
+        Py_DECREF(asyncio);
+        Py_DECREF(coro);
+        result = make_error(env, "run_and_send_not_found");
+        goto cleanup;
+    }
+
+    /* Create the caller PID object */
+    extern PyTypeObject ErlangPidType;
+    ErlangPidObject *pid_obj = PyObject_New(ErlangPidObject, &ErlangPidType);
+    if (pid_obj == NULL) {
+        Py_DECREF(run_and_send);
+        Py_DECREF(asyncio);
+        Py_DECREF(coro);
+        result = make_error(env, "pid_alloc_failed");
+        goto cleanup;
+    }
+    pid_obj->pid = caller_pid;
+
+    /* Convert ref to Python */
+    PyObject *py_ref = term_to_py(env, ref_term);
+    if (py_ref == NULL) {
+        Py_DECREF((PyObject *)pid_obj);
+        Py_DECREF(run_and_send);
+        Py_DECREF(asyncio);
+        Py_DECREF(coro);
+        result = make_error(env, "ref_conversion_failed");
+        goto cleanup;
+    }
+
+    /* Create wrapped coroutine: _run_and_send(coro, caller_pid, ref) */
+    PyObject *wrapped_coro = PyObject_CallFunction(run_and_send, "OOO",
+                                                    coro, (PyObject *)pid_obj, py_ref);
+    Py_DECREF(run_and_send);
+    Py_DECREF(coro);
+    Py_DECREF((PyObject *)pid_obj);
+    Py_DECREF(py_ref);
+
+    if (wrapped_coro == NULL) {
+        Py_DECREF(asyncio);
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Get the running event loop and create a task */
+    PyObject *get_loop = PyObject_CallMethod(asyncio, "get_event_loop", NULL);
+    if (get_loop == NULL) {
+        PyErr_Clear();
+        /* Try to use the event loop policy instead */
+        get_loop = PyObject_CallMethod(asyncio, "get_running_loop", NULL);
+    }
+
+    if (get_loop == NULL) {
+        PyErr_Clear();
+        Py_DECREF(wrapped_coro);
+        Py_DECREF(asyncio);
+        result = make_error(env, "no_running_loop");
+        goto cleanup;
+    }
+
+    /* Schedule the task on the loop */
+    PyObject *task = PyObject_CallMethod(get_loop, "create_task", "O", wrapped_coro);
+    Py_DECREF(wrapped_coro);
+    Py_DECREF(get_loop);
+    Py_DECREF(asyncio);
+
+    if (task == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    Py_DECREF(task);
+    result = ATOM_OK;
+
+cleanup:
+    enif_free(module_name);
+    enif_free(func_name);
+    PyGILState_Release(gstate);
+
+    return result;
+}
+
 /* ============================================================================
  * Helper Functions
  * ============================================================================ */
@@ -2457,6 +2732,439 @@ ERL_NIF_TERM nif_set_udp_broadcast(ErlNifEnv *env, int argc,
 }
 
 /* ============================================================================
+ * Reactor NIFs - Erlang-as-Reactor Architecture
+ *
+ * These NIFs support the Erlang-as-Reactor pattern where:
+ * - Erlang manages TCP accept and routing via gen_tcp
+ * - FDs are passed to py_reactor_context processes
+ * - Python handles HTTP parsing and ASGI/WSGI execution
+ * - Erlang handles I/O readiness via enif_select
+ * ============================================================================ */
+
+/**
+ * reactor_register_fd(ContextRef, Fd, OwnerPid) -> {ok, FdRef} | {error, Reason}
+ *
+ * Register an FD for reactor monitoring. The FD is owned by the context
+ * and receives {select, FdRes, Ref, ready_input/ready_output} messages.
+ * Initial registration is for read events.
+ */
+ERL_NIF_TERM nif_reactor_register_fd(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    /* Get context reference - we need PY_CONTEXT_RESOURCE_TYPE from py_nif.h */
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    int fd;
+    if (!enif_get_int(env, argv[1], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    ErlNifPid owner_pid;
+    if (!enif_get_local_pid(env, argv[2], &owner_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+
+    /* Allocate fd resource */
+    fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
+                                                 sizeof(fd_resource_t));
+    if (fd_res == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    fd_res->fd = fd;
+    fd_res->read_callback_id = 0;  /* Not used for reactor mode */
+    fd_res->write_callback_id = 0;
+    fd_res->owner_pid = owner_pid;
+    fd_res->reader_active = true;
+    fd_res->writer_active = false;
+    fd_res->loop = NULL;  /* No event loop needed for reactor mode */
+
+    /* Initialize lifecycle management */
+    atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
+    fd_res->monitor_active = false;
+    fd_res->owns_fd = false;  /* Erlang owns the socket via gen_tcp */
+
+    /* Monitor owner process for cleanup on death */
+    if (enif_monitor_process(env, fd_res, &owner_pid,
+                             &fd_res->owner_monitor) == 0) {
+        fd_res->monitor_active = true;
+    }
+
+    /* Register with Erlang scheduler for read monitoring */
+    int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_READ,
+                          fd_res, &owner_pid, enif_make_ref(env));
+
+    if (ret < 0) {
+        if (fd_res->monitor_active) {
+            enif_demonitor_process(env, fd_res, &fd_res->owner_monitor);
+        }
+        enif_release_resource(fd_res);
+        return make_error(env, "select_failed");
+    }
+
+    ERL_NIF_TERM fd_term = enif_make_resource(env, fd_res);
+    /* Don't release - keep reference while registered */
+
+    return enif_make_tuple2(env, ATOM_OK, fd_term);
+}
+
+/**
+ * reactor_reselect_read(FdRef) -> ok | {error, Reason}
+ *
+ * Re-register for read events after a one-shot event was delivered.
+ */
+ERL_NIF_TERM nif_reactor_reselect_read(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return make_error(env, "fd_closing");
+    }
+
+    if (fd_res->fd < 0) {
+        return make_error(env, "fd_closed");
+    }
+
+    /* Re-register for read events */
+    int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
+                          fd_res, &fd_res->owner_pid, enif_make_ref(env));
+
+    if (ret < 0) {
+        return make_error(env, "select_failed");
+    }
+
+    fd_res->reader_active = true;
+
+    return ATOM_OK;
+}
+
+/**
+ * reactor_select_write(FdRef) -> ok | {error, Reason}
+ *
+ * Switch to write monitoring for response sending.
+ */
+ERL_NIF_TERM nif_reactor_select_write(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        return make_error(env, "fd_closing");
+    }
+
+    if (fd_res->fd < 0) {
+        return make_error(env, "fd_closed");
+    }
+
+    /* Register for write events */
+    int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
+                          fd_res, &fd_res->owner_pid, enif_make_ref(env));
+
+    if (ret < 0) {
+        return make_error(env, "select_failed");
+    }
+
+    fd_res->writer_active = true;
+    fd_res->reader_active = false;  /* Typically stop reading when writing */
+
+    return ATOM_OK;
+}
+
+/**
+ * get_fd_from_resource(FdRef) -> Fd | {error, Reason}
+ *
+ * Extract the file descriptor integer from an FD resource.
+ */
+ERL_NIF_TERM nif_get_fd_from_resource(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    if (fd_res->fd < 0) {
+        return make_error(env, "fd_closed");
+    }
+
+    return enif_make_int(env, fd_res->fd);
+}
+
+/**
+ * reactor_on_read_ready(ContextRef, Fd) -> {ok, Action} | {error, Reason}
+ *
+ * Call Python's erlang_reactor.on_read_ready(fd) and return the action.
+ * Action is one of: <<"continue">>, <<"write_pending">>, <<"close">>
+ *
+ * This is a dirty NIF since it acquires the GIL and calls Python.
+ */
+ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    int fd;
+    if (!enif_get_int(env, argv[1], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    /* Acquire GIL and call Python */
+    gil_guard_t guard = gil_acquire();
+
+    /* Import erlang_reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    if (reactor_module == NULL) {
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "import_erlang_reactor_failed");
+    }
+
+    /* Call on_read_ready(fd) */
+    PyObject *result = PyObject_CallMethod(reactor_module, "on_read_ready",
+                                            "i", fd);
+    Py_DECREF(reactor_module);
+
+    if (result == NULL) {
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "on_read_ready_failed");
+    }
+
+    /* Convert result to Erlang term */
+    ERL_NIF_TERM action;
+    if (PyUnicode_Check(result)) {
+        const char *str = PyUnicode_AsUTF8(result);
+        if (str != NULL) {
+            size_t len = strlen(str);
+            unsigned char *buf = enif_make_new_binary(env, len, &action);
+            memcpy(buf, str, len);
+        } else {
+            action = enif_make_atom(env, "unknown");
+        }
+    } else {
+        action = enif_make_atom(env, "unknown");
+    }
+
+    Py_DECREF(result);
+    gil_release(guard);
+
+    return enif_make_tuple2(env, ATOM_OK, action);
+}
+
+/**
+ * reactor_on_write_ready(ContextRef, Fd) -> {ok, Action} | {error, Reason}
+ *
+ * Call Python's erlang_reactor.on_write_ready(fd) and return the action.
+ * Action is one of: <<"continue">>, <<"read_pending">>, <<"close">>
+ *
+ * This is a dirty NIF since it acquires the GIL and calls Python.
+ */
+ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
+                                         const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    int fd;
+    if (!enif_get_int(env, argv[1], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    /* Acquire GIL and call Python */
+    gil_guard_t guard = gil_acquire();
+
+    /* Import erlang_reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    if (reactor_module == NULL) {
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "import_erlang_reactor_failed");
+    }
+
+    /* Call on_write_ready(fd) */
+    PyObject *result = PyObject_CallMethod(reactor_module, "on_write_ready",
+                                            "i", fd);
+    Py_DECREF(reactor_module);
+
+    if (result == NULL) {
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "on_write_ready_failed");
+    }
+
+    /* Convert result to Erlang term */
+    ERL_NIF_TERM action;
+    if (PyUnicode_Check(result)) {
+        const char *str = PyUnicode_AsUTF8(result);
+        if (str != NULL) {
+            size_t len = strlen(str);
+            unsigned char *buf = enif_make_new_binary(env, len, &action);
+            memcpy(buf, str, len);
+        } else {
+            action = enif_make_atom(env, "unknown");
+        }
+    } else {
+        action = enif_make_atom(env, "unknown");
+    }
+
+    Py_DECREF(result);
+    gil_release(guard);
+
+    return enif_make_tuple2(env, ATOM_OK, action);
+}
+
+/**
+ * reactor_init_connection(ContextRef, Fd, ClientInfo) -> ok | {error, Reason}
+ *
+ * Initialize a Python protocol handler for a new connection.
+ * ClientInfo is a map with keys: addr, port
+ *
+ * This is a dirty NIF since it acquires the GIL and calls Python.
+ */
+ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    int fd;
+    if (!enif_get_int(env, argv[1], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    /* Convert client_info map to Python dict */
+    if (!enif_is_map(env, argv[2])) {
+        return make_error(env, "invalid_client_info");
+    }
+
+    /* Acquire GIL and call Python */
+    gil_guard_t guard = gil_acquire();
+
+    /* Convert Erlang map to Python dict */
+    PyObject *client_info = term_to_py(env, argv[2]);
+    if (client_info == NULL) {
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "client_info_conversion_failed");
+    }
+
+    /* Import erlang_reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    if (reactor_module == NULL) {
+        Py_DECREF(client_info);
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "import_erlang_reactor_failed");
+    }
+
+    /* Call init_connection(fd, client_info) */
+    PyObject *result = PyObject_CallMethod(reactor_module, "init_connection",
+                                            "iO", fd, client_info);
+    Py_DECREF(reactor_module);
+    Py_DECREF(client_info);
+
+    if (result == NULL) {
+        PyErr_Clear();
+        gil_release(guard);
+        return make_error(env, "init_connection_failed");
+    }
+
+    Py_DECREF(result);
+    gil_release(guard);
+
+    return ATOM_OK;
+}
+
+/**
+ * reactor_close_fd(FdRef) -> ok | {error, Reason}
+ *
+ * Close an FD and clean up the protocol handler.
+ * Calls Python's erlang_reactor.close_connection(fd) if registered.
+ */
+ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
+                                   const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+
+    int fd = fd_res->fd;
+
+    /* Atomically transition to CLOSING state */
+    int expected = FD_STATE_OPEN;
+    if (!atomic_compare_exchange_strong(&fd_res->closing_state,
+                                        &expected, FD_STATE_CLOSING)) {
+        /* Already closing or closed */
+        return ATOM_OK;
+    }
+
+    /* Call Python to clean up protocol handler */
+    if (fd >= 0) {
+        gil_guard_t guard = gil_acquire();
+
+        PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+        if (reactor_module != NULL) {
+            PyObject *result = PyObject_CallMethod(reactor_module,
+                                                    "close_connection", "i", fd);
+            Py_XDECREF(result);
+            Py_DECREF(reactor_module);
+            PyErr_Clear();  /* Ignore errors during cleanup */
+        } else {
+            PyErr_Clear();
+        }
+
+        gil_release(guard);
+    }
+
+    /* Take ownership for cleanup */
+    fd_res->owns_fd = true;
+
+    /* Stop select and close */
+    if (fd_res->reader_active || fd_res->writer_active) {
+        enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_STOP,
+                    fd_res, NULL, enif_make_atom(env, "reactor_close"));
+    } else {
+        atomic_store(&fd_res->closing_state, FD_STATE_CLOSED);
+        if (fd_res->fd >= 0) {
+            close(fd_res->fd);
+            fd_res->fd = -1;
+        }
+        if (fd_res->monitor_active) {
+            enif_demonitor_process(env, fd_res, &fd_res->owner_monitor);
+            fd_res->monitor_active = false;
+        }
+    }
+
+    return ATOM_OK;
+}
+
+/* ============================================================================
  * Python Module: py_event_loop
  *
  * This provides Python-callable functions for the event loop, allowing
@@ -2489,7 +3197,9 @@ ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_event_loop");
     }
 
-    /* Set global C variable for fast access from C code */
+    /* Set global C variable for fast access from C code.
+     * Note: The resource lifetime is managed by Erlang (py_event_loop gen_server
+     * holds the reference). We just store a raw pointer here for fast C access. */
     g_python_event_loop = loop;
 
     /* Also set per-interpreter storage so Python code uses the correct loop */
@@ -3698,9 +4408,20 @@ static PyObject *py_erlang_sleep(PyObject *self, PyObject *args) {
     /* Generate a unique sleep ID */
     uint64_t sleep_id = atomic_fetch_add(&loop->next_callback_id, 1);
 
+    /* FIX: Store sleep_id BEFORE sending to prevent race condition.
+     * If completion arrives before storage, it would be dropped and waiter deadlocks. */
+    pthread_mutex_lock(&loop->mutex);
+    atomic_store(&loop->sync_sleep_id, sleep_id);
+    atomic_store(&loop->sync_sleep_complete, false);
+    pthread_mutex_unlock(&loop->mutex);
+
     /* Send {sleep_wait, DelayMs, SleepId} to worker */
     ErlNifEnv *msg_env = enif_alloc_env();
     if (msg_env == NULL) {
+        /* On failure, reset sleep_id */
+        pthread_mutex_lock(&loop->mutex);
+        atomic_store(&loop->sync_sleep_id, 0);
+        pthread_mutex_unlock(&loop->mutex);
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
         return NULL;
     }
@@ -3715,16 +4436,18 @@ static PyObject *py_erlang_sleep(PyObject *self, PyObject *args) {
     /* Use worker_pid when available, otherwise fall back to router_pid */
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     if (!enif_send(NULL, target_pid, msg_env, msg)) {
+        /* On failure, reset sleep_id */
+        pthread_mutex_lock(&loop->mutex);
+        atomic_store(&loop->sync_sleep_id, 0);
+        pthread_mutex_unlock(&loop->mutex);
         enif_free_env(msg_env);
         PyErr_SetString(PyExc_RuntimeError, "Failed to send sleep message");
         return NULL;
     }
     enif_free_env(msg_env);
 
-    /* Set up for waiting on this sleep */
+    /* Wait for completion - sleep_id already set above */
     pthread_mutex_lock(&loop->mutex);
-    atomic_store(&loop->sync_sleep_id, sleep_id);
-    atomic_store(&loop->sync_sleep_complete, false);
 
     /* Release GIL and wait for completion */
     Py_BEGIN_ALLOW_THREADS

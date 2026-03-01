@@ -241,70 +241,7 @@ typedef struct {
     ErlNifEnv *callback_env;
 } py_worker_t;
 
-/**
- * @struct async_pending_t
- * @brief Represents a pending asynchronous Python operation
- *
- * Used to track asyncio coroutines submitted to the event loop.
- * Forms a linked list for efficient queue management.
- */
-typedef struct async_pending {
-    /** @brief Unique identifier for this async operation */
-    uint64_t id;
-
-    /** @brief Python Future object from `asyncio.run_coroutine_threadsafe` */
-    PyObject *future;
-
-    /** @brief PID of the Erlang process awaiting the result */
-    ErlNifPid caller;
-
-    /** @brief Next pending operation in the queue */
-    struct async_pending *next;
-} async_pending_t;
-
-/**
- * @struct py_async_worker_t
- * @brief Async worker managing an asyncio event loop
- *
- * Provides support for Python async/await operations by running
- * an asyncio event loop in a dedicated background thread.
- *
- * @see nif_async_worker_new
- * @see nif_async_call
- */
-typedef struct {
-    /** @brief Background thread running the event loop */
-    pthread_t loop_thread;
-
-    /** @brief Python asyncio event loop object */
-    PyObject *event_loop;
-
-    /**
-     * @brief Notification pipe for waking the event loop
-     *
-     * - `notify_pipe[0]` - Read end (event loop monitors)
-     * - `notify_pipe[1]` - Write end (main thread signals)
-     */
-    int notify_pipe[2];
-
-    /** @brief Flag indicating the event loop is running */
-    volatile bool loop_running;
-
-    /** @brief Flag to signal shutdown */
-    volatile bool shutdown;
-
-    /** @brief Mutex protecting the pending queue */
-    pthread_mutex_t queue_mutex;
-
-    /** @brief Head of pending operations queue */
-    async_pending_t *pending_head;
-
-    /** @brief Tail of pending operations queue */
-    async_pending_t *pending_tail;
-
-    /** @brief Environment for sending async result messages */
-    ErlNifEnv *msg_env;
-} py_async_worker_t;
+/* async_pending_t and py_async_worker_t removed - async workers replaced by event loop model */
 
 /**
  * @struct py_object_t
@@ -820,8 +757,7 @@ extern ErlNifResourceType *WORKER_RESOURCE_TYPE;
 /** @brief Resource type for py_object_t */
 extern ErlNifResourceType *PYOBJ_RESOURCE_TYPE;
 
-/** @brief Resource type for py_async_worker_t */
-extern ErlNifResourceType *ASYNC_WORKER_RESOURCE_TYPE;
+/* ASYNC_WORKER_RESOURCE_TYPE removed - async workers replaced by event loop model */
 
 /** @brief Resource type for suspended_state_t */
 extern ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE;
@@ -1404,15 +1340,7 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args);
  */
 static PyObject *erlang_module_getattr(PyObject *module, PyObject *name);
 
-/**
- * @brief Background thread running asyncio event loop
- *
- * Manages async Python operations submitted via async_call.
- *
- * @param arg Pointer to py_async_worker_t
- * @return NULL
- */
-static void *async_event_loop_thread(void *arg);
+/* async_event_loop_thread removed - replaced by event loop model */
 
 /**
  * @brief Create suspended state for callback handling

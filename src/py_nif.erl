@@ -82,6 +82,7 @@
     event_loop_set_worker/2,
     event_loop_set_id/2,
     event_loop_wakeup/1,
+    event_loop_run_async/7,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -159,7 +160,16 @@
     ref_interp_id/1,
     ref_to_term/1,
     ref_getattr/2,
-    ref_call_method/3
+    ref_call_method/3,
+    %% Reactor NIFs - Erlang-as-Reactor architecture
+    reactor_register_fd/3,
+    reactor_reselect_read/1,
+    reactor_select_write/1,
+    get_fd_from_resource/1,
+    reactor_on_read_ready/2,
+    reactor_on_write_ready/2,
+    reactor_init_connection/3,
+    reactor_close_fd/1
 ]).
 
 -on_load(load_nif/0).
@@ -581,6 +591,14 @@ event_loop_set_id(_LoopRef, _LoopId) ->
 %% @doc Wake up an event loop from a wait.
 -spec event_loop_wakeup(reference()) -> ok | {error, term()}.
 event_loop_wakeup(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Submit an async coroutine to run on the event loop.
+%% When the coroutine completes, the result is sent to CallerPid via erlang.send().
+%% This replaces the pthread+usleep polling model with direct message passing.
+-spec event_loop_run_async(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
+    ok | {error, term()}.
+event_loop_run_async(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.
@@ -1254,4 +1272,118 @@ ref_getattr(_Ref, _AttrName) ->
 %% @returns {ok, Result} | {error, Reason}
 -spec ref_call_method(reference(), binary(), list()) -> {ok, term()} | {error, term()}.
 ref_call_method(_Ref, _Method, _Args) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Reactor NIFs - Erlang-as-Reactor Architecture
+%%%
+%%% These NIFs support the Erlang-as-Reactor pattern where Erlang handles
+%%% TCP accept/routing and Python handles HTTP parsing and ASGI/WSGI execution.
+%%% ============================================================================
+
+%% @doc Register an FD for reactor monitoring.
+%%
+%% The FD is owned by the context and receives {select, FdRes, Ref, ready_input/ready_output}
+%% messages. Initial registration is for read events.
+%%
+%% @param ContextRef Context reference from context_create/1
+%% @param Fd File descriptor to monitor
+%% @param OwnerPid Process to receive select messages
+%% @returns {ok, FdRef} | {error, Reason}
+-spec reactor_register_fd(reference(), integer(), pid()) ->
+    {ok, reference()} | {error, term()}.
+reactor_register_fd(_ContextRef, _Fd, _OwnerPid) ->
+    ?NIF_STUB.
+
+%% @doc Re-register for read events after a one-shot event was delivered.
+%%
+%% Since enif_select is one-shot, this must be called after processing
+%% each read event to continue monitoring.
+%%
+%% @param FdRef FD resource reference from reactor_register_fd/3
+%% @returns ok | {error, Reason}
+-spec reactor_reselect_read(reference()) -> ok | {error, term()}.
+reactor_reselect_read(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Switch to write monitoring for response sending.
+%%
+%% After HTTP request parsing is complete and a response is ready,
+%% switch to write monitoring to send the response when the socket is ready.
+%%
+%% @param FdRef FD resource reference
+%% @returns ok | {error, Reason}
+-spec reactor_select_write(reference()) -> ok | {error, term()}.
+reactor_select_write(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Extract the file descriptor integer from an FD resource.
+%%
+%% Useful for passing the FD to Python for os.read/os.write operations.
+%%
+%% @param FdRef FD resource reference
+%% @returns Fd integer | {error, Reason}
+-spec get_fd_from_resource(reference()) -> integer() | {error, term()}.
+get_fd_from_resource(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Call Python's erlang_reactor.on_read_ready(fd).
+%%
+%% This is called when the FD is ready for reading. Python reads data,
+%% parses HTTP, and returns an action indicating what to do next.
+%%
+%% Actions:
+%% - <<"continue">> - Continue reading (call reactor_reselect_read)
+%% - <<"write_pending">> - Response ready, switch to write mode
+%% - <<"close">> - Close the connection
+%%
+%% @param ContextRef Context reference
+%% @param Fd File descriptor
+%% @returns {ok, Action} | {error, Reason}
+-spec reactor_on_read_ready(reference(), integer()) ->
+    {ok, binary()} | {error, term()}.
+reactor_on_read_ready(_ContextRef, _Fd) ->
+    ?NIF_STUB.
+
+%% @doc Call Python's erlang_reactor.on_write_ready(fd).
+%%
+%% This is called when the FD is ready for writing. Python writes
+%% buffered response data and returns an action.
+%%
+%% Actions:
+%% - <<"continue">> - More data to write
+%% - <<"read_pending">> - Keep-alive, switch back to read mode
+%% - <<"close">> - Close the connection
+%%
+%% @param ContextRef Context reference
+%% @param Fd File descriptor
+%% @returns {ok, Action} | {error, Reason}
+-spec reactor_on_write_ready(reference(), integer()) ->
+    {ok, binary()} | {error, term()}.
+reactor_on_write_ready(_ContextRef, _Fd) ->
+    ?NIF_STUB.
+
+%% @doc Initialize a Python protocol handler for a new connection.
+%%
+%% Called when a new connection is accepted. Creates an HTTPProtocol
+%% instance in Python and registers it in the protocol registry.
+%%
+%% @param ContextRef Context reference
+%% @param Fd File descriptor
+%% @param ClientInfo Map with client info (addr, port)
+%% @returns ok | {error, Reason}
+-spec reactor_init_connection(reference(), integer(), map()) ->
+    ok | {error, term()}.
+reactor_init_connection(_ContextRef, _Fd, _ClientInfo) ->
+    ?NIF_STUB.
+
+%% @doc Close an FD and clean up the protocol handler.
+%%
+%% Calls Python's erlang_reactor.close_connection(fd) to clean up
+%% the protocol handler, then closes the FD.
+%%
+%% @param FdRef FD resource reference
+%% @returns ok | {error, Reason}
+-spec reactor_close_fd(reference()) -> ok | {error, term()}.
+reactor_close_fd(_FdRef) ->
     ?NIF_STUB.
