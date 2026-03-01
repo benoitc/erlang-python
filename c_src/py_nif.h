@@ -893,6 +893,13 @@ extern _Atomic uint64_t g_callback_id_counter;
 /** @brief Python exception class for suspension */
 extern PyObject *SuspensionRequiredException;
 
+/** @brief Python exception for dead/unreachable process */
+extern PyObject *ProcessErrorException;
+
+/** @brief Python type for opaque Erlang PIDs */
+typedef struct { PyObject_HEAD; ErlNifPid pid; } ErlangPidObject;
+extern PyTypeObject ErlangPidType;
+
 /** @brief Cached numpy.ndarray type for fast isinstance checks (NULL if numpy unavailable) */
 extern PyObject *g_numpy_ndarray_type;
 
