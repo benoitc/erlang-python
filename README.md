@@ -25,7 +25,8 @@ Key features:
 - **Dirty NIF execution** - Python runs on dirty schedulers, never blocking the BEAM
 - **Elixir support** - Works seamlessly from Elixir via the `:py` module
 - **Bidirectional calls** - Python can call back into registered Erlang/Elixir functions
-- **Type conversion** - Automatic conversion between Erlang and Python types
+- **Message passing** - Python can send messages directly to Erlang processes via `erlang.send()`
+- **Type conversion** - Automatic conversion between Erlang and Python types (including PIDs)
 - **Streaming** - Iterate over Python generators chunk-by-chunk
 - **Virtual environments** - Activate venvs for dependency isolation
 - **AI/ML ready** - Examples for embeddings, semantic search, RAG, and LLMs

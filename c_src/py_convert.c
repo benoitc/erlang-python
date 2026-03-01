@@ -317,6 +317,12 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return result;
     }
 
+    /* Handle ErlangPid → Erlang PID */
+    if (Py_IS_TYPE(obj, &ErlangPidType)) {
+        ErlangPidObject *pid_obj = (ErlangPidObject *)obj;
+        return enif_make_pid(env, &pid_obj->pid);
+    }
+
     /* Handle NumPy arrays by converting to Python list first */
     if (is_numpy_ndarray(obj)) {
         PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
@@ -526,6 +532,17 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         }
         enif_map_iterator_destroy(env, &iter);
         return dict;
+    }
+
+    /* Check for PID */
+    {
+        ErlNifPid pid;
+        if (enif_get_local_pid(env, term, &pid)) {
+            ErlangPidObject *obj = PyObject_New(ErlangPidObject, &ErlangPidType);
+            if (obj == NULL) return NULL;
+            obj->pid = pid;
+            return (PyObject *)obj;
+        }
     }
 
     /* Check for wrapped Python object resource */
