@@ -86,15 +86,30 @@ static const char *EVENT_LOOP_CAPSULE_NAME = "erlang_python.event_loop";
 /** @brief Module attribute name for storing the event loop */
 static const char *EVENT_LOOP_ATTR_NAME = "_loop";
 
-/* Forward declaration for fallback in get_interpreter_event_loop */
-static erlang_event_loop_t *g_python_event_loop;
+/* ============================================================================
+ * Module State Structure
+ * ============================================================================
+ *
+ * Instead of using global variables, we store state in the Python module.
+ * This enables proper per-interpreter/per-context isolation.
+ */
+typedef struct {
+    /** @brief Event loop for this interpreter */
+    erlang_event_loop_t *event_loop;
 
-/* Global flag for isolation mode - set by Erlang via NIF */
-static volatile int g_isolation_mode = 0;  /* 0 = global, 1 = per_loop */
+    /** @brief Shared router PID for loops created via _loop_new() */
+    ErlNifPid shared_router;
 
-/* Global shared router PID - set during init, used by all loops in per_loop mode */
-static ErlNifPid g_shared_router;
-static volatile int g_shared_router_valid = 0;
+    /** @brief Whether shared_router has been set */
+    bool shared_router_valid;
+
+    /** @brief Isolation mode: 0=global, 1=per_loop */
+    int isolation_mode;
+} py_event_loop_module_state_t;
+
+/* Forward declaration for module state access */
+static py_event_loop_module_state_t *get_module_state(void);
+static py_event_loop_module_state_t *get_module_state_from_module(PyObject *module);
 
 /**
  * Get the py_event_loop module for the current interpreter.
@@ -110,57 +125,61 @@ static PyObject *get_event_loop_module(void) {
 }
 
 /**
+ * Get module state from a module object.
+ * MUST be called with GIL held.
+ *
+ * @param module The py_event_loop module object
+ * @return Module state or NULL if not available
+ */
+static py_event_loop_module_state_t *get_module_state_from_module(PyObject *module) {
+    if (module == NULL) {
+        return NULL;
+    }
+    void *state = PyModule_GetState(module);
+    return (py_event_loop_module_state_t *)state;
+}
+
+/**
+ * Get module state for the current interpreter.
+ * MUST be called with GIL held.
+ *
+ * @return Module state or NULL if not available
+ */
+static py_event_loop_module_state_t *get_module_state(void) {
+    PyObject *module = get_event_loop_module();
+    return get_module_state_from_module(module);
+}
+
+/**
  * Get the event loop for the current Python interpreter.
  * MUST be called with GIL held.
  *
- * For now, we use the global g_python_event_loop directly. Per-interpreter
- * storage via module attributes was causing issues on some Python versions.
- * The global approach works correctly since all Python code in the main
- * interpreter shares the same event loop.
- *
- * TODO: Implement proper per-interpreter storage for sub-interpreter support.
+ * Uses module state for proper per-interpreter isolation.
  *
  * @return Event loop pointer or NULL if not set
  */
 static erlang_event_loop_t *get_interpreter_event_loop(void) {
-    return g_python_event_loop;
+    py_event_loop_module_state_t *state = get_module_state();
+    if (state == NULL) {
+        return NULL;
+    }
+    return state->event_loop;
 }
 
 /**
  * Set the event loop for the current interpreter.
  * MUST be called with GIL held.
- * Stores as py_event_loop._loop module attribute.
+ * Stores in module state for proper per-interpreter isolation.
  *
- * @param loop Event loop to set
+ * @param loop Event loop to set (NULL to clear)
  * @return 0 on success, -1 on error
  */
 static int set_interpreter_event_loop(erlang_event_loop_t *loop) {
-    PyObject *module = get_event_loop_module();
-    if (module == NULL) {
+    py_event_loop_module_state_t *state = get_module_state();
+    if (state == NULL) {
         return -1;
     }
-
-    if (loop == NULL) {
-        /* Clear the event loop attribute */
-        if (PyObject_SetAttrString(module, EVENT_LOOP_ATTR_NAME, Py_None) < 0) {
-            PyErr_Clear();
-        }
-        return 0;
-    }
-
-    PyObject *capsule = PyCapsule_New(loop, EVENT_LOOP_CAPSULE_NAME, NULL);
-    if (capsule == NULL) {
-        return -1;
-    }
-
-    int result = PyObject_SetAttrString(module, EVENT_LOOP_ATTR_NAME, capsule);
-    Py_DECREF(capsule);
-
-    if (result < 0) {
-        PyErr_Clear();
-        return -1;
-    }
-
+    state->event_loop = loop;
     return 0;
 }
 
@@ -177,18 +196,14 @@ int create_default_event_loop(ErlNifEnv *env);
 void event_loop_destructor(ErlNifEnv *env, void *obj) {
     erlang_event_loop_t *loop = (erlang_event_loop_t *)obj;
 
-    /* If this is the active Python event loop, clear references */
-    if (g_python_event_loop == loop) {
-        g_python_event_loop = NULL;
-        /* Clear per-interpreter storage if we can acquire GIL.
-         * Don't create new loop in destructor - let next Python call handle it. */
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        erlang_event_loop_t *interp_loop = get_interpreter_event_loop();
-        if (interp_loop == loop) {
-            set_interpreter_event_loop(NULL);
-        }
-        PyGILState_Release(gstate);
+    /* If this is the active Python event loop, clear references.
+     * Acquire GIL to safely access module state. */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    erlang_event_loop_t *interp_loop = get_interpreter_event_loop();
+    if (interp_loop == loop) {
+        set_interpreter_event_loop(NULL);
     }
+    PyGILState_Release(gstate);
 
     /* Signal shutdown */
     loop->shutdown = true;
@@ -3172,21 +3187,20 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
  * ============================================================================ */
 
 /**
- * Initialize the global Python event loop.
- * Note: This function is currently unused (dead code).
+ * Initialize the Python event loop.
+ * Note: This function is deprecated - use nif_set_python_event_loop instead.
  */
 int py_event_loop_init_python(ErlNifEnv *env, erlang_event_loop_t *loop) {
     (void)env;
-    g_python_event_loop = loop;
-    return 0;
+    /* This is called from C code which should have GIL */
+    return set_interpreter_event_loop(loop);
 }
 
 /**
- * NIF to set the global Python event loop.
+ * NIF to set the Python event loop.
  * Called from Erlang: py_nif:set_python_event_loop(LoopRef)
  *
- * Updates both the global C variable (for NIF calls) and the per-interpreter
- * storage (for Python code). Acquires GIL to set per-interpreter storage.
+ * Stores the event loop in module state for per-interpreter isolation.
  */
 ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]) {
@@ -3197,15 +3211,14 @@ ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_event_loop");
     }
 
-    /* Set global C variable for fast access from C code.
-     * Note: The resource lifetime is managed by Erlang (py_event_loop gen_server
-     * holds the reference). We just store a raw pointer here for fast C access. */
-    g_python_event_loop = loop;
-
-    /* Also set per-interpreter storage so Python code uses the correct loop */
+    /* Store in module state with GIL held */
     PyGILState_STATE gstate = PyGILState_Ensure();
-    set_interpreter_event_loop(loop);
+    int result = set_interpreter_event_loop(loop);
     PyGILState_Release(gstate);
+
+    if (result < 0) {
+        return make_error(env, "failed_to_set_event_loop");
+    }
 
     return ATOM_OK;
 }
@@ -3223,11 +3236,19 @@ ERL_NIF_TERM nif_set_isolation_mode(ErlNifEnv *env, int argc,
     if (enif_is_atom(env, argv[0])) {
         char atom_buf[32];
         if (enif_get_atom(env, argv[0], atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+            int mode = 0;
             if (strcmp(atom_buf, "per_loop") == 0) {
-                g_isolation_mode = 1;
-            } else {
-                g_isolation_mode = 0;  /* global or any other value */
+                mode = 1;
             }
+
+            /* Store in module state */
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            py_event_loop_module_state_t *state = get_module_state();
+            if (state != NULL) {
+                state->isolation_mode = mode;
+            }
+            PyGILState_Release(gstate);
+
             return ATOM_OK;
         }
     }
@@ -3237,15 +3258,26 @@ ERL_NIF_TERM nif_set_isolation_mode(ErlNifEnv *env, int argc,
 /**
  * Set the shared router PID for per-loop created loops.
  * This router will be used by all loops created via _loop_new().
+ * Stores in module state instead of global variable.
  */
 ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
                                     const ERL_NIF_TERM argv[]) {
     (void)argc;
 
-    if (!enif_get_local_pid(env, argv[0], &g_shared_router)) {
+    ErlNifPid router_pid;
+    if (!enif_get_local_pid(env, argv[0], &router_pid)) {
         return make_error(env, "invalid_pid");
     }
-    g_shared_router_valid = 1;
+
+    /* Store in module state */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    py_event_loop_module_state_t *state = get_module_state();
+    if (state != NULL) {
+        state->shared_router = router_pid;
+        state->shared_router_valid = true;
+    }
+    PyGILState_Release(gstate);
+
     return ATOM_OK;
 }
 
@@ -3410,7 +3442,8 @@ static PyObject *py_get_isolation_mode(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
 
-    if (g_isolation_mode == 1) {
+    py_event_loop_module_state_t *state = get_module_state();
+    if (state != NULL && state->isolation_mode == 1) {
         return PyUnicode_FromString("per_loop");
     }
     return PyUnicode_FromString("global");
@@ -3882,9 +3915,10 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     loop->event_freelist = NULL;
     loop->freelist_count = 0;
 
-    /* Use shared router if available (for per-loop mode) */
-    if (g_shared_router_valid) {
-        loop->router_pid = g_shared_router;
+    /* Use shared router if available from module state (for per-loop mode) */
+    py_event_loop_module_state_t *state = get_module_state();
+    if (state != NULL && state->shared_router_valid) {
+        loop->router_pid = state->shared_router;
         loop->has_router = true;
     }
 
@@ -4500,24 +4534,32 @@ static PyMethodDef PyEventLoopMethods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-/* Module definition */
+/* Module definition with module state for per-interpreter isolation */
 static struct PyModuleDef PyEventLoopModuleDef = {
     PyModuleDef_HEAD_INIT,
-    "py_event_loop",
-    "Erlang-native asyncio event loop",
-    -1,
-    PyEventLoopMethods
+    .m_name = "py_event_loop",
+    .m_doc = "Erlang-native asyncio event loop",
+    .m_size = sizeof(py_event_loop_module_state_t),
+    .m_methods = PyEventLoopMethods,
 };
 
 /**
  * Create and register the py_event_loop module in Python.
- * Also creates a default event loop so g_python_event_loop is always available.
+ * Initializes module state for per-interpreter isolation.
  * Called during Python initialization.
  */
 int create_py_event_loop_module(void) {
     PyObject *module = PyModule_Create(&PyEventLoopModuleDef);
     if (module == NULL) {
         return -1;
+    }
+
+    /* Initialize module state */
+    py_event_loop_module_state_t *state = PyModule_GetState(module);
+    if (state != NULL) {
+        state->event_loop = NULL;
+        state->shared_router_valid = false;
+        state->isolation_mode = 0;  /* global mode by default */
     }
 
     /* Add module to sys.modules */
@@ -4531,22 +4573,15 @@ int create_py_event_loop_module(void) {
 }
 
 /**
- * Create a default event loop and set it as g_python_event_loop.
+ * Create a default event loop and store in module state.
  * This ensures the event loop is always available for Python asyncio.
  * Called after NIF is fully loaded (with GIL held).
  */
 int create_default_event_loop(ErlNifEnv *env) {
-    /* Check per-interpreter storage first for sub-interpreter support */
+    /* Check module state first */
     erlang_event_loop_t *existing = get_interpreter_event_loop();
     if (existing != NULL) {
         return 0;  /* Already have an event loop for this interpreter */
-    }
-
-    /* Also check global for backward compatibility */
-    if (g_python_event_loop != NULL) {
-        /* Global exists but not set for this interpreter - set it now */
-        set_interpreter_event_loop(g_python_event_loop);
-        return 0;
     }
 
     /* Allocate event loop resource */
@@ -4598,10 +4633,7 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->has_router = false;
     loop->has_self = false;
 
-    /* Set as global Python event loop (backward compatibility for NIF calls) */
-    g_python_event_loop = loop;
-
-    /* Store in per-interpreter storage for Python code to access */
+    /* Store in module state for Python code to access */
     set_interpreter_event_loop(loop);
 
     /* Keep a reference to prevent garbage collection */
