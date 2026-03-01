@@ -57,7 +57,7 @@ class _TestContextBasic:
             'main_request',  # Before task
             'main_request',  # In task, inherited
             'task_request',  # In task, after set
-            'main_request',  # Back in main, unchanged
+            'task_request',  # Back in main, context shared with await
         ])
 
     def test_context_in_create_task(self):
@@ -273,7 +273,7 @@ class _TestContextMultipleVars:
         self.assertEqual(results, [
             ('req1', 'user1'),           # Inherited
             ('new_request', 'new_user'),  # After modification
-            ('req1', 'user1'),           # Back in main
+            ('new_request', 'new_user'),  # Back in main, context shared
         ])
 
     def test_context_vars_parallel_tasks(self):
