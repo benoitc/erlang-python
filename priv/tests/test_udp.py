@@ -106,7 +106,7 @@ class _TestCreateDatagramEndpoint:
                 self.done = None
 
             def connection_made(self, transport):
-                self.done = asyncio.get_event_loop().create_future()
+                self.done = asyncio.get_running_loop().create_future()
 
             def datagram_received(self, data, addr):
                 self.received.append(data)
@@ -157,7 +157,7 @@ class _TestCreateDatagramEndpoint:
 
             def connection_made(self, transport):
                 self.transport = transport
-                self.done = asyncio.get_event_loop().create_future()
+                self.done = asyncio.get_running_loop().create_future()
 
             def datagram_received(self, data, addr):
                 self.received.append((data, addr))
@@ -209,7 +209,7 @@ class _TestCreateDatagramEndpoint:
                 self.done = None
 
             def connection_made(self, transport):
-                self.done = asyncio.get_event_loop().create_future()
+                self.done = asyncio.get_running_loop().create_future()
 
             def datagram_received(self, data, addr):
                 self.received.append(data)
@@ -391,8 +391,8 @@ class _TestDatagramProtocol:
 class _TestUDPReuse:
     """Tests for UDP socket reuse options."""
 
-    def test_udp_reuse_address(self):
-        """Test UDP with reuse_address."""
+    def test_udp_reuse_port(self):
+        """Test UDP with reuse_port."""
         class TestProtocol(asyncio.DatagramProtocol):
             pass
 
@@ -400,7 +400,7 @@ class _TestUDPReuse:
             transport1, _ = await self.loop.create_datagram_endpoint(
                 TestProtocol,
                 local_addr=('127.0.0.1', 0),
-                reuse_address=True
+                reuse_port=True
             )
             addr = transport1.get_extra_info('sockname')
             transport1.close()
@@ -409,7 +409,7 @@ class _TestUDPReuse:
             transport2, _ = await self.loop.create_datagram_endpoint(
                 TestProtocol,
                 local_addr=addr,
-                reuse_address=True
+                reuse_port=True
             )
             transport2.close()
 

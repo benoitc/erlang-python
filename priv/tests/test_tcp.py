@@ -78,6 +78,7 @@ class _TestCreateServer:
 
         class ServerProtocol(asyncio.Protocol):
             def connection_made(self, transport):
+                self.transport = transport
                 connections.append(transport)
 
             def data_received(self, data):
@@ -527,7 +528,8 @@ class _TestServerSockets:
             sockets = server.sockets
             self.assertIsInstance(sockets, tuple)
             self.assertEqual(len(sockets), 1)
-            self.assertIsInstance(sockets[0], socket.socket)
+            # Check for socket-like object (asyncio may wrap in TransportSocket)
+            self.assertTrue(hasattr(sockets[0], 'fileno'))
 
             server.close()
             await server.wait_closed()

@@ -89,9 +89,14 @@ class ErlangSocketTransport(transports.Transport):
         if data:
             self._protocol.data_received(data)
         else:
-            # Connection closed
+            # Connection closed (EOF received)
             self._loop.remove_reader(self._fileno)
-            self._protocol.eof_received()
+            keep_open = self._protocol.eof_received()
+            # If eof_received returns False/None, close the transport
+            if not keep_open:
+                self._closing = True
+                self._conn_lost += 1
+                self._call_connection_lost(None)
 
     def write(self, data):
         """Write data to the transport."""
@@ -252,9 +257,10 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         if address:
             self._extra['peername'] = address
 
-    def _start(self):
+    async def _start(self):
         """Start the transport."""
-        self._loop.call_soon(self._protocol.connection_made, self)
+        # Call connection_made directly to ensure it runs before returning
+        self._protocol.connection_made(self)
         self._loop.add_reader(self._fileno, self._read_ready)
 
     def _read_ready(self):
@@ -286,9 +292,16 @@ class ErlangDatagramTransport(transports.DatagramTransport):
 
         if not self._buffer:
             try:
-                if addr:
+                # For connected sockets (self._address is set), use send() not sendto()
+                # because sendto() with an address fails with "Socket is already connected"
+                if self._address is not None:
+                    # Connected socket - use send()
+                    self._sock.send(data)
+                elif addr:
+                    # Not connected, addr provided - use sendto()
                     self._sock.sendto(data, addr)
                 else:
+                    # Not connected, no addr - use send() (will fail if not connected)
                     self._sock.send(data)
                 return
             except (BlockingIOError, InterruptedError):
@@ -307,7 +320,10 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         while self._buffer:
             data, addr = self._buffer[0]
             try:
-                if addr:
+                # For connected sockets (self._address is set), use send() not sendto()
+                if self._address is not None:
+                    self._sock.send(data)
+                elif addr:
                     self._sock.sendto(data, addr)
                 else:
                     self._sock.send(data)

@@ -4205,6 +4205,146 @@ static PyObject *py_remove_writer_for(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+/**
+ * Update read callback on existing fd_resource and re-register with enif_select.
+ * Python function: _update_fd_read(fd_key, callback_id) -> None
+ */
+static PyObject *py_update_fd_read(PyObject *self, PyObject *args) {
+    (void)self;
+    unsigned long long fd_key;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "KK", &fd_key, &callback_id)) {
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res == NULL || fd_res->loop == NULL) {
+        PyErr_SetString(PyExc_ValueError, "Invalid fd resource");
+        return NULL;
+    }
+
+    fd_res->read_callback_id = callback_id;
+    fd_res->reader_active = true;
+
+    /* Re-register for read events (may already be registered, that's OK) */
+    ErlNifPid *target_pid = fd_res->loop->has_worker ?
+        &fd_res->loop->worker_pid : &fd_res->loop->router_pid;
+    enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
+
+    Py_RETURN_NONE;
+}
+
+/**
+ * Update write callback on existing fd_resource and re-register with enif_select.
+ * Python function: _update_fd_write(fd_key, callback_id) -> None
+ */
+static PyObject *py_update_fd_write(PyObject *self, PyObject *args) {
+    (void)self;
+    unsigned long long fd_key;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "KK", &fd_key, &callback_id)) {
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res == NULL || fd_res->loop == NULL) {
+        PyErr_SetString(PyExc_ValueError, "Invalid fd resource");
+        return NULL;
+    }
+
+    fd_res->write_callback_id = callback_id;
+    fd_res->writer_active = true;
+
+    /* Re-register for write events */
+    ErlNifPid *target_pid = fd_res->loop->has_worker ?
+        &fd_res->loop->worker_pid : &fd_res->loop->router_pid;
+    enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
+
+    Py_RETURN_NONE;
+}
+
+/**
+ * Clear read monitoring on fd_resource (cancel READ select).
+ * Python function: _clear_fd_read(fd_key) -> None
+ */
+static PyObject *py_clear_fd_read(PyObject *self, PyObject *args) {
+    (void)self;
+    unsigned long long fd_key;
+
+    if (!PyArg_ParseTuple(args, "K", &fd_key)) {
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res == NULL || fd_res->loop == NULL) {
+        Py_RETURN_NONE;  /* Already cleaned up */
+    }
+
+    if (fd_res->reader_active) {
+        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                    ERL_NIF_SELECT_CANCEL | ERL_NIF_SELECT_READ,
+                    fd_res, NULL, ATOM_UNDEFINED);
+        fd_res->reader_active = false;
+        fd_res->read_callback_id = 0;
+    }
+
+    Py_RETURN_NONE;
+}
+
+/**
+ * Clear write monitoring on fd_resource (cancel WRITE select).
+ * Python function: _clear_fd_write(fd_key) -> None
+ */
+static PyObject *py_clear_fd_write(PyObject *self, PyObject *args) {
+    (void)self;
+    unsigned long long fd_key;
+
+    if (!PyArg_ParseTuple(args, "K", &fd_key)) {
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res == NULL || fd_res->loop == NULL) {
+        Py_RETURN_NONE;  /* Already cleaned up */
+    }
+
+    if (fd_res->writer_active) {
+        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                    ERL_NIF_SELECT_CANCEL | ERL_NIF_SELECT_WRITE,
+                    fd_res, NULL, ATOM_UNDEFINED);
+        fd_res->writer_active = false;
+        fd_res->write_callback_id = 0;
+    }
+
+    Py_RETURN_NONE;
+}
+
+/**
+ * Release fd_resource (stop all monitoring and release).
+ * Python function: _release_fd_resource(fd_key) -> None
+ */
+static PyObject *py_release_fd_resource(PyObject *self, PyObject *args) {
+    (void)self;
+    unsigned long long fd_key;
+
+    if (!PyArg_ParseTuple(args, "K", &fd_key)) {
+        return NULL;
+    }
+
+    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    if (fd_res != NULL && fd_res->loop != NULL) {
+        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+        enif_release_resource(fd_res);
+    }
+
+    Py_RETURN_NONE;
+}
+
 /* Python function: _schedule_timer_for(capsule, delay_ms, callback_id) -> timer_ref */
 static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
     (void)self;
@@ -4527,6 +4667,12 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_remove_reader_for", py_remove_reader_for, METH_VARARGS, "Stop monitoring fd for reads on specific loop"},
     {"_add_writer_for", py_add_writer_for, METH_VARARGS, "Register fd for write monitoring on specific loop"},
     {"_remove_writer_for", py_remove_writer_for, METH_VARARGS, "Stop monitoring fd for writes on specific loop"},
+    /* Shared fd resource management (for read+write on same fd) */
+    {"_update_fd_read", py_update_fd_read, METH_VARARGS, "Update read callback on fd resource"},
+    {"_update_fd_write", py_update_fd_write, METH_VARARGS, "Update write callback on fd resource"},
+    {"_clear_fd_read", py_clear_fd_read, METH_VARARGS, "Clear read monitoring on fd resource"},
+    {"_clear_fd_write", py_clear_fd_write, METH_VARARGS, "Clear write monitoring on fd resource"},
+    {"_release_fd_resource", py_release_fd_resource, METH_VARARGS, "Release fd resource"},
     {"_schedule_timer_for", py_schedule_timer_for, METH_VARARGS, "Schedule timer on specific loop"},
     {"_cancel_timer_for", py_cancel_timer_for, METH_VARARGS, "Cancel timer on specific loop"},
     /* Synchronous sleep (for ASGI fast path) */

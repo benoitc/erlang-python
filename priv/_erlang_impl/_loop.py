@@ -47,6 +47,8 @@ __all__ = ['ErlangEventLoop', '_run_and_send']
 EVENT_TYPE_READ = 1
 EVENT_TYPE_WRITE = 2
 EVENT_TYPE_TIMER = 3
+EVENT_TYPE_SUBPROCESS_DATA = 4
+EVENT_TYPE_SUBPROCESS_EXIT = 5
 
 
 class ErlangEventLoop(asyncio.AbstractEventLoop):
@@ -72,6 +74,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     __slots__ = (
         '_pel', '_loop_capsule',
         '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
+        '_fd_resources',  # fd -> fd_key (shared fd_resource_t per fd)
         '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
         '_ready', '_callback_id',
         '_handle_pool', '_handle_pool_max', '_running', '_stopping', '_closed',
@@ -113,10 +116,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._loop_capsule = self._pel._loop_new()
 
         # Callback management
-        self._readers = {}  # fd -> (callback, args, callback_id, fd_key)
-        self._writers = {}  # fd -> (callback, args, callback_id, fd_key)
+        self._readers = {}  # fd -> (callback, args, callback_id)
+        self._writers = {}  # fd -> (callback, args, callback_id)
         self._readers_by_cid = {}  # callback_id -> fd (reverse map for O(1) lookup)
         self._writers_by_cid = {}  # callback_id -> fd (reverse map for O(1) lookup)
+        self._fd_resources = {}  # fd -> fd_key (shared fd_resource_t per fd)
         self._timers = {}   # callback_id -> handle
         self._timer_refs = {}  # callback_id -> timer_ref (for cancellation)
         self._timer_heap = []  # min-heap of (when, callback_id)
@@ -154,6 +158,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         # Signal handlers
         self._signal_handlers = {}
+
+        # Subprocess transports (callback_id -> SubprocessTransport)
+        self._subprocess_transports = {}
 
     def _next_id(self):
         """Generate a unique callback ID."""
@@ -395,62 +402,108 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     def add_reader(self, fd, callback, *args):
         """Register a reader callback for a file descriptor."""
         self._check_closed()
-        self.remove_reader(fd)
+
+        # Remove old callback (but not the fd_resource)
+        if fd in self._readers:
+            old_entry = self._readers[fd]
+            self._readers_by_cid.pop(old_entry[2], None)
 
         callback_id = self._next_id()
 
         try:
-            fd_key = self._pel._add_reader_for(self._loop_capsule, fd, callback_id)
-            self._readers[fd] = (callback, args, callback_id, fd_key)
+            if fd in self._fd_resources:
+                # Reuse existing fd_resource, just update read callback
+                fd_key = self._fd_resources[fd]
+                self._pel._update_fd_read(fd_key, callback_id)
+            else:
+                # Create new fd_resource
+                fd_key = self._pel._add_reader_for(self._loop_capsule, fd, callback_id)
+                self._fd_resources[fd] = fd_key
+
+            self._readers[fd] = (callback, args, callback_id)
             self._readers_by_cid[callback_id] = fd
         except Exception as e:
             raise RuntimeError(f"Failed to add reader: {e}")
 
     def remove_reader(self, fd):
         """Unregister a reader callback for a file descriptor."""
-        if fd in self._readers:
-            entry = self._readers[fd]
-            callback_id = entry[2]
-            fd_key = entry[3] if len(entry) > 3 else None
-            del self._readers[fd]
-            self._readers_by_cid.pop(callback_id, None)
-            if fd_key is not None:
+        if fd not in self._readers:
+            return False
+
+        entry = self._readers.pop(fd)
+        callback_id = entry[2]
+        self._readers_by_cid.pop(callback_id, None)
+
+        if fd in self._fd_resources:
+            fd_key = self._fd_resources[fd]
+            # Clear read monitoring but keep resource if writer active
+            try:
+                self._pel._clear_fd_read(fd_key)
+            except Exception:
+                pass
+
+            # Only release resource if no writer either
+            if fd not in self._writers:
                 try:
-                    self._pel._remove_reader_for(self._loop_capsule, fd_key)
+                    self._pel._release_fd_resource(fd_key)
                 except Exception:
                     pass
-            return True
-        return False
+                del self._fd_resources[fd]
+
+        return True
 
     def add_writer(self, fd, callback, *args):
         """Register a writer callback for a file descriptor."""
         self._check_closed()
-        self.remove_writer(fd)
+
+        # Remove old callback (but not the fd_resource)
+        if fd in self._writers:
+            old_entry = self._writers[fd]
+            self._writers_by_cid.pop(old_entry[2], None)
 
         callback_id = self._next_id()
 
         try:
-            fd_key = self._pel._add_writer_for(self._loop_capsule, fd, callback_id)
-            self._writers[fd] = (callback, args, callback_id, fd_key)
+            if fd in self._fd_resources:
+                # Reuse existing fd_resource, just update write callback
+                fd_key = self._fd_resources[fd]
+                self._pel._update_fd_write(fd_key, callback_id)
+            else:
+                # Create new fd_resource
+                fd_key = self._pel._add_writer_for(self._loop_capsule, fd, callback_id)
+                self._fd_resources[fd] = fd_key
+
+            self._writers[fd] = (callback, args, callback_id)
             self._writers_by_cid[callback_id] = fd
         except Exception as e:
             raise RuntimeError(f"Failed to add writer: {e}")
 
     def remove_writer(self, fd):
         """Unregister a writer callback for a file descriptor."""
-        if fd in self._writers:
-            entry = self._writers[fd]
-            callback_id = entry[2]
-            fd_key = entry[3] if len(entry) > 3 else None
-            del self._writers[fd]
-            self._writers_by_cid.pop(callback_id, None)
-            if fd_key is not None:
+        if fd not in self._writers:
+            return False
+
+        entry = self._writers.pop(fd)
+        callback_id = entry[2]
+        self._writers_by_cid.pop(callback_id, None)
+
+        if fd in self._fd_resources:
+            fd_key = self._fd_resources[fd]
+            # Clear write monitoring but keep resource if reader active
+            try:
+                self._pel._clear_fd_write(fd_key)
+            except Exception:
+                pass
+
+            # Only release resource if no reader either
+            if fd not in self._readers:
                 try:
-                    self._pel._remove_writer_for(self._loop_capsule, fd_key)
+                    self._pel._release_fd_resource(fd_key)
                 except Exception:
                     pass
-            return True
-        return False
+                del self._fd_resources[fd]
+
+        return True
 
     # ========================================================================
     # Socket operations
@@ -753,7 +806,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         protocol = protocol_factory()
         transport = ErlangDatagramTransport(self, sock, protocol, address=remote_addr)
-        transport._start()
+        await transport._start()
 
         return transport, protocol
 
@@ -954,6 +1007,22 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 self._handle_to_callback_id.pop(id(handle), None)
                 if not handle._cancelled:
                     self._ready_append(handle)
+        elif event_type == EVENT_TYPE_SUBPROCESS_DATA:
+            transport = self._subprocess_transports.get(callback_id)
+            if transport is not None:
+                result = self._pel._subprocess_get_data(callback_id)
+                if result is not None and result != 'undefined':
+                    fd, data = result
+                    if fd == 1:
+                        self.call_soon(transport._on_stdout_data, data)
+                    elif fd == 2:
+                        self.call_soon(transport._on_stderr_data, data)
+        elif event_type == EVENT_TYPE_SUBPROCESS_EXIT:
+            transport = self._subprocess_transports.pop(callback_id, None)
+            if transport is not None:
+                exit_code = self._pel._subprocess_get_exit_code(callback_id)
+                if exit_code is not None and exit_code != 'undefined':
+                    self.call_soon(transport._on_process_exit, exit_code)
 
     def _check_closed(self):
         """Raise an error if the loop is closed."""
@@ -1053,6 +1122,7 @@ class _MockLoopCapsule:
         self.writers = {}
         self.pending = []
         self._counter = 0
+        self._fd_resources = {}  # fd_key -> {fd, read_active, write_active, read_cid, write_cid}
 
 
 class _MockNifModule:
@@ -1106,6 +1176,26 @@ class _MockNifModule:
             if key == fd_key:
                 del capsule.writers[fd]
                 break
+
+    def _update_fd_read(self, fd_key, callback_id):
+        """Update read callback on existing fd_resource."""
+        pass
+
+    def _update_fd_write(self, fd_key, callback_id):
+        """Update write callback on existing fd_resource."""
+        pass
+
+    def _clear_fd_read(self, fd_key):
+        """Clear read monitoring on fd_resource."""
+        pass
+
+    def _clear_fd_write(self, fd_key):
+        """Clear write monitoring on fd_resource."""
+        pass
+
+    def _release_fd_resource(self, fd_key):
+        """Release fd_resource."""
+        pass
 
     def _schedule_timer_for(self, capsule, delay_ms, callback_id):
         return callback_id
