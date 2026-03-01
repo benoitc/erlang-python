@@ -66,7 +66,7 @@ The `ErlangEventLoop` is a custom asyncio event loop backed by Erlang's schedule
 ## Usage
 
 ```python
-from erlang_loop import ErlangEventLoop
+from erlang import ErlangEventLoop
 import asyncio
 
 # Create and set the event loop
@@ -83,7 +83,7 @@ asyncio.run(main())
 Or use the provided event loop policy:
 
 ```python
-from erlang_loop import get_event_loop_policy
+from erlang import get_event_loop_policy
 import asyncio
 
 asyncio.set_event_loop_policy(get_event_loop_policy())
@@ -306,7 +306,7 @@ transport.sendto(b'Hello')  # Goes to connected address
 
 ```python
 import asyncio
-from erlang_loop import ErlangEventLoop
+from erlang import ErlangEventLoop
 
 class EchoServerProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
@@ -506,7 +506,7 @@ Each `ErlangEventLoop` instance has its own isolated capsule with a dedicated pe
 ### Multi-threaded Example
 
 ```python
-from erlang_loop import ErlangEventLoop
+from erlang import ErlangEventLoop
 import threading
 
 def run_tasks(loop_id):

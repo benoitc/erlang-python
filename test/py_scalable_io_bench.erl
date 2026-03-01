@@ -105,7 +105,7 @@ import time
 import threading
 import sys
 sys.path.insert(0, 'priv')
-from erlang_loop import ErlangEventLoop
+from _erlang_impl import ErlangEventLoop
 
 def run_timer_throughput_concurrent(n_timers, n_workers):
     results = []

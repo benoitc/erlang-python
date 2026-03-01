@@ -55,6 +55,7 @@ from ._mode import detect_mode, ExecutionMode
 __all__ = [
     'run',
     'new_event_loop',
+    'get_event_loop_policy',
     'install',
     'EventLoopPolicy',
     'ErlangEventLoopPolicy',
@@ -67,15 +68,27 @@ __all__ = [
 EventLoopPolicy = ErlangEventLoopPolicy
 
 
+def get_event_loop_policy() -> ErlangEventLoopPolicy:
+    """Get an Erlang event loop policy instance.
+
+    Returns a policy that uses ErlangEventLoop for event loops.
+    This is used by Erlang code to set the default asyncio policy.
+
+    Returns:
+        ErlangEventLoopPolicy: A new policy instance.
+    """
+    return ErlangEventLoopPolicy()
+
+
 def new_event_loop() -> ErlangEventLoop:
     """Create a new Erlang-backed event loop.
 
     Returns:
         ErlangEventLoop: A new event loop instance backed by Erlang's
-            scheduler via enif_select. The loop is created in isolated
-            mode to ensure timers and FD events are routed correctly.
+            scheduler via enif_select. Each loop has its own isolated
+            capsule for proper timer and FD event routing.
     """
-    return ErlangEventLoop(isolated=True)
+    return ErlangEventLoop()
 
 
 def run(main, *, debug=None, **run_kwargs):

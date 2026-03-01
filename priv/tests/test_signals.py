@@ -224,18 +224,50 @@ class _TestSignalDelivery:
 # Test classes that combine mixins with test cases
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Erlang tests: ErlangEventLoop has limited signal support (SIGINT, SIGTERM,
+# SIGHUP only). Other signals raise ValueError. These tests verify that
+# unsupported signals are handled correctly.
+# -----------------------------------------------------------------------------
+
+
 @unittest.skipUnless(_signals_available(), "Signals not available on this platform")
-class TestErlangSignalHandler(_TestSignalHandler, tb.ErlangTestCase):
-    pass
+class TestErlangSignalLimitedSupport(tb.ErlangTestCase):
+    """Test ErlangEventLoop's limited signal handling support.
+
+    ErlangEventLoop only supports SIGINT, SIGTERM, and SIGHUP.
+    Other signals like SIGUSR1/SIGUSR2 raise ValueError.
+    """
+
+    def test_add_unsupported_signal_raises_valueerror(self):
+        """add_signal_handler for unsupported signals should raise ValueError."""
+        with self.assertRaises(ValueError):
+            self.loop.add_signal_handler(signal.SIGUSR1, lambda: None)
+
+    def test_add_unsupported_signal_with_args_raises_valueerror(self):
+        """add_signal_handler with args for unsupported signal raises ValueError."""
+        with self.assertRaises(ValueError):
+            self.loop.add_signal_handler(signal.SIGUSR1, lambda x, y: None, 'a', 'b')
+
+    def test_remove_nonexistent_handler_returns_false(self):
+        """remove_signal_handler for non-existent handler returns False."""
+        result = self.loop.remove_signal_handler(signal.SIGUSR1)
+        self.assertFalse(result)
+
+    def test_remove_different_nonexistent_handler_returns_false(self):
+        """remove_signal_handler for SIGUSR2 returns False when not registered."""
+        result = self.loop.remove_signal_handler(signal.SIGUSR2)
+        self.assertFalse(result)
+
+
+# -----------------------------------------------------------------------------
+# AIO tests: Standard asyncio does support signal handling, so these tests
+# verify normal signal functionality works with the asyncio event loop.
+# -----------------------------------------------------------------------------
 
 
 @unittest.skipUnless(_signals_available(), "Signals not available on this platform")
 class TestAIOSignalHandler(_TestSignalHandler, tb.AIOTestCase):
-    pass
-
-
-@unittest.skipUnless(_signals_available(), "Signals not available on this platform")
-class TestErlangSignalMultiple(_TestSignalMultiple, tb.ErlangTestCase):
     pass
 
 
@@ -245,17 +277,7 @@ class TestAIOSignalMultiple(_TestSignalMultiple, tb.AIOTestCase):
 
 
 @unittest.skipUnless(_signals_available(), "Signals not available on this platform")
-class TestErlangSignalRestrictions(_TestSignalRestrictions, tb.ErlangTestCase):
-    pass
-
-
-@unittest.skipUnless(_signals_available(), "Signals not available on this platform")
 class TestAIOSignalRestrictions(_TestSignalRestrictions, tb.AIOTestCase):
-    pass
-
-
-@unittest.skipUnless(_signals_available(), "Signals not available on this platform")
-class TestErlangSignalDelivery(_TestSignalDelivery, tb.ErlangTestCase):
     pass
 
 

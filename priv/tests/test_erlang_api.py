@@ -52,13 +52,6 @@ def _get_erlang_event_loop():
     except ImportError:
         pass
 
-    # Try erlang_loop module (legacy)
-    try:
-        from erlang_loop import ErlangEventLoop
-        return ErlangEventLoop
-    except ImportError:
-        pass
-
     # Add parent directory to path and try again
     import os
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

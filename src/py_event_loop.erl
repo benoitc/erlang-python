@@ -153,7 +153,7 @@ set_default_policy() ->
         "priv_dir = '", PrivDir, "'\n",
         "if priv_dir not in sys.path:\n",
         "    sys.path.insert(0, priv_dir)\n",
-        "from erlang_loop import get_event_loop_policy\n",
+        "from _erlang_impl import get_event_loop_policy\n",
         "import asyncio\n",
         "asyncio.set_event_loop_policy(get_event_loop_policy())\n"
     ]),

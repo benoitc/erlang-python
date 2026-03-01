@@ -52,6 +52,22 @@ try:
 except ImportError:
     HAVE_SSL = False
 
+
+def _has_subprocess_support():
+    """Check if Erlang subprocess is available.
+
+    Returns True if the py_event_loop NIF module has subprocess support.
+    Subprocess requires _subprocess_spawn to be implemented in the NIF.
+    """
+    try:
+        import py_event_loop as pel
+        return hasattr(pel, '_subprocess_spawn')
+    except ImportError:
+        return False
+
+
+HAS_SUBPROCESS_SUPPORT = _has_subprocess_support()
+
 # Markers for test filtering
 ONLYUV = unittest.skipUnless(False, "uvloop-only test")
 ONLYERL = object()  # Marker for Erlang-only tests
@@ -241,16 +257,9 @@ class ErlangTestCase(BaseTestCase):
         except ImportError:
             pass
 
-        # Fallback: Try to import from _erlang_impl package
+        # Try to import from _erlang_impl package
         try:
             from _erlang_impl import ErlangEventLoop
-            return ErlangEventLoop()
-        except ImportError:
-            pass
-
-        # Fallback: Try to import from erlang_loop module
-        try:
-            from erlang_loop import ErlangEventLoop
             return ErlangEventLoop()
         except ImportError:
             pass
