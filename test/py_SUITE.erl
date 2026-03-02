@@ -366,17 +366,17 @@ test_stream_iterators(_Config) ->
     ok.
 
 test_error_handling(_Config) ->
-    %% Test Python exception
-    {error, {'NameError', _}} = py:eval(<<"undefined_variable">>),
+    %% Test Python exception (exception names are strings since v2.0)
+    {error, {"NameError", _}} = py:eval(<<"undefined_variable">>),
 
     %% Test syntax error
-    {error, {'SyntaxError', _}} = py:eval(<<"if True">>),
+    {error, {"SyntaxError", _}} = py:eval(<<"if True">>),
 
     %% Test division by zero
-    {error, {'ZeroDivisionError', _}} = py:eval(<<"1/0">>),
+    {error, {"ZeroDivisionError", _}} = py:eval(<<"1/0">>),
 
     %% Test import error
-    {error, {'ModuleNotFoundError', _}} = py:call(nonexistent_module, func, []),
+    {error, {"ModuleNotFoundError", _}} = py:call(nonexistent_module, func, []),
 
     ok.
 

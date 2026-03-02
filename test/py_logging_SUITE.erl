@@ -134,7 +134,7 @@ with erlang.Span('test-span', key='value'):
     1 = length(Spans),
     [Span] = Spans,
     <<"test-span">> = maps:get(name, Span),
-    ok = maps:get(status, Span),
+    "ok" = maps:get(status, Span),  %% Status is now string since v2.0
     true = maps:get(duration_us, Span) >= 0,
     #{<<"key">> := <<"value">>} = maps:get(attributes, Span),
     ok.
@@ -222,7 +222,7 @@ except ValueError:
 ">>),
 
     {ok, [Span]} = py:get_traces(),
-    error = maps:get(status, Span),
+    "error" = maps:get(status, Span),  %% Status is now string since v2.0
     EndAttrs = maps:get(end_attrs, Span),
     true = maps:is_key(<<"exception">>, EndAttrs),
     ok.
