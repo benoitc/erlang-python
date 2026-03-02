@@ -16,7 +16,7 @@
     test_eval/1,
     test_eval_complex_locals/1,
     test_exec/1,
-    test_async_call/1,
+    test_cast/1,
     test_type_conversions/1,
     test_nested_types/1,
     test_timeout/1,
@@ -66,7 +66,7 @@ all() ->
         test_eval,
         test_eval_complex_locals,
         test_exec,
-        test_async_call,
+        test_cast,
         test_type_conversions,
         test_nested_types,
         test_timeout,
@@ -201,9 +201,9 @@ def my_func():
 ">>),
     ok.
 
-test_async_call(_Config) ->
-    Ref1 = py:call_async(math, sqrt, [100]),
-    Ref2 = py:call_async(math, sqrt, [144]),
+test_cast(_Config) ->
+    Ref1 = py:cast(math, sqrt, [100]),
+    Ref2 = py:cast(math, sqrt, [144]),
 
     {ok, 10.0} = py:await(Ref1),
     {ok, 12.0} = py:await(Ref2),

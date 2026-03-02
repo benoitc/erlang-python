@@ -95,7 +95,7 @@ For non-blocking operations:
 
 ```erlang
 %% Start async call
-Ref = py:call_async(math, factorial, [1000]).
+Ref = py:cast(math, factorial, [1000]).
 
 %% Do other work...
 

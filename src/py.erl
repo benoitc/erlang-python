@@ -39,8 +39,8 @@
     call/3,
     call/4,
     call/5,
-    call_async/3,
-    call_async/4,
+    cast/3,
+    cast/4,
     await/1,
     await/2,
     eval/1,
@@ -234,14 +234,15 @@ exec(Ctx, Code) when is_pid(Ctx) ->
 %%% Asynchronous API
 %%% ============================================================================
 
-%% @doc Call a Python function asynchronously, returns immediately with a ref.
--spec call_async(py_module(), py_func(), py_args()) -> py_ref().
-call_async(Module, Func, Args) ->
-    call_async(Module, Func, Args, #{}).
+%% @doc Cast a Python function call, returns immediately with a ref.
+%% The call executes in a spawned process. Use await/1,2 to get the result.
+-spec cast(py_module(), py_func(), py_args()) -> py_ref().
+cast(Module, Func, Args) ->
+    cast(Module, Func, Args, #{}).
 
-%% @doc Call a Python function asynchronously with kwargs.
--spec call_async(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
-call_async(Module, Func, Args, Kwargs) ->
+%% @doc Cast a Python function call with kwargs.
+-spec cast(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
+cast(Module, Func, Args, Kwargs) ->
     %% Spawn a process to execute the call and return a ref
     Ref = make_ref(),
     Parent = self(),

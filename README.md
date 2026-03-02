@@ -67,7 +67,7 @@ application:ensure_all_started(erlang_python).
 {ok, 25} = py:eval(<<"x * y">>, #{x => 5, y => 5}).
 
 %% Async calls
-Ref = py:call_async(math, factorial, [100]),
+Ref = py:cast(math, factorial, [100]),
 {ok, Result} = py:await(Ref).
 
 %% Streaming from generators
@@ -444,7 +444,7 @@ escript examples/logging_example.erl
 {ok, Result} = py:call(Module, Function, Args, KwArgs, Timeout).
 
 %% Async
-Ref = py:call_async(Module, Function, Args).
+Ref = py:cast(Module, Function, Args).
 {ok, Result} = py:await(Ref).
 {ok, Result} = py:await(Ref, Timeout).
 ```
