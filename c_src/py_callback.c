@@ -122,6 +122,68 @@ static void cleanup_callback_cache(void) {
 }
 
 /* ============================================================================
+ * Per-interpreter Exception Lookup
+ *
+ * In subinterpreters, each interpreter has its own erlang module with its own
+ * exception classes. Using the global ProcessErrorException or
+ * SuspensionRequiredException would cause exception identity mismatches when
+ * Python code tries to catch them with "except erlang.ProcessError".
+ *
+ * These helpers look up the exception from the current interpreter's erlang
+ * module, ensuring exception identity matches.
+ * ============================================================================ */
+
+/**
+ * @brief Get ProcessError exception from current interpreter's erlang module
+ *
+ * Looks up erlang.ProcessError from the current interpreter, falling back
+ * to the global ProcessErrorException if lookup fails.
+ *
+ * @return Borrowed reference to ProcessError exception class
+ */
+static PyObject *get_process_error_exception(void) {
+    PyObject *erlang_mod = PyImport_ImportModule("erlang");
+    if (erlang_mod != NULL) {
+        PyObject *exc = PyObject_GetAttrString(erlang_mod, "ProcessError");
+        Py_DECREF(erlang_mod);
+        if (exc != NULL) {
+            /* Return new reference - caller must decref */
+            return exc;
+        }
+        PyErr_Clear();
+    }
+    PyErr_Clear();
+    /* Fallback to global (main interpreter) */
+    Py_INCREF(ProcessErrorException);
+    return ProcessErrorException;
+}
+
+/**
+ * @brief Get SuspensionRequired exception from current interpreter's erlang module
+ *
+ * Looks up erlang.SuspensionRequired from the current interpreter, falling back
+ * to the global SuspensionRequiredException if lookup fails.
+ *
+ * @return Borrowed reference to SuspensionRequired exception class
+ */
+static PyObject *get_suspension_required_exception(void) {
+    PyObject *erlang_mod = PyImport_ImportModule("erlang");
+    if (erlang_mod != NULL) {
+        PyObject *exc = PyObject_GetAttrString(erlang_mod, "SuspensionRequired");
+        Py_DECREF(erlang_mod);
+        if (exc != NULL) {
+            /* Return new reference - caller must decref */
+            return exc;
+        }
+        PyErr_Clear();
+    }
+    PyErr_Clear();
+    /* Fallback to global (main interpreter) */
+    Py_INCREF(SuspensionRequiredException);
+    return SuspensionRequiredException;
+}
+
+/* ============================================================================
  * Callback Name Registry
  *
  * Maintains a C-side registry of registered callback function names.
@@ -1549,8 +1611,11 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     Py_XDECREF(tl_pending_args);
     tl_pending_args = call_args;  /* Takes ownership, don't decref */
 
-    /* Raise exception to abort Python execution */
-    PyErr_SetString(SuspensionRequiredException, "callback pending");
+    /* Raise exception to abort Python execution.
+     * Use per-interpreter lookup to ensure exception identity matches. */
+    PyObject *suspension_exc = get_suspension_required_exception();
+    PyErr_SetString(suspension_exc, "callback pending");
+    Py_DECREF(suspension_exc);
     return NULL;
 }
 
@@ -1607,8 +1672,11 @@ static PyObject *erlang_send_impl(PyObject *self, PyObject *args) {
     /* Fire-and-forget send */
     if (!enif_send(NULL, &pid->pid, msg_env, msg)) {
         enif_free_env(msg_env);
-        PyErr_SetString(ProcessErrorException,
+        /* Use per-interpreter lookup to ensure exception identity matches */
+        PyObject *process_exc = get_process_error_exception();
+        PyErr_SetString(process_exc,
             "Failed to send message: process may not exist");
+        Py_DECREF(process_exc);
         return NULL;
     }
 

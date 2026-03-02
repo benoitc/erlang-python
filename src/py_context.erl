@@ -223,6 +223,9 @@ get_interp_id(Ctx) when is_pid(Ctx) ->
 init(Parent, Id, Mode) ->
     case create_context(Mode) of
         {ok, Ref, InterpId} ->
+            %% Extend the erlang module with event loop functions (erlang.run(), etc.)
+            %% This is needed because each subinterpreter has its own erlang module
+            extend_erlang_module(Ref),
             %% No callback handler process needed - we handle callbacks inline
             %% using the suspension-based approach with recursive receive
             Parent ! {self(), started},
@@ -241,6 +244,28 @@ create_context(subinterp) ->
     py_nif:context_create(subinterp);
 create_context(worker) ->
     py_nif:context_create(worker).
+
+%% @private
+%% @doc Extend the C 'erlang' module with Python event loop exports.
+%% This makes erlang.run(), erlang.new_event_loop(), etc. available in the context.
+%% Each subinterpreter has its own erlang module that needs to be extended.
+extend_erlang_module(Ref) ->
+    PrivDir = code:priv_dir(erlang_python),
+    Code = iolist_to_binary([
+        "import sys\n",
+        "import erlang\n",
+        "priv_dir = '", PrivDir, "'\n",
+        "if priv_dir not in sys.path:\n",
+        "    sys.path.insert(0, priv_dir)\n",
+        "if hasattr(erlang, '_extend_erlang_module'):\n",
+        "    erlang._extend_erlang_module(priv_dir)\n"
+    ]),
+    case py_nif:context_exec(Ref, Code) of
+        ok -> ok;
+        {error, Reason} ->
+            error_logger:warning_msg("py_context: failed to extend erlang module: ~p~n", [Reason]),
+            ok  %% Non-fatal - basic functionality will still work
+    end.
 
 %% @private
 %% Main context loop. Handles requests and uses suspension-based callback support.
