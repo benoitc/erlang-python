@@ -32,6 +32,7 @@ Key features:
 - **AI/ML ready** - Examples for embeddings, semantic search, RAG, and LLMs
 - **Logging integration** - Python logging forwarded to Erlang logger
 - **Distributed tracing** - Span-based tracing from Python code
+- **Security sandbox** - Blocks fork/exec operations that would corrupt the VM
 
 ## Requirements
 
@@ -573,6 +574,8 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Threading](docs/threading.md)
 - [Logging and Tracing](docs/logging.md)
 - [Asyncio Event Loop](docs/asyncio.md) - Erlang-native asyncio with TCP/UDP support
+- [Reactor](docs/reactor.md) - FD-based protocol handling
+- [Security](docs/security.md) - Sandbox and blocked operations
 - [Web Frameworks](docs/web-frameworks.md) - ASGI/WSGI integration
 - [Changelog](https://github.com/benoitc/erlang-python/releases)
 

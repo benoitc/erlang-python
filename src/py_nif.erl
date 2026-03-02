@@ -1333,9 +1333,11 @@ get_fd_from_resource(_FdRef) ->
 %% parses HTTP, and returns an action indicating what to do next.
 %%
 %% Actions:
-%% - <<"continue">> - Continue reading (call reactor_reselect_read)
-%% - <<"write_pending">> - Response ready, switch to write mode
-%% - <<"close">> - Close the connection
+%% <ul>
+%% <li>`"continue"' - Continue reading (call reactor_reselect_read)</li>
+%% <li>`"write_pending"' - Response ready, switch to write mode</li>
+%% <li>`"close"' - Close the connection</li>
+%% </ul>
 %%
 %% @param ContextRef Context reference
 %% @param Fd File descriptor
@@ -1351,9 +1353,11 @@ reactor_on_read_ready(_ContextRef, _Fd) ->
 %% buffered response data and returns an action.
 %%
 %% Actions:
-%% - <<"continue">> - More data to write
-%% - <<"read_pending">> - Keep-alive, switch back to read mode
-%% - <<"close">> - Close the connection
+%% <ul>
+%% <li>`"continue"' - More data to write</li>
+%% <li>`"read_pending"' - Keep-alive, switch back to read mode</li>
+%% <li>`"close"' - Close the connection</li>
+%% </ul>
 %%
 %% @param ContextRef Context reference
 %% @param Fd File descriptor

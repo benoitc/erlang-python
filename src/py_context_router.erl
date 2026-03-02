@@ -21,20 +21,20 @@
 %%%
 %%% == Architecture ==
 %%%
-%%% ```
-%%% Scheduler 1 ──┐
-%%%               ├──► Context 1 (Subinterp/Worker)
-%%% Scheduler 2 ──┤
-%%%               ├──► Context 2 (Subinterp/Worker)
-%%% Scheduler 3 ──┤
-%%%               ├──► Context 3 (Subinterp/Worker)
-%%% ...           │
-%%% Scheduler N ──┴──► Context N (Subinterp/Worker)
-%%% ```
+%%% <pre>
+%%% Scheduler 1 ---+
+%%%                +---> Context 1 (Subinterp/Worker)
+%%% Scheduler 2 ---+
+%%%                +---> Context 2 (Subinterp/Worker)
+%%% Scheduler 3 ---+
+%%%                +---> Context 3 (Subinterp/Worker)
+%%% ...            |
+%%% Scheduler N ---+---> Context N (Subinterp/Worker)
+%%% </pre>
 %%%
 %%% == Usage ==
 %%%
-%%% ```erlang
+%%% <pre>
 %%% %% Start the router with default settings
 %%% {ok, Contexts} = py_context_router:start(),
 %%%
@@ -51,7 +51,7 @@
 %%%
 %%% %% Unbind to return to scheduler-based routing
 %%% ok = py_context_router:unbind_context().
-%%% ```
+%%% </pre>
 %%%
 %%% @end
 -module(py_context_router).
