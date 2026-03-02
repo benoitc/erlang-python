@@ -2555,6 +2555,9 @@ static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
         Py_ssize_t name_len = PyBytes_GET_SIZE(py_name);
         ERL_NIF_TERM erl_name;
         unsigned char *name_buf = enif_make_new_binary(env, name_len, &erl_name);
+        if (name_buf == NULL) {
+            return py_to_term(env, result);  /* Fallback on alloc failure */
+        }
         memcpy(name_buf, name_data, name_len);
 
         /* Convert header value */
@@ -2562,6 +2565,9 @@ static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
         Py_ssize_t value_len = PyBytes_GET_SIZE(py_value);
         ERL_NIF_TERM erl_value;
         unsigned char *value_buf = enif_make_new_binary(env, value_len, &erl_value);
+        if (value_buf == NULL) {
+            return py_to_term(env, result);  /* Fallback on alloc failure */
+        }
         memcpy(value_buf, value_data, value_len);
 
         /* Create header tuple and prepend to list */
@@ -2574,6 +2580,9 @@ static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
     Py_ssize_t body_len = PyBytes_GET_SIZE(py_body);
     ERL_NIF_TERM erl_body;
     unsigned char *body_buf = enif_make_new_binary(env, body_len, &erl_body);
+    if (body_buf == NULL) {
+        return py_to_term(env, result);  /* Fallback on alloc failure */
+    }
     memcpy(body_buf, body_data, body_len);
 
     return enif_make_tuple3(env, erl_status, erl_headers, erl_body);
