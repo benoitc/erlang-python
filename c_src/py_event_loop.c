@@ -4641,17 +4641,28 @@ static PyObject *py_erlang_sleep(PyObject *self, PyObject *args) {
     }
     enif_free_env(msg_env);
 
-    /* Wait for completion - sleep_id already set above */
+    /* Wait for completion with timeout - sleep_id already set above */
     pthread_mutex_lock(&loop->mutex);
 
+    /* Calculate timeout (30 seconds should be plenty for any sleep completion) */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 30;
+
     /* Release GIL and wait for completion */
+    int wait_rc = 0;
     Py_BEGIN_ALLOW_THREADS
-    while (!atomic_load(&loop->sync_sleep_complete) && !loop->shutdown) {
-        pthread_cond_wait(&loop->sync_sleep_cond, &loop->mutex);
+    while (!atomic_load(&loop->sync_sleep_complete) && !loop->shutdown && wait_rc != ETIMEDOUT) {
+        wait_rc = pthread_cond_timedwait(&loop->sync_sleep_cond, &loop->mutex, &ts);
     }
     Py_END_ALLOW_THREADS
 
     pthread_mutex_unlock(&loop->mutex);
+
+    if (wait_rc == ETIMEDOUT) {
+        PyErr_SetString(PyExc_TimeoutError, "Sleep completion timed out");
+        return NULL;
+    }
 
     if (loop->shutdown) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop shutdown during sleep");
