@@ -42,9 +42,13 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
+    %% Bind context to ensure all py:exec/eval calls use same context
+    Ctx = py:context(1),
+    ok = py_context_router:bind_context(Ctx),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
+    ok = py_context_router:unbind_context(),
     ok.
 
 %%% ============================================================================
