@@ -98,19 +98,12 @@ class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
             ErlangEventLoop: A new event loop instance.
 
         Note:
-            Only the main thread gets an ErlangEventLoop.
-            Other threads get the default SelectorEventLoop to avoid
-            conflicts with Erlang's scheduler integration.
+            Always returns ErlangEventLoop when using this policy.
+            The Erlang event loop handles thread safety internally.
         """
         # Import here to avoid circular imports
         from ._loop import ErlangEventLoop
-
-        if threading.current_thread().ident == self._main_thread_id:
-            return ErlangEventLoop()
-        else:
-            # Non-main threads use default selector loop
-            # This avoids issues with Erlang integration
-            return asyncio.SelectorEventLoop()
+        return ErlangEventLoop()
 
     # Child watcher methods (for subprocess support)
 

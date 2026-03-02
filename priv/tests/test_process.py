@@ -13,17 +13,14 @@
 # limitations under the License.
 
 """
-Subprocess tests for ErlangEventLoop.
+Subprocess/process tests for ErlangEventLoop.
 
-Subprocess is NOT supported in ErlangEventLoop because Python's subprocess
-module uses fork() which corrupts the Erlang VM.
-
-These tests verify that:
-1. ErlangEventLoop raises NotImplementedError for subprocess operations
-2. Standard asyncio subprocess works outside the Erlang NIF environment
+These tests verify that dangerous subprocess operations are blocked
+when running inside the Erlang VM via audit hooks.
 """
 
 import asyncio
+import os
 import subprocess
 import sys
 import unittest
@@ -31,83 +28,63 @@ import unittest
 from . import _testbase as tb
 
 
-class TestErlangSubprocessNotSupported(tb.ErlangTestCase):
-    """Verify that subprocess raises NotImplementedError in ErlangEventLoop."""
+class TestErlangSubprocessBlocked(tb.ErlangTestCase):
+    """Verify subprocess is blocked via event loop or audit hooks."""
 
-    def test_subprocess_shell_not_supported(self):
-        """Test that create_subprocess_shell raises NotImplementedError."""
+    def test_asyncio_subprocess_shell_blocked(self):
+        """Test asyncio.create_subprocess_shell is blocked."""
         async def main():
-            await asyncio.create_subprocess_shell(
-                'echo hello',
-                stdout=subprocess.PIPE,
-            )
+            await asyncio.create_subprocess_shell('echo hello')
 
-        with self.assertRaises(NotImplementedError) as cm:
+        # NotImplementedError from ErlangEventLoop._subprocess, or RuntimeError from audit hook
+        with self.assertRaises((NotImplementedError, RuntimeError)):
             self.loop.run_until_complete(main())
 
-        self.assertIn('not supported', str(cm.exception).lower())
-
-    def test_subprocess_exec_not_supported(self):
-        """Test that create_subprocess_exec raises NotImplementedError."""
+    def test_asyncio_subprocess_exec_blocked(self):
+        """Test asyncio.create_subprocess_exec is blocked."""
         async def main():
-            await asyncio.create_subprocess_exec(
-                sys.executable, '-c', 'print("hello")',
-                stdout=subprocess.PIPE,
-            )
+            await asyncio.create_subprocess_exec('echo', 'hello')
 
-        with self.assertRaises(NotImplementedError) as cm:
+        # NotImplementedError from ErlangEventLoop._subprocess, or RuntimeError from audit hook
+        with self.assertRaises((NotImplementedError, RuntimeError)):
             self.loop.run_until_complete(main())
 
-        self.assertIn('not supported', str(cm.exception).lower())
 
+class TestErlangOsBlocked(tb.ErlangTestCase):
+    """Verify os.* process functions are blocked."""
 
-# =============================================================================
-# Standard asyncio tests (outside Erlang NIF)
-# =============================================================================
+    @unittest.skipUnless(hasattr(os, 'fork'), "fork not available")
+    def test_os_fork_blocked(self):
+        """Test os.fork is blocked."""
+        with self.assertRaises(RuntimeError) as cm:
+            os.fork()
+        self.assertIn('blocked', str(cm.exception).lower())
 
-@unittest.skipIf(
-    tb.INSIDE_ERLANG_NIF,
-    "asyncio subprocess uses fork() which corrupts Erlang VM"
-)
-class TestAIOSubprocessShell(tb.AIOTestCase):
-    """Test asyncio subprocess_shell outside Erlang (for comparison)."""
+    def test_os_system_blocked(self):
+        """Test os.system is blocked."""
+        with self.assertRaises(RuntimeError) as cm:
+            os.system('echo hello')
+        self.assertIn('blocked', str(cm.exception).lower())
 
-    def test_subprocess_shell_echo(self):
-        """Test subprocess_shell with echo command."""
-        async def main():
-            proc = await asyncio.create_subprocess_shell(
-                'echo "hello world"',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            return stdout.decode().strip(), proc.returncode
+    def test_os_popen_blocked(self):
+        """Test os.popen is blocked."""
+        with self.assertRaises(RuntimeError) as cm:
+            os.popen('echo hello')
+        self.assertIn('blocked', str(cm.exception).lower())
 
-        stdout, returncode = self.loop.run_until_complete(main())
-        self.assertEqual(stdout, 'hello world')
-        self.assertEqual(returncode, 0)
+    @unittest.skipUnless(hasattr(os, 'execv'), "execv not available")
+    def test_os_execv_blocked(self):
+        """Test os.execv is blocked."""
+        with self.assertRaises(RuntimeError) as cm:
+            os.execv('/bin/echo', ['echo', 'hello'])
+        self.assertIn('blocked', str(cm.exception).lower())
 
-
-@unittest.skipIf(
-    tb.INSIDE_ERLANG_NIF,
-    "asyncio subprocess uses fork() which corrupts Erlang VM"
-)
-class TestAIOSubprocessExec(tb.AIOTestCase):
-    """Test asyncio subprocess_exec outside Erlang (for comparison)."""
-
-    def test_subprocess_exec_basic(self):
-        """Test basic subprocess_exec."""
-        async def main():
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, '-c', 'print("hello")',
-                stdout=subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            return stdout.decode().strip(), proc.returncode
-
-        stdout, returncode = self.loop.run_until_complete(main())
-        self.assertEqual(stdout, 'hello')
-        self.assertEqual(returncode, 0)
+    @unittest.skipUnless(hasattr(os, 'spawnl'), "spawnl not available")
+    def test_os_spawnl_blocked(self):
+        """Test os.spawnl is blocked."""
+        with self.assertRaises(RuntimeError) as cm:
+            os.spawnl(os.P_WAIT, '/bin/echo', 'echo', 'hello')
+        self.assertIn('blocked', str(cm.exception).lower())
 
 
 if __name__ == '__main__':

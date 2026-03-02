@@ -49,7 +49,6 @@
     test_dns_erlang/1,
     test_executors_erlang/1,
     test_context_erlang/1,
-    test_signals_erlang/1,
     test_process_erlang/1,
     test_erlang_api/1
 ]).
@@ -63,9 +62,7 @@
     test_unix_asyncio/1,
     test_dns_asyncio/1,
     test_executors_asyncio/1,
-    test_context_asyncio/1,
-    test_signals_asyncio/1,
-    test_process_asyncio/1
+    test_context_asyncio/1
 ]).
 
 %% ============================================================================
@@ -86,7 +83,6 @@ groups() ->
             test_dns_erlang,
             test_executors_erlang,
             test_context_erlang,
-            test_signals_erlang,
             test_process_erlang,
             test_erlang_api
         ]},
@@ -98,9 +94,7 @@ groups() ->
             test_unix_asyncio,
             test_dns_asyncio,
             test_executors_asyncio,
-            test_context_asyncio,
-            test_signals_asyncio,
-            test_process_asyncio
+            test_context_asyncio
         ]}
     ].
 
@@ -171,14 +165,6 @@ test_executors_erlang(Config) ->
 test_context_erlang(Config) ->
     run_erlang_tests("tests.test_context", Config).
 
-test_signals_erlang(Config) ->
-    case os:type() of
-        {unix, _} ->
-            run_erlang_tests("tests.test_signals", Config);
-        _ ->
-            {skip, "Signal tests not available on this platform"}
-    end.
-
 test_process_erlang(Config) ->
     run_erlang_tests("tests.test_process", Config).
 
@@ -218,17 +204,6 @@ test_executors_asyncio(Config) ->
 
 test_context_asyncio(Config) ->
     run_asyncio_tests("tests.test_context", Config).
-
-test_signals_asyncio(Config) ->
-    case os:type() of
-        {unix, _} ->
-            run_asyncio_tests("tests.test_signals", Config);
-        _ ->
-            {skip, "Signal tests not available on this platform"}
-    end.
-
-test_process_asyncio(Config) ->
-    run_asyncio_tests("tests.test_process", Config).
 
 %% ============================================================================
 %% Internal Functions

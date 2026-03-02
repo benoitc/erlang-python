@@ -408,8 +408,9 @@ class TestExecutionMode(unittest.TestCase):
         ExecutionMode = mode_module.ExecutionMode
 
         # Check that expected modes exist
-        self.assertTrue(hasattr(ExecutionMode, 'MAIN_INTERPRETER'))
-        self.assertTrue(hasattr(ExecutionMode, 'SUBINTERPRETER'))
+        self.assertTrue(hasattr(ExecutionMode, 'SHARED_GIL'))
+        self.assertTrue(hasattr(ExecutionMode, 'SUBINTERP'))
+        self.assertTrue(hasattr(ExecutionMode, 'FREE_THREADED'))
 
 
 class TestEventLoopPolicy(unittest.TestCase):

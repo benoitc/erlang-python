@@ -48,6 +48,15 @@ import sys
 import asyncio
 import warnings
 
+# Install sandbox when running inside Erlang VM
+# This must happen before any other imports to block subprocess/fork
+try:
+    import py_event_loop  # Only available when running in Erlang NIF
+    from ._sandbox import install_sandbox
+    install_sandbox()
+except ImportError:
+    pass  # Not running inside Erlang VM
+
 from ._loop import ErlangEventLoop
 from ._policy import ErlangEventLoopPolicy
 from ._mode import detect_mode, ExecutionMode
