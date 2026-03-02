@@ -558,8 +558,10 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 ## Error Handling
 
 ```erlang
-{error, {'NameError', "name 'x' is not defined"}} = py:eval(<<"x">>).
-{error, {'ZeroDivisionError', "division by zero"}} = py:eval(<<"1/0">>).
+%% Python exceptions return {error, {TypeString, Message}}
+%% Note: Exception types are strings (not atoms) since v2.0 to prevent atom table exhaustion
+{error, {"NameError", "name 'x' is not defined"}} = py:eval(<<"x">>).
+{error, {"ZeroDivisionError", "division by zero"}} = py:eval(<<"1/0">>).
 {error, timeout} = py:eval(<<"sum(range(10**9))">>, #{}, 100).
 ```
 

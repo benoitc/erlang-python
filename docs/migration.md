@@ -12,6 +12,35 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 - [ ] Replace subprocess calls with Erlang ports
 - [ ] Move signal handlers to Erlang level
 - [ ] Review any `os.fork`/`os.exec` usage
+- [ ] Update error pattern matching: exception types are now strings
+
+## Security-Related Breaking Changes
+
+### Exception Types Changed from Atoms to Strings
+
+**Reason:** Atoms are never garbage collected in Erlang. Using atoms for Python exception type names (which are unbounded due to custom exceptions and third-party libraries) could exhaust the atom table.
+
+**Before (v1.8.x):**
+```erlang
+case py:eval(Code) of
+    {ok, Result} -> Result;
+    {error, {'NameError', Msg}} -> handle_name_error(Msg);
+    {error, {'TypeError', Msg}} -> handle_type_error(Msg);
+    {error, {ExcType, Msg}} -> handle_other(ExcType, Msg)
+end.
+```
+
+**After (v2.0):**
+```erlang
+case py:eval(Code) of
+    {ok, Result} -> Result;
+    {error, {"NameError", Msg}} -> handle_name_error(Msg);
+    {error, {"TypeError", Msg}} -> handle_type_error(Msg);
+    {error, {ExcType, Msg}} -> handle_other(ExcType, Msg)  %% ExcType is now a string
+end.
+```
+
+**Note:** Trace span status remains as atoms (`ok` | `error`) since these are known, bounded values.
 
 ## API Changes
 

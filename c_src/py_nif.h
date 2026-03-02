@@ -1006,9 +1006,12 @@ static ERL_NIF_TERM make_error(ErlNifEnv *env, const char *reason);
  * error tuple, and clears the Python error state.
  *
  * @param env NIF environment for term allocation
- * @return `{error, {ExceptionType, Message}}` tuple
+ * @return `{error, {ExceptionTypeString, MessageString}}` tuple
+ *         where ExceptionTypeString is the Python exception class name
+ *         (e.g., "NameError", "TypeError") as a string (not atom)
  *
  * @note Always clears the Python exception state
+ * @note Exception type is returned as string to prevent atom table exhaustion
  */
 static ERL_NIF_TERM make_py_error(ErlNifEnv *env);
 
