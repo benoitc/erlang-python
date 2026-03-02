@@ -49,6 +49,10 @@
 
 ### Changed
 
+- **`py:call_async` renamed to `py:cast`** - Follows gen_server convention where
+  `call` is synchronous and `cast` is asynchronous. The semantics are identical,
+  only the name changed.
+
 - **Unified `erlang` Python module** - Consolidated callback and event loop APIs
   - `erlang.run(coro)` - Run coroutine with ErlangEventLoop (like uvloop.run)
   - `erlang.new_event_loop()` - Create new ErlangEventLoop instance
@@ -79,6 +83,11 @@
   returned ErlangEventLoop for main thread; now consistent across all threads.
 
 ### Removed
+
+- **Context affinity functions** - Removed `py:bind`, `py:unbind`, `py:is_bound`,
+  `py:with_context`, and `py:ctx_*` functions. The new `py_context_router` provides
+  automatic scheduler-affinity routing. For explicit context control, use
+  `py_context_router:bind_context/1` and `py_context:call/5`.
 
 - **Signal handling support** - Removed `add_signal_handler`/`remove_signal_handler`
   from ErlangEventLoop. Signal handling should be done at the Erlang VM level.
