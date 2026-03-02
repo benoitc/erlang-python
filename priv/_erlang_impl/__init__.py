@@ -51,6 +51,7 @@ import warnings
 from ._loop import ErlangEventLoop
 from ._policy import ErlangEventLoopPolicy
 from ._mode import detect_mode, ExecutionMode
+from . import _reactor as reactor
 
 __all__ = [
     'run',
@@ -62,6 +63,7 @@ __all__ = [
     'ErlangEventLoop',
     'detect_mode',
     'ExecutionMode',
+    'reactor',
 ]
 
 # Re-export for uvloop API compatibility
