@@ -47,8 +47,6 @@ __all__ = ['ErlangEventLoop', '_run_and_send']
 EVENT_TYPE_READ = 1
 EVENT_TYPE_WRITE = 2
 EVENT_TYPE_TIMER = 3
-EVENT_TYPE_SUBPROCESS_DATA = 4
-EVENT_TYPE_SUBPROCESS_EXIT = 5
 
 
 class ErlangEventLoop(asyncio.AbstractEventLoop):
@@ -76,13 +74,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
         '_fd_resources',  # fd -> fd_key (shared fd_resource_t per fd)
         '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
-        '_ready', '_callback_id',
+        '_ready',
         '_handle_pool', '_handle_pool_max', '_running', '_stopping', '_closed',
         '_thread_id', '_clock_resolution', '_exception_handler', '_current_handle',
         '_debug', '_task_factory', '_default_executor',
         '_ready_append', '_ready_popleft',
         '_signal_handlers',
         '_execution_mode',
+        '_callback_id',
     )
 
     def __init__(self):
@@ -126,7 +125,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._timer_heap = []  # min-heap of (when, callback_id)
         self._handle_to_callback_id = {}  # handle -> callback_id
         self._ready = deque()  # Callbacks ready to run
-        self._callback_id = 0
 
         # Cache deque methods for hot path
         self._ready_append = self._ready.append
@@ -159,11 +157,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Signal handlers
         self._signal_handlers = {}
 
-        # Subprocess transports (callback_id -> SubprocessTransport)
-        self._subprocess_transports = {}
+        # Callback ID counter
+        self._callback_id = 0
 
     def _next_id(self):
-        """Generate a unique callback ID."""
+        """Generate a unique callback ID for this loop."""
         self._callback_id += 1
         return self._callback_id
 
@@ -272,9 +270,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Clear signal handlers
         self._signal_handlers.clear()
 
-        # Shutdown default executor
+        # Shutdown default executor - wait=True ensures all executor callbacks
+        # complete before loop destruction to prevent use-after-free
         if self._default_executor is not None:
-            self._default_executor.shutdown(wait=False)
+            self._default_executor.shutdown(wait=True)
             self._default_executor = None
 
         # Destroy loop capsule
@@ -1007,22 +1006,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 self._handle_to_callback_id.pop(id(handle), None)
                 if not handle._cancelled:
                     self._ready_append(handle)
-        elif event_type == EVENT_TYPE_SUBPROCESS_DATA:
-            transport = self._subprocess_transports.get(callback_id)
-            if transport is not None:
-                result = self._pel._subprocess_get_data(callback_id)
-                if result is not None and result != 'undefined':
-                    fd, data = result
-                    if fd == 1:
-                        self.call_soon(transport._on_stdout_data, data)
-                    elif fd == 2:
-                        self.call_soon(transport._on_stderr_data, data)
-        elif event_type == EVENT_TYPE_SUBPROCESS_EXIT:
-            transport = self._subprocess_transports.pop(callback_id, None)
-            if transport is not None:
-                exit_code = self._pel._subprocess_get_exit_code(callback_id)
-                if exit_code is not None and exit_code != 'undefined':
-                    self.call_soon(transport._on_process_exit, exit_code)
 
     def _check_closed(self):
         """Raise an error if the loop is closed."""

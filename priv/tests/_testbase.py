@@ -53,35 +53,27 @@ except ImportError:
     HAVE_SSL = False
 
 
-def _has_subprocess_support():
-    """Check if Erlang subprocess is available.
+def _is_inside_erlang_nif():
+    """Check if we're running inside the Erlang NIF environment.
 
-    Returns True if the subprocess support is available either through:
-    1. The py_event_loop NIF module with _subprocess_spawn
-    2. The erlang module with call() support for py_subprocess_sup
-
-    Subprocess requires Erlang infrastructure to be running.
+    Returns True if py_event_loop module is available, which indicates
+    Python is embedded inside the Erlang NIF. In this environment,
+    fork() operations will corrupt the Erlang VM.
     """
-    # Check for NIF-based subprocess support
     try:
-        import py_event_loop as pel
-        if hasattr(pel, '_subprocess_spawn'):
-            return True
+        import py_event_loop
+        return True
     except ImportError:
-        pass
-
-    # Check for erlang module with call() support
-    try:
-        import erlang
-        if hasattr(erlang, 'call'):
-            return True
-    except ImportError:
-        pass
-
-    return False
+        return False
 
 
-HAS_SUBPROCESS_SUPPORT = _has_subprocess_support()
+INSIDE_ERLANG_NIF = _is_inside_erlang_nif()
+
+
+# Subprocess is not supported in ErlangEventLoop.
+# Python subprocess uses fork() which corrupts the Erlang VM.
+# Use Erlang ports directly via erlang.call() instead.
+HAS_SUBPROCESS_SUPPORT = False
 
 # Markers for test filtering
 ONLYUV = unittest.skipUnless(False, "uvloop-only test")

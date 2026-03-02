@@ -4454,6 +4454,13 @@ static PyObject *py_wakeup_for(PyObject *self, PyObject *args) {
         Py_RETURN_NONE;
     }
 
+    /* Check shutdown flag before accessing mutex - loop may be in teardown.
+     * This is a safety net for any stray executor callbacks that might
+     * arrive after loop destruction has begun. */
+    if (loop->shutdown) {
+        Py_RETURN_NONE;
+    }
+
     pthread_mutex_lock(&loop->mutex);
     pthread_cond_broadcast(&loop->event_cond);
     pthread_mutex_unlock(&loop->mutex);
