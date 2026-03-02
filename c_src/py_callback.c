@@ -122,6 +122,68 @@ static void cleanup_callback_cache(void) {
 }
 
 /* ============================================================================
+ * Per-interpreter Exception Lookup
+ *
+ * In subinterpreters, each interpreter has its own erlang module with its own
+ * exception classes. Using the global ProcessErrorException or
+ * SuspensionRequiredException would cause exception identity mismatches when
+ * Python code tries to catch them with "except erlang.ProcessError".
+ *
+ * These helpers look up the exception from the current interpreter's erlang
+ * module, ensuring exception identity matches.
+ * ============================================================================ */
+
+/**
+ * @brief Get ProcessError exception from current interpreter's erlang module
+ *
+ * Looks up erlang.ProcessError from the current interpreter, falling back
+ * to the global ProcessErrorException if lookup fails.
+ *
+ * @return Borrowed reference to ProcessError exception class
+ */
+static PyObject *get_process_error_exception(void) {
+    PyObject *erlang_mod = PyImport_ImportModule("erlang");
+    if (erlang_mod != NULL) {
+        PyObject *exc = PyObject_GetAttrString(erlang_mod, "ProcessError");
+        Py_DECREF(erlang_mod);
+        if (exc != NULL) {
+            /* Return new reference - caller must decref */
+            return exc;
+        }
+        PyErr_Clear();
+    }
+    PyErr_Clear();
+    /* Fallback to global (main interpreter) */
+    Py_INCREF(ProcessErrorException);
+    return ProcessErrorException;
+}
+
+/**
+ * @brief Get SuspensionRequired exception from current interpreter's erlang module
+ *
+ * Looks up erlang.SuspensionRequired from the current interpreter, falling back
+ * to the global SuspensionRequiredException if lookup fails.
+ *
+ * @return Borrowed reference to SuspensionRequired exception class
+ */
+static PyObject *get_suspension_required_exception(void) {
+    PyObject *erlang_mod = PyImport_ImportModule("erlang");
+    if (erlang_mod != NULL) {
+        PyObject *exc = PyObject_GetAttrString(erlang_mod, "SuspensionRequired");
+        Py_DECREF(erlang_mod);
+        if (exc != NULL) {
+            /* Return new reference - caller must decref */
+            return exc;
+        }
+        PyErr_Clear();
+    }
+    PyErr_Clear();
+    /* Fallback to global (main interpreter) */
+    Py_INCREF(SuspensionRequiredException);
+    return SuspensionRequiredException;
+}
+
+/* ============================================================================
  * Callback Name Registry
  *
  * Maintains a C-side registry of registered callback function names.
@@ -579,6 +641,10 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 
     ERL_NIF_TERM func_name_term;
     unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
+    if (fn_buf == NULL) {
+        tl_pending_callback = false;
+        return make_error(env, "alloc_failed");
+    }
     memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
 
     ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
@@ -590,6 +656,497 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
         callback_id_term,
         state_ref,
         enif_make_tuple2(env, func_name_term, args_term));
+}
+
+/* ============================================================================
+ * Context suspension helpers (for process-per-context architecture)
+ *
+ * These functions handle suspension/resume for py_context_t-based execution.
+ * Unlike worker suspension, context suspension doesn't use mutex or condvar -
+ * the context process handles callbacks inline via recursive receive.
+ * ============================================================================ */
+
+/**
+ * Create a suspended context state for a py:call.
+ *
+ * Called when Python code in a context calls erlang.call() and suspension
+ * is required. Captures all state needed to resume after callback completes.
+ *
+ * @param env NIF environment
+ * @param ctx Context executing the Python code
+ * @param module_bin Original module binary
+ * @param func_bin Original function binary
+ * @param args_term Original args term
+ * @param kwargs_term Original kwargs term
+ * @return suspended_context_state_t* or NULL on error
+ */
+static suspended_context_state_t *create_suspended_context_state_for_call(
+    ErlNifEnv *env,
+    py_context_t *ctx,
+    ErlNifBinary *module_bin,
+    ErlNifBinary *func_bin,
+    ERL_NIF_TERM args_term,
+    ERL_NIF_TERM kwargs_term) {
+
+    /* Allocate the suspended context state resource */
+    suspended_context_state_t *state = enif_alloc_resource(
+        PY_CONTEXT_SUSPENDED_RESOURCE_TYPE, sizeof(suspended_context_state_t));
+    if (state == NULL) {
+        return NULL;
+    }
+
+    /* Initialize to zero */
+    memset(state, 0, sizeof(suspended_context_state_t));
+
+    state->ctx = ctx;
+    state->callback_id = tl_pending_callback_id;
+    state->request_type = PY_REQ_CALL;
+
+    /* Copy callback function name */
+    state->callback_func_name = enif_alloc(tl_pending_func_name_len + 1);
+    if (state->callback_func_name == NULL) {
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->callback_func_name, tl_pending_func_name, tl_pending_func_name_len);
+    state->callback_func_name[tl_pending_func_name_len] = '\0';
+    state->callback_func_len = tl_pending_func_name_len;
+
+    /* Store callback args reference */
+    Py_INCREF(tl_pending_args);
+    state->callback_args = tl_pending_args;
+
+    /* Create environment to hold copied terms */
+    state->orig_env = enif_alloc_env();
+    if (state->orig_env == NULL) {
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+
+    /* Copy module binary */
+    if (!enif_alloc_binary(module_bin->size, &state->orig_module)) {
+        enif_free_env(state->orig_env);
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->orig_module.data, module_bin->data, module_bin->size);
+
+    /* Copy function binary */
+    if (!enif_alloc_binary(func_bin->size, &state->orig_func)) {
+        enif_release_binary(&state->orig_module);
+        enif_free_env(state->orig_env);
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->orig_func.data, func_bin->data, func_bin->size);
+
+    /* Copy args and kwargs to our environment */
+    state->orig_args = enif_make_copy(state->orig_env, args_term);
+    state->orig_kwargs = enif_make_copy(state->orig_env, kwargs_term);
+
+    return state;
+}
+
+/**
+ * Create a suspended context state for a py:eval.
+ *
+ * Called when Python code in a context calls erlang.call() during eval
+ * and suspension is required.
+ *
+ * @param env NIF environment
+ * @param ctx Context executing the Python code
+ * @param code_bin Original code binary
+ * @param locals_term Original locals term
+ * @return suspended_context_state_t* or NULL on error
+ */
+static suspended_context_state_t *create_suspended_context_state_for_eval(
+    ErlNifEnv *env,
+    py_context_t *ctx,
+    ErlNifBinary *code_bin,
+    ERL_NIF_TERM locals_term) {
+
+    (void)env;
+
+    /* Allocate the suspended context state resource */
+    suspended_context_state_t *state = enif_alloc_resource(
+        PY_CONTEXT_SUSPENDED_RESOURCE_TYPE, sizeof(suspended_context_state_t));
+    if (state == NULL) {
+        return NULL;
+    }
+
+    /* Initialize to zero */
+    memset(state, 0, sizeof(suspended_context_state_t));
+
+    state->ctx = ctx;
+    state->callback_id = tl_pending_callback_id;
+    state->request_type = PY_REQ_EVAL;
+
+    /* Copy callback function name */
+    state->callback_func_name = enif_alloc(tl_pending_func_name_len + 1);
+    if (state->callback_func_name == NULL) {
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->callback_func_name, tl_pending_func_name, tl_pending_func_name_len);
+    state->callback_func_name[tl_pending_func_name_len] = '\0';
+    state->callback_func_len = tl_pending_func_name_len;
+
+    /* Store callback args reference */
+    Py_INCREF(tl_pending_args);
+    state->callback_args = tl_pending_args;
+
+    /* Create environment to hold copied terms */
+    state->orig_env = enif_alloc_env();
+    if (state->orig_env == NULL) {
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+
+    /* Copy code binary */
+    if (!enif_alloc_binary(code_bin->size, &state->orig_code)) {
+        enif_free_env(state->orig_env);
+        Py_DECREF(state->callback_args);
+        enif_free(state->callback_func_name);
+        enif_release_resource(state);
+        return NULL;
+    }
+    memcpy(state->orig_code.data, code_bin->data, code_bin->size);
+
+    /* Copy locals to our environment */
+    state->orig_locals = enif_make_copy(state->orig_env, locals_term);
+
+    return state;
+}
+
+/**
+ * Build the {suspended, ...} result term from a suspended context state.
+ *
+ * @param env NIF environment
+ * @param suspended Suspended context state (resource will be released)
+ * @return ERL_NIF_TERM {suspended, CallbackId, StateRef, {FuncName, Args}}
+ * @note Clears tl_pending_callback
+ */
+static ERL_NIF_TERM build_suspended_context_result(ErlNifEnv *env, suspended_context_state_t *suspended) {
+    ERL_NIF_TERM state_ref = enif_make_resource(env, suspended);
+    enif_release_resource(suspended);
+
+    ERL_NIF_TERM callback_id_term = enif_make_uint64(env, tl_pending_callback_id);
+
+    ERL_NIF_TERM func_name_term;
+    unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
+    if (fn_buf == NULL) {
+        tl_pending_callback = false;
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
+
+    ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
+
+    tl_pending_callback = false;
+
+    return enif_make_tuple4(env,
+        ATOM_SUSPENDED,
+        callback_id_term,
+        state_ref,
+        enif_make_tuple2(env, func_name_term, args_term));
+}
+
+/**
+ * Copy accumulated callback results from parent state to nested state.
+ *
+ * When a sequential callback occurs during replay, the nested suspended state
+ * needs to include all callback results from the parent PLUS the current result.
+ * This function copies parent's callback_results array and adds the parent's
+ * current result (result_data) to the end.
+ *
+ * @param nested The nested suspended state being created
+ * @param parent The parent suspended state (current tl_current_context_suspended)
+ * @return 0 on success, -1 on memory allocation failure
+ */
+static int copy_callback_results_to_nested(suspended_context_state_t *nested,
+                                           suspended_context_state_t *parent) {
+    if (parent == NULL) {
+        /* No parent state - nothing to copy */
+        return 0;
+    }
+
+    /*
+     * Calculate total results needed: parent's array + parent's current result.
+     *
+     * IMPORTANT: We check result_data != NULL instead of has_result because
+     * has_result may have been set to false when the result was consumed
+     * during replay, but the result data is still valid and needs to be
+     * copied to the nested state for subsequent replays.
+     */
+    size_t total_results = parent->num_callback_results;
+    bool has_current_result = (parent->result_data != NULL && parent->result_len > 0);
+    if (has_current_result) {
+        total_results += 1;
+    }
+
+    if (total_results == 0) {
+        /* No results to copy */
+        return 0;
+    }
+
+    /* Allocate results array */
+    nested->callback_results = enif_alloc(total_results * sizeof(nested->callback_results[0]));
+    if (nested->callback_results == NULL) {
+        return -1;
+    }
+    nested->callback_results_capacity = total_results;
+    nested->num_callback_results = total_results;
+    nested->callback_result_index = 0;
+
+    /* Copy parent's accumulated results */
+    for (size_t i = 0; i < parent->num_callback_results; i++) {
+        size_t len = parent->callback_results[i].len;
+        nested->callback_results[i].data = enif_alloc(len);
+        if (nested->callback_results[i].data == NULL) {
+            /* Cleanup on failure */
+            for (size_t j = 0; j < i; j++) {
+                enif_free(nested->callback_results[j].data);
+            }
+            enif_free(nested->callback_results);
+            nested->callback_results = NULL;
+            nested->num_callback_results = 0;
+            nested->callback_results_capacity = 0;
+            return -1;
+        }
+        memcpy(nested->callback_results[i].data, parent->callback_results[i].data, len);
+        nested->callback_results[i].len = len;
+    }
+
+    /* Add parent's current result (result_data) as the last element */
+    if (has_current_result) {
+        size_t idx = parent->num_callback_results;
+        nested->callback_results[idx].data = enif_alloc(parent->result_len);
+        if (nested->callback_results[idx].data == NULL) {
+            /* Cleanup on failure */
+            for (size_t j = 0; j < idx; j++) {
+                enif_free(nested->callback_results[j].data);
+            }
+            enif_free(nested->callback_results);
+            nested->callback_results = NULL;
+            nested->num_callback_results = 0;
+            nested->callback_results_capacity = 0;
+            return -1;
+        }
+        memcpy(nested->callback_results[idx].data, parent->result_data, parent->result_len);
+        nested->callback_results[idx].len = parent->result_len;
+    }
+
+    return 0;
+}
+
+/**
+ * Helper to convert __etf__:base64 strings to Python objects.
+ * Used for encoding pids and references in callback responses.
+ * Returns a NEW reference on success, NULL with exception on error.
+ */
+static PyObject *decode_etf_string(const char *str, Py_ssize_t len) {
+    /* Check for __etf__: prefix (8 chars) */
+    const char *prefix = "__etf__:";
+    size_t prefix_len = 8;
+
+    if (len <= (Py_ssize_t)prefix_len || strncmp(str, prefix, prefix_len) != 0) {
+        return NULL;  /* Not an ETF string */
+    }
+
+    /* Extract base64 portion */
+    const char *b64_data = str + prefix_len;
+    size_t b64_len = len - prefix_len;
+
+    /* Import base64 module and decode */
+    PyObject *base64_mod = PyImport_ImportModule("base64");
+    if (base64_mod == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *b64decode = PyObject_GetAttrString(base64_mod, "b64decode");
+    Py_DECREF(base64_mod);
+    if (b64decode == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *b64_str = PyUnicode_FromStringAndSize(b64_data, b64_len);
+    if (b64_str == NULL) {
+        Py_DECREF(b64decode);
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *decoded = PyObject_CallFunctionObjArgs(b64decode, b64_str, NULL);
+    Py_DECREF(b64decode);
+    Py_DECREF(b64_str);
+
+    if (decoded == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    /* Get the binary data */
+    char *bin_data;
+    Py_ssize_t bin_len;
+    if (PyBytes_AsStringAndSize(decoded, &bin_data, &bin_len) < 0) {
+        Py_DECREF(decoded);
+        PyErr_Clear();
+        return NULL;
+    }
+
+    /* Create a temporary NIF environment to decode the term */
+    ErlNifEnv *tmp_env = enif_alloc_env();
+    if (tmp_env == NULL) {
+        Py_DECREF(decoded);
+        return NULL;
+    }
+
+    /* Decode the ETF binary to an Erlang term */
+    ERL_NIF_TERM term;
+    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, 0) == 0) {
+        /* Decoding failed */
+        enif_free_env(tmp_env);
+        Py_DECREF(decoded);
+        return NULL;
+    }
+
+    Py_DECREF(decoded);
+
+    /* Convert the term to a Python object */
+    PyObject *result = term_to_py(tmp_env, term);
+    enif_free_env(tmp_env);
+
+    return result;
+}
+
+/**
+ * Recursively convert __etf__:base64 strings in a Python object.
+ * Handles nested tuples, lists, and dicts.
+ * Returns a NEW reference with ETF strings converted, or the original object
+ * with its refcount incremented if no conversion was needed.
+ */
+static PyObject *convert_etf_strings(PyObject *obj) {
+    if (obj == NULL) {
+        return NULL;
+    }
+
+    /* Check if it's a string that might be an ETF encoding */
+    if (PyUnicode_Check(obj)) {
+        Py_ssize_t len;
+        const char *str = PyUnicode_AsUTF8AndSize(obj, &len);
+        if (str != NULL && len > 8 && strncmp(str, "__etf__:", 8) == 0) {
+            PyObject *decoded = decode_etf_string(str, len);
+            if (decoded != NULL) {
+                return decoded;  /* Return the decoded object */
+            }
+            /* If decoding failed, fall through and return original */
+        }
+        Py_INCREF(obj);
+        return obj;
+    }
+
+    /* Handle tuples */
+    if (PyTuple_Check(obj)) {
+        Py_ssize_t size = PyTuple_Size(obj);
+        int needs_conversion = 0;
+
+        /* First pass: check if any element needs conversion */
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyTuple_GET_ITEM(obj, i);
+            if (PyUnicode_Check(item)) {
+                Py_ssize_t len;
+                const char *str = PyUnicode_AsUTF8AndSize(item, &len);
+                if (str != NULL && len > 8 && strncmp(str, "__etf__:", 8) == 0) {
+                    needs_conversion = 1;
+                    break;
+                }
+            } else if (PyTuple_Check(item) || PyList_Check(item) || PyDict_Check(item)) {
+                needs_conversion = 1;  /* Might need recursive conversion */
+                break;
+            }
+        }
+
+        if (!needs_conversion) {
+            Py_INCREF(obj);
+            return obj;
+        }
+
+        /* Create new tuple with converted elements */
+        PyObject *new_tuple = PyTuple_New(size);
+        if (new_tuple == NULL) {
+            return NULL;
+        }
+
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyTuple_GET_ITEM(obj, i);
+            PyObject *converted = convert_etf_strings(item);
+            if (converted == NULL) {
+                Py_DECREF(new_tuple);
+                return NULL;
+            }
+            PyTuple_SET_ITEM(new_tuple, i, converted);  /* Steals reference */
+        }
+        return new_tuple;
+    }
+
+    /* Handle lists */
+    if (PyList_Check(obj)) {
+        Py_ssize_t size = PyList_Size(obj);
+        PyObject *new_list = PyList_New(size);
+        if (new_list == NULL) {
+            return NULL;
+        }
+
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyList_GET_ITEM(obj, i);
+            PyObject *converted = convert_etf_strings(item);
+            if (converted == NULL) {
+                Py_DECREF(new_list);
+                return NULL;
+            }
+            PyList_SET_ITEM(new_list, i, converted);  /* Steals reference */
+        }
+        return new_list;
+    }
+
+    /* Handle dicts */
+    if (PyDict_Check(obj)) {
+        PyObject *new_dict = PyDict_New();
+        if (new_dict == NULL) {
+            return NULL;
+        }
+
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(obj, &pos, &key, &value)) {
+            PyObject *conv_key = convert_etf_strings(key);
+            PyObject *conv_value = convert_etf_strings(value);
+            if (conv_key == NULL || conv_value == NULL) {
+                Py_XDECREF(conv_key);
+                Py_XDECREF(conv_value);
+                Py_DECREF(new_dict);
+                return NULL;
+            }
+            PyDict_SetItem(new_dict, conv_key, conv_value);
+            Py_DECREF(conv_key);
+            Py_DECREF(conv_value);
+        }
+        return new_dict;
+    }
+
+    /* For all other types, just return with incremented refcount */
+    Py_INCREF(obj);
+    return obj;
 }
 
 /**
@@ -618,18 +1175,35 @@ static PyObject *parse_callback_response(unsigned char *response_data, size_t re
 
     PyObject *result = NULL;
     if (status == 0) {
-        /* Try to evaluate the result string as Python literal using cached function */
-        if (g_ast_literal_eval != NULL) {
-            PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
-            if (arg != NULL) {
-                result = PyObject_CallFunctionObjArgs(g_ast_literal_eval, arg, NULL);
-                Py_DECREF(arg);
-                if (result == NULL) {
-                    /* If literal_eval fails, return as string */
-                    PyErr_Clear();
-                    result = PyUnicode_FromStringAndSize(result_str, result_len);
+        /* Try to evaluate the result string as Python literal.
+         * Import ast.literal_eval fresh to support subinterpreters
+         * (the cached g_ast_literal_eval may be from a different interpreter). */
+        PyObject *ast_mod = PyImport_ImportModule("ast");
+        if (ast_mod != NULL) {
+            PyObject *literal_eval = PyObject_GetAttrString(ast_mod, "literal_eval");
+            Py_DECREF(ast_mod);
+            if (literal_eval != NULL) {
+                PyObject *arg = PyUnicode_FromStringAndSize(result_str, result_len);
+                if (arg != NULL) {
+                    result = PyObject_CallFunctionObjArgs(literal_eval, arg, NULL);
+                    Py_DECREF(arg);
+                    if (result == NULL) {
+                        /* If literal_eval fails, return as string */
+                        PyErr_Clear();
+                        result = PyUnicode_FromStringAndSize(result_str, result_len);
+                    } else {
+                        /* Post-process result to convert __etf__: strings to Python objects.
+                         * This handles pids, references, and other Erlang terms that can't
+                         * be represented as Python literals. */
+                        PyObject *converted = convert_etf_strings(result);
+                        Py_DECREF(result);
+                        result = converted;
+                    }
                 }
+                Py_DECREF(literal_eval);
             }
+        } else {
+            PyErr_Clear();
         }
         if (result == NULL) {
             result = PyUnicode_FromStringAndSize(result_str, result_len);
@@ -757,10 +1331,18 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     (void)self;
 
     /*
-     * Check if this is a call from an executor thread (normal path) or
-     * from a spawned thread (thread worker path).
+     * Check if we have a callback handler available.
+     * Priority:
+     * 1. tl_current_context with suspension enabled (new process-per-context API)
+     * 2. tl_current_context with callback_handler (old blocking pipe mode)
+     * 3. tl_current_worker (legacy worker API)
+     * 4. thread_worker_call (spawned threads)
      */
-    if (tl_current_worker == NULL || !tl_current_worker->has_callback_handler) {
+    bool has_context_suspension = (tl_current_context != NULL && tl_allow_suspension);
+    bool has_context_handler = (tl_current_context != NULL && tl_current_context->has_callback_handler);
+    bool has_worker_handler = (tl_current_worker != NULL && tl_current_worker->has_callback_handler);
+
+    if (!has_context_suspension && !has_context_handler && !has_worker_handler) {
         /*
          * Not an executor thread - use thread worker path.
          * This enables any spawned Python thread to call erlang.call():
@@ -831,15 +1413,77 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         }
     }
 
+    /* Check for context-based suspended state with cached results (context replay case) */
+    if (tl_current_context_suspended != NULL) {
+        /*
+         * Sequential callback support:
+         * When replaying Python code with multiple sequential erlang.call()s,
+         * we need to return results in the same order they were executed.
+         * The callback_results array stores results from previous callbacks,
+         * indexed in call order. The has_result field holds the CURRENT callback's
+         * result (the one that triggered this resume).
+         *
+         * Example: f(g(h(x)))
+         * - Replay 1: h(x) suspended, resumed with h_result
+         *   callback_results = [], has_result = h_result
+         *   h(x) returns h_result, g(...) suspends
+         *
+         * - Replay 2: nested state has callback_results = [h_result], has_result = g_result
+         *   h(x) returns callback_results[0] = h_result
+         *   g(...) returns has_result = g_result
+         *   f(...) suspends
+         *
+         * - Replay 3: nested state has callback_results = [h_result, g_result], has_result = f_result
+         *   h(x) returns callback_results[0] = h_result
+         *   g(...) returns callback_results[1] = g_result
+         *   f(...) returns has_result = f_result
+         *   Done!
+         */
+
+        /* First, check if we have a cached result from a PREVIOUS callback */
+        if (tl_current_context_suspended->callback_result_index <
+            tl_current_context_suspended->num_callback_results) {
+            /* Return cached result from previous callback, advance index */
+            size_t idx = tl_current_context_suspended->callback_result_index++;
+            PyObject *result = parse_callback_response(
+                tl_current_context_suspended->callback_results[idx].data,
+                tl_current_context_suspended->callback_results[idx].len);
+            return result;
+        }
+
+        /* Next, check if this is the CURRENT callback (the one that triggered resume) */
+        if (tl_current_context_suspended->has_result) {
+            /* Verify this is the same callback */
+            if (tl_current_context_suspended->callback_func_len == func_name_len &&
+                memcmp(tl_current_context_suspended->callback_func_name, func_name, func_name_len) == 0) {
+                /* Return the current callback result */
+                PyObject *result = parse_callback_response(
+                    tl_current_context_suspended->result_data,
+                    tl_current_context_suspended->result_len);
+                /* Mark result as consumed */
+                tl_current_context_suspended->has_result = false;
+                return result;
+            }
+        }
+        /* If we get here, this is a NEW callback - will suspend below */
+    }
+
     /*
      * FIX for multiple sequential erlang.call():
-     * If we're in replay context (tl_current_suspended != NULL) but didn't get
+     * If we're in WORKER replay context (tl_current_suspended != NULL) but didn't get
      * a cache hit above, this is a SUBSEQUENT call (e.g., second erlang.call()
-     * in the same Python function). We MUST NOT suspend again - that would
-     * cause an infinite loop where replay always hits this second call.
-     * Instead, fall through to blocking pipe behavior for subsequent calls.
+     * in the same Python function). For WORKER mode, the callback handler process
+     * is still running and will handle this via blocking pipe.
+     *
+     * For CONTEXT replay (tl_current_context_suspended != NULL), we CANNOT block
+     * because there's no callback handler process. Instead, we must suspend again
+     * and let the context process handle the subsequent callback. This works because
+     * the context process re-replays from the beginning, and each callback result
+     * is returned via the cached result mechanism on subsequent replays.
      */
     bool force_blocking = (tl_current_suspended != NULL);
+    /* Note: tl_current_context_suspended is NOT included here - context mode
+     * always uses suspension for callbacks, allowing unlimited nesting via replay */
 
     /* Build args list (remaining args) */
     PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
@@ -866,6 +1510,12 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         ERL_NIF_TERM func_term;
         {
             unsigned char *buf = enif_make_new_binary(msg_env, func_name_len, &func_term);
+            if (buf == NULL) {
+                Py_DECREF(call_args);
+                enif_free_env(msg_env);
+                PyErr_SetString(PyExc_MemoryError, "Failed to allocate binary");
+                return NULL;
+            }
             memcpy(buf, func_name, func_name_len);
         }
 
@@ -885,12 +1535,23 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         uint32_t response_len = 0;
         int read_result;
 
+        /* Get callback handler and pipe from context or worker */
+        ErlNifPid *handler_pid;
+        int read_fd;
+        if (has_context_handler) {
+            handler_pid = &tl_current_context->callback_handler;
+            read_fd = tl_current_context->callback_pipe[0];
+        } else {
+            handler_pid = &tl_current_worker->callback_handler;
+            read_fd = tl_current_worker->callback_pipe[0];
+        }
+
         Py_BEGIN_ALLOW_THREADS
-        enif_send(NULL, &tl_current_worker->callback_handler, msg_env, msg);
+        enif_send(NULL, handler_pid, msg_env, msg);
         enif_free_env(msg_env);
         /* Use 30 second timeout to prevent indefinite blocking */
         read_result = read_length_prefixed_data(
-            tl_current_worker->callback_pipe[0],
+            read_fd,
             &response_data, &response_len, 30000);
         Py_END_ALLOW_THREADS
 
@@ -950,8 +1611,11 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     Py_XDECREF(tl_pending_args);
     tl_pending_args = call_args;  /* Takes ownership, don't decref */
 
-    /* Raise exception to abort Python execution */
-    PyErr_SetString(SuspensionRequiredException, "callback pending");
+    /* Raise exception to abort Python execution.
+     * Use per-interpreter lookup to ensure exception identity matches. */
+    PyObject *suspension_exc = get_suspension_required_exception();
+    PyErr_SetString(suspension_exc, "callback pending");
+    Py_DECREF(suspension_exc);
     return NULL;
 }
 
@@ -1008,8 +1672,11 @@ static PyObject *erlang_send_impl(PyObject *self, PyObject *args) {
     /* Fire-and-forget send */
     if (!enif_send(NULL, &pid->pid, msg_env, msg)) {
         enif_free_env(msg_env);
-        PyErr_SetString(ProcessErrorException,
+        /* Use per-interpreter lookup to ensure exception identity matches */
+        PyObject *process_exc = get_process_error_exception();
+        PyErr_SetString(process_exc,
             "Failed to send message: process may not exist");
+        Py_DECREF(process_exc);
         return NULL;
     }
 
@@ -1722,216 +2389,101 @@ static int create_erlang_module(void) {
         Py_DECREF(log_globals);
     }
 
+    /* Add helper to extend erlang module with Python package exports.
+     * Called from Erlang after priv_dir is added to sys.path.
+     * Follows uvloop's minimal export pattern.
+     */
+    const char *extend_code =
+        "def _extend_erlang_module(priv_dir):\n"
+        "    '''\n"
+        "    Extend the C erlang module with Python event loop exports.\n"
+        "    \n"
+        "    Called from Erlang after priv_dir is set up in sys.path.\n"
+        "    This allows the C 'erlang' module to also provide:\n"
+        "      - erlang.run()\n"
+        "      - erlang.new_event_loop()\n"
+        "      - erlang.get_event_loop_policy()\n"
+        "      - erlang.install()\n"
+        "      - erlang.EventLoopPolicy\n"
+        "      - erlang.ErlangEventLoop\n"
+        "    \n"
+        "    Args:\n"
+        "        priv_dir: Path to erlang_python priv directory (bytes or str)\n"
+        "    \n"
+        "    Returns:\n"
+        "        True on success, False on failure\n"
+        "    '''\n"
+        "    import sys\n"
+        "    # Handle bytes from Erlang\n"
+        "    if isinstance(priv_dir, bytes):\n"
+        "        priv_dir = priv_dir.decode('utf-8')\n"
+        "    if priv_dir not in sys.path:\n"
+        "        sys.path.insert(0, priv_dir)\n"
+        "    try:\n"
+        "        import _erlang_impl\n"
+        "        import erlang\n"
+        "        # Primary exports (uvloop-compatible)\n"
+        "        erlang.run = _erlang_impl.run\n"
+        "        erlang.new_event_loop = _erlang_impl.new_event_loop\n"
+        "        erlang.ErlangEventLoop = _erlang_impl.ErlangEventLoop\n"
+        "        # Deprecated (Python < 3.16)\n"
+        "        erlang.install = _erlang_impl.install\n"
+        "        erlang.EventLoopPolicy = _erlang_impl.EventLoopPolicy\n"
+        "        erlang.ErlangEventLoopPolicy = _erlang_impl.ErlangEventLoopPolicy\n"
+        "        # Additional exports for compatibility\n"
+        "        erlang.get_event_loop_policy = _erlang_impl.get_event_loop_policy\n"
+        "        erlang.detect_mode = _erlang_impl.detect_mode\n"
+        "        erlang.ExecutionMode = _erlang_impl.ExecutionMode\n"
+        "        # Reactor for fd-based protocol handling\n"
+        "        erlang.reactor = _erlang_impl.reactor\n"
+        "        # Make erlang behave as a package for 'import erlang.reactor' syntax\n"
+        "        erlang.__path__ = [priv_dir]\n"
+        "        sys.modules['erlang.reactor'] = erlang.reactor\n"
+        "        return True\n"
+        "    except ImportError as e:\n"
+        "        import sys\n"
+        "        sys.stderr.write(f'Failed to extend erlang module: {e}\\n')\n"
+        "        return False\n"
+        "\n"
+        "import erlang\n"
+        "erlang._extend_erlang_module = _extend_erlang_module\n";
+
+    PyObject *ext_globals = PyDict_New();
+    if (ext_globals != NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(ext_globals, "__builtins__", builtins);
+
+        /* Import erlang module into globals so the code can reference it */
+        PyObject *sys_modules = PySys_GetObject("modules");
+        if (sys_modules != NULL) {
+            PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
+            if (erlang_mod != NULL) {
+                PyDict_SetItemString(ext_globals, "erlang", erlang_mod);
+            }
+        }
+
+        PyObject *result = PyRun_String(extend_code, Py_file_input, ext_globals, ext_globals);
+        if (result == NULL) {
+            /* Non-fatal - extension will be called from Erlang */
+            PyErr_Print();
+            PyErr_Clear();
+        } else {
+            Py_DECREF(result);
+        }
+        Py_DECREF(ext_globals);
+    }
+
     return 0;
 }
 
 /* ============================================================================
- * Asyncio support
+ * Asyncio support (DEPRECATED - replaced by event loop model)
+ *
+ * The async_future_callback and async_event_loop_thread functions have been
+ * removed. Async coroutine execution is now handled by py_event_loop and
+ * py_event_loop_pool using enif_select and erlang.send() for efficient
+ * event-driven operation without pthread polling.
  * ============================================================================ */
-
-/**
- * Callback function that gets invoked when a future completes.
- * This is called from within the event loop thread.
- */
-static void async_future_callback(py_async_worker_t *worker, async_pending_t *pending) {
-    ErlNifEnv *msg_env = enif_alloc_env();
-    if (msg_env == NULL) {
-        /* Cannot send result - just log and return */
-        return;
-    }
-    PyObject *py_result = PyObject_CallMethod(pending->future, "result", NULL);
-
-    ERL_NIF_TERM result_term;
-    if (py_result == NULL) {
-        /* Exception occurred */
-        PyObject *exc = PyObject_CallMethod(pending->future, "exception", NULL);
-        if (exc != NULL && exc != Py_None) {
-            PyObject *str = PyObject_Str(exc);
-            const char *err_msg = str ? PyUnicode_AsUTF8(str) : "unknown";
-            result_term = enif_make_tuple2(msg_env, ATOM_ERROR,
-                enif_make_string(msg_env, err_msg, ERL_NIF_LATIN1));
-            Py_XDECREF(str);
-        } else {
-            result_term = enif_make_tuple2(msg_env, ATOM_ERROR,
-                enif_make_atom(msg_env, "unknown"));
-        }
-        Py_XDECREF(exc);
-        PyErr_Clear();
-    } else {
-        result_term = enif_make_tuple2(msg_env, ATOM_OK,
-            py_to_term(msg_env, py_result));
-        Py_DECREF(py_result);
-    }
-
-    /* Send message: {async_result, Id, Result} */
-    ERL_NIF_TERM msg = enif_make_tuple3(msg_env,
-        ATOM_ASYNC_RESULT,
-        enif_make_uint64(msg_env, pending->id),
-        result_term);
-    enif_send(NULL, &pending->caller, msg_env, msg);
-    enif_free_env(msg_env);
-}
-
-/**
- * Background thread running the asyncio event loop.
- * This thread owns the event loop and processes coroutines.
- */
-static void *async_event_loop_thread(void *arg) {
-    py_async_worker_t *worker = (py_async_worker_t *)arg;
-
-    /* Acquire GIL for this thread */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Import asyncio */
-    PyObject *asyncio = PyImport_ImportModule("asyncio");
-    if (asyncio == NULL) {
-        PyErr_Print();
-        PyGILState_Release(gstate);
-        worker->loop_running = false;
-        return NULL;
-    }
-
-    /* Create a default selector event loop directly, bypassing the policy.
-     * Worker threads should NOT use ErlangEventLoop since it requires the
-     * main thread's event router. Using SelectorEventLoop ensures these
-     * background threads have their own independent event loops. */
-    PyObject *selector_loop_class = PyObject_GetAttrString(asyncio, "SelectorEventLoop");
-    PyObject *loop = NULL;
-    if (selector_loop_class != NULL) {
-        loop = PyObject_CallObject(selector_loop_class, NULL);
-        Py_DECREF(selector_loop_class);
-    }
-    if (loop == NULL) {
-        /* Fallback to new_event_loop if SelectorEventLoop not available */
-        PyErr_Clear();
-        loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
-    }
-    if (loop == NULL) {
-        PyErr_Print();
-        Py_DECREF(asyncio);
-        PyGILState_Release(gstate);
-        worker->loop_running = false;
-        return NULL;
-    }
-
-    /* Set as current loop for this thread */
-    PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", loop);
-    Py_XDECREF(set_result);
-
-    worker->event_loop = loop;
-    Py_INCREF(loop);  /* Keep extra ref for worker struct */
-
-    Py_DECREF(asyncio);
-
-    worker->loop_running = true;
-
-    /* Run the event loop with proper GIL management */
-    while (!worker->shutdown) {
-        /* Release GIL while sleeping (allow other Python threads to run) */
-        Py_BEGIN_ALLOW_THREADS
-        usleep(10000);  /* 10ms sleep without holding GIL */
-        Py_END_ALLOW_THREADS
-
-        /* Run one iteration of the event loop with GIL held */
-        PyObject *asyncio_mod = PyImport_ImportModule("asyncio");
-        if (asyncio_mod != NULL) {
-            PyObject *sleep_coro = PyObject_CallMethod(asyncio_mod, "sleep", "d", 0.0);
-            if (sleep_coro != NULL) {
-                PyObject *task = PyObject_CallMethod(loop, "create_task", "O", sleep_coro);
-                Py_DECREF(sleep_coro);
-                if (task != NULL) {
-                    PyObject *run_result = PyObject_CallMethod(loop, "run_until_complete", "O", task);
-                    Py_DECREF(task);
-                    Py_XDECREF(run_result);
-                }
-            }
-            Py_DECREF(asyncio_mod);
-        }
-        if (PyErr_Occurred()) {
-            PyErr_Clear();
-        }
-
-        /*
-         * Check for completed futures (GIL held).
-         *
-         * IMPORTANT: We must not hold the mutex while calling Python functions
-         * to avoid deadlocks. The pattern is:
-         * 1. Lock mutex, collect completed items, unlock
-         * 2. Process callbacks outside mutex (no contention)
-         * 3. Lock mutex, remove processed items, unlock
-         */
-
-        /* Phase 1: Collect completed futures under mutex */
-        #define MAX_COMPLETED_BATCH 16
-        async_pending_t *completed[MAX_COMPLETED_BATCH];
-        int num_completed = 0;
-
-        pthread_mutex_lock(&worker->queue_mutex);
-        async_pending_t *p = worker->pending_head;
-        while (p != NULL && num_completed < MAX_COMPLETED_BATCH) {
-            if (p->future != NULL) {
-                /* Quick check if future is done (still needs GIL, but mutex held briefly) */
-                PyObject *done = PyObject_CallMethod(p->future, "done", NULL);
-                if (done != NULL && PyObject_IsTrue(done)) {
-                    Py_DECREF(done);
-                    completed[num_completed++] = p;
-                } else {
-                    Py_XDECREF(done);
-                }
-            }
-            p = p->next;
-        }
-        pthread_mutex_unlock(&worker->queue_mutex);
-
-        /* Phase 2: Process completed callbacks outside mutex (no deadlock risk) */
-        for (int i = 0; i < num_completed; i++) {
-            async_future_callback(worker, completed[i]);
-        }
-
-        /* Phase 3: Remove processed items under mutex */
-        if (num_completed > 0) {
-            pthread_mutex_lock(&worker->queue_mutex);
-            for (int i = 0; i < num_completed; i++) {
-                async_pending_t *to_remove = completed[i];
-
-                /* Find and remove from list */
-                async_pending_t *prev = NULL;
-                p = worker->pending_head;
-                while (p != NULL) {
-                    if (p == to_remove) {
-                        /* Remove from list */
-                        if (prev == NULL) {
-                            worker->pending_head = p->next;
-                        } else {
-                            prev->next = p->next;
-                        }
-                        if (p == worker->pending_tail) {
-                            worker->pending_tail = prev;
-                        }
-                        break;
-                    }
-                    prev = p;
-                    p = p->next;
-                }
-
-                /* Clean up */
-                Py_DECREF(to_remove->future);
-                enif_free(to_remove);
-            }
-            pthread_mutex_unlock(&worker->queue_mutex);
-        }
-    }
-
-    /* Stop and close the event loop */
-    PyObject_CallMethod(loop, "stop", NULL);
-    PyObject_CallMethod(loop, "close", NULL);
-    Py_DECREF(loop);
-
-    worker->loop_running = false;
-    PyGILState_Release(gstate);
-
-    return NULL;
-}
 
 /* ============================================================================
  * Resume callback NIFs

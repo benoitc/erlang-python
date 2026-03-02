@@ -39,14 +39,15 @@
     call/3,
     call/4,
     call/5,
-    call_async/3,
-    call_async/4,
+    cast/3,
+    cast/4,
     await/1,
     await/2,
     eval/1,
     eval/2,
     eval/3,
     exec/1,
+    exec/2,
     stream/3,
     stream/4,
     stream_eval/1,
@@ -91,21 +92,25 @@
     state_decr/2,
     %% Module reload
     reload/1,
-    %% Context affinity
-    bind/0, bind/1,
-    unbind/0, unbind/1,
-    is_bound/0,
-    with_context/1,
-    ctx_call/4, ctx_call/5, ctx_call/6,
-    ctx_eval/2, ctx_eval/3, ctx_eval/4,
-    ctx_exec/2,
     %% Logging and tracing
     configure_logging/0,
     configure_logging/1,
     enable_tracing/0,
     disable_tracing/0,
     get_traces/0,
-    clear_traces/0
+    clear_traces/0,
+    %% Process-per-context API (new architecture)
+    context/0,
+    context/1,
+    start_contexts/0,
+    start_contexts/1,
+    stop_contexts/0,
+    contexts_started/0,
+    %% py_ref API (Python object references with auto-routing)
+    call_method/3,
+    getattr/2,
+    to_term/1,
+    is_ref/1
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -115,11 +120,7 @@
 -type py_args() :: [term()].
 -type py_kwargs() :: #{atom() | binary() => term()}.
 
-%% Context affinity handle
--record(py_ctx, {ref :: reference()}).
--opaque py_ctx() :: #py_ctx{}.
-
--export_type([py_result/0, py_ref/0, py_ctx/0]).
+-export_type([py_result/0, py_ref/0]).
 
 %% Default timeout for synchronous calls (30 seconds)
 -define(DEFAULT_TIMEOUT, 30000).
@@ -134,14 +135,34 @@ call(Module, Func, Args) ->
     call(Module, Func, Args, #{}).
 
 %% @doc Call a Python function with keyword arguments.
--spec call(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
+%%
+%% When the first argument is a pid (context), calls using the new
+%% process-per-context architecture.
+%%
+%% @param CtxOrModule Context pid or Python module
+%% @param ModuleOrFunc Python module or function name
+%% @param FuncOrArgs Function name or arguments list
+%% @param ArgsOrKwargs Arguments list or keyword arguments
+-spec call(pid(), py_module(), py_func(), py_args()) -> py_result()
+    ; (py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
+call(Ctx, Module, Func, Args) when is_pid(Ctx) ->
+    py_context:call(Ctx, Module, Func, Args, #{});
 call(Module, Func, Args, Kwargs) ->
     call(Module, Func, Args, Kwargs, ?DEFAULT_TIMEOUT).
 
 %% @doc Call a Python function with keyword arguments and custom timeout.
+%%
+%% When the first argument is a pid (context), calls using the new
+%% process-per-context architecture with options map.
+%%
 %% Timeout is in milliseconds. Use `infinity' for no timeout.
 %% Rate limited via ETS-based semaphore to prevent overload.
--spec call(py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
+-spec call(pid(), py_module(), py_func(), py_args(), map()) -> py_result()
+    ; (py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
+call(Ctx, Module, Func, Args, Opts) when is_pid(Ctx), is_map(Opts) ->
+    Kwargs = maps:get(kwargs, Opts, #{}),
+    Timeout = maps:get(timeout, Opts, infinity),
+    py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout);
 call(Module, Func, Args, Kwargs, Timeout) ->
     %% Acquire semaphore slot before making the call
     case py_semaphore:acquire(Timeout) of
@@ -156,23 +177,11 @@ call(Module, Func, Args, Kwargs, Timeout) ->
     end.
 
 %% @private
+%% Always route through context process - it handles callbacks inline using
+%% suspension-based approach (no separate callback handler, no blocking)
 do_call(Module, Func, Args, Kwargs, Timeout) ->
-    Ref = make_ref(),
-    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-    Request = {call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs},
-    case get_binding() of
-        {bound, Worker} -> py_pool:direct_request(Worker, Request);
-        unbound -> py_pool:request(Request)
-    end,
-    await(Ref, Timeout).
-
-%% @private Get binding if process is bound
-get_binding() ->
-    Key = {process, self()},
-    case py_pool:lookup_binding(Key) of
-        {ok, Worker} -> {bound, Worker};
-        not_found -> unbound
-    end.
+    Ctx = py_context_router:get_context(),
+    py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout).
 
 %% @doc Evaluate a Python expression and return the result.
 -spec eval(string() | binary()) -> py_result().
@@ -180,51 +189,68 @@ eval(Code) ->
     eval(Code, #{}).
 
 %% @doc Evaluate a Python expression with local variables.
--spec eval(string() | binary(), map()) -> py_result().
+%%
+%% When the first argument is a pid (context), evaluates using the new
+%% process-per-context architecture.
+-spec eval(pid(), string() | binary()) -> py_result()
+    ; (string() | binary(), map()) -> py_result().
+eval(Ctx, Code) when is_pid(Ctx) ->
+    py_context:eval(Ctx, Code, #{});
 eval(Code, Locals) ->
     eval(Code, Locals, ?DEFAULT_TIMEOUT).
 
 %% @doc Evaluate a Python expression with local variables and timeout.
+%%
+%% When the first argument is a pid (context), evaluates using the new
+%% process-per-context architecture with locals.
+%%
 %% Timeout is in milliseconds. Use `infinity' for no timeout.
--spec eval(string() | binary(), map(), timeout()) -> py_result().
+-spec eval(pid(), string() | binary(), map()) -> py_result()
+    ; (string() | binary(), map(), timeout()) -> py_result().
+eval(Ctx, Code, Locals) when is_pid(Ctx), is_map(Locals) ->
+    py_context:eval(Ctx, Code, Locals);
 eval(Code, Locals, Timeout) ->
-    Ref = make_ref(),
-    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-    Request = {eval, Ref, self(), Code, Locals, TimeoutMs},
-    case get_binding() of
-        {bound, Worker} -> py_pool:direct_request(Worker, Request);
-        unbound -> py_pool:request(Request)
-    end,
-    await(Ref, Timeout).
+    %% Always route through context process - it handles callbacks inline using
+    %% suspension-based approach (no separate callback handler, no blocking)
+    Ctx = py_context_router:get_context(),
+    py_context:eval(Ctx, Code, Locals, Timeout).
 
 %% @doc Execute Python statements (no return value expected).
 -spec exec(string() | binary()) -> ok | {error, term()}.
 exec(Code) ->
-    Ref = make_ref(),
-    Request = {exec, Ref, self(), Code},
-    case get_binding() of
-        {bound, Worker} -> py_pool:direct_request(Worker, Request);
-        unbound -> py_pool:request(Request)
-    end,
-    case await(Ref, ?DEFAULT_TIMEOUT) of
-        {ok, _} -> ok;
-        Error -> Error
-    end.
+    %% Always route through context process - it handles callbacks inline using
+    %% suspension-based approach (no separate callback handler, no blocking)
+    Ctx = py_context_router:get_context(),
+    py_context:exec(Ctx, Code).
+
+%% @doc Execute Python statements using a specific context.
+%%
+%% This is the explicit context variant of exec/1.
+-spec exec(pid(), string() | binary()) -> ok | {error, term()}.
+exec(Ctx, Code) when is_pid(Ctx) ->
+    py_context:exec(Ctx, Code).
 
 %%% ============================================================================
 %%% Asynchronous API
 %%% ============================================================================
 
-%% @doc Call a Python function asynchronously, returns immediately with a ref.
--spec call_async(py_module(), py_func(), py_args()) -> py_ref().
-call_async(Module, Func, Args) ->
-    call_async(Module, Func, Args, #{}).
+%% @doc Cast a Python function call, returns immediately with a ref.
+%% The call executes in a spawned process. Use await/1,2 to get the result.
+-spec cast(py_module(), py_func(), py_args()) -> py_ref().
+cast(Module, Func, Args) ->
+    cast(Module, Func, Args, #{}).
 
-%% @doc Call a Python function asynchronously with kwargs.
--spec call_async(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
-call_async(Module, Func, Args, Kwargs) ->
+%% @doc Cast a Python function call with kwargs.
+-spec cast(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
+cast(Module, Func, Args, Kwargs) ->
+    %% Spawn a process to execute the call and return a ref
     Ref = make_ref(),
-    py_pool:request({call, Ref, self(), Module, Func, Args, Kwargs}),
+    Parent = self(),
+    spawn(fun() ->
+        Ctx = py_context_router:get_context(),
+        Result = py_context:call(Ctx, Module, Func, Args, Kwargs),
+        Parent ! {py_response, Ref, Result}
+    end),
     Ref.
 
 %% @doc Wait for an async call to complete.
@@ -255,22 +281,42 @@ stream(Module, Func, Args) ->
 %% @doc Stream results from a Python generator with kwargs.
 -spec stream(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
 stream(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_pool:request({stream, Ref, self(), Module, Func, Args, Kwargs}),
-    stream_collect(Ref, []).
+    %% Route through the new process-per-context system
+    %% Create the generator and collect all values using list()
+    Ctx = py_context_router:get_context(),
+    ModuleBin = ensure_binary(Module),
+    FuncBin = ensure_binary(Func),
+    %% Build code that calls the function and collects all yielded values
+    KwargsCode = format_kwargs(Kwargs),
+    ArgsCode = format_args(Args),
+    Code = iolist_to_binary([
+        <<"list(__import__('">>, ModuleBin, <<"').">>, FuncBin,
+        <<"(">>, ArgsCode, KwargsCode, <<"))">>
+    ]),
+    py_context:eval(Ctx, Code, #{}).
 
-%% @private
-stream_collect(Ref, Acc) ->
-    receive
-        {py_chunk, Ref, Chunk} ->
-            stream_collect(Ref, [Chunk | Acc]);
-        {py_end, Ref} ->
-            {ok, lists:reverse(Acc)};
-        {py_error, Ref, Error} ->
-            {error, Error}
-    after ?DEFAULT_TIMEOUT ->
-        {error, timeout}
-    end.
+%% @private Format arguments for Python code
+format_args([]) -> <<>>;
+format_args(Args) ->
+    ArgStrs = [format_arg(A) || A <- Args],
+    iolist_to_binary(lists:join(<<", ">>, ArgStrs)).
+
+%% @private Format a single argument
+format_arg(A) when is_integer(A) -> integer_to_binary(A);
+format_arg(A) when is_float(A) -> float_to_binary(A);
+format_arg(A) when is_binary(A) -> <<"'", A/binary, "'">>;
+format_arg(A) when is_atom(A) -> <<"'", (atom_to_binary(A))/binary, "'">>;
+format_arg(A) when is_list(A) -> iolist_to_binary([<<"[">>, format_args(A), <<"]">>]);
+format_arg(_) -> <<"None">>.
+
+%% @private Format kwargs for Python code
+format_kwargs(Kwargs) when map_size(Kwargs) == 0 -> <<>>;
+format_kwargs(Kwargs) ->
+    KwList = maps:fold(fun(K, V, Acc) ->
+        KB = if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end,
+        [<<KB/binary, "=", (format_arg(V))/binary>> | Acc]
+    end, [], Kwargs),
+    iolist_to_binary([<<", ">>, lists:join(<<", ">>, KwList)]).
 
 %% @doc Stream results from a Python generator expression.
 %% Evaluates the expression and if it returns a generator, streams all values.
@@ -281,9 +327,12 @@ stream_eval(Code) ->
 %% @doc Stream results from a Python generator expression with local variables.
 -spec stream_eval(string() | binary(), map()) -> py_result().
 stream_eval(Code, Locals) ->
-    Ref = make_ref(),
-    py_pool:request({stream_eval, Ref, self(), Code, Locals}),
-    stream_collect(Ref, []).
+    %% Route through the new process-per-context system
+    %% Wrap the code in list() to collect generator values
+    Ctx = py_context_router:get_context(),
+    CodeBin = ensure_binary(Code),
+    WrappedCode = <<"list(", CodeBin/binary, ")">>,
+    py_context:eval(Ctx, WrappedCode, Locals).
 
 %%% ============================================================================
 %%% Info
@@ -475,11 +524,41 @@ subinterp_supported() ->
 %% On older Python versions, returns {error, subinterpreters_not_supported}.
 -spec parallel([{py_module(), py_func(), py_args()}]) -> py_result().
 parallel(Calls) when is_list(Calls) ->
-    case py_nif:subinterp_supported() of
+    %% Distribute calls across available contexts for true parallel execution
+    NumContexts = py_context_router:num_contexts(),
+    Parent = self(),
+    Ref = make_ref(),
+
+    %% Spawn processes to execute calls in parallel
+    CallsWithIdx = lists:zip(lists:seq(1, length(Calls)), Calls),
+    _ = [spawn(fun() ->
+        %% Distribute calls round-robin across contexts
+        CtxIdx = ((Idx - 1) rem NumContexts) + 1,
+        Ctx = py_context_router:get_context(CtxIdx),
+        Result = py_context:call(Ctx, M, F, A, #{}),
+        Parent ! {Ref, Idx, Result}
+    end) || {Idx, {M, F, A}} <- CallsWithIdx],
+
+    %% Collect results in order
+    Results = [receive
+        {Ref, Idx, Result} -> {Idx, Result}
+    after ?DEFAULT_TIMEOUT ->
+        {Idx, {error, timeout}}
+    end || {Idx, _} <- CallsWithIdx],
+
+    %% Sort by index and extract results
+    SortedResults = [R || {_, R} <- lists:keysort(1, Results)],
+
+    %% Check if all succeeded
+    case lists:all(fun({ok, _}) -> true; (_) -> false end, SortedResults) of
         true ->
-            py_subinterp_pool:parallel(Calls);
+            {ok, [V || {ok, V} <- SortedResults]};
         false ->
-            {error, subinterpreters_not_supported}
+            %% Return first error or all results
+            case lists:keyfind(error, 1, SortedResults) of
+                {error, _} = Err -> Err;
+                false -> {ok, SortedResults}
+            end
     end.
 
 %%% ============================================================================
@@ -620,12 +699,12 @@ state_decr(Key, Amount) ->
 %%% Module Reload
 %%% ============================================================================
 
-%% @doc Reload a Python module across all workers.
+%% @doc Reload a Python module across all contexts.
 %% This uses importlib.reload() to refresh the module from disk.
 %% Useful during development when Python code changes.
 %%
 %% Note: This only affects already-imported modules. If the module
-%% hasn't been imported in a worker yet, the reload is a no-op for that worker.
+%% hasn't been imported in a context yet, the reload is a no-op for that context.
 %%
 %% Example:
 %% ```
@@ -633,9 +712,9 @@ state_decr(Key, Amount) ->
 %% ok = py:reload(mymodule).
 %% '''
 %%
-%% Returns ok if reload succeeded in all workers, or {error, Reasons}
-%% if any workers failed.
--spec reload(py_module()) -> ok | {error, [{worker, term()}]}.
+%% Returns ok if reload succeeded in all contexts, or {error, Reasons}
+%% if any contexts failed.
+-spec reload(py_module()) -> ok | {error, [{context, term()}]}.
 reload(Module) ->
     ModuleBin = ensure_binary(Module),
     %% Build Python code that:
@@ -645,9 +724,12 @@ reload(Module) ->
     Code = <<"__import__('importlib').reload(__import__('sys').modules['",
              ModuleBin/binary,
              "']) if '", ModuleBin/binary, "' in __import__('sys').modules else None">>,
-    %% Broadcast to all workers
-    Request = {eval, undefined, undefined, Code, #{}},
-    Results = py_pool:broadcast(Request),
+    %% Broadcast to all contexts
+    NumContexts = py_context_router:num_contexts(),
+    Results = [begin
+        Ctx = py_context_router:get_context(N),
+        py_context:eval(Ctx, Code, #{})
+    end || N <- lists:seq(1, NumContexts)],
     %% Check if any failed
     Errors = lists:filtermap(fun
         ({ok, _}) -> false;
@@ -655,176 +737,7 @@ reload(Module) ->
     end, Results),
     case Errors of
         [] -> ok;
-        _ -> {error, [{worker, E} || E <- Errors]}
-    end.
-
-%%% ============================================================================
-%%% Context Affinity API
-%%% ============================================================================
-
-%% @doc Bind current process to a dedicated Python worker.
-%% All subsequent py:call/eval/exec operations from this process will use
-%% the same worker, preserving Python state (variables, imports) across calls.
-%%
-%% Example:
-%% ```
-%% ok = py:bind(),
-%% ok = py:exec(<<"x = 42">>),
-%% {ok, 42} = py:eval(<<"x">>),  % Same worker, x persists
-%% ok = py:unbind().
-%% '''
--spec bind() -> ok | {error, term()}.
-bind() ->
-    Key = {process, self()},
-    case py_pool:lookup_binding(Key) of
-        {ok, _} -> ok;  % Already bound
-        not_found ->
-            case py_pool:checkout(Key) of
-                {ok, _} -> ok;
-                Error -> Error
-            end
-    end.
-
-%% @doc Create an explicit context with a dedicated worker.
-%% Returns a context handle that can be passed to call/eval/exec variants.
-%% Multiple contexts can exist per process.
-%%
-%% Example:
-%% ```
-%% {ok, Ctx1} = py:bind(new),
-%% {ok, Ctx2} = py:bind(new),
-%% ok = py:exec(Ctx1, <<"x = 1">>),
-%% ok = py:exec(Ctx2, <<"x = 2">>),
-%% {ok, 1} = py:eval(Ctx1, <<"x">>),  % Isolated
-%% {ok, 2} = py:eval(Ctx2, <<"x">>),  % Isolated
-%% ok = py:unbind(Ctx1),
-%% ok = py:unbind(Ctx2).
-%% '''
--spec bind(new) -> {ok, py_ctx()} | {error, term()}.
-bind(new) ->
-    Ref = make_ref(),
-    Key = {context, Ref},
-    case py_pool:checkout(Key) of
-        {ok, _} -> {ok, #py_ctx{ref = Ref}};
-        Error -> Error
-    end.
-
-%% @doc Release bound worker for current process.
--spec unbind() -> ok.
-unbind() ->
-    py_pool:checkin({process, self()}).
-
-%% @doc Release explicit context's worker.
--spec unbind(py_ctx()) -> ok.
-unbind(#py_ctx{ref = Ref}) ->
-    py_pool:checkin({context, Ref}).
-
-%% @doc Check if current process is bound.
--spec is_bound() -> boolean().
-is_bound() ->
-    case py_pool:lookup_binding({process, self()}) of
-        {ok, _} -> true;
-        not_found -> false
-    end.
-
-%% @doc Execute function with temporary bound context.
-%% Automatically binds before and unbinds after (even on exception).
-%%
-%% With arity-0 function (uses implicit process binding):
-%% ```
-%% Result = py:with_context(fun() ->
-%%     ok = py:exec(<<"total = 0">>),
-%%     ok = py:exec(<<"total += 1">>),
-%%     py:eval(<<"total">>)
-%% end).
-%% %% {ok, 1}
-%% '''
-%%
-%% With arity-1 function (receives explicit context):
-%% ```
-%% Result = py:with_context(fun(Ctx) ->
-%%     ok = py:exec(Ctx, <<"x = 10">>),
-%%     py:eval(Ctx, <<"x * 2">>)
-%% end).
-%% %% {ok, 20}
-%% '''
--spec with_context(fun(() -> Result) | fun((py_ctx()) -> Result)) -> Result.
-with_context(Fun) when is_function(Fun, 0) ->
-    ok = bind(),
-    try Fun()
-    after unbind()
-    end;
-with_context(Fun) when is_function(Fun, 1) ->
-    {ok, Ctx} = bind(new),
-    try Fun(Ctx)
-    after unbind(Ctx)
-    end.
-
-%% @doc Call with explicit context.
--spec ctx_call(py_ctx(), py_module(), py_func(), py_args()) -> py_result().
-ctx_call(Ctx, Module, Func, Args) ->
-    ctx_call(Ctx, Module, Func, Args, #{}).
-
-%% @doc Call with explicit context and kwargs.
--spec ctx_call(py_ctx(), py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
-ctx_call(Ctx, Module, Func, Args, Kwargs) ->
-    ctx_call(Ctx, Module, Func, Args, Kwargs, ?DEFAULT_TIMEOUT).
-
-%% @doc Call with explicit context, kwargs, and timeout.
--spec ctx_call(py_ctx(), py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
-ctx_call(#py_ctx{ref = CtxRef}, Module, Func, Args, Kwargs, Timeout) ->
-    case py_semaphore:acquire(Timeout) of
-        ok ->
-            try
-                Ref = make_ref(),
-                TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-                Request = {call, Ref, self(), Module, Func, Args, Kwargs, TimeoutMs},
-                case py_pool:lookup_binding({context, CtxRef}) of
-                    {ok, Worker} -> py_pool:direct_request(Worker, Request);
-                    not_found -> error(context_not_bound)
-                end,
-                await(Ref, Timeout)
-            after
-                py_semaphore:release()
-            end;
-        {error, max_concurrent} ->
-            {error, {overloaded, py_semaphore:current(), py_semaphore:max_concurrent()}}
-    end.
-
-%% @doc Eval with explicit context.
--spec ctx_eval(py_ctx(), string() | binary()) -> py_result().
-ctx_eval(Ctx, Code) ->
-    ctx_eval(Ctx, Code, #{}).
-
-%% @doc Eval with explicit context and locals.
--spec ctx_eval(py_ctx(), string() | binary(), map()) -> py_result().
-ctx_eval(Ctx, Code, Locals) ->
-    ctx_eval(Ctx, Code, Locals, ?DEFAULT_TIMEOUT).
-
-%% @doc Eval with explicit context, locals, and timeout.
--spec ctx_eval(py_ctx(), string() | binary(), map(), timeout()) -> py_result().
-ctx_eval(#py_ctx{ref = CtxRef}, Code, Locals, Timeout) ->
-    Ref = make_ref(),
-    TimeoutMs = py_util:normalize_timeout(Timeout, ?DEFAULT_TIMEOUT),
-    Request = {eval, Ref, self(), Code, Locals, TimeoutMs},
-    case py_pool:lookup_binding({context, CtxRef}) of
-        {ok, Worker} -> py_pool:direct_request(Worker, Request);
-        not_found -> error(context_not_bound)
-    end,
-    await(Ref, Timeout).
-
-%% @doc Exec with explicit context.
--spec ctx_exec(py_ctx(), string() | binary()) -> ok | {error, term()}.
-ctx_exec(#py_ctx{ref = CtxRef}, Code) ->
-    Ref = make_ref(),
-    Request = {exec, Ref, self(), Code},
-    case py_pool:lookup_binding({context, CtxRef}) of
-        {ok, Worker} -> py_pool:direct_request(Worker, Request);
-        not_found -> error(context_not_bound)
-    end,
-    case await(Ref, ?DEFAULT_TIMEOUT) of
-        {ok, _} -> ok;
-        Error -> Error
+        _ -> {error, [{context, E} || E <- Errors]}
     end.
 
 %%% ============================================================================
@@ -907,3 +820,134 @@ get_traces() ->
 -spec clear_traces() -> ok.
 clear_traces() ->
     py_tracer:clear().
+
+%%% ============================================================================
+%%% Process-per-context API
+%%%
+%%% This new architecture uses one Erlang process per Python context.
+%%% Each context owns its Python interpreter (subinterpreter on Python 3.12+
+%%% or worker on older versions). This eliminates mutex contention and
+%%% enables true N-way parallelism.
+%%%
+%%% Usage:
+%%% ```
+%%% %% Start the context system (usually done by the application)
+%%% {ok, _} = py:start_contexts(),
+%%%
+%%% %% Get context for current scheduler (automatic routing)
+%%% Ctx = py:context(),
+%%% {ok, Result} = py:call(Ctx, math, sqrt, [16]),
+%%%
+%%% %% Or bind a specific context to this process
+%%% ok = py:bind_context(py:context(1)),
+%%% {ok, Result} = py:call(py:context(), math, sqrt, [16]).
+%%% '''
+%%% ============================================================================
+
+%% @doc Start the process-per-context system with default settings.
+%%
+%% Creates one context per scheduler, using auto mode (subinterp on
+%% Python 3.12+, worker otherwise).
+%%
+%% @returns {ok, [Context]} | {error, Reason}
+-spec start_contexts() -> {ok, [pid()]} | {error, term()}.
+start_contexts() ->
+    py_context_router:start().
+
+%% @doc Start the process-per-context system with options.
+%%
+%% Options:
+%% - `contexts' - Number of contexts to create (default: number of schedulers)
+%% - `mode' - Context mode: `auto', `subinterp', or `worker' (default: `auto')
+%%
+%% @param Opts Start options
+%% @returns {ok, [Context]} | {error, Reason}
+-spec start_contexts(map()) -> {ok, [pid()]} | {error, term()}.
+start_contexts(Opts) ->
+    py_context_router:start(Opts).
+
+%% @doc Stop the process-per-context system.
+-spec stop_contexts() -> ok.
+stop_contexts() ->
+    py_context_router:stop().
+
+%% @doc Check if contexts have been started.
+-spec contexts_started() -> boolean().
+contexts_started() ->
+    py_context_router:is_started().
+
+%% @doc Get the context for the current process.
+%%
+%% If the process has a bound context (via bind_context/1), returns that.
+%% Otherwise, selects a context based on the current scheduler ID.
+%%
+%% This provides automatic load distribution across contexts while
+%% maintaining scheduler affinity for cache locality.
+%%
+%% @returns Context pid
+-spec context() -> pid().
+context() ->
+    py_context_router:get_context().
+
+%% @doc Get a specific context by index.
+%%
+%% @param N Context index (1 to num_contexts)
+%% @returns Context pid
+-spec context(pos_integer()) -> pid().
+context(N) ->
+    py_context_router:get_context(N).
+
+%%% ============================================================================
+%%% py_ref API (Python object references with auto-routing)
+%%%
+%%% These functions work with py_ref references that carry both a Python
+%%% object and the interpreter ID that created it. Method calls and
+%%% attribute access are automatically routed to the correct context.
+%%% ============================================================================
+
+%% @doc Call a method on a Python object reference.
+%%
+%% The reference carries the interpreter ID, so the call is automatically
+%% routed to the correct context.
+%%
+%% Example:
+%% ```
+%% {ok, Ref} = py:call(Ctx, builtins, list, [[1,2,3]], #{return => ref}),
+%% {ok, 3} = py:call_method(Ref, '__len__', []).
+%% '''
+%%
+%% @param Ref py_ref reference
+%% @param Method Method name
+%% @param Args Arguments list
+%% @returns {ok, Result} | {error, Reason}
+-spec call_method(reference(), atom() | binary(), list()) -> py_result().
+call_method(Ref, Method, Args) ->
+    MethodBin = ensure_binary(Method),
+    py_nif:ref_call_method(Ref, MethodBin, Args).
+
+%% @doc Get an attribute from a Python object reference.
+%%
+%% @param Ref py_ref reference
+%% @param Name Attribute name
+%% @returns {ok, Value} | {error, Reason}
+-spec getattr(reference(), atom() | binary()) -> py_result().
+getattr(Ref, Name) ->
+    NameBin = ensure_binary(Name),
+    py_nif:ref_getattr(Ref, NameBin).
+
+%% @doc Convert a Python object reference to an Erlang term.
+%%
+%% @param Ref py_ref reference
+%% @returns {ok, Term} | {error, Reason}
+-spec to_term(reference()) -> py_result().
+to_term(Ref) ->
+    py_nif:ref_to_term(Ref).
+
+%% @doc Check if a term is a py_ref reference.
+%%
+%% @param Term Term to check
+%% @returns true | false
+-spec is_ref(term()) -> boolean().
+is_ref(Term) ->
+    py_nif:is_ref(Term).
+

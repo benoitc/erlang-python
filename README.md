@@ -32,6 +32,7 @@ Key features:
 - **AI/ML ready** - Examples for embeddings, semantic search, RAG, and LLMs
 - **Logging integration** - Python logging forwarded to Erlang logger
 - **Distributed tracing** - Span-based tracing from Python code
+- **Security sandbox** - Blocks fork/exec operations that would corrupt the VM
 
 ## Requirements
 
@@ -66,7 +67,7 @@ application:ensure_all_started(erlang_python).
 {ok, 25} = py:eval(<<"x * y">>, #{x => 5, y => 5}).
 
 %% Async calls
-Ref = py:call_async(math, factorial, [100]),
+Ref = py:cast(math, factorial, [100]),
 {ok, Result} = py:await(Ref).
 
 %% Streaming from generators
@@ -443,7 +444,7 @@ escript examples/logging_example.erl
 {ok, Result} = py:call(Module, Function, Args, KwArgs, Timeout).
 
 %% Async
-Ref = py:call_async(Module, Function, Args).
+Ref = py:cast(Module, Function, Args).
 {ok, Result} = py:await(Ref).
 {ok, Result} = py:await(Ref, Timeout).
 ```
@@ -557,8 +558,10 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 ## Error Handling
 
 ```erlang
-{error, {'NameError', "name 'x' is not defined"}} = py:eval(<<"x">>).
-{error, {'ZeroDivisionError', "division by zero"}} = py:eval(<<"1/0">>).
+%% Python exceptions return {error, {TypeString, Message}}
+%% Note: Exception types are strings (not atoms) since v2.0 to prevent atom table exhaustion
+{error, {"NameError", "name 'x' is not defined"}} = py:eval(<<"x">>).
+{error, {"ZeroDivisionError", "division by zero"}} = py:eval(<<"1/0">>).
 {error, timeout} = py:eval(<<"sum(range(10**9))">>, #{}, 100).
 ```
 
@@ -573,6 +576,8 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Threading](docs/threading.md)
 - [Logging and Tracing](docs/logging.md)
 - [Asyncio Event Loop](docs/asyncio.md) - Erlang-native asyncio with TCP/UDP support
+- [Reactor](docs/reactor.md) - FD-based protocol handling
+- [Security](docs/security.md) - Sandbox and blocked operations
 - [Web Frameworks](docs/web-frameworks.md) - ASGI/WSGI integration
 - [Changelog](https://github.com/benoitc/erlang-python/releases)
 

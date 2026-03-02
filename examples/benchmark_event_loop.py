@@ -459,16 +459,19 @@ def main():
 
     # Test with Erlang event loop
     try:
-        # Try to import the Erlang event loop
+        # Try to import from erlang module (primary API)
         try:
-            from erlang_loop import ErlangEventLoop
+            from erlang import ErlangEventLoop
         except ImportError:
-            # Try loading from priv directory
-            import os
-            priv_path = os.path.join(os.path.dirname(__file__), '..', 'priv')
-            if priv_path not in sys.path:
-                sys.path.insert(0, priv_path)
-            from erlang_loop import ErlangEventLoop
+            # Fallback to _erlang_impl if erlang module not extended
+            try:
+                from _erlang_impl import ErlangEventLoop
+            except ImportError:
+                import os
+                priv_path = os.path.join(os.path.dirname(__file__), '..', 'priv')
+                if priv_path not in sys.path:
+                    sys.path.insert(0, priv_path)
+                from _erlang_impl import ErlangEventLoop
 
         erlang_loop = ErlangEventLoop()
         erlang_results = run_benchmark_suite("Erlang Event Loop", erlang_loop)

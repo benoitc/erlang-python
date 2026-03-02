@@ -120,8 +120,19 @@ static int init_wsgi_interp_state(wsgi_interp_state_t *state) {
     if (!state->method_patch) return -1;
 
     /* WSGI version tuple (1, 0) */
-    state->wsgi_version_tuple = PyTuple_Pack(2, PyLong_FromLong(1), PyLong_FromLong(0));
-    if (!state->wsgi_version_tuple) return -1;
+    {
+        PyObject *v1 = PyLong_FromLong(1);
+        PyObject *v2 = PyLong_FromLong(0);
+        if (!v1 || !v2) {
+            Py_XDECREF(v1);
+            Py_XDECREF(v2);
+            return -1;
+        }
+        state->wsgi_version_tuple = PyTuple_Pack(2, v1, v2);
+        Py_DECREF(v1);
+        Py_DECREF(v2);
+        if (!state->wsgi_version_tuple) return -1;
+    }
 
     /* Boolean constants */
     state->py_true = Py_True;

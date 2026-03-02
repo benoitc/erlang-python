@@ -28,6 +28,8 @@ all() ->
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
+    %% Ensure contexts are running
+    {ok, _} = py:start_contexts(),
     Config.
 
 end_per_suite(_Config) ->
@@ -35,11 +37,9 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    py:unbind(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    py:unbind(),
     ok.
 
 %% ============================================================================

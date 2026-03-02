@@ -42,7 +42,6 @@ run_all(UserOpts) ->
     io:format("Erlang/OTP: ~s~n", [erlang:system_info(otp_release)]),
     io:format("Schedulers: ~p~n", [erlang:system_info(schedulers)]),
     {ok, _} = application:ensure_all_started(erlang_python),
-    py:bind(),
     Results = #{
         commit => list_to_binary(get_git_commit()),
         timestamp => erlang:system_time(millisecond),
@@ -53,7 +52,6 @@ run_all(UserOpts) ->
         tcp_echo_concurrent => safe_bench(fun() -> tcp_echo_concurrent(Opts) end),
         tcp_connections_scaling => safe_bench(fun() -> tcp_connections_scaling(Opts) end)
     },
-    py:unbind(),
     io:format("~n========================================~n"),
     io:format("Summary~n"),
     io:format("========================================~n"),
@@ -107,7 +105,7 @@ import time
 import threading
 import sys
 sys.path.insert(0, 'priv')
-from erlang_loop import ErlangEventLoop
+from _erlang_impl import ErlangEventLoop
 
 def run_timer_throughput_concurrent(n_timers, n_workers):
     results = []

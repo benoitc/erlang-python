@@ -6,7 +6,7 @@ sys.path.insert(0, 'priv')
 
 import asyncio
 import time
-from erlang_loop import ErlangEventLoop
+from _erlang_impl import ErlangEventLoop
 
 def run_test():
     results = {}
@@ -39,18 +39,18 @@ def run_test():
     results['default_time'] = default_time
     results['default_rate'] = int(n/default_time)
 
-    # Isolated loop test
-    loop = ErlangEventLoop(isolated=True)
+    # Direct loop test
+    loop = ErlangEventLoop()
     asyncio.set_event_loop(loop)
     start = time.perf_counter()
     try:
         loop.run_until_complete(timer_test(n))
     finally:
         loop.close()
-    isolated_time = time.perf_counter() - start
-    results['isolated_time'] = isolated_time
-    results['isolated_rate'] = int(n/isolated_time)
+    direct_time = time.perf_counter() - start
+    results['direct_time'] = direct_time
+    results['direct_rate'] = int(n/direct_time)
 
-    results['ratio'] = default_time/isolated_time
+    results['ratio'] = default_time/direct_time
 
     return results

@@ -638,9 +638,11 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
     PyObject *type_name = PyObject_GetAttrString(type, "__name__");
     const char *type_str = type_name ? PyUnicode_AsUTF8(type_name) : "Exception";
 
-    /* Build error tuple: {error, {TypeAtom, MessageString}} */
+    /* Build error tuple: {error, {TypeString, MessageString}} */
+    /* Use string instead of atom to prevent atom table exhaustion from
+     * arbitrary Python exception type names (custom exceptions, third-party libs) */
     ERL_NIF_TERM error_tuple = enif_make_tuple2(env,
-        enif_make_atom(env, type_str),
+        enif_make_string(env, type_str, ERL_NIF_LATIN1),
         enif_make_string(env, err_msg, ERL_NIF_LATIN1));
 
     /* Clean up Python objects */

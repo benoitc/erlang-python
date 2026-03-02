@@ -6,6 +6,15 @@ This guide covers the Erlang-native asyncio event loop implementation that provi
 
 The `ErlangEventLoop` is a custom asyncio event loop backed by Erlang's scheduler using `enif_select` for I/O multiplexing. This replaces Python's polling-based event loop with true event-driven callbacks integrated into the BEAM VM.
 
+All asyncio functionality is available through the unified `erlang` module:
+
+```python
+import erlang
+
+# Preferred way to run async code
+erlang.run(main())
+```
+
 ### Key Benefits
 
 - **Sub-millisecond latency** - Events are delivered immediately via Erlang messages instead of polling every 10ms
@@ -63,37 +72,81 @@ The `ErlangEventLoop` is a custom asyncio event loop backed by Erlang's schedule
 | `py_event_router` | Routes timer/FD events to the correct event loop instance |
 | `erlang_asyncio` | High-level asyncio-compatible API with direct Erlang integration |
 
-## Usage
+## Usage Patterns
+
+### Pattern 1: `erlang.run()` (Recommended)
+
+The preferred way to run async code, matching uvloop's API:
 
 ```python
-from erlang_loop import ErlangEventLoop
-import asyncio
-
-# Create and set the event loop
-loop = ErlangEventLoop()
-asyncio.set_event_loop(loop)
+import erlang
 
 async def main():
     await asyncio.sleep(1.0)  # Uses erlang:send_after internally
     print("Done!")
 
-asyncio.run(main())
+# Simple and clean
+erlang.run(main())
 ```
 
-Or use the provided event loop policy:
+### Pattern 2: With `asyncio.Runner` (Python 3.11+)
 
 ```python
-from erlang_loop import get_event_loop_policy
 import asyncio
+import erlang
 
-asyncio.set_event_loop_policy(get_event_loop_policy())
+with asyncio.Runner(loop_factory=erlang.new_event_loop) as runner:
+    runner.run(main())
+```
 
-async def main():
-    # Uses ErlangEventLoop automatically
-    await asyncio.sleep(0.5)
+### Pattern 3: `erlang.install()` (Deprecated in Python 3.12+)
 
+This pattern installs the ErlangEventLoopPolicy globally. It's deprecated in Python 3.12+ because `asyncio.run()` no longer respects global policies:
+
+```python
+import asyncio
+import erlang
+
+erlang.install()  # Deprecated in 3.12+, use erlang.run() instead
 asyncio.run(main())
 ```
+
+### Pattern 4: Manual Loop Management
+
+For cases where you need direct control:
+
+```python
+import asyncio
+import erlang
+
+loop = erlang.new_event_loop()
+asyncio.set_event_loop(loop)
+try:
+    loop.run_until_complete(main())
+finally:
+    loop.close()
+```
+
+## Execution Mode Detection
+
+The `erlang` module can detect the Python execution mode:
+
+```python
+from erlang import detect_mode, ExecutionMode
+
+mode = detect_mode()
+if mode == ExecutionMode.FREE_THREADED:
+    print("Running in free-threaded mode (no GIL)")
+elif mode == ExecutionMode.SUBINTERP:
+    print("Running in subinterpreter with per-interpreter GIL")
+else:
+    print("Running with shared GIL")
+```
+
+**ExecutionMode values:**
+- `FREE_THREADED` - Python 3.13+ with `Py_GIL_DISABLED` (no GIL)
+- `SUBINTERP` - Python 3.12+ running in a subinterpreter
+- `SHARED_GIL` - Traditional Python with shared GIL
 
 ## TCP Support
 
@@ -306,7 +359,7 @@ transport.sendto(b'Hello')  # Goes to connected address
 
 ```python
 import asyncio
-from erlang_loop import ErlangEventLoop
+from erlang import ErlangEventLoop
 
 class EchoServerProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
@@ -499,44 +552,19 @@ ok = py_nif:event_loop_set_router(LoopRef, RouterPid).
 
 Events are delivered as Erlang messages, enabling the event loop to participate in BEAM's supervision trees and distributed computing capabilities.
 
-## Isolated Event Loops
+## Event Loop Architecture
 
-By default, all `ErlangEventLoop` instances share a single underlying native event loop managed by Erlang. For multi-threaded applications where each thread needs its own event loop, you can create isolated loops.
-
-### Creating an Isolated Loop
-
-Use the `isolated=True` parameter to create a loop with its own pending queue:
-
-```python
-from erlang_loop import ErlangEventLoop
-
-# Default: uses shared global loop
-shared_loop = ErlangEventLoop()
-
-# Isolated: creates its own native loop
-isolated_loop = ErlangEventLoop(isolated=True)
-```
-
-### When to Use Isolated Loops
-
-| Use Case | Loop Type |
-|----------|-----------|
-| Single-threaded asyncio applications | Default (shared) |
-| Web frameworks (ASGI/WSGI) | Default (shared) |
-| Multi-threaded Python with separate event loops | `isolated=True` |
-| Sub-interpreters | `isolated=True` |
-| Free-threaded Python (3.13+) | `isolated=True` |
-| Testing loop isolation | `isolated=True` |
+Each `ErlangEventLoop` instance has its own isolated capsule with a dedicated pending queue. This ensures that timers and FD events are properly routed to the correct loop instance.
 
 ### Multi-threaded Example
 
 ```python
-from erlang_loop import ErlangEventLoop
+from erlang import ErlangEventLoop
 import threading
 
-def run_isolated_tasks(loop_id):
-    """Each thread gets its own isolated event loop."""
-    loop = ErlangEventLoop(isolated=True)
+def run_tasks(loop_id):
+    """Each thread gets its own event loop."""
+    loop = ErlangEventLoop()
 
     results = []
 
@@ -558,8 +586,8 @@ def run_isolated_tasks(loop_id):
     return results
 
 # Run in separate threads
-t1 = threading.Thread(target=run_isolated_tasks, args=('loop_a',))
-t2 = threading.Thread(target=run_isolated_tasks, args=('loop_b',))
+t1 = threading.Thread(target=run_tasks, args=('loop_a',))
+t2 = threading.Thread(target=run_tasks, args=('loop_b',))
 
 t1.start()
 t2.start()
@@ -568,7 +596,7 @@ t2.join()
 # Each thread only sees its own callbacks
 ```
 
-### Architecture
+### Internal Architecture
 
 A shared router process handles timer and FD events for all loops:
 
@@ -590,15 +618,17 @@ A shared router process handles timer and FD events for all loops:
     └─────────┘          └─────────┘          └─────────┘
 ```
 
-Each isolated loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The shared router dispatches timer and FD events to the correct loop based on the resource backref.
+Each loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The shared router dispatches timer and FD events to the correct loop based on the capsule backref.
 
-## erlang_asyncio Module
+## Erlang Asyncio Primitives
 
-The `erlang_asyncio` module provides asyncio-compatible primitives that use Erlang's native scheduler for maximum performance. This is the recommended way to use async/await patterns when you need explicit Erlang timer integration.
+> **Note:** The `erlang_asyncio` module has been unified into the main `erlang` module. Use `import erlang` and `erlang.run()` instead.
+
+The `erlang` module provides asyncio-compatible primitives that use Erlang's native scheduler for maximum performance. This is the recommended way to use async/await patterns when you need explicit Erlang timer integration.
 
 ### Overview
 
-Unlike the standard `asyncio` module which uses Python's polling-based event loop, `erlang_asyncio` uses Erlang's `erlang:send_after/3` for timers and integrates directly with the BEAM scheduler. This eliminates Python event loop overhead (~0.5-1ms per operation) and provides more precise timing.
+Unlike the standard `asyncio` module which uses Python's polling-based event loop, the `erlang` module uses Erlang's `erlang:send_after/3` for timers and integrates directly with the BEAM scheduler. This eliminates Python event loop overhead (~0.5-1ms per operation) and provides more precise timing.
 
 ### Architecture
 
@@ -644,231 +674,308 @@ Unlike the standard `asyncio` module which uses Python's polling-based event loo
 ### Basic Usage
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def my_handler():
     # Sleep using Erlang's timer system
-    await erlang_asyncio.sleep(0.1)  # 100ms
+    await asyncio.sleep(0.1)  # 100ms - uses erlang:send_after internally
     return "done"
 
-# Run a coroutine
-result = erlang_asyncio.run(my_handler())
+# Run a coroutine with Erlang event loop
+result = erlang.run(my_handler())
 ```
 
 ### API Reference
 
-#### sleep(delay, result=None)
+When using `erlang.run()` or the Erlang event loop, all standard asyncio functions work seamlessly with Erlang's backend.
 
-Sleep for the specified delay using Erlang's native timer system.
+#### asyncio.sleep(delay)
+
+Sleep for the specified delay. Uses Erlang's `erlang:send_after/3` internally.
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def example():
-    # Simple sleep
-    await erlang_asyncio.sleep(0.05)  # 50ms
+    # Simple sleep - uses Erlang timer system
+    await asyncio.sleep(0.05)  # 50ms
 
-    # Sleep and return a value
-    value = await erlang_asyncio.sleep(0.01, result='ready')
-    assert value == 'ready'
+erlang.run(example())
 ```
 
-**Parameters:**
-- `delay` (float): Time to sleep in seconds
-- `result` (optional): Value to return after sleeping (default: None)
-
-**Returns:** The `result` argument
-
-#### run(coro)
+#### erlang.run(coro)
 
 Run a coroutine to completion using an ErlangEventLoop.
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def main():
-    await erlang_asyncio.sleep(0.01)
+    await asyncio.sleep(0.01)
     return 42
 
-result = erlang_asyncio.run(main())
+result = erlang.run(main())
 assert result == 42
 ```
 
-#### gather(*coros, return_exceptions=False)
+#### asyncio.gather(*coros, return_exceptions=False)
 
 Run coroutines concurrently and gather results.
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def task(n):
-    await erlang_asyncio.sleep(0.01)
+    await asyncio.sleep(0.01)
     return n * 2
 
 async def main():
-    results = await erlang_asyncio.gather(task(1), task(2), task(3))
+    results = await asyncio.gather(task(1), task(2), task(3))
     assert results == [2, 4, 6]
 
-erlang_asyncio.run(main())
+erlang.run(main())
 ```
 
-#### wait_for(coro, timeout)
+#### asyncio.wait_for(coro, timeout)
 
 Wait for a coroutine with a timeout.
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def fast_task():
-    await erlang_asyncio.sleep(0.01)
+    await asyncio.sleep(0.01)
     return 'done'
 
 async def main():
     try:
-        result = await erlang_asyncio.wait_for(fast_task(), timeout=1.0)
-    except erlang_asyncio.TimeoutError:
+        result = await asyncio.wait_for(fast_task(), timeout=1.0)
+    except asyncio.TimeoutError:
         print("Task timed out")
 
-erlang_asyncio.run(main())
+erlang.run(main())
 ```
 
-#### create_task(coro, *, name=None)
+#### asyncio.create_task(coro, *, name=None)
 
 Create a task to run a coroutine in the background.
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def background_work():
-    await erlang_asyncio.sleep(0.1)
+    await asyncio.sleep(0.1)
     return 'background_done'
 
 async def main():
-    task = erlang_asyncio.create_task(background_work())
+    task = asyncio.create_task(background_work())
 
     # Do other work while task runs
-    await erlang_asyncio.sleep(0.05)
+    await asyncio.sleep(0.05)
 
     # Wait for task to complete
     result = await task
     assert result == 'background_done'
 
-erlang_asyncio.run(main())
+erlang.run(main())
 ```
 
-#### wait(fs, *, timeout=None, return_when=ALL_COMPLETED)
+#### asyncio.wait(fs, *, timeout=None, return_when=ALL_COMPLETED)
 
 Wait for multiple futures/tasks.
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def main():
     tasks = [
-        erlang_asyncio.create_task(erlang_asyncio.sleep(0.01, result=i))
+        asyncio.create_task(asyncio.sleep(0.01))
         for i in range(3)
     ]
 
-    done, pending = await erlang_asyncio.wait(
+    done, pending = await asyncio.wait(
         tasks,
-        return_when=erlang_asyncio.ALL_COMPLETED
+        return_when=asyncio.ALL_COMPLETED
     )
 
     assert len(done) == 3
     assert len(pending) == 0
 
-erlang_asyncio.run(main())
+erlang.run(main())
 ```
 
 #### Event Loop Functions
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
-# Get the current event loop (creates ErlangEventLoop if needed)
-loop = erlang_asyncio.get_event_loop()
-
-# Create a new event loop
-loop = erlang_asyncio.new_event_loop()
+# Create a new Erlang-backed event loop
+loop = erlang.new_event_loop()
 
 # Set the current event loop
-erlang_asyncio.set_event_loop(loop)
+asyncio.set_event_loop(loop)
 
 # Get the running loop (raises RuntimeError if none)
-loop = erlang_asyncio.get_running_loop()
+loop = asyncio.get_running_loop()
 ```
 
-#### Additional Functions
-
-- `ensure_future(coro_or_future, *, loop=None)` - Wrap a coroutine in a Future
-- `shield(arg)` - Protect a coroutine from cancellation
-
-#### Context Manager
+#### Context Manager for Timeouts
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def main():
-    async with erlang_asyncio.timeout(1.0):
+    async with asyncio.timeout(1.0):
         await slow_operation()  # Raises TimeoutError if > 1s
-```
 
-#### Exceptions and Constants
-
-```python
-import erlang_asyncio
-
-# Exceptions
-erlang_asyncio.TimeoutError
-erlang_asyncio.CancelledError
-
-# Constants for wait()
-erlang_asyncio.ALL_COMPLETED
-erlang_asyncio.FIRST_COMPLETED
-erlang_asyncio.FIRST_EXCEPTION
+erlang.run(main())
 ```
 
 ### Performance Comparison
 
-| Operation | asyncio | erlang_asyncio | Improvement |
-|-----------|---------|----------------|-------------|
+| Operation | Standard asyncio | Erlang Event Loop | Improvement |
+|-----------|------------------|-------------------|-------------|
 | sleep(1ms) | ~1.5ms | ~1.1ms | ~27% faster |
-| Event loop overhead | ~0.5-1ms | ~0 | No Python loop |
+| Event loop overhead | ~0.5-1ms | ~0 | Erlang scheduler |
 | Timer precision | 10ms polling | Sub-ms | BEAM scheduler |
 | Idle CPU | Polling | Zero | Event-driven |
 
-### When to Use erlang_asyncio
+### When to Use Erlang Event Loop
 
-**Use `erlang_asyncio` when:**
+**Use `erlang.run()` when:**
 - You need precise sub-millisecond timing
 - Your app makes many small sleep calls
 - You want to eliminate Python event loop overhead
 - Building ASGI handlers that need efficient sleep
+- Your app is running inside erlang_python
 
-**Use standard `asyncio` when:**
-- You need full asyncio compatibility (aiohttp, asyncpg, etc.)
-- You're using third-party async libraries
-- You need complex I/O multiplexing
+**Use standard `asyncio.run()` when:**
+- You're running outside the Erlang VM
+- Testing Python code in isolation
 
 ### Integration with ASGI Frameworks
 
-For ASGI applications (FastAPI, Starlette, etc.), you can use `erlang_asyncio.sleep` as a drop-in replacement:
+For ASGI applications (FastAPI, Starlette, etc.), you can use the Erlang event loop for better performance:
 
 ```python
 from fastapi import FastAPI
-import erlang_asyncio
+import asyncio
 
 app = FastAPI()
 
 @app.get("/delay")
 async def delay_endpoint(ms: int = 100):
-    # Uses Erlang timer instead of asyncio event loop
-    await erlang_asyncio.sleep(ms / 1000.0)
+    # When running via py_asgi, uses Erlang timer
+    await asyncio.sleep(ms / 1000.0)
     return {"slept_ms": ms}
 ```
 
+## Async Worker Backend (Internal)
+
+The `py:async_call/3,4` and `py:await/1,2` APIs use an event-driven backend based on `py_event_loop`.
+
+### Architecture
+
+```
+┌─────────────┐     ┌─────────────────┐     ┌──────────────────────┐
+│ Erlang      │     │ C NIF           │     │ py_event_loop        │
+│ py:async_   │     │ (no thread)     │     │ (Erlang process)     │
+│ call()      │     │                 │     │                      │
+└──────┬──────┘     └────────┬────────┘     └──────────┬───────────┘
+       │                     │                         │
+       │ 1. Message to       │                         │
+       │    event_loop       │                         │
+       │─────────────────────┼────────────────────────>│
+       │                     │                         │
+       │ 2. Return Ref       │                         │
+       │<────────────────────┼─────────────────────────│
+       │                     │                         │
+       │                     │   enif_select (wait)    │
+       │                     │   ┌───────────────────┐ │
+       │                     │   │ Run Python        │ │
+       │                     │   │ erlang.send(pid,  │ │
+       │                     │   │   result)         │ │
+       │                     │   └───────────────────┘ │
+       │                     │                         │
+       │ 3. {async_result}   │                         │
+       │<──────────────────────────────────────────────│
+       │     (direct erlang.send from Python)          │
+       │                     │                         │
+```
+
+### Key Components
+
+| Component | Role |
+|-----------|------|
+| `py_event_loop_pool` | Pool manager for event loop-based async execution |
+| `py_event_loop:run_async/2` | Submit coroutine to event loop |
+| `_run_and_send` | Python wrapper that sends result via `erlang.send()` |
+| `nif_event_loop_run_async` | NIF for direct coroutine submission |
+
+### Performance Benefits
+
+| Aspect | Previous (pthread) | Current (event_loop) |
+|--------|-------------------|---------------------|
+| Latency | ~10-20ms polling | <1ms (enif_select) |
+| CPU idle | 100 wakeups/sec | Zero |
+| Threads | N pthreads | 0 extra threads |
+| GIL | Acquire/release in thread | Already held in callback |
+| Shutdown | pthread_join (blocking) | Clean Erlang messages |
+
+The event-driven model eliminates the polling overhead of the previous pthread+usleep
+implementation, resulting in significantly lower latency for async operations.
+
+## Limitations
+
+### Subprocess Operations Not Supported
+
+The `ErlangEventLoop` does not support subprocess operations:
+
+```python
+# These will raise NotImplementedError:
+loop.subprocess_shell(...)
+loop.subprocess_exec(...)
+
+# asyncio.create_subprocess_* will also fail
+await asyncio.create_subprocess_shell(...)
+await asyncio.create_subprocess_exec(...)
+```
+
+**Why?** Subprocess operations use `fork()` which would corrupt the Erlang VM. See [Security](security.md) for details.
+
+**Alternative:** Use Erlang ports (`open_port/2`) for subprocess management. You can register an Erlang function that runs shell commands and call it from Python via `erlang.call()`.
+
+### Signal Handling Not Supported
+
+The `ErlangEventLoop` does not support signal handlers:
+
+```python
+# These will raise NotImplementedError:
+loop.add_signal_handler(signal.SIGTERM, handler)
+loop.remove_signal_handler(signal.SIGTERM)
+```
+
+**Why?** Signal handling should be done at the Erlang VM level. The BEAM has its own signal handling infrastructure that's integrated with supervisors and the OTP design patterns.
+
+**Alternative:** Handle signals in Erlang using the `kernel` application's signal handling or write a port program that forwards signals to Erlang processes.
+
+## Protocol-Based I/O
+
+For building custom servers with low-level protocol handling, see the [Reactor](reactor.md) module. The reactor provides FD-based protocol handling where Erlang manages I/O scheduling via `enif_select` and Python implements protocol logic.
+
 ## See Also
 
+- [Reactor](reactor.md) - Low-level FD-based protocol handling
+- [Security](security.md) - Sandbox and blocked operations
 - [Threading](threading.md) - For `erlang.async_call()` in asyncio contexts
 - [Streaming](streaming.md) - For working with Python generators
 - [Getting Started](getting-started.md) - Basic usage guide

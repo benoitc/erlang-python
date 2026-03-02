@@ -56,6 +56,7 @@
     subinterp_worker_new/0,
     subinterp_worker_destroy/1,
     subinterp_call/5,
+    subinterp_asgi_run/6,
     parallel_execute/2,
     %% Execution mode info
     execution_mode/0,
@@ -81,6 +82,7 @@
     event_loop_set_worker/2,
     event_loop_set_id/2,
     event_loop_wakeup/1,
+    event_loop_run_async/7,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -128,8 +130,46 @@
     %% ASGI optimizations
     asgi_build_scope/1,
     asgi_run/5,
+    %% ASGI profiling (only available when compiled with -DASGI_PROFILING)
+    asgi_profile_stats/0,
+    asgi_profile_reset/0,
     %% WSGI optimizations
-    wsgi_run/4
+    wsgi_run/4,
+    %% Worker pool
+    pool_start/1,
+    pool_stop/0,
+    pool_submit/5,
+    pool_stats/0,
+    %% Process-per-context API (no mutex)
+    context_create/1,
+    context_destroy/1,
+    context_call/5,
+    context_eval/3,
+    context_exec/2,
+    context_call_method/4,
+    context_to_term/1,
+    context_interp_id/1,
+    context_set_callback_handler/2,
+    context_get_callback_pipe/1,
+    context_write_callback_response/2,
+    context_resume/3,
+    context_cancel_resume/2,
+    %% py_ref API (Python object references with interp_id)
+    ref_wrap/2,
+    is_ref/1,
+    ref_interp_id/1,
+    ref_to_term/1,
+    ref_getattr/2,
+    ref_call_method/3,
+    %% Reactor NIFs - Erlang-as-Reactor architecture
+    reactor_register_fd/3,
+    reactor_reselect_read/1,
+    reactor_select_write/1,
+    get_fd_from_resource/1,
+    reactor_on_read_ready/2,
+    reactor_on_write_ready/2,
+    reactor_init_connection/3,
+    reactor_close_fd/1
 ]).
 
 -on_load(load_nif/0).
@@ -397,6 +437,14 @@ subinterp_worker_destroy(_WorkerRef) ->
 subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
+%% @doc Run an ASGI application in a sub-interpreter.
+%% This runs ASGI in a subinterpreter with its own GIL for true parallelism.
+%% Args: WorkerRef, Runner (binary), Module (binary), Callable (binary), Scope (map), Body (binary)
+-spec subinterp_asgi_run(reference(), binary(), binary(), binary(), map(), binary()) ->
+    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
+subinterp_asgi_run(_WorkerRef, _Runner, _Module, _Callable, _Scope, _Body) ->
+    ?NIF_STUB.
+
 %% @doc Execute multiple calls in parallel across sub-interpreters.
 %% Args: WorkerRefs (list of refs), Calls (list of {Module, Func, Args})
 %% Returns: List of results (one per call)
@@ -543,6 +591,14 @@ event_loop_set_id(_LoopRef, _LoopId) ->
 %% @doc Wake up an event loop from a wait.
 -spec event_loop_wakeup(reference()) -> ok | {error, term()}.
 event_loop_wakeup(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Submit an async coroutine to run on the event loop.
+%% When the coroutine completes, the result is sent to CallerPid via erlang.send().
+%% This replaces the pthread+usleep polling model with direct message passing.
+-spec event_loop_run_async(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
+    ok | {error, term()}.
+event_loop_run_async(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.
@@ -867,6 +923,34 @@ asgi_build_scope(_ScopeMap) ->
 asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
     ?NIF_STUB.
 
+%% @doc Get ASGI profiling statistics.
+%%
+%% Only available when NIF is compiled with -DASGI_PROFILING.
+%% Returns timing breakdown for each phase of ASGI request handling:
+%% - gil_acquire_us: Time to acquire Python GIL
+%% - string_conv_us: Time to convert binary strings
+%% - module_import_us: Time to import Python module
+%% - get_callable_us: Time to get ASGI callable
+%% - scope_build_us: Time to build scope dict
+%% - body_conv_us: Time to convert body binary
+%% - runner_import_us: Time to import runner module
+%% - runner_call_us: Time to call the runner (includes Python ASGI execution)
+%% - response_extract_us: Time to extract response
+%% - gil_release_us: Time to release GIL
+%% - total_us: Total time
+%%
+%% @returns {ok, StatsMap} or {error, not_available} if profiling not enabled
+-spec asgi_profile_stats() -> {ok, map()} | {error, term()}.
+asgi_profile_stats() ->
+    {error, profiling_not_enabled}.
+
+%% @doc Reset ASGI profiling statistics.
+%%
+%% Only available when NIF is compiled with -DASGI_PROFILING.
+-spec asgi_profile_reset() -> ok | {error, term()}.
+asgi_profile_reset() ->
+    {error, profiling_not_enabled}.
+
 %%% ============================================================================
 %%% WSGI Optimizations
 %%% ============================================================================
@@ -892,4 +976,420 @@ asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
 -spec wsgi_run(binary(), binary(), binary(), map()) ->
     {ok, {binary(), [{binary(), binary()}], binary()}} | {error, term()}.
 wsgi_run(_Runner, _Module, _Callable, _EnvironMap) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Worker Pool
+%%% ============================================================================
+
+%% @doc Start the worker pool with the specified number of workers.
+%%
+%% Creates a pool of worker threads that process Python operations.
+%% Each worker may have its own subinterpreter (Python 3.12+) for true
+%% parallelism, or share the GIL with optimized batching.
+%%
+%% If NumWorkers is 0, the pool will use the number of CPU cores.
+%%
+%% @param NumWorkers Number of worker threads (0 = auto-detect)
+%% @returns ok on success, or {error, Reason}
+-spec pool_start(non_neg_integer()) -> ok | {error, term()}.
+pool_start(_NumWorkers) ->
+    ?NIF_STUB.
+
+%% @doc Stop the worker pool.
+%%
+%% Signals all workers to shut down and waits for them to terminate.
+%% Any pending requests will receive {error, pool_shutdown}.
+%%
+%% @returns ok
+-spec pool_stop() -> ok.
+pool_stop() ->
+    ?NIF_STUB.
+
+%% @doc Submit a request to the worker pool.
+%%
+%% Submits an asynchronous request to the pool. The caller will receive
+%% a {py_response, RequestId, Result} message when the request completes.
+%%
+%% Request types and arguments:
+%% <ul>
+%% <li>`call' - Module, Func, Args, undefined (or Timeout)</li>
+%% <li>`apply' - Module, Func, Args, Kwargs</li>
+%% <li>`eval' - Code, Locals, undefined, undefined</li>
+%% <li>`exec' - Code, undefined, undefined, undefined</li>
+%% <li>`asgi' - Runner, Module, Callable, {Scope, Body}</li>
+%% <li>`wsgi' - Module, Callable, Environ, undefined</li>
+%% </ul>
+%%
+%% @param Type Request type atom
+%% @param Arg1 First argument (varies by type)
+%% @param Arg2 Second argument (varies by type)
+%% @param Arg3 Third argument (varies by type)
+%% @param Arg4 Fourth argument (varies by type)
+%% @returns {ok, RequestId} on success, or {error, Reason}
+-spec pool_submit(atom(), term(), term(), term(), term()) ->
+    {ok, non_neg_integer()} | {error, term()}.
+pool_submit(_Type, _Arg1, _Arg2, _Arg3, _Arg4) ->
+    ?NIF_STUB.
+
+%% @doc Get worker pool statistics.
+%%
+%% Returns a map with the following keys:
+%% <ul>
+%% <li>`num_workers' - Number of worker threads</li>
+%% <li>`initialized' - Whether the pool is started</li>
+%% <li>`use_subinterpreters' - Whether using subinterpreters (Python 3.12+)</li>
+%% <li>`free_threaded' - Whether using free-threaded Python (3.13+)</li>
+%% <li>`pending_count' - Number of pending requests in queue</li>
+%% <li>`total_enqueued' - Total requests submitted</li>
+%% </ul>
+%%
+%% @returns Stats map
+-spec pool_stats() -> map().
+pool_stats() ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Process-per-context API (no mutex)
+%%%
+%%% These NIFs are designed for the process-per-context architecture where
+%%% each Erlang process owns one Python context. Since access is serialized
+%%% by the owning process, no mutex locking is needed.
+%%% ============================================================================
+
+%% @doc Create a new Python context.
+%%
+%% Creates a subinterpreter (Python 3.12+) or worker thread-state based
+%% on the mode parameter. Returns a reference to the context and its
+%% interpreter ID for routing.
+%%
+%% @param Mode `subinterp' or `worker'
+%% @returns {ok, ContextRef, InterpId} | {error, Reason}
+-spec context_create(subinterp | worker) ->
+    {ok, reference(), non_neg_integer()} | {error, term()}.
+context_create(_Mode) ->
+    ?NIF_STUB.
+
+%% @doc Destroy a Python context.
+%%
+%% Cleans up the Python interpreter or thread-state. Should only be
+%% called by the owning process.
+%%
+%% @param ContextRef Reference returned by context_create/1
+%% @returns ok
+-spec context_destroy(reference()) -> ok.
+context_destroy(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Call a Python function in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @param Kwargs Map of keyword arguments
+%% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
+-spec context_call(reference(), binary(), binary(), list(), map()) ->
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
+context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Evaluate a Python expression in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param Code Python code to evaluate
+%% @param Locals Map of local variables
+%% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
+-spec context_eval(reference(), binary(), map()) ->
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
+context_eval(_ContextRef, _Code, _Locals) ->
+    ?NIF_STUB.
+
+%% @doc Execute Python statements in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param Code Python code to execute
+%% @returns ok | {error, Reason}
+-spec context_exec(reference(), binary()) -> ok | {error, term()}.
+context_exec(_ContextRef, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Call a method on a Python object in a context.
+%%
+%% NO MUTEX - caller must ensure exclusive access (process ownership).
+%%
+%% @param ContextRef Context reference
+%% @param ObjRef Python object reference
+%% @param Method Method name
+%% @param Args List of arguments
+%% @returns {ok, Result} | {error, Reason}
+-spec context_call_method(reference(), reference(), binary(), list()) ->
+    {ok, term()} | {error, term()}.
+context_call_method(_ContextRef, _ObjRef, _Method, _Args) ->
+    ?NIF_STUB.
+
+%% @doc Convert a Python object reference to an Erlang term.
+%%
+%% The reference carries the interpreter ID, allowing automatic routing
+%% to the correct context.
+%%
+%% @param ObjRef Python object reference
+%% @returns {ok, Term} | {error, Reason}
+-spec context_to_term(reference()) -> {ok, term()} | {error, term()}.
+context_to_term(_ObjRef) ->
+    ?NIF_STUB.
+
+%% @doc Get the interpreter ID from a context reference.
+%%
+%% @param ContextRef Context reference
+%% @returns InterpId
+-spec context_interp_id(reference()) -> non_neg_integer().
+context_interp_id(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Set the callback handler pid for a context.
+%%
+%% This must be called before the context can handle erlang.call() callbacks.
+%%
+%% @param ContextRef Context reference
+%% @param Pid Erlang pid to handle callbacks
+%% @returns ok | {error, Reason}
+-spec context_set_callback_handler(reference(), pid()) -> ok | {error, term()}.
+context_set_callback_handler(_ContextRef, _Pid) ->
+    ?NIF_STUB.
+
+%% @doc Get the callback pipe write FD for a context.
+%%
+%% Returns the write end of the callback pipe for sending responses.
+%%
+%% @param ContextRef Context reference
+%% @returns {ok, WriteFd} | {error, Reason}
+-spec context_get_callback_pipe(reference()) -> {ok, integer()} | {error, term()}.
+context_get_callback_pipe(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Write a callback response to the context's pipe.
+%%
+%% Writes a length-prefixed binary response that Python will read.
+%%
+%% @param ContextRef Context reference
+%% @param Data Binary data to write
+%% @returns ok | {error, Reason}
+-spec context_write_callback_response(reference(), binary()) -> ok | {error, term()}.
+context_write_callback_response(_ContextRef, _Data) ->
+    ?NIF_STUB.
+
+%% @doc Resume a suspended context with callback result.
+%%
+%% After handling a callback, call this to resume Python execution with
+%% the callback result. May return {suspended, ...} if Python makes another
+%% erlang.call() during resume (nested callback).
+%%
+%% @param ContextRef Context reference
+%% @param StateRef Suspended state reference from {suspended, _, StateRef, _}
+%% @param Result Binary result to return to Python (format: status_byte + repr)
+%% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
+-spec context_resume(reference(), reference(), binary()) ->
+    {ok, term()} | {error, term()} | {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
+context_resume(_ContextRef, _StateRef, _Result) ->
+    ?NIF_STUB.
+
+%% @doc Cancel a suspended context resume (cleanup on error).
+%%
+%% Called when callback execution fails and resume won't be called.
+%% Allows proper cleanup of the suspended state.
+%%
+%% @param ContextRef Context reference
+%% @param StateRef Suspended state reference
+%% @returns ok
+-spec context_cancel_resume(reference(), reference()) -> ok.
+context_cancel_resume(_ContextRef, _StateRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% py_ref API (Python object references with interp_id)
+%%%
+%%% These functions work with py_ref resources that carry both a Python
+%%% object reference and the interpreter ID that created it. This enables
+%%% automatic routing of method calls and attribute access.
+%%% ============================================================================
+
+%% @doc Wrap a Python object as a py_ref with interp_id.
+%%
+%% @param ContextRef Context that owns the object
+%% @param PyObj Python object reference
+%% @returns {ok, RefTerm} | {error, Reason}
+-spec ref_wrap(reference(), reference()) -> {ok, reference()} | {error, term()}.
+ref_wrap(_ContextRef, _PyObj) ->
+    ?NIF_STUB.
+
+%% @doc Check if a term is a py_ref.
+%%
+%% @param Term Term to check
+%% @returns true | false
+-spec is_ref(term()) -> boolean().
+is_ref(_Term) ->
+    ?NIF_STUB.
+
+%% @doc Get the interpreter ID from a py_ref.
+%%
+%% This is fast - no GIL needed, just reads the stored interp_id.
+%%
+%% @param Ref py_ref reference
+%% @returns InterpId
+-spec ref_interp_id(reference()) -> non_neg_integer().
+ref_interp_id(_Ref) ->
+    ?NIF_STUB.
+
+%% @doc Convert a py_ref to an Erlang term.
+%%
+%% @param Ref py_ref reference
+%% @returns {ok, Term} | {error, Reason}
+-spec ref_to_term(reference()) -> {ok, term()} | {error, term()}.
+ref_to_term(_Ref) ->
+    ?NIF_STUB.
+
+%% @doc Get an attribute from a py_ref object.
+%%
+%% @param Ref py_ref reference
+%% @param AttrName Attribute name (binary)
+%% @returns {ok, Value} | {error, Reason}
+-spec ref_getattr(reference(), binary()) -> {ok, term()} | {error, term()}.
+ref_getattr(_Ref, _AttrName) ->
+    ?NIF_STUB.
+
+%% @doc Call a method on a py_ref object.
+%%
+%% @param Ref py_ref reference
+%% @param Method Method name (binary)
+%% @param Args List of arguments
+%% @returns {ok, Result} | {error, Reason}
+-spec ref_call_method(reference(), binary(), list()) -> {ok, term()} | {error, term()}.
+ref_call_method(_Ref, _Method, _Args) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Reactor NIFs - Erlang-as-Reactor Architecture
+%%%
+%%% These NIFs support the Erlang-as-Reactor pattern where Erlang handles
+%%% TCP accept/routing and Python handles HTTP parsing and ASGI/WSGI execution.
+%%% ============================================================================
+
+%% @doc Register an FD for reactor monitoring.
+%%
+%% The FD is owned by the context and receives {select, FdRes, Ref, ready_input/ready_output}
+%% messages. Initial registration is for read events.
+%%
+%% @param ContextRef Context reference from context_create/1
+%% @param Fd File descriptor to monitor
+%% @param OwnerPid Process to receive select messages
+%% @returns {ok, FdRef} | {error, Reason}
+-spec reactor_register_fd(reference(), integer(), pid()) ->
+    {ok, reference()} | {error, term()}.
+reactor_register_fd(_ContextRef, _Fd, _OwnerPid) ->
+    ?NIF_STUB.
+
+%% @doc Re-register for read events after a one-shot event was delivered.
+%%
+%% Since enif_select is one-shot, this must be called after processing
+%% each read event to continue monitoring.
+%%
+%% @param FdRef FD resource reference from reactor_register_fd/3
+%% @returns ok | {error, Reason}
+-spec reactor_reselect_read(reference()) -> ok | {error, term()}.
+reactor_reselect_read(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Switch to write monitoring for response sending.
+%%
+%% After HTTP request parsing is complete and a response is ready,
+%% switch to write monitoring to send the response when the socket is ready.
+%%
+%% @param FdRef FD resource reference
+%% @returns ok | {error, Reason}
+-spec reactor_select_write(reference()) -> ok | {error, term()}.
+reactor_select_write(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Extract the file descriptor integer from an FD resource.
+%%
+%% Useful for passing the FD to Python for os.read/os.write operations.
+%%
+%% @param FdRef FD resource reference
+%% @returns Fd integer | {error, Reason}
+-spec get_fd_from_resource(reference()) -> integer() | {error, term()}.
+get_fd_from_resource(_FdRef) ->
+    ?NIF_STUB.
+
+%% @doc Call Python's erlang_reactor.on_read_ready(fd).
+%%
+%% This is called when the FD is ready for reading. Python reads data,
+%% parses HTTP, and returns an action indicating what to do next.
+%%
+%% Actions:
+%% <ul>
+%% <li>`"continue"' - Continue reading (call reactor_reselect_read)</li>
+%% <li>`"write_pending"' - Response ready, switch to write mode</li>
+%% <li>`"close"' - Close the connection</li>
+%% </ul>
+%%
+%% @param ContextRef Context reference
+%% @param Fd File descriptor
+%% @returns {ok, Action} | {error, Reason}
+-spec reactor_on_read_ready(reference(), integer()) ->
+    {ok, binary()} | {error, term()}.
+reactor_on_read_ready(_ContextRef, _Fd) ->
+    ?NIF_STUB.
+
+%% @doc Call Python's erlang_reactor.on_write_ready(fd).
+%%
+%% This is called when the FD is ready for writing. Python writes
+%% buffered response data and returns an action.
+%%
+%% Actions:
+%% <ul>
+%% <li>`"continue"' - More data to write</li>
+%% <li>`"read_pending"' - Keep-alive, switch back to read mode</li>
+%% <li>`"close"' - Close the connection</li>
+%% </ul>
+%%
+%% @param ContextRef Context reference
+%% @param Fd File descriptor
+%% @returns {ok, Action} | {error, Reason}
+-spec reactor_on_write_ready(reference(), integer()) ->
+    {ok, binary()} | {error, term()}.
+reactor_on_write_ready(_ContextRef, _Fd) ->
+    ?NIF_STUB.
+
+%% @doc Initialize a Python protocol handler for a new connection.
+%%
+%% Called when a new connection is accepted. Creates an HTTPProtocol
+%% instance in Python and registers it in the protocol registry.
+%%
+%% @param ContextRef Context reference
+%% @param Fd File descriptor
+%% @param ClientInfo Map with client info (addr, port)
+%% @returns ok | {error, Reason}
+-spec reactor_init_connection(reference(), integer(), map()) ->
+    ok | {error, term()}.
+reactor_init_connection(_ContextRef, _Fd, _ClientInfo) ->
+    ?NIF_STUB.
+
+%% @doc Close an FD and clean up the protocol handler.
+%%
+%% Calls Python's erlang_reactor.close_connection(fd) to clean up
+%% the protocol handler, then closes the FD.
+%%
+%% @param FdRef FD resource reference
+%% @returns ok | {error, Reason}
+-spec reactor_close_fd(reference()) -> ok | {error, term()}.
+reactor_close_fd(_FdRef) ->
     ?NIF_STUB.

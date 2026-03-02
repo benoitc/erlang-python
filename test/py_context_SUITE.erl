@@ -1,4 +1,7 @@
-%%% @doc Common Test suite for py context affinity.
+%%% @doc Common Test suite for py context API.
+%%%
+%%% Tests the explicit context API where py:call/eval/exec can take
+%%% a context pid as the first argument.
 -module(py_context_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -12,33 +15,32 @@
 ]).
 
 -export([
-    bind_unbind_test/1,
-    bind_persists_state_test/1,
-    explicit_context_test/1,
-    with_context_implicit_test/1,
-    with_context_explicit_test/1,
-    automatic_cleanup_test/1,
-    multiple_contexts_isolated_test/1,
-    double_bind_idempotent_test/1,
-    unbind_without_bind_test/1,
-    context_call_test/1
+    get_context_test/1,
+    get_specific_context_test/1,
+    state_persists_in_context_test/1,
+    contexts_are_isolated_test/1,
+    explicit_context_call_test/1,
+    explicit_context_eval_test/1,
+    explicit_context_exec_test/1,
+    implicit_routing_test/1,
+    scheduler_affinity_test/1
 ]).
 
 all() -> [
-    bind_unbind_test,
-    bind_persists_state_test,
-    explicit_context_test,
-    with_context_implicit_test,
-    with_context_explicit_test,
-    automatic_cleanup_test,
-    multiple_contexts_isolated_test,
-    double_bind_idempotent_test,
-    unbind_without_bind_test,
-    context_call_test
+    get_context_test,
+    get_specific_context_test,
+    state_persists_in_context_test,
+    contexts_are_isolated_test,
+    explicit_context_call_test,
+    explicit_context_eval_test,
+    explicit_context_exec_test,
+    implicit_routing_test,
+    scheduler_affinity_test
 ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
+    {ok, _} = py:start_contexts(),
     Config.
 
 end_per_suite(_Config) ->
@@ -46,125 +48,78 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    %% Ensure the test process is not bound at the start of each test
-    py:unbind(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    %% Clean up any bindings after each test
-    py:unbind(),
     ok.
 
 %%% ============================================================================
 %%% Test Cases
 %%% ============================================================================
 
-%% @doc Test basic bind/unbind functionality
-bind_unbind_test(_Config) ->
-    false = py:is_bound(),
-    ok = py:bind(),
-    true = py:is_bound(),
-    ok = py:unbind(),
-    false = py:is_bound().
+%% @doc Test py:context/0 returns a valid context pid
+get_context_test(_Config) ->
+    Ctx = py:context(),
+    true = is_pid(Ctx),
+    true = is_process_alive(Ctx).
 
-%% @doc Test that state persists across calls when bound
-bind_persists_state_test(_Config) ->
-    ok = py:bind(),
-    ok = py:exec(<<"test_var = 42">>),
-    {ok, 42} = py:eval(<<"test_var">>),
-    ok = py:exec(<<"test_var += 1">>),
-    {ok, 43} = py:eval(<<"test_var">>),
-    ok = py:unbind().
+%% @doc Test py:context/1 returns specific contexts
+get_specific_context_test(_Config) ->
+    Ctx1 = py:context(1),
+    Ctx2 = py:context(2),
+    true = is_pid(Ctx1),
+    true = is_pid(Ctx2),
+    %% Different indices should give different contexts
+    true = Ctx1 =/= Ctx2.
 
-%% @doc Test explicit context creation and usage
-explicit_context_test(_Config) ->
-    {ok, Ctx} = py:bind(new),
-    ok = py:ctx_exec(Ctx, <<"ctx_var = 'hello'">>),
-    {ok, <<"hello">>} = py:ctx_eval(Ctx, <<"ctx_var">>),
-    ok = py:unbind(Ctx).
+%% @doc Test that state persists within a context
+state_persists_in_context_test(_Config) ->
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"test_var = 42">>),
+    {ok, 42} = py:eval(Ctx, <<"test_var">>),
+    ok = py:exec(Ctx, <<"test_var += 1">>),
+    {ok, 43} = py:eval(Ctx, <<"test_var">>).
 
-%% @doc Test with_context with implicit (arity-0) function
-with_context_implicit_test(_Config) ->
-    Result = py:with_context(fun() ->
-        ok = py:exec(<<"x = 10">>),
-        ok = py:exec(<<"x *= 2">>),
-        py:eval(<<"x">>)
-    end),
-    {ok, 20} = Result,
-    false = py:is_bound().
+%% @doc Test that different contexts are isolated
+contexts_are_isolated_test(_Config) ->
+    Ctx1 = py:context(1),
+    Ctx2 = py:context(2),
 
-%% @doc Test with_context with explicit (arity-1) function
-with_context_explicit_test(_Config) ->
-    Result = py:with_context(fun(Ctx) ->
-        ok = py:ctx_exec(Ctx, <<"y = 5">>),
-        py:ctx_eval(Ctx, <<"y * 3">>)
-    end),
-    {ok, 15} = Result.
-
-%% @doc Test automatic cleanup when bound process dies
-automatic_cleanup_test(_Config) ->
-    Parent = self(),
-    Stats1 = py_pool:get_stats(),
-    Avail1 = maps:get(available_workers, Stats1),
-
-    Pid = spawn(fun() ->
-        ok = py:bind(),
-        Parent ! bound,
-        receive stop -> ok end
-    end),
-    receive bound -> ok end,
-
-    %% Worker should be checked out
-    Stats2 = py_pool:get_stats(),
-    Avail2 = maps:get(available_workers, Stats2),
-    true = Avail2 < Avail1,
-
-    %% Kill the process
-    exit(Pid, kill),
-    timer:sleep(50),
-
-    %% Worker should be returned to pool
-    Stats3 = py_pool:get_stats(),
-    Avail3 = maps:get(available_workers, Stats3),
-    Avail1 = Avail3.
-
-%% @doc Test that multiple explicit contexts are isolated
-multiple_contexts_isolated_test(_Config) ->
-    {ok, Ctx1} = py:bind(new),
-    {ok, Ctx2} = py:bind(new),
-
-    ok = py:ctx_exec(Ctx1, <<"shared_name = 1">>),
-    ok = py:ctx_exec(Ctx2, <<"shared_name = 2">>),
+    ok = py:exec(Ctx1, <<"isolation_var = 'context1'">>),
+    ok = py:exec(Ctx2, <<"isolation_var = 'context2'">>),
 
     %% Each context should have its own value
-    {ok, 1} = py:ctx_eval(Ctx1, <<"shared_name">>),
-    {ok, 2} = py:ctx_eval(Ctx2, <<"shared_name">>),
+    {ok, <<"context1">>} = py:eval(Ctx1, <<"isolation_var">>),
+    {ok, <<"context2">>} = py:eval(Ctx2, <<"isolation_var">>).
 
-    ok = py:unbind(Ctx1),
-    ok = py:unbind(Ctx2).
+%% @doc Test py:call with explicit context
+explicit_context_call_test(_Config) ->
+    Ctx = py:context(1),
+    {ok, 4.0} = py:call(Ctx, math, sqrt, [16]),
+    {ok, 5.0} = py:call(Ctx, math, sqrt, [25]).
 
-%% @doc Test that double bind is idempotent
-double_bind_idempotent_test(_Config) ->
-    ok = py:bind(),
-    ok = py:bind(),  % Should be idempotent
-    true = py:is_bound(),
-    ok = py:unbind(),
-    false = py:is_bound().
+%% @doc Test py:eval with explicit context
+explicit_context_eval_test(_Config) ->
+    Ctx = py:context(1),
+    {ok, 6} = py:eval(Ctx, <<"2 + 4">>),
+    {ok, 15} = py:eval(Ctx, <<"x * 3">>, #{x => 5}).
 
-%% @doc Test that unbind without bind is safe (idempotent)
-unbind_without_bind_test(_Config) ->
-    false = py:is_bound(),
-    ok = py:unbind(),  % Should be safe even without prior bind
-    false = py:is_bound().
+%% @doc Test py:exec with explicit context
+explicit_context_exec_test(_Config) ->
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"exec_test = 123">>),
+    {ok, 123} = py:eval(Ctx, <<"exec_test">>).
 
-%% @doc Test py:ctx_call with explicit context
-context_call_test(_Config) ->
-    {ok, Ctx} = py:bind(new),
+%% @doc Test implicit routing (without explicit context)
+implicit_routing_test(_Config) ->
+    %% These should work via scheduler affinity
+    {ok, 4.0} = py:call(math, sqrt, [16]),
+    {ok, 6} = py:eval(<<"2 + 4">>),
+    ok = py:exec(<<"implicit_var = 1">>).
 
-    %% Import a module in this context
-    ok = py:ctx_exec(Ctx, <<"import json">>),
-
-    %% Use the imported module via ctx_call
-    {ok, <<"{\"a\": 1}">>} = py:ctx_call(Ctx, json, dumps, [#{a => 1}]),
-
-    ok = py:unbind(Ctx).
+%% @doc Test that same process gets same context (scheduler affinity)
+scheduler_affinity_test(_Config) ->
+    Ctx1 = py:context(),
+    Ctx2 = py:context(),
+    %% Same process should get same context
+    Ctx1 = Ctx2.

@@ -505,7 +505,7 @@ For non-blocking LLM calls:
 ```erlang
 %% Start async LLM call
 ask_async(Question) ->
-    py:call_async('__main__', generate, [Question, <<"">>]).
+    py:cast('__main__', generate, [Question, <<"">>]).
 
 %% Gather multiple responses
 ask_many(Questions) ->

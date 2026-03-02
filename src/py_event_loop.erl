@@ -27,7 +27,8 @@
     start_link/0,
     stop/0,
     get_loop/0,
-    register_callbacks/0
+    register_callbacks/0,
+    run_async/2
 ]).
 
 %% gen_server callbacks
@@ -83,6 +84,28 @@ register_callbacks() ->
     py_callback:register(py_event_loop_dispatch_timer, fun cb_dispatch_timer/1),
     ok.
 
+%% @doc Run an async coroutine on the event loop.
+%% The result will be sent to the caller via erlang.send().
+%%
+%% Request should be a map with the following keys:
+%%   ref => reference() - A reference to identify the result
+%%   caller => pid() - The pid to send the result to
+%%   module => atom() | binary() - Python module name
+%%   func => atom() | binary() - Python function name
+%%   args => list() - Arguments to pass to the function
+%%   kwargs => map() - Keyword arguments (optional)
+%%
+%% Returns ok immediately. The result will be sent as:
+%%   {async_result, Ref, {ok, Result}} - on success
+%%   {async_result, Ref, {error, Reason}} - on failure
+-spec run_async(reference(), map()) -> ok | {error, term()}.
+run_async(LoopRef, #{ref := Ref, caller := Caller, module := Module,
+                     func := Func, args := Args} = Request) ->
+    Kwargs = maps:get(kwargs, Request, #{}),
+    ModuleBin = py_util:to_binary(Module),
+    FuncBin = py_util:to_binary(Func),
+    py_nif:event_loop_run_async(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs).
+
 %% ============================================================================
 %% gen_server callbacks
 %% ============================================================================
@@ -119,14 +142,18 @@ init([]) ->
     end.
 
 %% @doc Set ErlangEventLoop as the default asyncio event loop policy.
+%% Also extends the C 'erlang' module with Python event loop exports.
 set_default_policy() ->
     PrivDir = code:priv_dir(erlang_python),
+    %% First, extend the erlang module with Python event loop exports
+    extend_erlang_module(PrivDir),
+    %% Then set the event loop policy
     Code = iolist_to_binary([
         "import sys\n",
         "priv_dir = '", PrivDir, "'\n",
         "if priv_dir not in sys.path:\n",
         "    sys.path.insert(0, priv_dir)\n",
-        "from erlang_loop import get_event_loop_policy\n",
+        "from _erlang_impl import get_event_loop_policy\n",
         "import asyncio\n",
         "asyncio.set_event_loop_policy(get_event_loop_policy())\n"
     ]),
@@ -134,6 +161,22 @@ set_default_policy() ->
         ok -> ok;
         {error, Reason} ->
             error_logger:warning_msg("Failed to set ErlangEventLoop policy: ~p~n", [Reason]),
+            ok  %% Non-fatal
+    end.
+
+%% @doc Extend the C 'erlang' module with Python event loop exports.
+%% This makes erlang.run(), erlang.new_event_loop(), etc. available.
+extend_erlang_module(PrivDir) ->
+    Code = iolist_to_binary([
+        "import erlang\n",
+        "priv_dir = '", PrivDir, "'\n",
+        "if hasattr(erlang, '_extend_erlang_module'):\n",
+        "    erlang._extend_erlang_module(priv_dir)\n"
+    ]),
+    case py:exec(Code) of
+        ok -> ok;
+        {error, Reason} ->
+            error_logger:warning_msg("Failed to extend erlang module: ~p~n", [Reason]),
             ok  %% Non-fatal
     end.
 

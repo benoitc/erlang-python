@@ -53,8 +53,8 @@ main(_) ->
     io:format("~n=== Async Calls ===~n~n"),
 
     %% Async call
-    Ref1 = py:call_async(math, factorial, [10]),
-    Ref2 = py:call_async(math, factorial, [20]),
+    Ref1 = py:cast(math, factorial, [10]),
+    Ref2 = py:cast(math, factorial, [20]),
 
     {ok, Fact10} = py:await(Ref1),
     {ok, Fact20} = py:await(Ref2),
