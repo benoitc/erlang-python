@@ -1458,18 +1458,46 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
         }
 
         /* Build result tuple: ('async_result', ref, ('ok', result)) */
-        PyObject *ok_tuple = PyTuple_Pack(2, PyUnicode_FromString("ok"), coro);
-        PyObject *msg = PyTuple_Pack(3,
-            PyUnicode_FromString("async_result"),
-            py_ref,
-            ok_tuple);
+        PyObject *ok_str = PyUnicode_FromString("ok");
+        PyObject *result_str = PyUnicode_FromString("async_result");
+        if (!ok_str || !result_str) {
+            Py_XDECREF(ok_str);
+            Py_XDECREF(result_str);
+            Py_DECREF(py_ref);
+            Py_DECREF((PyObject *)pid_obj);
+            Py_DECREF(erlang_mod);
+            Py_DECREF(coro);
+            result = make_error(env, "string_alloc_failed");
+            goto cleanup;
+        }
+        PyObject *ok_tuple = PyTuple_Pack(2, ok_str, coro);
+        Py_DECREF(ok_str);
+        if (!ok_tuple) {
+            Py_DECREF(result_str);
+            Py_DECREF(py_ref);
+            Py_DECREF((PyObject *)pid_obj);
+            Py_DECREF(erlang_mod);
+            Py_DECREF(coro);
+            result = make_error(env, "tuple_alloc_failed");
+            goto cleanup;
+        }
+        PyObject *msg = PyTuple_Pack(3, result_str, py_ref, ok_tuple);
+        Py_DECREF(result_str);
+        Py_DECREF(ok_tuple);
+        if (!msg) {
+            Py_DECREF(py_ref);
+            Py_DECREF((PyObject *)pid_obj);
+            Py_DECREF(erlang_mod);
+            Py_DECREF(coro);
+            result = make_error(env, "msg_alloc_failed");
+            goto cleanup;
+        }
 
         /* Send via erlang.send() */
         PyObject *send_result = PyObject_CallMethod(erlang_mod, "send", "OO",
                                                      (PyObject *)pid_obj, msg);
         Py_XDECREF(send_result);
         Py_DECREF(msg);
-        Py_DECREF(ok_tuple);
         Py_DECREF(py_ref);
         Py_DECREF((PyObject *)pid_obj);
         Py_DECREF(erlang_mod);
