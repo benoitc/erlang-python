@@ -277,7 +277,9 @@ static PyObject *erlang_trace_end_impl(PyObject *self, PyObject *args) {
     }
 
     ERL_NIF_TERM span_id_term = enif_make_uint64(msg_env, span_id);
-    ERL_NIF_TERM status_term = enif_make_atom(msg_env, status);
+    /* Use string instead of atom to prevent atom table exhaustion from
+     * arbitrary Python trace status strings */
+    ERL_NIF_TERM status_term = enif_make_string(msg_env, status, ERL_NIF_LATIN1);
     ERL_NIF_TERM attrs_term = py_to_term(msg_env, attrs);
 
     uint64_t ts = get_monotonic_ns() / 1000;
