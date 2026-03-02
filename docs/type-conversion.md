@@ -20,6 +20,7 @@ When calling Python functions or evaluating expressions, Erlang values are autom
 | `list()` | `list` | Recursively converted |
 | `tuple()` | `tuple` | Recursively converted |
 | `map()` | `dict` | Keys and values recursively converted |
+| `pid()` | `erlang.Pid` | Opaque wrapper, round-trips back to Erlang PID |
 
 ### Examples
 
@@ -74,6 +75,7 @@ Return values from Python are converted back to Erlang:
 | `list` | `list()` | Recursively converted |
 | `tuple` | `tuple()` | Recursively converted |
 | `dict` | `map()` | Keys and values recursively converted |
+| `erlang.Pid` | `pid()` | Round-trips back to the original Erlang PID |
 | generator | internal | Used with streaming functions |
 
 ### Examples
@@ -113,6 +115,43 @@ Return values from Python are converted back to Erlang:
 %% Dicts become maps
 {ok, #{<<"a">> := 1, <<"b">> := 2}} = py:eval(<<"{'a': 1, 'b': 2}">>).
 ```
+
+### Process Identifiers (PIDs)
+
+Erlang PIDs are converted to opaque `erlang.Pid` objects in Python. These can be
+passed back to Erlang (where they become real PIDs again) or used with `erlang.send()`:
+
+```erlang
+%% Pass self() to Python - arrives as erlang.Pid
+{ok, Pid} = py:call(mymod, round_trip_pid, [self()]).
+%% Pid =:= self()
+
+%% Python can send messages directly to Erlang processes
+ok = py:exec(<<"
+import erlang
+def notify(pid, data):
+    erlang.send(pid, ('notification', data))
+">>).
+```
+
+```python
+import erlang
+
+def forward_to(pid, message):
+    """Send a message to an Erlang process."""
+    erlang.send(pid, message)
+```
+
+`erlang.Pid` objects support equality and hashing, so they can be compared and
+used as dict keys or in sets:
+
+```python
+pid_a == pid_b       # True if both wrap the same Erlang PID
+{pid: "value"}       # Works as a dict key
+pid in seen_pids     # Works in sets
+```
+
+Sending to a process that has already exited raises `erlang.ProcessError`.
 
 ## Special Cases
 

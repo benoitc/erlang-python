@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- **PID serialization** - Erlang PIDs now convert to `erlang.Pid` objects in Python
+  and back to real PIDs when returned to Erlang. Previously, PIDs fell through to
+  `None` (Erlang→Python) or string representation (Python→Erlang).
+
+- **`erlang.send(pid, term)`** - Fire-and-forget message passing from Python to
+  Erlang processes. Uses `enif_send()` directly with no suspension or blocking.
+  Raises `erlang.ProcessError` if the target process is dead.
+
+- **`erlang.ProcessError`** - New exception for dead/unreachable process errors.
+  Subclass of `Exception`, so it's catchable with `except Exception` or
+  `except erlang.ProcessError`.
+
+### Changed
+
+- **`SuspensionRequired` base class** - Now inherits from `BaseException` instead
+  of `Exception`. This prevents ASGI/WSGI middleware `except Exception` handlers
+  from intercepting the suspension control flow used by `erlang.call()`.
+
 ### Fixed
 
 - **`activate_venv/1` now processes `.pth` files** - Uses `site.addsitedir()` instead of

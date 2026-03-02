@@ -79,6 +79,9 @@ _Atomic uint64_t g_callback_id_counter = 1;
 /* Custom exception for suspension */
 PyObject *SuspensionRequiredException = NULL;
 
+/* Custom exception for dead/unreachable processes */
+PyObject *ProcessErrorException = NULL;
+
 /* Cached numpy.ndarray type for fast isinstance checks (NULL if numpy not available) */
 PyObject *g_numpy_ndarray_type = NULL;
 
