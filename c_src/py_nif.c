@@ -927,8 +927,12 @@ static ERL_NIF_TERM nif_version(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     const char *version = Py_GetVersion();
     ERL_NIF_TERM version_bin;
 
-    unsigned char *buf = enif_make_new_binary(env, strlen(version), &version_bin);
-    memcpy(buf, version, strlen(version));
+    size_t version_len = strlen(version);
+    unsigned char *buf = enif_make_new_binary(env, version_len, &version_bin);
+    if (buf == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(buf, version, version_len);
 
     return enif_make_tuple2(env, ATOM_OK, version_bin);
 }

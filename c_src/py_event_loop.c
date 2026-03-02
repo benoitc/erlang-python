@@ -2644,6 +2644,10 @@ ERL_NIF_TERM nif_recvfrom_test_udp(ErlNifEnv *env, int argc,
     ERL_NIF_TERM host_bin;
     size_t host_len = strlen(host_str);
     unsigned char *host_buf = enif_make_new_binary(env, host_len, &host_bin);
+    if (host_buf == NULL) {
+        enif_release_binary(&bin);
+        return make_error(env, "alloc_failed");
+    }
     memcpy(host_buf, host_str, host_len);
 
     int from_port = ntohs(from_addr.sin_port);
@@ -2970,6 +2974,11 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         if (str != NULL) {
             size_t len = strlen(str);
             unsigned char *buf = enif_make_new_binary(env, len, &action);
+            if (buf == NULL) {
+                Py_DECREF(result);
+                gil_release(guard);
+                return make_error(env, "alloc_failed");
+            }
             memcpy(buf, str, len);
         } else {
             action = enif_make_atom(env, "unknown");
@@ -3035,6 +3044,11 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         if (str != NULL) {
             size_t len = strlen(str);
             unsigned char *buf = enif_make_new_binary(env, len, &action);
+            if (buf == NULL) {
+                Py_DECREF(result);
+                gil_release(guard);
+                return make_error(env, "alloc_failed");
+            }
             memcpy(buf, str, len);
         } else {
             action = enif_make_atom(env, "unknown");
