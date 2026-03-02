@@ -767,6 +767,9 @@ static void *py_pool_worker_thread(void *arg) {
     }
 
 cleanup:
+    /* Signal init failure so py_pool_init doesn't spin forever */
+    worker->shutdown = true;
+
     /* Clean up Python state */
     Py_XDECREF(worker->module_cache);
     Py_XDECREF(worker->globals);
@@ -852,10 +855,33 @@ static int py_pool_init(int num_workers) {
         }
     }
 
-    /* Wait for workers to start */
+    /* Wait for workers to start with timeout */
+    const int timeout_ms = 30000;  /* 30 second timeout */
     for (int i = 0; i < num_workers; i++) {
+        int waited_ms = 0;
         while (!g_pool.workers[i].running && !g_pool.workers[i].shutdown) {
             usleep(1000);  /* 1ms */
+            waited_ms++;
+            if (waited_ms > timeout_ms) {
+                /* Init timeout - shut down and return error */
+                g_pool.shutting_down = true;
+                queue_broadcast(&g_pool.queue);
+                for (int j = 0; j < i; j++) {
+                    pthread_join(g_pool.workers[j].thread, NULL);
+                }
+                queue_destroy(&g_pool.queue);
+                return -1;
+            }
+        }
+        if (g_pool.workers[i].shutdown && !g_pool.workers[i].running) {
+            /* Worker failed to init */
+            g_pool.shutting_down = true;
+            queue_broadcast(&g_pool.queue);
+            for (int j = 0; j < i; j++) {
+                pthread_join(g_pool.workers[j].thread, NULL);
+            }
+            queue_destroy(&g_pool.queue);
+            return -1;
         }
     }
 
