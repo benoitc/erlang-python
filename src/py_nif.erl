@@ -1090,9 +1090,10 @@ context_destroy(_ContextRef) ->
 %% @param Func Function name
 %% @param Args List of arguments
 %% @param Kwargs Map of keyword arguments
-%% @returns {ok, Result} | {error, Reason}
+%% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
 -spec context_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
@@ -1103,9 +1104,10 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
 %% @param ContextRef Context reference
 %% @param Code Python code to evaluate
 %% @param Locals Map of local variables
-%% @returns {ok, Result} | {error, Reason}
+%% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
 -spec context_eval(reference(), binary(), map()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
 context_eval(_ContextRef, _Code, _Locals) ->
     ?NIF_STUB.
 
