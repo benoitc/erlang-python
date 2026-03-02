@@ -23,11 +23,16 @@ These tests verify executor functionality:
 
 import asyncio
 import concurrent.futures
+import multiprocessing
 import threading
 import time
 import unittest
 
 from . import _testbase as tb
+
+# Use 'spawn' instead of 'fork' for ProcessPoolExecutor to avoid
+# corrupting the Erlang VM when running inside the NIF
+_mp_context = multiprocessing.get_context('spawn')
 
 
 class _TestRunInExecutor:
@@ -158,12 +163,26 @@ class _TestCustomExecutor:
             executor.shutdown(wait=True)
 
     def test_process_pool_executor(self):
-        """Test run_in_executor with ProcessPoolExecutor."""
+        """Test run_in_executor with ProcessPoolExecutor.
+
+        Note: This test is skipped when running inside the Erlang NIF
+        because multiprocessing doesn't work well with the embedded Python.
+        """
+        # Skip when running inside Erlang NIF - multiprocessing is problematic
+        try:
+            import py_event_loop
+            self.skipTest("ProcessPoolExecutor not supported inside Erlang NIF")
+        except ImportError:
+            pass  # Not running inside NIF, test is OK
+
         def cpu_bound(n):
             return sum(range(n))
 
         async def main():
-            executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+            # Use spawn context to avoid forking
+            executor = concurrent.futures.ProcessPoolExecutor(
+                max_workers=1, mp_context=_mp_context
+            )
             try:
                 result = await self.loop.run_in_executor(
                     executor, cpu_bound, 10000

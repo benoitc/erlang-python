@@ -190,7 +190,8 @@ class _TestSockets:
             sock.setblocking(False)
             try:
                 # Connect to a non-routable address to trigger timeout
-                with self.assertRaises(asyncio.TimeoutError):
+                # Some networks may refuse quickly, so accept either error
+                with self.assertRaises((asyncio.TimeoutError, OSError)):
                     await asyncio.wait_for(
                         self.loop.sock_connect(sock, ('10.255.255.1', 12345)),
                         timeout=0.5

@@ -878,6 +878,208 @@ static int copy_callback_results_to_nested(suspended_context_state_t *nested,
 }
 
 /**
+ * Helper to convert __etf__:base64 strings to Python objects.
+ * Used for encoding pids and references in callback responses.
+ * Returns a NEW reference on success, NULL with exception on error.
+ */
+static PyObject *decode_etf_string(const char *str, Py_ssize_t len) {
+    /* Check for __etf__: prefix (8 chars) */
+    const char *prefix = "__etf__:";
+    size_t prefix_len = 8;
+
+    if (len <= (Py_ssize_t)prefix_len || strncmp(str, prefix, prefix_len) != 0) {
+        return NULL;  /* Not an ETF string */
+    }
+
+    /* Extract base64 portion */
+    const char *b64_data = str + prefix_len;
+    size_t b64_len = len - prefix_len;
+
+    /* Import base64 module and decode */
+    PyObject *base64_mod = PyImport_ImportModule("base64");
+    if (base64_mod == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *b64decode = PyObject_GetAttrString(base64_mod, "b64decode");
+    Py_DECREF(base64_mod);
+    if (b64decode == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *b64_str = PyUnicode_FromStringAndSize(b64_data, b64_len);
+    if (b64_str == NULL) {
+        Py_DECREF(b64decode);
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *decoded = PyObject_CallFunctionObjArgs(b64decode, b64_str, NULL);
+    Py_DECREF(b64decode);
+    Py_DECREF(b64_str);
+
+    if (decoded == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    /* Get the binary data */
+    char *bin_data;
+    Py_ssize_t bin_len;
+    if (PyBytes_AsStringAndSize(decoded, &bin_data, &bin_len) < 0) {
+        Py_DECREF(decoded);
+        PyErr_Clear();
+        return NULL;
+    }
+
+    /* Create a temporary NIF environment to decode the term */
+    ErlNifEnv *tmp_env = enif_alloc_env();
+    if (tmp_env == NULL) {
+        Py_DECREF(decoded);
+        return NULL;
+    }
+
+    /* Decode the ETF binary to an Erlang term */
+    ERL_NIF_TERM term;
+    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, 0) == 0) {
+        /* Decoding failed */
+        enif_free_env(tmp_env);
+        Py_DECREF(decoded);
+        return NULL;
+    }
+
+    Py_DECREF(decoded);
+
+    /* Convert the term to a Python object */
+    PyObject *result = term_to_py(tmp_env, term);
+    enif_free_env(tmp_env);
+
+    return result;
+}
+
+/**
+ * Recursively convert __etf__:base64 strings in a Python object.
+ * Handles nested tuples, lists, and dicts.
+ * Returns a NEW reference with ETF strings converted, or the original object
+ * with its refcount incremented if no conversion was needed.
+ */
+static PyObject *convert_etf_strings(PyObject *obj) {
+    if (obj == NULL) {
+        return NULL;
+    }
+
+    /* Check if it's a string that might be an ETF encoding */
+    if (PyUnicode_Check(obj)) {
+        Py_ssize_t len;
+        const char *str = PyUnicode_AsUTF8AndSize(obj, &len);
+        if (str != NULL && len > 8 && strncmp(str, "__etf__:", 8) == 0) {
+            PyObject *decoded = decode_etf_string(str, len);
+            if (decoded != NULL) {
+                return decoded;  /* Return the decoded object */
+            }
+            /* If decoding failed, fall through and return original */
+        }
+        Py_INCREF(obj);
+        return obj;
+    }
+
+    /* Handle tuples */
+    if (PyTuple_Check(obj)) {
+        Py_ssize_t size = PyTuple_Size(obj);
+        int needs_conversion = 0;
+
+        /* First pass: check if any element needs conversion */
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyTuple_GET_ITEM(obj, i);
+            if (PyUnicode_Check(item)) {
+                Py_ssize_t len;
+                const char *str = PyUnicode_AsUTF8AndSize(item, &len);
+                if (str != NULL && len > 8 && strncmp(str, "__etf__:", 8) == 0) {
+                    needs_conversion = 1;
+                    break;
+                }
+            } else if (PyTuple_Check(item) || PyList_Check(item) || PyDict_Check(item)) {
+                needs_conversion = 1;  /* Might need recursive conversion */
+                break;
+            }
+        }
+
+        if (!needs_conversion) {
+            Py_INCREF(obj);
+            return obj;
+        }
+
+        /* Create new tuple with converted elements */
+        PyObject *new_tuple = PyTuple_New(size);
+        if (new_tuple == NULL) {
+            return NULL;
+        }
+
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyTuple_GET_ITEM(obj, i);
+            PyObject *converted = convert_etf_strings(item);
+            if (converted == NULL) {
+                Py_DECREF(new_tuple);
+                return NULL;
+            }
+            PyTuple_SET_ITEM(new_tuple, i, converted);  /* Steals reference */
+        }
+        return new_tuple;
+    }
+
+    /* Handle lists */
+    if (PyList_Check(obj)) {
+        Py_ssize_t size = PyList_Size(obj);
+        PyObject *new_list = PyList_New(size);
+        if (new_list == NULL) {
+            return NULL;
+        }
+
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyList_GET_ITEM(obj, i);
+            PyObject *converted = convert_etf_strings(item);
+            if (converted == NULL) {
+                Py_DECREF(new_list);
+                return NULL;
+            }
+            PyList_SET_ITEM(new_list, i, converted);  /* Steals reference */
+        }
+        return new_list;
+    }
+
+    /* Handle dicts */
+    if (PyDict_Check(obj)) {
+        PyObject *new_dict = PyDict_New();
+        if (new_dict == NULL) {
+            return NULL;
+        }
+
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(obj, &pos, &key, &value)) {
+            PyObject *conv_key = convert_etf_strings(key);
+            PyObject *conv_value = convert_etf_strings(value);
+            if (conv_key == NULL || conv_value == NULL) {
+                Py_XDECREF(conv_key);
+                Py_XDECREF(conv_value);
+                Py_DECREF(new_dict);
+                return NULL;
+            }
+            PyDict_SetItem(new_dict, conv_key, conv_value);
+            Py_DECREF(conv_key);
+            Py_DECREF(conv_value);
+        }
+        return new_dict;
+    }
+
+    /* For all other types, just return with incremented refcount */
+    Py_INCREF(obj);
+    return obj;
+}
+
+/**
  * Helper to parse callback response data into a Python object.
  * Response format: status_byte (0=ok, 1=error) + python_repr_string
  */
@@ -919,6 +1121,13 @@ static PyObject *parse_callback_response(unsigned char *response_data, size_t re
                         /* If literal_eval fails, return as string */
                         PyErr_Clear();
                         result = PyUnicode_FromStringAndSize(result_str, result_len);
+                    } else {
+                        /* Post-process result to convert __etf__: strings to Python objects.
+                         * This handles pids, references, and other Erlang terms that can't
+                         * be represented as Python literals. */
+                        PyObject *converted = convert_etf_strings(result);
+                        Py_DECREF(result);
+                        result = converted;
                     }
                 }
                 Py_DECREF(literal_eval);
