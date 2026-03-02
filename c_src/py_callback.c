@@ -579,6 +579,10 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 
     ERL_NIF_TERM func_name_term;
     unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
+    if (fn_buf == NULL) {
+        tl_pending_callback = false;
+        return make_error(env, "alloc_failed");
+    }
     memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
 
     ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
@@ -776,6 +780,10 @@ static ERL_NIF_TERM build_suspended_context_result(ErlNifEnv *env, suspended_con
 
     ERL_NIF_TERM func_name_term;
     unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
+    if (fn_buf == NULL) {
+        tl_pending_callback = false;
+        return make_error(env, "alloc_failed");
+    }
     memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
 
     ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
@@ -1440,6 +1448,12 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         ERL_NIF_TERM func_term;
         {
             unsigned char *buf = enif_make_new_binary(msg_env, func_name_len, &func_term);
+            if (buf == NULL) {
+                Py_DECREF(call_args);
+                enif_free_env(msg_env);
+                PyErr_SetString(PyExc_MemoryError, "Failed to allocate binary");
+                return NULL;
+            }
             memcpy(buf, func_name, func_name_len);
         }
 
