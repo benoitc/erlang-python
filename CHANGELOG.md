@@ -22,6 +22,16 @@
   of `Exception`. This prevents ASGI/WSGI middleware `except Exception` handlers
   from intercepting the suspension control flow used by `erlang.call()`.
 
+### Fixed
+
+- **`activate_venv/1` now processes `.pth` files** - Uses `site.addsitedir()` instead of
+  `sys.path.insert()` so that editable installs (uv, pip -e, poetry) work correctly.
+  New paths are moved to the front of `sys.path` for proper priority.
+
+- **`deactivate_venv/0` now restores `sys.path`** - The previous implementation used
+  `py:eval` with semicolon-separated statements which silently failed (eval only accepts
+  expressions). Switched to `py:exec` for correct statement execution.
+
 ## 1.8.1 (2026-02-25)
 
 ### Fixed

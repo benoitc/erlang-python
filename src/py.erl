@@ -490,6 +490,11 @@ parallel(Calls) when is_list(Calls) ->
 %% This modifies sys.path to use packages from the specified venv.
 %% The venv path should be the root directory (containing bin/lib folders).
 %%
+%% `.pth' files in the venv's site-packages directory are processed, so
+%% editable installs created by uv, pip, or any PEP 517/660 compliant tool
+%% work correctly.  New paths are inserted at the front of sys.path so that
+%% venv packages take priority over system packages.
+%%
 %% Example:
 %% ```
 %% ok = py:activate_venv(<<"/path/to/myenv">>).
@@ -504,12 +509,16 @@ activate_venv(VenvPath) ->
     case eval(<<"__import__('os').path.isdir(sp)">>, #{sp => SitePackages}) of
         {ok, true} ->
             %% Save original path if not already saved
-            _ = eval(<<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>),
+            {ok, _} = eval(<<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>),
             %% Set venv info
-            _ = eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
-            _ = eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{sp => SitePackages}),
-            %% Add to sys.path
-            _ = eval(<<"__import__('sys').path.insert(0, sp) if sp not in __import__('sys').path else None">>, #{sp => SitePackages}),
+            {ok, _} = eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
+            {ok, _} = eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{sp => SitePackages}),
+            %% Add site-packages and process .pth files (editable installs)
+            ok = exec(<<"import site as _site, sys as _sys\n"
+                         "_b = frozenset(_sys.path)\n"
+                         "_site.addsitedir(_sys._venv_site_packages)\n"
+                         "_sys.path[:] = [p for p in _sys.path if p not in _b] + [p for p in _sys.path if p in _b]\n"
+                         "del _site, _sys, _b\n">>),
             ok;
         {ok, false} ->
             {error, {invalid_venv, SitePackages}};
@@ -523,10 +532,12 @@ activate_venv(VenvPath) ->
 deactivate_venv() ->
     case eval(<<"hasattr(__import__('sys'), '_original_path')">>) of
         {ok, true} ->
-            _ = eval(<<"__import__('sys').path.clear(); __import__('sys').path.extend(__import__('sys')._original_path)">>),
-            _ = eval(<<"delattr(__import__('sys'), '_original_path')">>),
-            _ = eval(<<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>),
-            _ = eval(<<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>),
+            ok = exec(<<"import sys as _sys\n"
+                         "_sys.path[:] = _sys._original_path\n"
+                         "del _sys\n">>),
+            {ok, _} = eval(<<"delattr(__import__('sys'), '_original_path')">>),
+            {ok, _} = eval(<<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>),
+            {ok, _} = eval(<<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>),
             ok;
         {ok, false} ->
             ok;
