@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`erlang.reactor` module** - FD-based protocol handling for building custom servers
+  - `reactor.Protocol` - Base class for implementing protocols
+  - `reactor.serve(sock, protocol_factory)` - Serve connections using a protocol
+  - `reactor.run_fd(fd, protocol_factory)` - Handle a single FD with a protocol
+  - Integrates with Erlang's `enif_select` for efficient I/O multiplexing
+  - Zero-copy buffer management for high-throughput scenarios
+
+- **ETF encoding for PIDs and References** - Full Erlang term format support
+  - Erlang PIDs encode/decode properly in ETF binary format
+  - Erlang References encode/decode properly in ETF binary format
+  - Enables proper serialization for distributed Erlang communication
+
 - **PID serialization** - Erlang PIDs now convert to `erlang.Pid` objects in Python
   and back to real PIDs when returned to Erlang. Previously, PIDs fell through to
   `None` (Erlang→Python) or string representation (Python→Erlang).
@@ -16,7 +28,33 @@
   Subclass of `Exception`, so it's catchable with `except Exception` or
   `except erlang.ProcessError`.
 
+- **Audit hook sandbox** - Block dangerous operations when running inside Erlang VM
+  - Uses Python's `sys.addaudithook()` (PEP 578) for low-level blocking
+  - Blocks: `os.fork`, `os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `subprocess.Popen`
+  - Raises `RuntimeError` with clear message about using Erlang ports instead
+  - Automatically installed when `py_event_loop` NIF is available
+
+- **Process-per-context architecture** - Each Python context runs in dedicated process
+  - `py_context_process` - Gen_server managing a single Python context
+  - `py_context_sup` - Supervisor for context processes
+  - `py_context_router` - Routes calls to appropriate context process
+  - Improved isolation between contexts
+  - Better crash recovery and resource management
+
+- **Worker thread pool** - High-throughput Python operations
+  - Configurable pool size for parallel execution
+  - Efficient work distribution across threads
+
+- **`py:contexts_started/0`** - Helper to check if contexts are ready
+
 ### Changed
+
+- **Unified `erlang` Python module** - Consolidated callback and event loop APIs
+  - `erlang.run(coro)` - Run coroutine with ErlangEventLoop (like uvloop.run)
+  - `erlang.new_event_loop()` - Create new ErlangEventLoop instance
+  - `erlang.install()` - Install ErlangEventLoopPolicy (deprecated in 3.12+)
+  - `erlang.EventLoopPolicy` - Alias for ErlangEventLoopPolicy
+  - Removed separate `erlang_asyncio` module - all functionality now in `erlang`
 
 - **Async worker backend replaced with event loop model** - The pthread+usleep
   polling async workers have been replaced with an event-driven model using
@@ -33,6 +71,46 @@
 - **`SuspensionRequired` base class** - Now inherits from `BaseException` instead
   of `Exception`. This prevents ASGI/WSGI middleware `except Exception` handlers
   from intercepting the suspension control flow used by `erlang.call()`.
+
+- **Per-interpreter isolation in py_event_loop.c** - Removed global state for
+  proper subinterpreter support. Each interpreter now has isolated event loop state.
+
+- **ErlangEventLoopPolicy always returns ErlangEventLoop** - Previously only
+  returned ErlangEventLoop for main thread; now consistent across all threads.
+
+### Removed
+
+- **Signal handling support** - Removed `add_signal_handler`/`remove_signal_handler`
+  from ErlangEventLoop. Signal handling should be done at the Erlang VM level.
+  Methods now raise `NotImplementedError` with guidance.
+
+- **Subprocess support** - ErlangEventLoop raises `NotImplementedError` for
+  `subprocess_shell` and `subprocess_exec`. Use Erlang ports (`open_port/2`)
+  for subprocess management instead.
+
+### Fixed
+
+- **FD stealing and UDP connected socket issues** - Fixed file descriptor handling
+  for UDP sockets in connected mode
+
+- **Context test expectations** - Updated tests for Python contextvars behavior
+
+- **Unawaited coroutine warnings** - Fixed warnings in test suite
+
+- **Timer scheduling for standalone ErlangEventLoop** - Fixed timer callbacks not
+  firing for loops created outside the main event loop infrastructure
+
+- **Subinterpreter cleanup and thread worker re-registration** - Fixed cleanup
+  issues when subinterpreters are destroyed and recreated
+
+- **Thread worker handlers not re-registering after app restart** - Workers now
+  properly re-register when application restarts
+
+- **Timeout handling** - Improved timeout handling across the codebase
+
+- **Eval locals_term initialization** - Fixed uninitialized variable in eval
+
+- **Two race conditions in worker pool** - Fixed concurrent access issues
 
 ### Performance
 
