@@ -387,23 +387,29 @@ test_version(_Config) ->
     ok.
 
 test_memory_stats(_Config) ->
-    {ok, Stats} = py:memory_stats(),
-    true = is_map(Stats),
-    %% Check that we have GC stats
-    true = maps:is_key(gc_stats, Stats),
-    true = maps:is_key(gc_count, Stats),
-    true = maps:is_key(gc_threshold, Stats),
+    %% tracemalloc doesn't support subinterpreters
+    case py_nif:subinterp_supported() of
+        true ->
+            {skip, "tracemalloc not supported in subinterpreters"};
+        false ->
+            {ok, Stats} = py:memory_stats(),
+            true = is_map(Stats),
+            %% Check that we have GC stats
+            true = maps:is_key(gc_stats, Stats),
+            true = maps:is_key(gc_count, Stats),
+            true = maps:is_key(gc_threshold, Stats),
 
-    %% Test tracemalloc
-    ok = py:tracemalloc_start(),
-    %% Allocate some memory
-    {ok, _} = py:eval(<<"[x**2 for x in range(1000)]">>),
-    {ok, StatsWithTrace} = py:memory_stats(),
-    true = maps:is_key(traced_memory_current, StatsWithTrace),
-    true = maps:is_key(traced_memory_peak, StatsWithTrace),
-    ok = py:tracemalloc_stop(),
+            %% Test tracemalloc
+            ok = py:tracemalloc_start(),
+            %% Allocate some memory
+            {ok, _} = py:eval(<<"[x**2 for x in range(1000)]">>),
+            {ok, StatsWithTrace} = py:memory_stats(),
+            true = maps:is_key(traced_memory_current, StatsWithTrace),
+            true = maps:is_key(traced_memory_peak, StatsWithTrace),
+            ok = py:tracemalloc_stop(),
 
-    ok.
+            ok
+    end.
 
 test_gc(_Config) ->
     %% Test basic GC
@@ -912,25 +918,31 @@ assert val == 2, f'Expected 2, got {val}'
 
 %% Test module reload across all workers
 test_reload(_Config) ->
-    %% First, ensure json module is imported in at least one worker
-    {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
+    %% Module reload can trigger imports that don't support subinterpreters
+    case py_nif:subinterp_supported() of
+        true ->
+            {skip, "module reload may use modules not supported in subinterpreters"};
+        false ->
+            %% First, ensure json module is imported in at least one worker
+            {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
 
-    %% Now reload it - should succeed across all workers
-    ok = py:reload(json),
+            %% Now reload it - should succeed across all workers
+            ok = py:reload(json),
 
-    %% Verify the module still works after reload
-    {ok, <<"[1, 2, 3]">>} = py:call(json, dumps, [[1, 2, 3]]),
+            %% Verify the module still works after reload
+            {ok, <<"[1, 2, 3]">>} = py:call(json, dumps, [[1, 2, 3]]),
 
-    %% Test reload of a module that might not be loaded (should not error)
-    ok = py:reload(collections),
+            %% Test reload of a module that might not be loaded (should not error)
+            ok = py:reload(collections),
 
-    %% Test reload with binary module name
-    ok = py:reload(<<"os">>),
+            %% Test reload with binary module name
+            ok = py:reload(<<"os">>),
 
-    %% Test reload with string module name
-    ok = py:reload("sys"),
+            %% Test reload with string module name
+            ok = py:reload("sys"),
 
-    ok.
+            ok
+    end.
 
 %%% ============================================================================
 %%% ASGI Optimization Tests
