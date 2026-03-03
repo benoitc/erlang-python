@@ -154,6 +154,7 @@
     context_write_callback_response/2,
     context_resume/3,
     context_cancel_resume/2,
+    context_get_event_loop/1,
     %% py_ref API (Python object references with interp_id)
     ref_wrap/2,
     is_ref/1,
@@ -1210,6 +1211,18 @@ context_resume(_ContextRef, _StateRef, _Result) ->
 %% @returns ok
 -spec context_cancel_resume(reference(), reference()) -> ok.
 context_cancel_resume(_ContextRef, _StateRef) ->
+    ?NIF_STUB.
+
+%% @doc Get the event loop for a subinterpreter context.
+%%
+%% For subinterpreter contexts (Python 3.12+), this returns the event loop
+%% reference that can be used to create a dedicated event worker. Worker mode
+%% contexts (Python < 3.12) use the shared router instead and return an error.
+%%
+%% @param ContextRef Context reference
+%% @returns {ok, LoopRef} for subinterpreter contexts, or {error, not_subinterp} for worker mode
+-spec context_get_event_loop(reference()) -> {ok, reference()} | {error, term()}.
+context_get_event_loop(_ContextRef) ->
     ?NIF_STUB.
 
 %%% ============================================================================

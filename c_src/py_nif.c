@@ -1235,6 +1235,15 @@ static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL
     PyObject *builtins = PyEval_GetBuiltins();
     PyDict_SetItemString(worker->globals, "__builtins__", builtins);
 
+    /* Initialize event loop for this subinterpreter */
+    if (init_subinterpreter_event_loop(env) < 0) {
+        Py_EndInterpreter(tstate);
+        PyThreadState_Swap(main_tstate);
+        PyGILState_Release(gstate);
+        enif_release_resource(worker);
+        return make_error(env, "event_loop_init_failed");
+    }
+
     /* Switch back to main interpreter */
     PyThreadState_Swap(NULL);
     PyThreadState_Swap(main_tstate);
@@ -1677,6 +1686,15 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
                 PyDict_SetItemString(ctx->globals, "erlang", erlang_module);
                 Py_DECREF(erlang_module);
             }
+        }
+
+        /* Initialize event loop for this subinterpreter */
+        if (init_subinterpreter_event_loop(env) < 0) {
+            Py_EndInterpreter(tstate);
+            PyThreadState_Swap(main_tstate);
+            PyGILState_Release(gstate);
+            enif_release_resource(ctx);
+            return make_error(env, "event_loop_init_failed");
         }
 
         /* Switch back to main interpreter */
@@ -3180,6 +3198,7 @@ static ErlNifFunc nif_funcs[] = {
     {"context_write_callback_response", 2, nif_context_write_callback_response, 0},
     {"context_resume", 3, nif_context_resume, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_cancel_resume", 2, nif_context_cancel_resume, 0},
+    {"context_get_event_loop", 1, nif_context_get_event_loop, 0},
 
     /* py_ref API (Python object references with interp_id) */
     {"ref_wrap", 2, nif_ref_wrap, 0},

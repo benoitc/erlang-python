@@ -54,6 +54,13 @@
 
 -export_type([context_mode/0, context/0]).
 
+-record(state, {
+    ref :: reference(),
+    id :: pos_integer(),
+    interp_id :: non_neg_integer(),
+    event_state = #{} :: map()  %% #{loop_ref => ref(), worker_pid => pid()}
+}).
+
 %% ============================================================================
 %% API
 %% ============================================================================
@@ -221,14 +228,69 @@ get_interp_id(Ctx) when is_pid(Ctx) ->
 
 %% @private
 init(Parent, Id, Mode) ->
+    process_flag(trap_exit, true),
     case create_context(Mode) of
         {ok, Ref, InterpId} ->
-            %% No callback handler process needed - we handle callbacks inline
-            %% using the suspension-based approach with recursive receive
+            %% For subinterpreters, create a dedicated event worker
+            EventState = setup_event_worker(Ref, InterpId),
             Parent ! {self(), started},
-            loop(Ref, Id, InterpId);
+            State = #state{
+                ref = Ref,
+                id = Id,
+                interp_id = InterpId,
+                event_state = EventState
+            },
+            loop(State);
         {error, Reason} ->
             Parent ! {self(), {error, Reason}}
+    end.
+
+%% @private Create event worker for subinterpreter contexts
+setup_event_worker(Ref, InterpId) ->
+    case py_nif:context_get_event_loop(Ref) of
+        {ok, LoopRef} ->
+            %% This is a subinterpreter - create dedicated event worker
+            WorkerId = iolist_to_binary(["ctx_", integer_to_list(InterpId)]),
+            case py_event_worker:start_link(WorkerId, LoopRef) of
+                {ok, WorkerPid} ->
+                    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
+                    %% Extend erlang module with event loop functions
+                    extend_erlang_module_in_context(Ref),
+                    #{loop_ref => LoopRef, worker_pid => WorkerPid};
+                {error, WorkerError} ->
+                    error_logger:warning_msg(
+                        "py_context ~p: Failed to start event worker: ~p~n",
+                        [InterpId, WorkerError]),
+                    #{}
+            end;
+        {error, not_subinterp} ->
+            %% Worker mode - uses shared router (lazy initialization)
+            #{};
+        {error, Reason} ->
+            error_logger:warning_msg(
+                "py_context ~p: Failed to get event loop: ~p~n",
+                [InterpId, Reason]),
+            #{}
+    end.
+
+%% @private Extend the erlang module with event loop functions in a subinterpreter
+extend_erlang_module_in_context(Ref) ->
+    PrivDir = code:priv_dir(erlang_python),
+    Code = iolist_to_binary([
+        "import sys\n",
+        "priv_dir = '", PrivDir, "'\n",
+        "if priv_dir not in sys.path:\n",
+        "    sys.path.insert(0, priv_dir)\n",
+        "import erlang\n",
+        "if hasattr(erlang, '_extend_erlang_module'):\n",
+        "    erlang._extend_erlang_module(priv_dir)\n"
+    ]),
+    case py_nif:context_exec(Ref, Code) of
+        ok -> ok;
+        {error, Reason} ->
+            error_logger:warning_msg(
+                "py_context: Failed to extend erlang module: ~p~n", [Reason]),
+            ok
     end.
 
 %% @private
@@ -244,36 +306,71 @@ create_context(worker) ->
 
 %% @private
 %% Main context loop. Handles requests and uses suspension-based callback support.
-loop(Ref, Id, InterpId) ->
+loop(#state{ref = Ref, interp_id = InterpId} = State) ->
     receive
         {call, From, MRef, Module, Func, Args, Kwargs} ->
             Result = handle_call_with_suspension(Ref, Module, Func, Args, Kwargs),
             From ! {MRef, Result},
-            loop(Ref, Id, InterpId);
+            loop(State);
 
         {eval, From, MRef, Code, Locals} ->
             Result = handle_eval_with_suspension(Ref, Code, Locals),
             From ! {MRef, Result},
-            loop(Ref, Id, InterpId);
+            loop(State);
 
         {exec, From, MRef, Code} ->
             Result = py_nif:context_exec(Ref, Code),
             From ! {MRef, Result},
-            loop(Ref, Id, InterpId);
+            loop(State);
 
         {call_method, From, MRef, ObjRef, Method, Args} ->
             Result = py_nif:context_call_method(Ref, ObjRef, Method, Args),
             From ! {MRef, Result},
-            loop(Ref, Id, InterpId);
+            loop(State);
 
         {get_interp_id, From, MRef} ->
             From ! {MRef, {ok, InterpId}},
-            loop(Ref, Id, InterpId);
+            loop(State);
 
         {stop, From, MRef} ->
-            destroy_context(Ref),
-            From ! {MRef, ok}
+            terminate(normal, State),
+            From ! {MRef, ok};
+
+        {'EXIT', Pid, Reason} ->
+            %% Handle EXIT from linked processes
+            case State#state.event_state of
+                #{worker_pid := Pid} ->
+                    %% Event worker died - log and continue (degraded asyncio support)
+                    error_logger:warning_msg(
+                        "py_context ~p: Event worker died: ~p~n",
+                        [InterpId, Reason]),
+                    NewState = State#state{event_state = #{}},
+                    loop(NewState);
+                _ when Reason =:= shutdown; Reason =:= kill ->
+                    %% Supervisor shutdown or kill signal - clean exit
+                    terminate(Reason, State);
+                _ when is_tuple(Reason), element(1, Reason) =:= shutdown ->
+                    %% Supervisor shutdown with extra info: {shutdown, _}
+                    terminate(Reason, State);
+                _ ->
+                    %% Ignore EXIT from other processes (e.g. callback handlers)
+                    %% These are normal operations in the callback mechanism
+                    loop(State)
+            end
     end.
+
+%% @private Clean up resources on termination
+terminate(_Reason, #state{ref = Ref, event_state = EventState}) ->
+    %% Stop the event worker first (if it exists and is still alive)
+    case EventState of
+        #{worker_pid := WorkerPid} ->
+            catch gen_server:stop(WorkerPid, normal, 5000);
+        _ ->
+            ok
+    end,
+    %% Destroy the Python context
+    catch py_nif:context_destroy(Ref),
+    ok.
 
 %% ============================================================================
 %% Suspension-based callback handling
@@ -469,10 +566,6 @@ join_binaries([], _Sep) -> <<>>;
 join_binaries([H], _Sep) -> H;
 join_binaries([H|T], Sep) ->
     lists:foldl(fun(B, Acc) -> <<Acc/binary, Sep/binary, B/binary>> end, H, T).
-
-%% @private
-destroy_context(Ref) ->
-    py_nif:context_destroy(Ref).
 
 %% @private
 to_binary(Atom) when is_atom(Atom) ->

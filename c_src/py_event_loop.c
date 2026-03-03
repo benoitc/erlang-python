@@ -107,9 +107,52 @@ typedef struct {
     int isolation_mode;
 } py_event_loop_module_state_t;
 
+/* ============================================================================
+ * Global Shared Router
+ * ============================================================================
+ *
+ * A global shared router that can be used by all interpreters (main and sub).
+ * This is separate from the per-module state to allow subinterpreters to
+ * access the router even when their module state doesn't have it set.
+ */
+static ErlNifPid g_global_shared_router;
+static bool g_global_shared_router_valid = false;
+static pthread_mutex_t g_global_router_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* Forward declaration for module state access */
 static py_event_loop_module_state_t *get_module_state(void);
 static py_event_loop_module_state_t *get_module_state_from_module(PyObject *module);
+
+/**
+ * Try to acquire a router for the event loop.
+ *
+ * If the loop doesn't have a router/worker configured, check the global
+ * shared router and use it if available. This allows subinterpreters
+ * to use the main interpreter's router.
+ *
+ * @param loop Event loop to check/update
+ * @return true if a router/worker is available, false otherwise
+ */
+static bool event_loop_ensure_router(erlang_event_loop_t *loop) {
+    if (loop == NULL) {
+        return false;
+    }
+
+    /* Already have a router or worker */
+    if (loop->has_router || loop->has_worker) {
+        return true;
+    }
+
+    /* Try to get the global shared router */
+    pthread_mutex_lock(&g_global_router_mutex);
+    if (g_global_shared_router_valid) {
+        loop->router_pid = g_global_shared_router;
+        loop->has_router = true;
+    }
+    pthread_mutex_unlock(&g_global_router_mutex);
+
+    return loop->has_router || loop->has_worker;
+}
 
 /**
  * Get the py_event_loop module for the current interpreter.
@@ -626,7 +669,7 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     }
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!loop->has_worker && !loop->has_router) {
+    if (!event_loop_ensure_router(loop)) {
         return make_error(env, "no_router");
     }
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
@@ -738,7 +781,7 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     }
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!loop->has_worker && !loop->has_router) {
+    if (!event_loop_ensure_router(loop)) {
         return make_error(env, "no_router");
     }
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
@@ -852,7 +895,7 @@ ERL_NIF_TERM nif_call_later(ErlNifEnv *env, int argc,
     }
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!loop->has_worker && !loop->has_router) {
+    if (!event_loop_ensure_router(loop)) {
         return make_error(env, "no_router");
     }
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
@@ -892,7 +935,7 @@ ERL_NIF_TERM nif_cancel_timer(ErlNifEnv *env, int argc,
     ERL_NIF_TERM timer_ref = argv[1];
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!loop->has_worker && !loop->has_router) {
+    if (!event_loop_ensure_router(loop)) {
         return make_error(env, "no_router");
     }
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
@@ -1926,7 +1969,7 @@ ERL_NIF_TERM nif_reselect_reader_fd(ErlNifEnv *env, int argc,
 
     /* Use the loop stored in the fd resource */
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
+    if (loop == NULL || !event_loop_ensure_router(loop)) {
         return make_error(env, "no_loop");
     }
 
@@ -1969,7 +2012,7 @@ ERL_NIF_TERM nif_reselect_writer_fd(ErlNifEnv *env, int argc,
 
     /* Use the loop stored in the fd resource */
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
+    if (loop == NULL || !event_loop_ensure_router(loop)) {
         return make_error(env, "no_loop");
     }
 
@@ -2042,7 +2085,7 @@ ERL_NIF_TERM nif_start_reader(ErlNifEnv *env, int argc,
     }
 
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
+    if (loop == NULL || !event_loop_ensure_router(loop)) {
         return make_error(env, "no_loop");
     }
 
@@ -2117,7 +2160,7 @@ ERL_NIF_TERM nif_start_writer(ErlNifEnv *env, int argc,
     }
 
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
+    if (loop == NULL || !event_loop_ensure_router(loop)) {
         return make_error(env, "no_loop");
     }
 
@@ -2747,6 +2790,52 @@ ERL_NIF_TERM nif_set_udp_broadcast(ErlNifEnv *env, int argc,
 }
 
 /* ============================================================================
+ * Context Event Loop Access
+ *
+ * These NIFs allow Erlang to access the event loop for a subinterpreter context
+ * ============================================================================ */
+
+/**
+ * context_get_event_loop(ContextRef) -> {ok, LoopRef} | {error, Reason}
+ *
+ * Get the event loop for a subinterpreter context.
+ * This allows Erlang to create a dedicated event worker for the context.
+ */
+ERL_NIF_TERM nif_context_get_event_loop(ErlNifEnv *env, int argc,
+                                         const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (ctx->is_subinterp && ctx->tstate != NULL) {
+        /* Enter the subinterpreter - same pattern as context_call/context_eval */
+        PyThreadState *saved_tstate = PyThreadState_Swap(NULL);
+        PyThreadState_Swap(ctx->tstate);
+
+        erlang_event_loop_t *loop = get_interpreter_event_loop();
+
+        /* Restore previous thread state */
+        PyThreadState_Swap(saved_tstate);
+
+        if (loop == NULL) {
+            return make_error(env, "no_event_loop");
+        }
+
+        /* Return reference to the event loop */
+        ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
+        return enif_make_tuple2(env, ATOM_OK, loop_term);
+    }
+#endif
+
+    /* Worker mode contexts don't have their own event loop */
+    return make_error(env, "not_subinterp");
+}
+
+/* ============================================================================
  * Reactor NIFs - Erlang-as-Reactor Architecture
  *
  * These NIFs support the Erlang-as-Reactor pattern where:
@@ -3258,7 +3347,8 @@ ERL_NIF_TERM nif_set_isolation_mode(ErlNifEnv *env, int argc,
 /**
  * Set the shared router PID for per-loop created loops.
  * This router will be used by all loops created via _loop_new().
- * Stores in module state instead of global variable.
+ * Stores in both module state (for the current interpreter) and
+ * global variable (for subinterpreters).
  */
 ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
                                     const ERL_NIF_TERM argv[]) {
@@ -3269,7 +3359,13 @@ ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_pid");
     }
 
-    /* Store in module state */
+    /* Store in global variable (accessible from all interpreters) */
+    pthread_mutex_lock(&g_global_router_mutex);
+    g_global_shared_router = router_pid;
+    g_global_shared_router_valid = true;
+    pthread_mutex_unlock(&g_global_router_mutex);
+
+    /* Also store in module state for backward compatibility */
     PyGILState_STATE gstate = PyGILState_Ensure();
     py_event_loop_module_state_t *state = get_module_state();
     if (state != NULL) {
@@ -3613,7 +3709,7 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
 
     /* Use per-interpreter event loop lookup */
     erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
+    if (loop == NULL || !event_loop_ensure_router(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
@@ -3660,7 +3756,7 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
 
     /* Use per-interpreter event loop lookup */
     erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || (!loop->has_router && !loop->has_worker)) {
+    if (loop == NULL || !event_loop_ensure_router(loop)) {
         Py_RETURN_NONE;
     }
 
@@ -4059,7 +4155,7 @@ static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!loop->has_router && !loop->has_worker) {
+    if (!event_loop_ensure_router(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
@@ -4140,7 +4236,7 @@ static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!loop->has_router && !loop->has_worker) {
+    if (!event_loop_ensure_router(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
@@ -4361,7 +4457,7 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!loop->has_router && !loop->has_worker) {
+    if (!event_loop_ensure_router(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
@@ -4417,7 +4513,7 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
         Py_RETURN_NONE;
     }
 
-    if (!loop->has_router && !loop->has_worker) {
+    if (!event_loop_ensure_router(loop)) {
         Py_RETURN_NONE;
     }
 
@@ -4581,7 +4677,7 @@ static PyObject *py_erlang_sleep(PyObject *self, PyObject *args) {
     }
 
     /* Check if we have a worker to send to */
-    if (!loop->has_worker && !loop->has_router) {
+    if (!event_loop_ensure_router(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "No worker or router configured");
         return NULL;
     }
@@ -4702,6 +4798,13 @@ static struct PyModuleDef PyEventLoopModuleDef = {
  * Called during Python initialization.
  */
 int create_py_event_loop_module(void) {
+    /* Check if already registered in this interpreter (idempotent) */
+    PyObject *sys_modules = PyImport_GetModuleDict();
+    PyObject *existing = PyDict_GetItemString(sys_modules, "py_event_loop");
+    if (existing != NULL) {
+        return 0;  /* Already registered */
+    }
+
     PyObject *module = PyModule_Create(&PyEventLoopModuleDef);
     if (module == NULL) {
         return -1;
@@ -4715,8 +4818,7 @@ int create_py_event_loop_module(void) {
         state->isolation_mode = 0;  /* global mode by default */
     }
 
-    /* Add module to sys.modules */
-    PyObject *sys_modules = PyImport_GetModuleDict();
+    /* Add module to sys.modules (reuse sys_modules from idempotency check) */
     if (PyDict_SetItemString(sys_modules, "py_event_loop", module) < 0) {
         Py_DECREF(module);
         return -1;
@@ -4786,11 +4888,39 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->has_router = false;
     loop->has_self = false;
 
+    /* Try to use the global shared router if available (for subinterpreters) */
+    pthread_mutex_lock(&g_global_router_mutex);
+    if (g_global_shared_router_valid) {
+        loop->router_pid = g_global_shared_router;
+        loop->has_router = true;
+    }
+    pthread_mutex_unlock(&g_global_router_mutex);
+
     /* Store in module state for Python code to access */
     set_interpreter_event_loop(loop);
 
     /* Keep a reference to prevent garbage collection */
     /* Note: This loop will be replaced when py_event_loop:init runs */
 
+    return 0;
+}
+
+/**
+ * Initialize event loop for a subinterpreter.
+ *
+ * Creates the py_event_loop module and a default event loop for the
+ * current subinterpreter. This must be called after creating a new
+ * subinterpreter to enable asyncio.sleep() and timer functionality.
+ *
+ * @param env NIF environment (can be NULL for worker pool threads)
+ * @return 0 on success, -1 on failure
+ */
+int init_subinterpreter_event_loop(ErlNifEnv *env) {
+    if (create_py_event_loop_module() < 0) {
+        return -1;
+    }
+    if (create_default_event_loop(env) < 0) {
+        return -1;
+    }
     return 0;
 }

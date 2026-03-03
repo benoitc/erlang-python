@@ -776,4 +776,16 @@ int create_py_event_loop_module(void);
  */
 int create_default_event_loop(ErlNifEnv *env);
 
+/**
+ * @brief Initialize event loop for a subinterpreter
+ *
+ * Creates the py_event_loop module and a default event loop for the
+ * current subinterpreter. This must be called after creating a new
+ * subinterpreter to enable asyncio.sleep() and timer functionality.
+ *
+ * @param env NIF environment (can be NULL for worker pool threads)
+ * @return 0 on success, -1 on failure
+ */
+int init_subinterpreter_event_loop(ErlNifEnv *env);
+
 #endif /* PY_EVENT_LOOP_H */

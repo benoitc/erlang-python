@@ -622,6 +622,11 @@ static int worker_init_python_state(py_pool_worker_t *worker) {
         }
 
         worker->interp = PyThreadState_GetInterpreter(worker->tstate);
+
+        /* Initialize event loop for this subinterpreter */
+        if (init_subinterpreter_event_loop(NULL) < 0) {
+            return -1;
+        }
     } else
 #endif
     {
@@ -703,6 +708,13 @@ static void *py_pool_worker_thread(void *arg) {
         }
 
         worker->interp = PyThreadState_GetInterpreter(worker->tstate);
+
+        /* Initialize event loop for this subinterpreter */
+        if (init_subinterpreter_event_loop(NULL) < 0) {
+            gil_release(guard);
+            worker->running = false;
+            return NULL;
+        }
 
         /* Release main GIL - we now have our own */
         gil_release(guard);
