@@ -326,30 +326,40 @@ See [Reactor](reactor.md) for full documentation.
 
 ### Socket FD Handoff
 
-Pass socket file descriptors directly from Erlang to Python for high-performance I/O:
+Pass socket file descriptors directly from Erlang to Python for high-performance I/O.
+
+The reactor automatically `dup()`s the fd, so you can safely close Erlang's socket:
 
 ```erlang
-%% Erlang: Accept connection and get fd
+%% Erlang: Accept and hand off to reactor
 {ok, ClientSock} = gen_tcp:accept(ListenSock),
 {ok, Fd} = inet:getfd(ClientSock),
 
-%% Hand off to Python reactor (Erlang releases ownership)
-py_reactor_context:handoff(Fd, #{type => tcp}).
+%% Hand off fd - reactor dup()s it automatically
+py_reactor_context:handoff(Fd, #{type => tcp}),
 
-%% Or pass fd to asyncio-based Python code
+%% Safe to close Erlang's socket
+gen_tcp:close(ClientSock).
+```
+
+For direct asyncio usage (not via reactor), dup manually:
+
+```erlang
+%% For direct asyncio - dup the fd yourself
+{ok, DupFd} = prim_file:dup(Fd),
 Ctx = py:context(1),
-py:call(Ctx, my_handler, handle_fd, [Fd]).
+py:call(Ctx, my_handler, handle_fd, [DupFd]).
 ```
 
 ```python
-# Python: Use fd with reactor or asyncio
+# Python: Use fd with asyncio
 import socket
-sock = socket.socket(fileno=fd)  # Takes ownership
+sock = socket.socket(fileno=fd)
 sock.setblocking(False)
-# ... use with asyncio or reactor
+# ... use with asyncio
 ```
 
-See [Reactor](reactor.md#passing-sockets-from-erlang-to-python) for details.
+See [Reactor](reactor.md#socket-ownership) for details.
 
 ### `erlang.send()` for Fire-and-Forget Messages
 

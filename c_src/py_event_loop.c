@@ -2904,14 +2904,22 @@ ERL_NIF_TERM nif_reactor_register_fd(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_pid");
     }
 
+    /* Duplicate the fd so we own our copy independent of Erlang's socket.
+     * This prevents issues when Erlang's socket is garbage collected. */
+    int dup_fd = dup(fd);
+    if (dup_fd < 0) {
+        return make_error(env, "dup_failed");
+    }
+
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
                                                  sizeof(fd_resource_t));
     if (fd_res == NULL) {
+        close(dup_fd);
         return make_error(env, "alloc_failed");
     }
 
-    fd_res->fd = fd;
+    fd_res->fd = dup_fd;  /* Use duplicated fd */
     fd_res->read_callback_id = 0;  /* Not used for reactor mode */
     fd_res->write_callback_id = 0;
     fd_res->owner_pid = owner_pid;
@@ -2922,7 +2930,7 @@ ERL_NIF_TERM nif_reactor_register_fd(ErlNifEnv *env, int argc,
     /* Initialize lifecycle management */
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
     fd_res->monitor_active = false;
-    fd_res->owns_fd = false;  /* Erlang owns the socket via gen_tcp */
+    fd_res->owns_fd = true;  /* We own the duplicated fd */
 
     /* Monitor owner process for cleanup on death */
     if (enif_monitor_process(env, fd_res, &owner_pid,
