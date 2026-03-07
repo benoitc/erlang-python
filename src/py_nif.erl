@@ -162,6 +162,8 @@
     context_call/5,
     context_eval/3,
     context_exec/2,
+    context_reset/1,
+    context_reload/2,
     context_call_method/4,
     context_to_term/1,
     context_interp_id/1,
@@ -1227,6 +1229,33 @@ context_eval(_ContextRef, _Code, _Locals) ->
 %% @returns ok | {error, Reason}
 -spec context_exec(reference(), binary()) -> ok | {error, term()}.
 context_exec(_ContextRef, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Reset a context by clearing its namespace.
+%%
+%% Clears all user-defined names from the context's globals dict,
+%% keeping only dunder items (__builtins__, __name__, etc.) and
+%% the erlang module.
+%%
+%% This provides a "soft reset" that cleans up accumulated state
+%% without destroying and recreating the interpreter.
+%%
+%% @param ContextRef Context reference
+%% @returns ok | {error, Reason}
+-spec context_reset(reference()) -> ok | {error, term()}.
+context_reset(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Reload modules in a context.
+%%
+%% Reloads the specified modules using importlib.reload().
+%% Only modules that are already loaded will be reloaded.
+%%
+%% @param ContextRef Context reference
+%% @param Modules List of module names as binaries
+%% @returns ok | {error, Reason}
+-spec context_reload(reference(), [binary()]) -> ok | {error, term()}.
+context_reload(_ContextRef, _Modules) ->
     ?NIF_STUB.
 
 %% @doc Call a method on a Python object in a context.

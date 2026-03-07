@@ -123,6 +123,9 @@
     start_contexts/1,
     stop_contexts/0,
     contexts_started/0,
+    %% Context reset/reload
+    reset_context/1,
+    reload_context/2,
     %% py_ref API (Python object references with auto-routing)
     call_method/3,
     getattr/2,
@@ -1044,6 +1047,51 @@ context() ->
 -spec context(pos_integer()) -> pid().
 context(N) ->
     py_context_router:get_context(N).
+
+%% @doc Reset a context by clearing its namespace.
+%%
+%% Clears all user-defined names from the context's globals dict,
+%% keeping only dunder items (__builtins__, __name__, etc.) and
+%% the erlang module.
+%%
+%% This provides a "soft reset" that cleans up accumulated state
+%% without destroying and recreating the interpreter.
+%%
+%% Example:
+%% ```
+%% Ctx = py:context(1),
+%% ok = py:exec(Ctx, <<"x = 42">>),
+%% ok = py:reset_context(Ctx),
+%% {error, _} = py:eval(Ctx, <<"x">>).  %% x is no longer defined
+%% '''
+%%
+%% @param Ctx Context pid
+%% @returns ok | {error, Reason}
+-spec reset_context(pid()) -> ok | {error, term()}.
+reset_context(Ctx) ->
+    py_context:reset(Ctx).
+
+%% @doc Reload modules in a context.
+%%
+%% Reloads the specified modules using importlib.reload().
+%% Only modules that are already loaded will be reloaded.
+%%
+%% This is useful for hot-reloading code during development.
+%%
+%% Example:
+%% ```
+%% Ctx = py:context(1),
+%% ok = py:exec(Ctx, <<"import mymodule">>),
+%% %% ... modify mymodule.py on disk ...
+%% ok = py:reload_context(Ctx, [<<"mymodule">>]).
+%% '''
+%%
+%% @param Ctx Context pid
+%% @param Modules List of module names as binaries
+%% @returns ok | {error, Reason}
+-spec reload_context(pid(), [binary()]) -> ok | {error, term()}.
+reload_context(Ctx, Modules) ->
+    py_context:reload(Ctx, Modules).
 
 %%% ============================================================================
 %%% py_ref API (Python object references with auto-routing)

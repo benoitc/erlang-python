@@ -2458,6 +2458,180 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
 }
 
 /**
+ * @brief Reset a context by clearing its namespace
+ *
+ * nif_context_reset(ContextRef) -> ok | {error, Reason}
+ *
+ * Clears all user-defined names from the context's globals dict,
+ * keeping only dunder items (__builtins__, __name__, etc.) and
+ * the erlang module.
+ *
+ * This provides a "soft reset" that cleans up accumulated state
+ * without destroying and recreating the interpreter.
+ */
+static ERL_NIF_TERM nif_context_reset(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    ERL_NIF_TERM result;
+
+    /* Acquire thread state */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Get list of keys to remove (can't modify dict while iterating) */
+    PyObject *keys = PyDict_Keys(ctx->globals);
+    if (keys == NULL) {
+        py_context_release(&guard);
+        return make_error(env, "get_keys_failed");
+    }
+
+    Py_ssize_t len = PyList_Size(keys);
+
+    for (Py_ssize_t i = 0; i < len; i++) {
+        PyObject *key = PyList_GetItem(keys, i);  /* Borrowed ref */
+        if (key == NULL) continue;
+
+        const char *name = PyUnicode_AsUTF8(key);
+        if (name == NULL) continue;
+
+        /* Keep dunder items (__builtins__, __name__, __doc__, etc.) */
+        if (name[0] == '_' && name[1] == '_') {
+            continue;
+        }
+
+        /* Keep the erlang module */
+        if (strcmp(name, "erlang") == 0) {
+            continue;
+        }
+
+        /* Remove this key */
+        if (PyDict_DelItem(ctx->globals, key) < 0) {
+            PyErr_Clear();  /* Ignore errors, continue cleaning */
+        }
+    }
+
+    Py_DECREF(keys);
+
+    /* Also run garbage collection to free memory */
+    PyGC_Collect();
+
+    result = ATOM_OK;
+
+    py_context_release(&guard);
+    return result;
+}
+
+/**
+ * @brief Reload modules in a context
+ *
+ * nif_context_reload(ContextRef, ModuleNames) -> ok | {error, Reason}
+ *
+ * Reloads the specified modules using importlib.reload().
+ * ModuleNames is a list of binary module names.
+ */
+static ERL_NIF_TERM nif_context_reload(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    /* Get module names list */
+    unsigned int list_len;
+    if (!enif_get_list_length(env, argv[1], &list_len)) {
+        return make_error(env, "invalid_modules_list");
+    }
+
+    ERL_NIF_TERM result;
+
+    /* Acquire thread state */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Import importlib */
+    PyObject *importlib = PyImport_ImportModule("importlib");
+    if (importlib == NULL) {
+        py_context_release(&guard);
+        return make_py_error(env);
+    }
+
+    PyObject *reload_func = PyObject_GetAttrString(importlib, "reload");
+    Py_DECREF(importlib);
+    if (reload_func == NULL) {
+        py_context_release(&guard);
+        return make_py_error(env);
+    }
+
+    /* Get sys.modules */
+    PyObject *sys_modules = PyImport_GetModuleDict();  /* Borrowed ref */
+
+    /* Iterate through module names */
+    ERL_NIF_TERM list = argv[1];
+    ERL_NIF_TERM head, tail;
+    int error_count = 0;
+
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+        ErlNifBinary mod_bin;
+        if (enif_inspect_binary(env, head, &mod_bin)) {
+            char *mod_name = binary_to_string(&mod_bin);
+            if (mod_name != NULL) {
+                /* Check if module is loaded */
+                PyObject *mod_name_py = PyUnicode_FromString(mod_name);
+                if (mod_name_py != NULL) {
+                    PyObject *module = PyDict_GetItem(sys_modules, mod_name_py);  /* Borrowed */
+                    if (module != NULL) {
+                        /* Reload the module */
+                        PyObject *reloaded = PyObject_CallFunctionObjArgs(reload_func, module, NULL);
+                        if (reloaded != NULL) {
+                            Py_DECREF(reloaded);
+                        } else {
+                            PyErr_Clear();
+                            error_count++;
+                        }
+                    }
+                    Py_DECREF(mod_name_py);
+                }
+                enif_free(mod_name);
+            }
+        }
+        list = tail;
+    }
+
+    Py_DECREF(reload_func);
+
+    if (error_count > 0) {
+        result = enif_make_tuple2(env,
+            ATOM_ERROR,
+            enif_make_tuple2(env,
+                enif_make_atom(env, "reload_errors"),
+                enif_make_int(env, error_count)));
+    } else {
+        result = ATOM_OK;
+    }
+
+    py_context_release(&guard);
+    return result;
+}
+
+/**
  * @brief Call a method on a Python object in a context
  *
  * nif_context_call_method(ContextRef, ObjRef, Method, Args) -> {ok, Result} | {error, Reason}
@@ -3848,6 +4022,8 @@ static ErlNifFunc nif_funcs[] = {
     {"context_call", 5, nif_context_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_eval", 3, nif_context_eval, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_exec", 2, nif_context_exec, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"context_reset", 1, nif_context_reset, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"context_reload", 2, nif_context_reload, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_call_method", 4, nif_context_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_to_term", 1, nif_context_to_term, 0},
     {"context_interp_id", 1, nif_context_interp_id, 0},
