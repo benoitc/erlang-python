@@ -1,0 +1,10 @@
+Error! Failed to eval: 
+            application:ensure_all_started(erlang_python),
+            Results = py_scalable_io_bench:run_all(),
+            py_scalable_io_bench:save_results(Results, "/Users/benoitc/Projects/erlang-python/benchmark_results/current_20260224_133950.txt"),
+            init:stop()
+        
+
+Runtime terminating during boot ({undef,[{py_scalable_io_bench,run_all,[],[]},{erl_eval,do_apply,7,[{file,"erl_eval.erl"},{line,920}]},{erl_eval,expr,6,[{file,"erl_eval.erl"},{line,668}]},{erl_eval,exprs,6,[{file,"erl_eval.erl"},{line,276}]},{init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})
+
+Crash dump is being written to: erl_crash.dump...done

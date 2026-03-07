@@ -50,6 +50,61 @@ static pthread_mutex_t g_interp_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Flag: ASGI subsystem is initialized (not per-interpreter) */
 static bool g_asgi_initialized = false;
 
+/* ============================================================================
+ * Internal Profiling Support
+ * ============================================================================
+ * When ASGI_PROFILING is defined, detailed timing of each phase is collected.
+ * Enable with: -DASGI_PROFILING during compilation
+ */
+#ifdef ASGI_PROFILING
+#include <sys/time.h>
+
+typedef struct {
+    uint64_t count;
+    uint64_t gil_acquire_us;
+    uint64_t string_conv_us;
+    uint64_t module_import_us;
+    uint64_t get_callable_us;
+    uint64_t scope_build_us;
+    uint64_t body_conv_us;
+    uint64_t runner_import_us;
+    uint64_t runner_call_us;
+    uint64_t response_extract_us;
+    uint64_t gil_release_us;
+    uint64_t total_us;
+} asgi_profile_stats_t;
+
+static asgi_profile_stats_t g_asgi_profile = {0};
+static pthread_mutex_t g_asgi_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint64_t get_time_us(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
+
+#define PROF_START() uint64_t _prof_start = get_time_us(), _prof_prev = _prof_start, _prof_now
+#define PROF_MARK(field) do { \
+    _prof_now = get_time_us(); \
+    pthread_mutex_lock(&g_asgi_profile_mutex); \
+    g_asgi_profile.field += (_prof_now - _prof_prev); \
+    pthread_mutex_unlock(&g_asgi_profile_mutex); \
+    _prof_prev = _prof_now; \
+} while(0)
+#define PROF_END() do { \
+    _prof_now = get_time_us(); \
+    pthread_mutex_lock(&g_asgi_profile_mutex); \
+    g_asgi_profile.count++; \
+    g_asgi_profile.total_us += (_prof_now - _prof_start); \
+    pthread_mutex_unlock(&g_asgi_profile_mutex); \
+} while(0)
+
+#else
+#define PROF_START()
+#define PROF_MARK(field)
+#define PROF_END()
+#endif /* ASGI_PROFILING */
+
 /* ASGI-specific Erlang atoms for scope map keys */
 ERL_NIF_TERM ATOM_ASGI_PATH;
 ERL_NIF_TERM ATOM_ASGI_HEADERS;
@@ -1111,22 +1166,6 @@ static int asgi_init_scope_cache(void) {
 }
 
 /**
- * @brief Clean up thread-local scope cache
- */
-static void asgi_cleanup_scope_cache(void) {
-    if (tl_scope_cache == NULL) {
-        return;
-    }
-
-    for (int i = 0; i < SCOPE_CACHE_SIZE; i++) {
-        Py_XDECREF(tl_scope_cache->entries[i].scope_template);
-    }
-
-    enif_free(tl_scope_cache);
-    tl_scope_cache = NULL;
-}
-
-/**
  * @brief Update dynamic fields in a cloned scope
  *
  * Updates client, headers, query_string, and method which vary per request.
@@ -1264,94 +1303,6 @@ static int update_dynamic_scope_fields(ErlNifEnv *env, PyObject *scope,
 static PyObject *get_cached_scope(ErlNifEnv *env, ERL_NIF_TERM scope_map);
 
 /* ============================================================================
- * Thread-Local Response Pool
- * ============================================================================ */
-
-static __thread asgi_response_pool_t *tl_response_pool = NULL;
-
-/**
- * @brief Initialize thread-local response pool
- */
-static int asgi_init_response_pool(void) {
-    if (tl_response_pool != NULL && tl_response_pool->initialized) {
-        return 0;
-    }
-
-    tl_response_pool = enif_alloc(sizeof(asgi_response_pool_t));
-    if (tl_response_pool == NULL) {
-        return -1;
-    }
-
-    memset(tl_response_pool, 0, sizeof(asgi_response_pool_t));
-
-    /* Pre-allocate response structures */
-    for (int i = 0; i < ASGI_RESPONSE_POOL_SIZE; i++) {
-        asgi_pooled_response_t *resp = &tl_response_pool->responses[i];
-
-        /* Create dict for response */
-        resp->dict = PyDict_New();
-        if (resp->dict == NULL) {
-            /* Clean up already allocated */
-            for (int j = 0; j < i; j++) {
-                Py_XDECREF(tl_response_pool->responses[j].dict);
-                if (tl_response_pool->responses[j].body_buffer != NULL) {
-                    enif_free(tl_response_pool->responses[j].body_buffer);
-                }
-            }
-            enif_free(tl_response_pool);
-            tl_response_pool = NULL;
-            return -1;
-        }
-
-        /* Pre-allocate body buffer */
-        resp->body_buffer = enif_alloc(ASGI_INITIAL_BODY_BUFFER_SIZE);
-        if (resp->body_buffer == NULL) {
-            Py_DECREF(resp->dict);
-            for (int j = 0; j < i; j++) {
-                Py_XDECREF(tl_response_pool->responses[j].dict);
-                if (tl_response_pool->responses[j].body_buffer != NULL) {
-                    enif_free(tl_response_pool->responses[j].body_buffer);
-                }
-            }
-            enif_free(tl_response_pool);
-            tl_response_pool = NULL;
-            return -1;
-        }
-
-        resp->body_buffer_cap = ASGI_INITIAL_BODY_BUFFER_SIZE;
-        resp->body_len = 0;
-        resp->status = 0;
-        resp->in_use = false;
-        resp->headers = NULL;
-        resp->pool_index = i;
-    }
-
-    tl_response_pool->in_use_count = 0;
-    tl_response_pool->initialized = true;
-    return 0;
-}
-
-/**
- * @brief Clean up thread-local response pool
- */
-static void asgi_cleanup_response_pool(void) {
-    if (tl_response_pool == NULL) {
-        return;
-    }
-
-    for (int i = 0; i < ASGI_RESPONSE_POOL_SIZE; i++) {
-        asgi_pooled_response_t *resp = &tl_response_pool->responses[i];
-        Py_XDECREF(resp->dict);
-        if (resp->body_buffer != NULL) {
-            enif_free(resp->body_buffer);
-        }
-    }
-
-    enif_free(tl_response_pool);
-    tl_response_pool = NULL;
-}
-
-/* ============================================================================
  * Initialization / Cleanup (Per-Interpreter)
  * ============================================================================ */
 
@@ -1466,47 +1417,6 @@ static PyObject *asgi_get_method(const char *method, size_t len) {
     return PyUnicode_FromStringAndSize(method, len);
 }
 
-static PyObject *asgi_get_http_version(int version) {
-    switch (version) {
-        case 10:
-            Py_INCREF(ASGI_HTTP_10);
-            return ASGI_HTTP_10;
-        case 11:
-            Py_INCREF(ASGI_HTTP_11);
-            return ASGI_HTTP_11;
-        case 20:
-            Py_INCREF(ASGI_HTTP_2);
-            return ASGI_HTTP_2;
-        case 30:
-            Py_INCREF(ASGI_HTTP_3);
-            return ASGI_HTTP_3;
-        default:
-            /* Default to 1.1 */
-            Py_INCREF(ASGI_HTTP_11);
-            return ASGI_HTTP_11;
-    }
-}
-
-static PyObject *asgi_get_scheme(int scheme) {
-    switch (scheme) {
-        case 0:
-            Py_INCREF(ASGI_SCHEME_HTTP);
-            return ASGI_SCHEME_HTTP;
-        case 1:
-            Py_INCREF(ASGI_SCHEME_HTTPS);
-            return ASGI_SCHEME_HTTPS;
-        case 2:
-            Py_INCREF(ASGI_SCHEME_WS);
-            return ASGI_SCHEME_WS;
-        case 3:
-            Py_INCREF(ASGI_SCHEME_WSS);
-            return ASGI_SCHEME_WSS;
-        default:
-            Py_INCREF(ASGI_SCHEME_HTTP);
-            return ASGI_SCHEME_HTTP;
-    }
-}
-
 /**
  * @brief Get cached header name or create new bytes object
  *
@@ -1602,371 +1512,6 @@ static PyObject *get_cached_header_name(asgi_interp_state_t *state,
 
     /* Uncommon header - create new bytes object */
     return PyBytes_FromStringAndSize((char *)name, len);
-}
-
-/* ============================================================================
- * Response Pool Functions
- * ============================================================================ */
-
-static asgi_pooled_response_t *asgi_acquire_response(void) {
-    /* Initialize pool on first use */
-    if (tl_response_pool == NULL || !tl_response_pool->initialized) {
-        if (asgi_init_response_pool() < 0) {
-            return NULL;
-        }
-    }
-
-    /* Find free slot */
-    for (int i = 0; i < ASGI_RESPONSE_POOL_SIZE; i++) {
-        asgi_pooled_response_t *resp = &tl_response_pool->responses[i];
-        if (!resp->in_use) {
-            resp->in_use = true;
-            resp->body_len = 0;
-            resp->status = 0;
-            resp->headers = NULL;
-            tl_response_pool->in_use_count++;
-            return resp;
-        }
-    }
-
-    /* Pool exhausted - allocate temporary response */
-    asgi_pooled_response_t *resp = enif_alloc(sizeof(asgi_pooled_response_t));
-    if (resp == NULL) {
-        return NULL;
-    }
-
-    resp->dict = PyDict_New();
-    if (resp->dict == NULL) {
-        enif_free(resp);
-        return NULL;
-    }
-
-    resp->body_buffer = enif_alloc(ASGI_INITIAL_BODY_BUFFER_SIZE);
-    if (resp->body_buffer == NULL) {
-        Py_DECREF(resp->dict);
-        enif_free(resp);
-        return NULL;
-    }
-
-    resp->body_buffer_cap = ASGI_INITIAL_BODY_BUFFER_SIZE;
-    resp->body_len = 0;
-    resp->status = 0;
-    resp->in_use = true;
-    resp->headers = NULL;
-    resp->pool_index = -1;  /* Marks as non-pooled */
-
-    return resp;
-}
-
-static void asgi_release_response(asgi_pooled_response_t *resp) {
-    if (resp == NULL) {
-        return;
-    }
-
-    /* Clear dict contents but keep the dict */
-    if (resp->dict != NULL) {
-        PyDict_Clear(resp->dict);
-    }
-
-    /* Reset body */
-    resp->body_len = 0;
-    resp->status = 0;
-    resp->headers = NULL;
-
-    if (resp->pool_index >= 0) {
-        /* Return to pool */
-        resp->in_use = false;
-        if (tl_response_pool != NULL) {
-            tl_response_pool->in_use_count--;
-        }
-    } else {
-        /* Non-pooled - free everything */
-        Py_XDECREF(resp->dict);
-        if (resp->body_buffer != NULL) {
-            enif_free(resp->body_buffer);
-        }
-        enif_free(resp);
-    }
-}
-
-static void asgi_reset_response(asgi_pooled_response_t *resp) {
-    if (resp == NULL) {
-        return;
-    }
-
-    if (resp->dict != NULL) {
-        PyDict_Clear(resp->dict);
-    }
-
-    resp->body_len = 0;
-    resp->status = 0;
-    resp->headers = NULL;
-}
-
-static int asgi_ensure_body_capacity(asgi_pooled_response_t *resp, size_t needed) {
-    if (needed <= resp->body_buffer_cap) {
-        return 0;
-    }
-
-    if (needed > ASGI_MAX_BODY_BUFFER_SIZE) {
-        return -1;
-    }
-
-    /* Grow by doubling, capped at max */
-    size_t new_cap = resp->body_buffer_cap * 2;
-    while (new_cap < needed && new_cap < ASGI_MAX_BODY_BUFFER_SIZE) {
-        new_cap *= 2;
-    }
-    if (new_cap > ASGI_MAX_BODY_BUFFER_SIZE) {
-        new_cap = ASGI_MAX_BODY_BUFFER_SIZE;
-    }
-    if (new_cap < needed) {
-        return -1;
-    }
-
-    uint8_t *new_buffer = enif_alloc(new_cap);
-    if (new_buffer == NULL) {
-        return -1;
-    }
-
-    /* Copy existing data */
-    if (resp->body_len > 0) {
-        memcpy(new_buffer, resp->body_buffer, resp->body_len);
-    }
-
-    enif_free(resp->body_buffer);
-    resp->body_buffer = new_buffer;
-    resp->body_buffer_cap = new_cap;
-
-    return 0;
-}
-
-/* ============================================================================
- * Scope Building
- * ============================================================================ */
-
-static PyObject *asgi_build_scope(const asgi_scope_data_t *data) {
-    PyObject *scope = PyDict_New();
-    if (scope == NULL) {
-        return NULL;
-    }
-
-    /* type: "http" */
-    Py_INCREF(ASGI_TYPE_HTTP);
-    if (PyDict_SetItem(scope, ASGI_KEY_TYPE, ASGI_TYPE_HTTP) < 0) {
-        goto error;
-    }
-
-    /* asgi: {"version": "3.0", "spec_version": "2.3"} - reuse same dict */
-    Py_INCREF(ASGI_SUBDICT);
-    if (PyDict_SetItem(scope, ASGI_KEY_ASGI, ASGI_SUBDICT) < 0) {
-        goto error;
-    }
-
-    /* http_version */
-    PyObject *http_version = asgi_get_http_version(data->http_version);
-    if (PyDict_SetItem(scope, ASGI_KEY_HTTP_VERSION, http_version) < 0) {
-        Py_DECREF(http_version);
-        goto error;
-    }
-    Py_DECREF(http_version);
-
-    /* method */
-    PyObject *method = asgi_get_method(data->method, data->method_len);
-    if (method == NULL || PyDict_SetItem(scope, ASGI_KEY_METHOD, method) < 0) {
-        Py_XDECREF(method);
-        goto error;
-    }
-    Py_DECREF(method);
-
-    /* scheme */
-    PyObject *scheme = asgi_get_scheme(data->scheme);
-    if (PyDict_SetItem(scope, ASGI_KEY_SCHEME, scheme) < 0) {
-        Py_DECREF(scheme);
-        goto error;
-    }
-    Py_DECREF(scheme);
-
-    /* path */
-    PyObject *path = PyUnicode_FromStringAndSize(data->path, data->path_len);
-    if (path == NULL || PyDict_SetItem(scope, ASGI_KEY_PATH, path) < 0) {
-        Py_XDECREF(path);
-        goto error;
-    }
-    Py_DECREF(path);
-
-    /* raw_path (bytes) */
-    PyObject *raw_path;
-    if (data->raw_path_len > 0) {
-        raw_path = PyBytes_FromStringAndSize((char *)data->raw_path, data->raw_path_len);
-    } else {
-        Py_INCREF(ASGI_EMPTY_BYTES);
-        raw_path = ASGI_EMPTY_BYTES;
-    }
-    if (raw_path == NULL || PyDict_SetItem(scope, ASGI_KEY_RAW_PATH, raw_path) < 0) {
-        Py_XDECREF(raw_path);
-        goto error;
-    }
-    Py_DECREF(raw_path);
-
-    /* query_string (bytes) */
-    PyObject *query_string;
-    if (data->query_string_len > 0) {
-        query_string = PyBytes_FromStringAndSize(data->query_string, data->query_string_len);
-    } else {
-        Py_INCREF(ASGI_EMPTY_BYTES);
-        query_string = ASGI_EMPTY_BYTES;
-    }
-    if (query_string == NULL || PyDict_SetItem(scope, ASGI_KEY_QUERY_STRING, query_string) < 0) {
-        Py_XDECREF(query_string);
-        goto error;
-    }
-    Py_DECREF(query_string);
-
-    /* root_path */
-    PyObject *root_path;
-    if (data->root_path_len > 0) {
-        root_path = PyUnicode_FromStringAndSize(data->root_path, data->root_path_len);
-    } else {
-        Py_INCREF(ASGI_EMPTY_STRING);
-        root_path = ASGI_EMPTY_STRING;
-    }
-    if (root_path == NULL || PyDict_SetItem(scope, ASGI_KEY_ROOT_PATH, root_path) < 0) {
-        Py_XDECREF(root_path);
-        goto error;
-    }
-    Py_DECREF(root_path);
-
-    /* headers: list of [name, value] pairs (both bytes) */
-    /* Use cached header names for common headers */
-    asgi_interp_state_t *state = get_asgi_interp_state();
-    PyObject *headers = PyList_New(data->headers_count);
-    if (headers == NULL) {
-        goto error;
-    }
-    for (size_t i = 0; i < data->headers_count; i++) {
-        PyObject *header_pair = PyList_New(2);
-        if (header_pair == NULL) {
-            Py_DECREF(headers);
-            goto error;
-        }
-
-        PyObject *name = get_cached_header_name(
-            state, data->headers[i].name, data->headers[i].name_len);
-        PyObject *value = PyBytes_FromStringAndSize(
-            (char *)data->headers[i].value, data->headers[i].value_len);
-
-        if (name == NULL || value == NULL) {
-            Py_XDECREF(name);
-            Py_XDECREF(value);
-            Py_DECREF(header_pair);
-            Py_DECREF(headers);
-            goto error;
-        }
-
-        PyList_SET_ITEM(header_pair, 0, name);
-        PyList_SET_ITEM(header_pair, 1, value);
-        PyList_SET_ITEM(headers, i, header_pair);
-    }
-    if (PyDict_SetItem(scope, ASGI_KEY_HEADERS, headers) < 0) {
-        Py_DECREF(headers);
-        goto error;
-    }
-    Py_DECREF(headers);
-
-    /* server: (host, port) tuple */
-    if (data->server_host_len > 0) {
-        PyObject *server_host = PyUnicode_FromStringAndSize(
-            data->server_host, data->server_host_len);
-        PyObject *server_port = PyLong_FromLong(data->server_port);
-        if (server_host == NULL || server_port == NULL) {
-            Py_XDECREF(server_host);
-            Py_XDECREF(server_port);
-            goto error;
-        }
-        PyObject *server = PyTuple_Pack(2, server_host, server_port);
-        Py_DECREF(server_host);
-        Py_DECREF(server_port);
-        if (server == NULL || PyDict_SetItem(scope, ASGI_KEY_SERVER, server) < 0) {
-            Py_XDECREF(server);
-            goto error;
-        }
-        Py_DECREF(server);
-    }
-
-    /* client: (host, port) tuple */
-    if (data->client_host_len > 0) {
-        PyObject *client_host = PyUnicode_FromStringAndSize(
-            data->client_host, data->client_host_len);
-        PyObject *client_port = PyLong_FromLong(data->client_port);
-        if (client_host == NULL || client_port == NULL) {
-            Py_XDECREF(client_host);
-            Py_XDECREF(client_port);
-            goto error;
-        }
-        PyObject *client = PyTuple_Pack(2, client_host, client_port);
-        Py_DECREF(client_host);
-        Py_DECREF(client_port);
-        if (client == NULL || PyDict_SetItem(scope, ASGI_KEY_CLIENT, client) < 0) {
-            Py_XDECREF(client);
-            goto error;
-        }
-        Py_DECREF(client);
-    }
-
-    /* state: shared dict from lifespan */
-    if (data->state != NULL) {
-        Py_INCREF(data->state);
-        if (PyDict_SetItem(scope, ASGI_KEY_STATE, data->state) < 0) {
-            Py_DECREF(data->state);
-            goto error;
-        }
-    } else {
-        /* Create empty state dict */
-        PyObject *state = PyDict_New();
-        if (state == NULL || PyDict_SetItem(scope, ASGI_KEY_STATE, state) < 0) {
-            Py_XDECREF(state);
-            goto error;
-        }
-        Py_DECREF(state);
-    }
-
-    /* extensions (optional) */
-    if (data->has_trailers || data->has_early_hints) {
-        PyObject *extensions = PyDict_New();
-        if (extensions == NULL) {
-            goto error;
-        }
-
-        if (data->has_trailers) {
-            PyObject *trailers = PyDict_New();
-            if (trailers == NULL) {
-                Py_DECREF(extensions);
-                goto error;
-            }
-            PyDict_SetItem(extensions, ASGI_KEY_HTTP_TRAILERS, trailers);
-            Py_DECREF(trailers);
-        }
-
-        if (data->has_early_hints) {
-            PyObject *hints = PyDict_New();
-            if (hints == NULL) {
-                Py_DECREF(extensions);
-                goto error;
-            }
-            PyDict_SetItem(extensions, ASGI_KEY_HTTP_EARLY_HINTS, hints);
-            Py_DECREF(hints);
-        }
-
-        PyDict_SetItem(scope, ASGI_KEY_EXTENSIONS, extensions);
-        Py_DECREF(extensions);
-    }
-
-    return scope;
-
-error:
-    Py_DECREF(scope);
-    return NULL;
 }
 
 /* ============================================================================
@@ -2432,15 +1977,28 @@ static PyObject *get_cached_scope(ErlNifEnv *env, ERL_NIF_TERM scope_map) {
  * Output Erlang format: {Status, [{Header, Value}, ...], Body}
  */
 static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
-    /* Validate 3-element tuple, fallback to py_to_term if not */
-    if (!PyTuple_Check(result) || PyTuple_Size(result) != 3) {
+    PyObject *py_status = NULL;
+    PyObject *py_headers = NULL;
+    PyObject *py_body = NULL;
+
+    /* Handle both dict format (hornbeam) and tuple format */
+    if (PyDict_Check(result)) {
+        /* Dict format: {'status': int, 'headers': list, 'body': bytes, ...} */
+        py_status = PyDict_GetItemString(result, "status");
+        py_headers = PyDict_GetItemString(result, "headers");
+        py_body = PyDict_GetItemString(result, "body");
+
+        if (py_status == NULL || py_headers == NULL || py_body == NULL) {
+            return py_to_term(env, result);
+        }
+    } else if (PyTuple_Check(result) && PyTuple_Size(result) == 3) {
+        /* Tuple format: (status, headers, body) */
+        py_status = PyTuple_GET_ITEM(result, 0);
+        py_headers = PyTuple_GET_ITEM(result, 1);
+        py_body = PyTuple_GET_ITEM(result, 2);
+    } else {
         return py_to_term(env, result);
     }
-
-    /* Get tuple elements (borrowed references) */
-    PyObject *py_status = PyTuple_GET_ITEM(result, 0);
-    PyObject *py_headers = PyTuple_GET_ITEM(result, 1);
-    PyObject *py_body = PyTuple_GET_ITEM(result, 2);
 
     /* Validate types */
     if (!PyLong_Check(py_status) || !PyList_Check(py_headers) || !PyBytes_Check(py_body)) {
@@ -2518,7 +2076,7 @@ static ERL_NIF_TERM extract_asgi_response(ErlNifEnv *env, PyObject *result) {
 static ERL_NIF_TERM nif_asgi_build_scope(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
 
-    if (!g_python_initialized) {
+    if (!runtime_is_running()) {
         return make_error(env, "python_not_initialized");
     }
 
@@ -2545,6 +2103,8 @@ static ERL_NIF_TERM nif_asgi_build_scope(ErlNifEnv *env, int argc, const ERL_NIF
     }
 
     wrapper->obj = scope;
+    wrapper->interp_id = 0;  /* Main interpreter */
+    atomic_fetch_add(&g_counters.pyobj_created, 1);
 
     ERL_NIF_TERM result = enif_make_resource(env, wrapper);
     enif_release_resource(wrapper);
@@ -2555,11 +2115,13 @@ static ERL_NIF_TERM nif_asgi_build_scope(ErlNifEnv *env, int argc, const ERL_NIF
 }
 
 static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    PROF_START();
+
     if (argc < 5) {
         return make_error(env, "badarg");
     }
 
-    if (!g_python_initialized) {
+    if (!runtime_is_running()) {
         return make_error(env, "python_not_initialized");
     }
 
@@ -2580,6 +2142,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     }
 
     PyGILState_STATE gstate = PyGILState_Ensure();
+    PROF_MARK(gil_acquire_us);
 
     ERL_NIF_TERM result;
 
@@ -2594,6 +2157,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         PyGILState_Release(gstate);
         return make_error(env, "alloc_failed");
     }
+    PROF_MARK(string_conv_us);
 
     /* Import module */
     PyObject *module = PyImport_ImportModule(module_name);
@@ -2601,6 +2165,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(module_import_us);
 
     /* Get ASGI callable */
     PyObject *asgi_app = PyObject_GetAttrString(module, callable_name);
@@ -2609,6 +2174,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(get_callable_us);
 
     /* Build optimized scope dict from Erlang map (with caching) */
     PyObject *scope = get_cached_scope(env, argv[3]);
@@ -2617,6 +2183,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(scope_build_us);
 
     /* Convert body binary */
     PyObject *body = asgi_binary_to_buffer(env, argv[4]);
@@ -2626,6 +2193,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_py_error(env);
         goto cleanup;
     }
+    PROF_MARK(body_conv_us);
 
     /* Import the ASGI runner module */
     PyObject *runner_module = PyImport_ImportModule(runner_name);
@@ -2653,6 +2221,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         result = make_error(env, "runner_module_required");
         goto cleanup;
     }
+    PROF_MARK(runner_import_us);
 
     /* Call _run_asgi_sync(module_name, callable_name, scope, body) */
     PyObject *run_result = PyObject_CallMethod(
@@ -2663,6 +2232,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     Py_DECREF(body);
     Py_DECREF(scope);
     Py_DECREF(asgi_app);
+    PROF_MARK(runner_call_us);
 
     if (run_result == NULL) {
         result = make_py_error(env);
@@ -2672,6 +2242,7 @@ static ERL_NIF_TERM nif_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     /* Convert result to Erlang term using optimized extraction */
     ERL_NIF_TERM term_result = extract_asgi_response(env, run_result);
     Py_DECREF(run_result);
+    PROF_MARK(response_extract_us);
 
     result = enif_make_tuple2(env, ATOM_OK, term_result);
 
@@ -2680,6 +2251,86 @@ cleanup:
     enif_free(module_name);
     enif_free(callable_name);
     PyGILState_Release(gstate);
+    PROF_MARK(gil_release_us);
+    PROF_END();
 
     return result;
 }
+
+#ifdef ASGI_PROFILING
+/**
+ * @brief Get ASGI profiling statistics
+ * @return Map with timing breakdown
+ */
+static ERL_NIF_TERM nif_asgi_profile_stats(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+    pthread_mutex_lock(&g_asgi_profile_mutex);
+    asgi_profile_stats_t stats = g_asgi_profile;
+    pthread_mutex_unlock(&g_asgi_profile_mutex);
+
+    if (stats.count == 0) {
+        return enif_make_tuple2(env, ATOM_OK,
+            enif_make_new_map(env));
+    }
+
+    ERL_NIF_TERM keys[12], values[12];
+    int i = 0;
+
+    keys[i] = enif_make_atom(env, "count");
+    values[i++] = enif_make_uint64(env, stats.count);
+
+    keys[i] = enif_make_atom(env, "gil_acquire_us");
+    values[i++] = enif_make_uint64(env, stats.gil_acquire_us);
+
+    keys[i] = enif_make_atom(env, "string_conv_us");
+    values[i++] = enif_make_uint64(env, stats.string_conv_us);
+
+    keys[i] = enif_make_atom(env, "module_import_us");
+    values[i++] = enif_make_uint64(env, stats.module_import_us);
+
+    keys[i] = enif_make_atom(env, "get_callable_us");
+    values[i++] = enif_make_uint64(env, stats.get_callable_us);
+
+    keys[i] = enif_make_atom(env, "scope_build_us");
+    values[i++] = enif_make_uint64(env, stats.scope_build_us);
+
+    keys[i] = enif_make_atom(env, "body_conv_us");
+    values[i++] = enif_make_uint64(env, stats.body_conv_us);
+
+    keys[i] = enif_make_atom(env, "runner_import_us");
+    values[i++] = enif_make_uint64(env, stats.runner_import_us);
+
+    keys[i] = enif_make_atom(env, "runner_call_us");
+    values[i++] = enif_make_uint64(env, stats.runner_call_us);
+
+    keys[i] = enif_make_atom(env, "response_extract_us");
+    values[i++] = enif_make_uint64(env, stats.response_extract_us);
+
+    keys[i] = enif_make_atom(env, "gil_release_us");
+    values[i++] = enif_make_uint64(env, stats.gil_release_us);
+
+    keys[i] = enif_make_atom(env, "total_us");
+    values[i++] = enif_make_uint64(env, stats.total_us);
+
+    ERL_NIF_TERM map;
+    enif_make_map_from_arrays(env, keys, values, i, &map);
+
+    return enif_make_tuple2(env, ATOM_OK, map);
+}
+
+/**
+ * @brief Reset ASGI profiling statistics
+ */
+static ERL_NIF_TERM nif_asgi_profile_reset(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+    pthread_mutex_lock(&g_asgi_profile_mutex);
+    memset(&g_asgi_profile, 0, sizeof(g_asgi_profile));
+    pthread_mutex_unlock(&g_asgi_profile_mutex);
+
+    return ATOM_OK;
+}
+#endif /* ASGI_PROFILING */
