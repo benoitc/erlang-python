@@ -777,20 +777,54 @@ venv_exists(Path) ->
 -spec create_venv(string(), list()) -> ok | {error, term()}.
 create_venv(Path, Opts) ->
     Installer = detect_installer(Opts),
-    Python = proplists:get_value(python, Opts, "python3"),
+    Python = case proplists:get_value(python, Opts, undefined) of
+        undefined -> get_python_executable();
+        P -> P
+    end,
     Cmd = case Installer of
         uv ->
-            %% uv venv is faster
-            case proplists:get_value(python, Opts, undefined) of
-                undefined ->
-                    io_lib:format("uv venv ~s", [quote(Path)]);
-                PyVer ->
-                    io_lib:format("uv venv --python ~s ~s", [quote(PyVer), quote(Path)])
-            end;
+            %% uv venv is faster, use --python to match the running interpreter
+            io_lib:format("uv venv --python ~s ~s", [quote(Python), quote(Path)]);
         pip ->
             io_lib:format("~s -m venv ~s", [quote(Python), quote(Path)])
     end,
     run_cmd(lists:flatten(Cmd)).
+
+%% @private Get the Python executable path
+%% When embedded, sys.executable returns the embedding app (beam.smp)
+%% so we reconstruct the path from sys.prefix and version info
+-spec get_python_executable() -> string().
+get_python_executable() ->
+    Code = <<"
+import sys, os
+# When embedded, sys.executable points to the embedding app
+# Use sys.prefix to find the actual Python installation
+if sys.platform == 'win32':
+    python = os.path.join(sys.prefix, 'python.exe')
+else:
+    ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
+    # Try common locations
+    for path in [
+        os.path.join(sys.prefix, 'bin', ver),
+        os.path.join(sys.prefix, 'bin', 'python3'),
+        os.path.join(sys.prefix, 'bin', 'python'),
+        sys.executable  # fallback
+    ]:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            python = path
+            break
+    else:
+        python = 'python3'
+python
+">>,
+    case exec(Code) of
+        ok ->
+            case eval(<<"python">>) of
+                {ok, Path} when is_binary(Path) -> binary_to_list(Path);
+                _ -> "python3"
+            end;
+        _ -> "python3"
+    end.
 
 %% @private Install dependencies from requirements file
 -spec install_deps(string(), string(), list()) -> ok | {error, term()}.
