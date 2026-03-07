@@ -251,29 +251,13 @@ jobs:
           ASAN_OPTIONS: ${{ contains(matrix.env_vars, 'ASAN_OPTIONS') && 'detect_leaks=0:abort_on_error=1' || '' }}
           TSAN_OPTIONS: ${{ contains(matrix.env_vars, 'TSAN_OPTIONS') && 'second_deadlock_stack=1' || '' }}
         run: |
-          # Create wrapper script that preloads sanitizer runtime
-          cat > run_with_sanitizer.sh << 'EOF'
-          #!/bin/bash
-          if [[ "$1" == "asan" ]]; then
-            ASAN_LIB=$(gcc -print-file-name=libasan.so)
-            export LD_PRELOAD="$ASAN_LIB"
-          elif [[ "$1" == "tsan" ]]; then
-            TSAN_LIB=$(gcc -print-file-name=libtsan.so)
-            export LD_PRELOAD="$TSAN_LIB"
-          fi
-          shift
-          exec "$@"
-          EOF
-          chmod +x run_with_sanitizer.sh
-
-          # Run tests with appropriate preload
+          # Set LD_PRELOAD for sanitizer runtime before running tests
           if [[ "${{ matrix.sanitizer }}" == "ASan+UBSan" ]]; then
-            ./run_with_sanitizer.sh asan rebar3 ct --readable=compact
+            export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
           elif [[ "${{ matrix.sanitizer }}" == "TSan" ]]; then
-            ./run_with_sanitizer.sh tsan rebar3 ct --readable=compact
-          else
-            rebar3 ct --readable=compact
+            export LD_PRELOAD=$(gcc -print-file-name=libtsan.so)
           fi
+          rebar3 ct --readable=compact
 
       - name: Check debug counters
         run: |
