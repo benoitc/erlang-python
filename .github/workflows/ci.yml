@@ -238,16 +238,6 @@ jobs:
           export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
           rebar3 ct --readable=compact
 
-      - name: Check debug counters
-        run: |
-          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
-          erl -pa _build/default/lib/erlang_python/ebin -noshell -eval '
-            application:ensure_all_started(erlang_python),
-            Counters = py_nif:get_debug_counters(),
-            io:format("Debug counters: ~p~n", [Counters]),
-            halt().
-          '
-
   lint:
     name: Lint
     runs-on: ubuntu-24.04
