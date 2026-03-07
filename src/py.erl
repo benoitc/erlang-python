@@ -795,36 +795,12 @@ create_venv(Path, Opts) ->
 %% so we reconstruct the path from sys.prefix and version info
 -spec get_python_executable() -> string().
 get_python_executable() ->
-    Code = <<"
-import sys, os
-# When embedded, sys.executable points to the embedding app
-# Use sys.prefix to find the actual Python installation
-_py_exe = 'python3'  # default fallback
-if sys.platform == 'win32':
-    path = os.path.join(sys.prefix, 'python.exe')
-    if os.path.isfile(path):
-        _py_exe = path
-else:
-    ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
-    # Try common locations
-    for path in [
-        os.path.join(sys.prefix, 'bin', ver),
-        os.path.join(sys.prefix, 'bin', 'python3'),
-        os.path.join(sys.prefix, 'bin', 'python'),
-    ]:
-        try:
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                _py_exe = path
-                break
-        except:
-            pass
-">>,
-    case exec(Code) of
-        ok ->
-            case eval(<<"_py_exe">>) of
-                {ok, Path} when is_binary(Path) -> binary_to_list(Path);
-                _ -> "python3"
-            end;
+    %% Use a single expression to find the Python executable
+    %% Searches for pythonX.Y, python3, python in sys.prefix/bin (Unix)
+    %% or python.exe in sys.prefix (Windows)
+    Expr = <<"(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if __import__('sys').platform == 'win32' and __import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, 'python.exe')) else next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3')))()">>,
+    case eval(Expr) of
+        {ok, Path} when is_binary(Path) -> binary_to_list(Path);
         _ -> "python3"
     end.
 
