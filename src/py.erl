@@ -806,12 +806,8 @@ install_deps(Path, RequirementsFile, Opts) ->
             io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)]);
         ".toml" ->
             %% pyproject.toml - install as editable
-            ReqDir = filename:dirname(RequirementsFile),
-            InstallPath = case ReqDir of
-                "." -> ".";
-                "" -> ".";
-                _ -> ReqDir
-            end,
+            %% filename:dirname returns "." for files without directory component
+            InstallPath = filename:dirname(RequirementsFile),
             case Extras of
                 [] ->
                     io_lib:format("~s install -e ~s", [PipPath, quote(InstallPath)]);
