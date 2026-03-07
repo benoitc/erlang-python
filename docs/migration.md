@@ -12,6 +12,121 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 - [ ] Replace subprocess calls with Erlang ports
 - [ ] Move signal handlers to Erlang level
 - [ ] Review any `os.fork`/`os.exec` usage
+- [ ] Update code relying on shared state between contexts (now isolated)
+
+## Architecture Changes
+
+### OWN_GIL Subinterpreter Thread Pool (Python 3.12+)
+
+The most significant change in v2.0 is the new execution model. On Python 3.12+, erlang_python now uses **OWN_GIL subinterpreters** for true parallelism:
+
+**v1.8.x Architecture:**
+- Single Python interpreter with shared GIL
+- Worker pool with round-robin dispatch
+- All workers share global state
+
+**v2.0 Architecture:**
+- N subinterpreters, each in its own thread with its own GIL
+- Each subinterpreter has isolated state (no shared globals)
+- True parallel execution without GIL contention
+- 25-30% faster cast operations
+
+**Impact on your code:**
+
+1. **Isolated namespaces**: Variables defined in one context are not visible in others
+   ```erlang
+   %% v1.8.x - this worked (shared namespace)
+   py:exec(<<"x = 42">>),
+   {ok, 42} = py:eval(<<"x">>).  %% Might go to different worker
+
+   %% v2.0 - use explicit context for shared state
+   Ctx = py:context(1),
+   py:exec(Ctx, <<"x = 42">>),
+   {ok, 42} = py:eval(Ctx, <<"x">>).  %% Same context
+   ```
+
+2. **Module imports are per-context**: Each subinterpreter loads modules independently
+   ```erlang
+   %% Import in one context doesn't affect others
+   Ctx1 = py:context(1),
+   Ctx2 = py:context(2),
+   py:exec(Ctx1, <<"import mymodule">>),
+   %% Ctx2 does NOT have mymodule imported
+   ```
+
+3. **Use Shared State API for cross-context data**:
+   ```python
+   from erlang import state_set, state_get
+   state_set("config", {"key": "value"})  # Available to all contexts
+   ```
+
+### Execution Mode Detection
+
+Check which mode is active:
+
+```erlang
+%% Check execution mode
+py:execution_mode().
+%% => subinterp     (Python 3.12+ with OWN_GIL)
+%% => free_threaded (Python 3.13t with --disable-gil)
+%% => multi_executor (Python < 3.12)
+
+%% Check if subinterpreters are supported
+py:subinterp_supported().
+%% => true | false
+```
+
+## New APIs
+
+### `py:context/1` - Explicit Context Selection
+
+Get a specific context by index for operations that need shared state:
+
+```erlang
+%% Get context 1 (1-based indexing)
+Ctx = py:context(1),
+
+%% All operations on Ctx share state
+ok = py:exec(Ctx, <<"counter = 0">>),
+ok = py:exec(Ctx, <<"counter += 1">>),
+{ok, 1} = py:eval(Ctx, <<"counter">>).
+```
+
+### `py:start_contexts/0` - Initialize Context Pool
+
+Explicitly start the context pool (usually done automatically):
+
+```erlang
+{ok, Contexts} = py:start_contexts().
+%% Returns list of context PIDs
+```
+
+### `py_context_router` - Context Routing
+
+The context router manages context distribution:
+
+```erlang
+%% Start with default contexts (one per scheduler)
+{ok, Contexts} = py_context_router:start().
+
+%% Start with custom count
+{ok, Contexts} = py_context_router:start(#{contexts => 8}).
+
+%% Get context for current scheduler
+Ctx = py_context_router:get_context().
+
+%% Get specific context
+Ctx = py_context_router:get_context(1).
+
+%% Bind current process to a context
+ok = py_context_router:bind_context(Ctx).
+
+%% Unbind
+ok = py_context_router:unbind_context().
+
+%% Get pool size
+N = py_context_router:num_contexts().
+```
 
 ## API Changes
 
@@ -260,3 +375,57 @@ If you see this error with `py:async_call`, ensure the application is fully star
 ```erlang
 {ok, _} = application:ensure_all_started(erlang_python).
 ```
+
+### Variables not found across py:exec/py:eval calls
+
+In v2.0 with subinterpreters, each call may go to a different context. Use explicit contexts:
+
+```erlang
+%% Wrong - may use different contexts
+py:exec(<<"x = 42">>),
+{error, _} = py:eval(<<"x">>).  %% x not defined in this context!
+
+%% Right - use explicit context
+Ctx = py:context(1),
+py:exec(Ctx, <<"x = 42">>),
+{ok, 42} = py:eval(Ctx, <<"x">>).
+```
+
+### asyncio tests failing with subinterpreters
+
+Some asyncio operations don't work correctly across subinterpreters because each has isolated event loop state. For asyncio-heavy code, either:
+
+1. Use explicit context to keep operations in one subinterpreter
+2. Use `erlang.run()` within a single context
+3. Check `py:execution_mode()` and adapt accordingly
+
+### C extension not compatible with subinterpreters
+
+Some C extensions don't support subinterpreters. Check for errors like:
+```
+ImportError: module does not support subinterpreters
+```
+
+Options:
+1. Use Python < 3.12 (falls back to multi_executor mode)
+2. Check if the library has a subinterpreter-compatible version
+3. Isolate the library usage to a single context
+
+## Configuration
+
+### Pool Size
+
+Configure the number of contexts in `sys.config`:
+
+```erlang
+{erlang_python, [
+    {num_contexts, 8}  %% Default: erlang:system_info(schedulers)
+]}
+```
+
+Or at runtime:
+```erlang
+py_context_router:start(#{contexts => 8}).
+```
+
+The C-level pool supports up to 64 subinterpreters (default pre-allocated: 32).
