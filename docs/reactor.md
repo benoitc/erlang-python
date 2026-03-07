@@ -289,6 +289,118 @@ class SimpleHTTPProtocol(reactor.Protocol):
 reactor.set_protocol_factory(SimpleHTTPProtocol)
 ```
 
+## Passing Sockets from Erlang to Python
+
+### Method 1: Socket FD Handoff to Reactor
+
+The most efficient way is to hand off the socket's file descriptor directly:
+
+```erlang
+%% Erlang: Accept and hand off to Python reactor
+{ok, ClientSock} = gen_tcp:accept(ListenSock),
+{ok, {Addr, Port}} = inet:peername(ClientSock),
+
+%% Get the raw file descriptor
+{ok, Fd} = inet:getfd(ClientSock),
+
+%% Hand off to Python - Erlang no longer owns this socket
+py_reactor_context:handoff(Fd, #{
+    addr => inet:ntoa(Addr),
+    port => Port,
+    type => tcp
+}).
+```
+
+```python
+# Python: Protocol handles the fd
+import erlang.reactor as reactor
+
+class MyProtocol(reactor.Protocol):
+    def data_received(self, data):
+        # self.fd is the socket fd from Erlang
+        self.write_buffer.extend(b"Got: " + data)
+        return "write_pending"
+
+reactor.set_protocol_factory(MyProtocol)
+```
+
+### Method 2: Pass Socket FD to asyncio
+
+For asyncio-based code, pass the fd and wrap it in Python:
+
+```erlang
+%% Erlang: Get fd and pass to Python
+{ok, ClientSock} = gen_tcp:accept(ListenSock),
+{ok, Fd} = inet:getfd(ClientSock),
+
+%% Call Python with the fd
+Ctx = py:context(1),
+py:call(Ctx, my_handler, handle_connection, [Fd]).
+```
+
+```python
+# Python: Wrap fd in asyncio
+import asyncio
+import socket
+
+async def handle_connection(fd: int):
+    # Create socket from fd (Python takes ownership)
+    sock = socket.socket(fileno=fd)
+    sock.setblocking(False)
+
+    # Use asyncio streams
+    reader, writer = await asyncio.open_connection(sock=sock)
+
+    data = await reader.read(1024)
+    writer.write(b"Echo: " + data)
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+def handle_connection_sync(fd: int):
+    """Sync wrapper for Erlang call."""
+    asyncio.run(handle_connection(fd))
+```
+
+### Method 3: Pass Socket Object via Pickle (Not Recommended)
+
+For simple cases, you can pickle socket info, but this is less efficient:
+
+```erlang
+%% Erlang: Pass connection info
+{ok, {Addr, Port}} = inet:peername(ClientSock),
+py:call(Ctx, my_handler, connect_to, [Addr, Port]).
+```
+
+```python
+# Python: Create new connection (less efficient - new socket)
+import socket
+
+def connect_to(addr: str, port: int):
+    sock = socket.create_connection((addr, port))
+    # ... use socket
+```
+
+### Important: Socket Ownership
+
+When passing an fd from Erlang to Python:
+
+1. **Erlang releases ownership**: After `inet:getfd/1`, don't use the Erlang socket
+2. **Python takes ownership**: Close the socket in Python when done
+3. **Don't double-close**: Either Erlang or Python closes, not both
+
+```erlang
+%% WRONG - double close
+{ok, Fd} = inet:getfd(ClientSock),
+py_reactor_context:handoff(Fd, #{}),
+gen_tcp:close(ClientSock).  %% BAD: Python will also close
+
+%% RIGHT - let Python handle it
+{ok, Fd} = inet:getfd(ClientSock),
+py_reactor_context:handoff(Fd, #{}).
+%% Don't close ClientSock - Python owns it now
+```
+
 ## Integration with Erlang
 
 ### From Erlang: Starting a Reactor Server
@@ -300,7 +412,8 @@ reactor.set_protocol_factory(SimpleHTTPProtocol)
 
 start(Port) ->
     %% Set up the Python protocol factory first
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import erlang.reactor as reactor
 from my_protocols import MyProtocol
 reactor.set_protocol_factory(MyProtocol)
