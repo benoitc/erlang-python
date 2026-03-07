@@ -253,6 +253,9 @@ typedef struct erlang_event_loop {
 
     /** @brief Whether sync_sleep_cond has been initialized */
     bool sync_sleep_cond_initialized;
+
+    /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
+    uint32_t interp_id;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -454,6 +457,17 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_event_loop_wakeup(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Submit an async coroutine to run on the event loop
+ *
+ * The coroutine result is sent to CallerPid via erlang.send().
+ * This replaces the pthread+usleep polling model with direct message passing.
+ *
+ * NIF: event_loop_run_async(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Signal that a synchronous sleep has completed
@@ -764,5 +778,17 @@ int create_py_event_loop_module(void);
  * @return 0 on success, -1 on failure
  */
 int create_default_event_loop(ErlNifEnv *env);
+
+/**
+ * @brief Initialize event loop for a subinterpreter
+ *
+ * Creates the py_event_loop module and a default event loop for the
+ * current subinterpreter. This must be called after creating a new
+ * subinterpreter to enable asyncio.sleep() and timer functionality.
+ *
+ * @param env NIF environment (can be NULL for worker pool threads)
+ * @return 0 on success, -1 on failure
+ */
+int init_subinterpreter_event_loop(ErlNifEnv *env);
 
 #endif /* PY_EVENT_LOOP_H */

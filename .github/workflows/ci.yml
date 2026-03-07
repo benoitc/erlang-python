@@ -186,6 +186,58 @@ jobs:
           '
     continue-on-error: true  # Free-threading is experimental
 
+  # ASan builds for detecting memory issues
+  test-asan:
+    name: ASan / Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - name: Set Python library path
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Clean and compile with ASan
+        run: |
+          rm -rf _build/cmake
+          mkdir -p _build/cmake
+          cd _build/cmake
+          cmake ../../c_src -DENABLE_ASAN=ON -DENABLE_UBSAN=ON
+          cmake --build . -- -j $(nproc)
+          cd ../..
+          rebar3 compile
+
+      - name: Run tests with ASan
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+        run: |
+          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+          rebar3 ct --readable=compact
+
   lint:
     name: Lint
     runs-on: ubuntu-24.04

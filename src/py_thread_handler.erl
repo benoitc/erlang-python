@@ -269,6 +269,19 @@ term_to_python_repr(Term) when is_map(Term) ->
     end, [], Term),
     Joined = join_binaries(Items, <<", ">>),
     <<"{", Joined/binary, "}">>;
+term_to_python_repr(Term) when is_pid(Term) ->
+    %% Encode PID using ETF (Erlang Term Format) for exact reconstruction.
+    %% Format: "__etf__:<base64_encoded_binary>"
+    %% The C side will detect this, base64 decode, and use enif_binary_to_term
+    %% to reconstruct the pid, then convert to ErlangPidObject.
+    Etf = term_to_binary(Term),
+    B64 = base64:encode(Etf),
+    <<"\"__etf__:", B64/binary, "\"">>;
+term_to_python_repr(Term) when is_reference(Term) ->
+    %% References also need ETF encoding for round-trip
+    Etf = term_to_binary(Term),
+    B64 = base64:encode(Etf),
+    <<"\"__etf__:", B64/binary, "\"">>;
 term_to_python_repr(_Term) ->
     %% Fallback - return None for unsupported types
     <<"None">>.

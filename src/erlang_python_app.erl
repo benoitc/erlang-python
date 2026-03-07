@@ -23,4 +23,7 @@ start(_StartType, _StartArgs) ->
     erlang_python_sup:start_link().
 
 stop(_State) ->
+    %% Stop contexts before application shutdown to ensure proper cleanup
+    %% of subinterpreters before NIF resources are garbage collected
+    catch py:stop_contexts(),
     ok.

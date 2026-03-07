@@ -95,7 +95,7 @@ For non-blocking operations:
 
 ```erlang
 %% Start async call
-Ref = py:call_async(math, factorial, [1000]).
+Ref = py:cast(math, factorial, [1000]).
 
 %% Do other work...
 
@@ -350,27 +350,50 @@ elixir --erl "-pa _build/default/lib/erlang_python/ebin" examples/elixir_example
 
 This demonstrates basic calls, data conversion, callbacks, parallel processing (10x speedup), and AI integration.
 
-## Using erlang_asyncio
+## Using the Erlang Event Loop
 
-For async Python code that uses `await asyncio.sleep()`, you can use `erlang_asyncio` for better performance. This module uses Erlang's native timer system instead of Python's event loop:
+For async Python code, use the `erlang` module which provides an Erlang-backed asyncio event loop for better performance:
 
 ```python
-import erlang_asyncio
+import erlang
+import asyncio
 
 async def my_handler():
     # Uses Erlang's erlang:send_after/3 - no Python event loop overhead
-    await erlang_asyncio.sleep(0.1)  # 100ms
+    await asyncio.sleep(0.1)  # 100ms
     return "done"
 
-# Run a coroutine
-result = erlang_asyncio.run(my_handler())
+# Run a coroutine with the Erlang event loop
+result = erlang.run(my_handler())
 
-# Also supports gather, wait_for, create_task, etc.
+# Standard asyncio functions work seamlessly
 async def main():
-    results = await erlang_asyncio.gather(task1(), task2(), task3())
+    results = await asyncio.gather(task1(), task2(), task3())
+
+erlang.run(main())
 ```
 
 This is especially useful in ASGI handlers where sleep operations are common. See [Asyncio](asyncio.md) for the full API reference.
+
+## Security Considerations
+
+When Python runs inside the Erlang VM, certain operations are blocked for safety:
+
+- **Subprocess operations blocked** - `subprocess.Popen`, `os.fork()`, `os.system()`, etc. would corrupt the Erlang VM
+- **Signal handling not supported** - Signal handling should be done at the Erlang level
+
+If you need to run external commands, use Erlang ports (`open_port/2`) instead:
+
+```erlang
+%% From Erlang - run a shell command
+Port = open_port({spawn, "ls -la"}, [exit_status, binary]),
+receive
+    {Port, {data, Data}} -> Data;
+    {Port, {exit_status, 0}} -> ok
+end.
+```
+
+See [Security](security.md) for details on blocked operations and recommended alternatives.
 
 ## Next Steps
 
@@ -382,4 +405,6 @@ This is especially useful in ASGI handlers where sleep operations are common. Se
 - See [Logging and Tracing](logging.md) for Python logging and distributed tracing
 - See [AI Integration](ai-integration.md) for ML/AI examples
 - See [Asyncio Event Loop](asyncio.md) for the Erlang-native asyncio implementation with TCP and UDP support
+- See [Reactor](reactor.md) for FD-based protocol handling
+- See [Security](security.md) for sandbox and blocked operations
 - See [Web Frameworks](web-frameworks.md) for ASGI/WSGI integration

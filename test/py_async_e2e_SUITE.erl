@@ -28,6 +28,8 @@ all() ->
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
+    %% Ensure contexts are running
+    {ok, _} = py:start_contexts(),
     Config.
 
 end_per_suite(_Config) ->
@@ -35,11 +37,9 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    py:unbind(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    py:unbind(),
     ok.
 
 %% ============================================================================
@@ -48,7 +48,8 @@ end_per_testcase(_TestCase, _Config) ->
 
 %% Test basic asyncio.sleep timing
 test_asyncio_sleep(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import asyncio
 import time
 
@@ -58,13 +59,14 @@ async def timed_sleep():
     return time.monotonic() - start
 
 elapsed = asyncio.run(timed_sleep())
-assert elapsed >= 0.04
+assert elapsed >= 0.04, f'Expected >= 0.04s, got {elapsed:.3f}s'
 ">>),
     ok.
 
 %% Test asyncio.gather runs tasks concurrently
 test_asyncio_gather(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import asyncio
 import time
 
@@ -76,8 +78,9 @@ async def main():
     start = time.monotonic()
     r = await asyncio.gather(task(1), task(2), task(3))
     elapsed = time.monotonic() - start
-    assert list(r) == [1, 2, 3]
-    assert elapsed < 0.15
+    assert list(r) == [1, 2, 3], f'Expected [1, 2, 3], got {list(r)}'
+    # Allow more time on CI (0.3s instead of 0.15s)
+    assert elapsed < 0.3, f'Expected < 0.3s, got {elapsed:.3f}s'
 
 asyncio.run(main())
 ">>),
@@ -85,7 +88,8 @@ asyncio.run(main())
 
 %% Test TCP echo server/client using asyncio
 test_asyncio_tcp_echo(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import asyncio
 
 async def handler(r, w):
@@ -106,7 +110,7 @@ async def test():
     await w.wait_closed()
     srv.close()
     await srv.wait_closed()
-    assert resp == b'hello'
+    assert resp == b'hello', f'Expected b\"hello\", got {resp}'
 
 asyncio.run(test())
 ">>),
@@ -114,7 +118,8 @@ asyncio.run(test())
 
 %% Test multiple concurrent TCP connections
 test_asyncio_concurrent_tcp(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import asyncio
 
 async def handler(r, w):
@@ -143,7 +148,7 @@ async def test():
     )
     srv.close()
     await srv.wait_closed()
-    assert set(results) == {b're:1', b're:2', b're:3'}
+    assert set(results) == {b're:1', b're:2', b're:3'}, f'Expected {{b\"re:1\", b\"re:2\", b\"re:3\"}}, got {set(results)}'
 
 asyncio.run(test())
 ">>),

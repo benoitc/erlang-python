@@ -596,7 +596,7 @@ static ERL_NIF_TERM nif_wsgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return make_error(env, "badarg");
     }
 
-    if (!g_python_initialized) {
+    if (!runtime_is_running()) {
         return make_error(env, "python_not_initialized");
     }
 

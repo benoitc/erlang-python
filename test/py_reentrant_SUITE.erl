@@ -43,6 +43,7 @@ all() ->
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
+    {ok, _} = py:start_contexts(),
     Config.
 
 end_per_suite(_Config) ->

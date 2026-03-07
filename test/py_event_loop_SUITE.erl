@@ -68,6 +68,7 @@ all() ->
 init_per_suite(Config) ->
     case application:ensure_all_started(erlang_python) of
         {ok, _} ->
+            {ok, _} = py:start_contexts(),
             %% Wait for event loop to be fully initialized
             %% This is important for free-threaded Python where initialization
             %% can race with test execution

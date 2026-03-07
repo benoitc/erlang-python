@@ -206,11 +206,26 @@ static void thread_worker_cleanup(void) {
  * The coordinator is the Erlang process that spawns handler processes
  * for new thread workers.
  *
+ * When a new coordinator is registered (e.g., after app restart), we must
+ * reset all existing workers' has_handler flag since the old handler
+ * processes are dead.
+ *
  * @param pid PID of the coordinator process
  */
 static void thread_worker_set_coordinator(ErlNifPid pid) {
     g_thread_coordinator_pid = pid;
     g_has_thread_coordinator = true;
+
+    /* Reset has_handler on all existing workers since old handlers are dead */
+    pthread_mutex_lock(&g_thread_pool_mutex);
+    thread_worker_t *tw = g_thread_pool_head;
+    while (tw != NULL) {
+        pthread_mutex_lock(&tw->mutex);
+        tw->has_handler = false;
+        pthread_mutex_unlock(&tw->mutex);
+        tw = tw->next;
+    }
+    pthread_mutex_unlock(&g_thread_pool_mutex);
 }
 
 /**
@@ -278,23 +293,6 @@ static thread_worker_t *acquire_thread_worker(void) {
     pthread_mutex_unlock(&g_thread_pool_mutex);
 
     return tw;
-}
-
-/**
- * @brief Release a thread worker back to the pool
- *
- * Marks the worker as available for reuse.
- *
- * @param tw Worker to release
- */
-static void release_thread_worker(thread_worker_t *tw) {
-    if (tw == NULL) {
-        return;
-    }
-
-    pthread_mutex_lock(&tw->mutex);
-    tw->in_use = false;
-    pthread_mutex_unlock(&tw->mutex);
 }
 
 /* ============================================================================
