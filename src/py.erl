@@ -127,7 +127,9 @@
     call_method/3,
     getattr/2,
     to_term/1,
-    is_ref/1
+    is_ref/1,
+    %% File descriptor utilities
+    dup_fd/1
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -1098,4 +1100,28 @@ to_term(Ref) ->
 -spec is_ref(term()) -> boolean().
 is_ref(Term) ->
     py_nif:is_ref(Term).
+
+%%% ============================================================================
+%%% File Descriptor Utilities
+%%% ============================================================================
+
+%% @doc Duplicate a file descriptor.
+%%
+%% Creates a copy of an existing file descriptor. Use this when handing off
+%% a socket fd to Python while keeping Erlang's ability to close its socket.
+%%
+%% Example:
+%% ```
+%% {ok, ClientSock} = gen_tcp:accept(ListenSock),
+%% {ok, Fd} = inet:getfd(ClientSock),
+%% {ok, DupFd} = py:dup_fd(Fd),
+%% py_reactor_context:handoff(DupFd, #{type => tcp}),
+%% gen_tcp:close(ClientSock).  %% Safe - Python has its own fd copy
+%% '''
+%%
+%% @param Fd File descriptor to duplicate
+%% @returns {ok, DupFd} | {error, Reason}
+-spec dup_fd(integer()) -> {ok, integer()} | {error, term()}.
+dup_fd(Fd) when is_integer(Fd) ->
+    py_nif:dup_fd(Fd).
 

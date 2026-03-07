@@ -662,6 +662,14 @@ ERL_NIF_TERM nif_close_test_fd(ErlNifEnv *env, int argc,
                                 const ERL_NIF_TERM argv[]);
 
 /**
+ * @brief Duplicate a file descriptor
+ *
+ * NIF: dup_fd(Fd) -> {ok, DupFd} | {error, Reason}
+ */
+ERL_NIF_TERM nif_dup_fd(ErlNifEnv *env, int argc,
+                        const ERL_NIF_TERM argv[]);
+
+/**
  * @brief Write data to a test file descriptor
  *
  * NIF: write_test_fd(Fd, Data) -> ok | {error, Reason}

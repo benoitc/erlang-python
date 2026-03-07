@@ -3809,6 +3809,7 @@ static ErlNifFunc nif_funcs[] = {
     /* Test helpers for fd monitoring (using pipes) */
     {"create_test_pipe", 0, nif_create_test_pipe, 0},
     {"close_test_fd", 1, nif_close_test_fd, 0},
+    {"dup_fd", 1, nif_dup_fd, 0},
     {"write_test_fd", 2, nif_write_test_fd, 0},
     {"read_test_fd", 2, nif_read_test_fd, 0},
     /* TCP test helpers */
