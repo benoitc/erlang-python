@@ -62,24 +62,9 @@ end_per_suite(_Config) ->
 init_per_group(_Group, Config) ->
     %% Get Python executable path from the running interpreter
     %% Note: sys.executable returns beam.smp when embedded, so we find the actual Python
-    Code = <<"
-import sys, os
-_python_path = 'python3'  # default
-ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
-for path in [
-    os.path.join(sys.prefix, 'bin', ver),
-    os.path.join(sys.prefix, 'bin', 'python3'),
-    os.path.join(sys.prefix, 'bin', 'python'),
-]:
-    try:
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            _python_path = path
-            break
-    except:
-        pass
-">>,
-    ok = py:exec(Code),
-    {ok, PythonPath} = py:eval(<<"_python_path">>),
+    %% Use a single expression to avoid any exec issues
+    Expr = <<"(lambda: next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3'))()">>,
+    {ok, PythonPath} = py:eval(Expr),
     [{python_path, binary_to_list(PythonPath)} | Config].
 
 end_per_group(_Group, _Config) ->
