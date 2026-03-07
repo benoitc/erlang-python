@@ -138,13 +138,10 @@ test_udp_multiple_clients(_Config) ->
     ok = py_nif:sendto_test_udp(Client2Fd, <<"client2">>, <<"127.0.0.1">>, ServerPort),
     ok = py_nif:sendto_test_udp(Client3Fd, <<"client3">>, <<"127.0.0.1">>, ServerPort),
 
-    %% Give time for data to arrive
-    timer:sleep(100),
-
-    %% Receive all messages on server
-    {ok, {Data1, {_, Port1}}} = py_nif:recvfrom_test_udp(ServerFd, 1024),
-    {ok, {Data2, {_, Port2}}} = py_nif:recvfrom_test_udp(ServerFd, 1024),
-    {ok, {Data3, {_, Port3}}} = py_nif:recvfrom_test_udp(ServerFd, 1024),
+    %% Receive all messages on server with retry for slow CI
+    {ok, {Data1, {_, Port1}}} = recv_with_retry(ServerFd, 1024, 10),
+    {ok, {Data2, {_, Port2}}} = recv_with_retry(ServerFd, 1024, 10),
+    {ok, {Data3, {_, Port3}}} = recv_with_retry(ServerFd, 1024, 10),
 
     %% Verify we received all three messages (order may vary)
     ReceivedData = lists:sort([Data1, Data2, Data3]),
@@ -161,6 +158,21 @@ test_udp_multiple_clients(_Config) ->
     py_nif:close_test_fd(Client2Fd),
     py_nif:close_test_fd(Client3Fd),
     ok.
+
+%% Helper to retry recvfrom on would_block (for slow CI)
+recv_with_retry(Fd, Size, Retries) ->
+    recv_with_retry(Fd, Size, Retries, 50).
+
+recv_with_retry(_Fd, _Size, 0, _Delay) ->
+    {error, timeout};
+recv_with_retry(Fd, Size, Retries, Delay) ->
+    case py_nif:recvfrom_test_udp(Fd, Size) of
+        {error, would_block} ->
+            timer:sleep(Delay),
+            recv_with_retry(Fd, Size, Retries - 1, Delay);
+        Result ->
+            Result
+    end.
 
 %% ============================================================================
 %% UDP Socket Options Tests
