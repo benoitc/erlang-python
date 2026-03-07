@@ -60,9 +60,34 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(_Group, Config) ->
-    Config.
+    %% Get Python executable path from the running interpreter
+    %% Note: sys.executable returns beam.smp when embedded, so we find the actual Python
+    Code = <<"
+import sys, os
+ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
+for path in [
+    os.path.join(sys.prefix, 'bin', ver),
+    os.path.join(sys.prefix, 'bin', 'python3'),
+    os.path.join(sys.prefix, 'bin', 'python'),
+]:
+    if os.path.isfile(path) and os.access(path, os.X_OK):
+        _python_path = path
+        break
+else:
+    _python_path = 'python3'
+">>,
+    ok = py:exec(Code),
+    {ok, PythonPath} = py:eval(<<"_python_path">>),
+    [{python_path, binary_to_list(PythonPath)} | Config].
 
 end_per_group(_Group, _Config) ->
+    ok.
+
+%% @private Create venv using the Python from config
+create_test_venv(VenvPath, Config) ->
+    PythonPath = ?config(python_path, Config),
+    Cmd = PythonPath ++ " -m venv " ++ VenvPath,
+    _ = os:cmd(Cmd),
     ok.
 
 init_per_testcase(_TestCase, Config) ->
@@ -174,9 +199,8 @@ test_activate_venv(Config) ->
     TempDir = ?config(temp_dir, Config),
     VenvPath = filename:join(TempDir, "venv"),
 
-    %% Create venv manually
-    Cmd = "python3 -m venv " ++ VenvPath,
-    _ = os:cmd(Cmd),
+    %% Create venv manually using the same Python we're linked against
+    ok = create_test_venv(VenvPath, Config),
 
     %% Activate it
     ok = py:activate_venv(VenvPath),
@@ -192,9 +216,8 @@ test_deactivate_venv(Config) ->
     TempDir = ?config(temp_dir, Config),
     VenvPath = filename:join(TempDir, "venv"),
 
-    %% Create and activate venv
-    Cmd = "python3 -m venv " ++ VenvPath,
-    _ = os:cmd(Cmd),
+    %% Create and activate venv using the same Python we're linked against
+    ok = create_test_venv(VenvPath, Config),
     ok = py:activate_venv(VenvPath),
 
     %% Verify active
@@ -217,9 +240,8 @@ test_venv_info(Config) ->
     {ok, Info1} = py:venv_info(),
     false = maps:get(<<"active">>, Info1),
 
-    %% Create and activate
-    Cmd = "python3 -m venv " ++ VenvPath,
-    _ = os:cmd(Cmd),
+    %% Create and activate using the same Python we're linked against
+    ok = create_test_venv(VenvPath, Config),
     ok = py:activate_venv(VenvPath),
 
     %% After activation, should have all info
