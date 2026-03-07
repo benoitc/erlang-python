@@ -381,25 +381,29 @@ def connect_to(addr: str, port: int):
     # ... use socket
 ```
 
-### Important: Socket Ownership
+### Socket Ownership
 
-When passing an fd from Erlang to Python:
+The reactor automatically duplicates (`dup()`) the file descriptor when you call
+`py_reactor_context:handoff/2`. This means:
 
-1. **Erlang releases ownership**: After `inet:getfd/1`, don't use the Erlang socket
-2. **Python takes ownership**: Close the socket in Python when done
-3. **Don't double-close**: Either Erlang or Python closes, not both
+1. **Erlang keeps its socket** - You can close it whenever convenient
+2. **Python gets its own fd copy** - Independent of Erlang's lifecycle
+3. **No double-close issues** - Each side manages its own fd
 
 ```erlang
-%% WRONG - double close
+%% Simple and safe - reactor handles dup() internally
+{ok, ClientSock} = gen_tcp:accept(ListenSock),
 {ok, Fd} = inet:getfd(ClientSock),
-py_reactor_context:handoff(Fd, #{}),
-gen_tcp:close(ClientSock).  %% BAD: Python will also close
 
-%% RIGHT - let Python handle it
-{ok, Fd} = inet:getfd(ClientSock),
-py_reactor_context:handoff(Fd, #{}).
-%% Don't close ClientSock - Python owns it now
+%% Hand off fd - reactor will dup() it automatically
+py_reactor_context:handoff(Fd, #{type => tcp}),
+
+%% Safe to close Erlang's socket immediately
+gen_tcp:close(ClientSock).
 ```
+
+The reactor will close its duplicated fd when the protocol completes or the
+connection is closed.
 
 ## Integration with Erlang
 
