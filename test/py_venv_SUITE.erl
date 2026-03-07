@@ -64,17 +64,19 @@ init_per_group(_Group, Config) ->
     %% Note: sys.executable returns beam.smp when embedded, so we find the actual Python
     Code = <<"
 import sys, os
+_python_path = 'python3'  # default
 ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
 for path in [
     os.path.join(sys.prefix, 'bin', ver),
     os.path.join(sys.prefix, 'bin', 'python3'),
     os.path.join(sys.prefix, 'bin', 'python'),
 ]:
-    if os.path.isfile(path) and os.access(path, os.X_OK):
-        _python_path = path
-        break
-else:
-    _python_path = 'python3'
+    try:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            _python_path = path
+            break
+    except:
+        pass
 ">>,
     ok = py:exec(Code),
     {ok, PythonPath} = py:eval(<<"_python_path">>),

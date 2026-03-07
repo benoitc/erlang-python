@@ -799,8 +799,11 @@ get_python_executable() ->
 import sys, os
 # When embedded, sys.executable points to the embedding app
 # Use sys.prefix to find the actual Python installation
+_py_exe = 'python3'  # default fallback
 if sys.platform == 'win32':
-    python = os.path.join(sys.prefix, 'python.exe')
+    path = os.path.join(sys.prefix, 'python.exe')
+    if os.path.isfile(path):
+        _py_exe = path
 else:
     ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
     # Try common locations
@@ -808,18 +811,17 @@ else:
         os.path.join(sys.prefix, 'bin', ver),
         os.path.join(sys.prefix, 'bin', 'python3'),
         os.path.join(sys.prefix, 'bin', 'python'),
-        sys.executable  # fallback
     ]:
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            python = path
-            break
-    else:
-        python = 'python3'
-python
+        try:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                _py_exe = path
+                break
+        except:
+            pass
 ">>,
     case exec(Code) of
         ok ->
-            case eval(<<"python">>) of
+            case eval(<<"_py_exe">>) of
                 {ok, Path} when is_binary(Path) -> binary_to_list(Path);
                 _ -> "python3"
             end;
