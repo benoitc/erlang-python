@@ -125,6 +125,8 @@
     cancel_reader/2,  %% Legacy alias for stop_reader
     cancel_writer/2,  %% Legacy alias for stop_writer
     close_fd/1,
+    %% File descriptor utilities
+    dup_fd/1,
     %% Test helpers for fd monitoring (using pipes)
     create_test_pipe/0,
     close_test_fd/1,
@@ -878,6 +880,12 @@ close_fd(_FdRef) ->
 %% Returns {ReadFd, WriteFd} where both are non-blocking.
 -spec create_test_pipe() -> {ok, {integer(), integer()}} | {error, term()}.
 create_test_pipe() ->
+    ?NIF_STUB.
+
+%% @doc Duplicate a file descriptor.
+%% Creates an independent copy of the fd.
+-spec dup_fd(integer()) -> {ok, integer()} | {error, term()}.
+dup_fd(_Fd) ->
     ?NIF_STUB.
 
 %% @doc Close a test file descriptor.

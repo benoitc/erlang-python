@@ -328,25 +328,27 @@ See [Reactor](reactor.md) for full documentation.
 
 Pass socket file descriptors directly from Erlang to Python for high-performance I/O.
 
-The reactor automatically `dup()`s the fd, so you can safely close Erlang's socket:
+Use `py:dup_fd/1` to duplicate the fd before handoff. This lets Erlang close its
+socket while Python keeps its own copy:
 
 ```erlang
 %% Erlang: Accept and hand off to reactor
 {ok, ClientSock} = gen_tcp:accept(ListenSock),
 {ok, Fd} = inet:getfd(ClientSock),
 
-%% Hand off fd - reactor dup()s it automatically
-py_reactor_context:handoff(Fd, #{type => tcp}),
+%% Duplicate fd so both sides have independent copies
+{ok, DupFd} = py:dup_fd(Fd),
+py_reactor_context:handoff(DupFd, #{type => tcp}),
 
 %% Safe to close Erlang's socket
 gen_tcp:close(ClientSock).
 ```
 
-For direct asyncio usage (not via reactor), dup manually:
+For direct asyncio usage:
 
 ```erlang
-%% For direct asyncio - dup the fd yourself
-{ok, DupFd} = prim_file:dup(Fd),
+{ok, Fd} = inet:getfd(ClientSock),
+{ok, DupFd} = py:dup_fd(Fd),
 Ctx = py:context(1),
 py:call(Ctx, my_handler, handle_fd, [DupFd]).
 ```

@@ -2337,6 +2337,28 @@ ERL_NIF_TERM nif_close_test_fd(ErlNifEnv *env, int argc,
 }
 
 /**
+ * dup_fd(Fd) -> {ok, DupFd} | {error, Reason}
+ *
+ * Duplicates a file descriptor.
+ */
+ERL_NIF_TERM nif_dup_fd(ErlNifEnv *env, int argc,
+                        const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    int fd;
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    int dup_fd = dup(fd);
+    if (dup_fd == -1) {
+        return make_error(env, "dup_failed");
+    }
+
+    return enif_make_tuple2(env, ATOM_OK, enif_make_int(env, dup_fd));
+}
+
+/**
  * write_test_fd(Fd, Data) -> ok | {error, Reason}
  *
  * Writes binary data to a file descriptor.
@@ -2904,22 +2926,14 @@ ERL_NIF_TERM nif_reactor_register_fd(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_pid");
     }
 
-    /* Duplicate the fd so we own our copy independent of Erlang's socket.
-     * This prevents issues when Erlang's socket is garbage collected. */
-    int dup_fd = dup(fd);
-    if (dup_fd < 0) {
-        return make_error(env, "dup_failed");
-    }
-
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
                                                  sizeof(fd_resource_t));
     if (fd_res == NULL) {
-        close(dup_fd);
         return make_error(env, "alloc_failed");
     }
 
-    fd_res->fd = dup_fd;  /* Use duplicated fd */
+    fd_res->fd = fd;
     fd_res->read_callback_id = 0;  /* Not used for reactor mode */
     fd_res->write_callback_id = 0;
     fd_res->owner_pid = owner_pid;
@@ -2930,7 +2944,7 @@ ERL_NIF_TERM nif_reactor_register_fd(ErlNifEnv *env, int argc,
     /* Initialize lifecycle management */
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
     fd_res->monitor_active = false;
-    fd_res->owns_fd = true;  /* We own the duplicated fd */
+    fd_res->owns_fd = false;  /* Caller owns the fd */
 
     /* Monitor owner process for cleanup on death */
     if (enif_monitor_process(env, fd_res, &owner_pid,
