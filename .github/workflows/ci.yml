@@ -186,6 +186,104 @@ jobs:
           '
     continue-on-error: true  # Free-threading is experimental
 
+  # Sanitizer builds for detecting memory issues and race conditions
+  test-sanitizers:
+    name: ${{ matrix.sanitizer }} / Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ASan + UBSan with Python 3.12
+          - sanitizer: "ASan+UBSan"
+            python: "3.12"
+            cmake_flags: "-DENABLE_ASAN=ON -DENABLE_UBSAN=ON"
+            env_vars: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+          # ASan + UBSan with Python 3.13
+          - sanitizer: "ASan+UBSan"
+            python: "3.13"
+            cmake_flags: "-DENABLE_ASAN=ON -DENABLE_UBSAN=ON"
+            env_vars: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+          # TSan with Python 3.12 (separate because incompatible with ASan)
+          - sanitizer: "TSan"
+            python: "3.12"
+            cmake_flags: "-DENABLE_TSAN=ON"
+            env_vars: "TSAN_OPTIONS=second_deadlock_stack=1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - name: Set Python library path
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Clean and compile with sanitizers
+        run: |
+          rm -rf _build/cmake
+          mkdir -p _build/cmake
+          cd _build/cmake
+          cmake ../../c_src ${{ matrix.cmake_flags }}
+          cmake --build . -- -j $(nproc)
+          cd ../..
+          rebar3 compile
+
+      - name: Run tests with sanitizers
+        env:
+          ASAN_OPTIONS: ${{ contains(matrix.env_vars, 'ASAN_OPTIONS') && 'detect_leaks=0:abort_on_error=1' || '' }}
+          TSAN_OPTIONS: ${{ contains(matrix.env_vars, 'TSAN_OPTIONS') && 'second_deadlock_stack=1' || '' }}
+        run: |
+          # Create wrapper script that preloads sanitizer runtime
+          cat > run_with_sanitizer.sh << 'EOF'
+          #!/bin/bash
+          if [[ "$1" == "asan" ]]; then
+            ASAN_LIB=$(gcc -print-file-name=libasan.so)
+            export LD_PRELOAD="$ASAN_LIB"
+          elif [[ "$1" == "tsan" ]]; then
+            TSAN_LIB=$(gcc -print-file-name=libtsan.so)
+            export LD_PRELOAD="$TSAN_LIB"
+          fi
+          shift
+          exec "$@"
+          EOF
+          chmod +x run_with_sanitizer.sh
+
+          # Run tests with appropriate preload
+          if [[ "${{ matrix.sanitizer }}" == "ASan+UBSan" ]]; then
+            ./run_with_sanitizer.sh asan rebar3 ct --readable=compact
+          elif [[ "${{ matrix.sanitizer }}" == "TSan" ]]; then
+            ./run_with_sanitizer.sh tsan rebar3 ct --readable=compact
+          else
+            rebar3 ct --readable=compact
+          fi
+
+      - name: Check debug counters
+        run: |
+          erl -pa _build/default/lib/erlang_python/ebin -noshell -eval '
+            application:ensure_all_started(erlang_python),
+            Counters = py_nif:get_debug_counters(),
+            io:format("Debug counters: ~p~n", [Counters]),
+            halt().
+          '
+
   lint:
     name: Lint
     runs-on: ubuntu-24.04

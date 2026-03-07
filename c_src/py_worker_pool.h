@@ -330,13 +330,6 @@ static int py_pool_init(int num_workers);
  */
 static void py_pool_shutdown(void);
 
-/**
- * @brief Check if pool is initialized
- *
- * @return true if pool is ready to accept requests
- */
-static bool py_pool_is_initialized(void);
-
 /* ============================================================================
  * Request Submission Functions
  * ============================================================================ */
@@ -487,13 +480,6 @@ static ERL_NIF_TERM py_pool_process_wsgi(py_pool_worker_t *worker,
  */
 static PyObject *py_pool_get_module(py_pool_worker_t *worker,
                                      const char *module_name);
-
-/**
- * @brief Clear module cache for a worker
- *
- * @param worker Worker to clear cache for
- */
-static void py_pool_clear_module_cache(py_pool_worker_t *worker);
 
 /* ============================================================================
  * Statistics

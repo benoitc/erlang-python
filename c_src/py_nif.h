@@ -138,6 +138,12 @@
 
 /** @} */
 
+/* Include subinterpreter pool header for shared-GIL pool model */
+#include "py_subinterp_pool.h"
+
+/* Include subinterpreter thread pool header for OWN_GIL parallelism */
+#include "py_subinterp_thread.h"
+
 /* ============================================================================
  * Execution Mode
  * ============================================================================ */
@@ -181,6 +187,141 @@ typedef enum {
      */
     PY_MODE_MULTI_EXECUTOR
 } py_execution_mode_t;
+
+/** @} */
+
+/* ============================================================================
+ * Runtime State Machine
+ * ============================================================================ */
+
+/**
+ * @defgroup runtime_state Runtime State Machine
+ * @brief Atomic state machine for Python runtime lifecycle
+ * @{
+ */
+
+/**
+ * @enum py_runtime_state_t
+ * @brief Runtime state for Python interpreter lifecycle
+ *
+ * State transitions are performed atomically using CAS operations to ensure
+ * thread-safe initialization and shutdown. The state machine prevents race
+ * conditions during concurrent init/finalize calls.
+ *
+ * Valid transitions:
+ *   UNINIT -> INITING (only one thread wins)
+ *   INITING -> RUNNING (on success)
+ *   INITING -> STOPPED (on failure)
+ *   RUNNING -> SHUTTING_DOWN (only one thread wins)
+ *   SHUTTING_DOWN -> STOPPED (after cleanup)
+ */
+typedef enum {
+    /** @brief Initial state, Python not initialized */
+    PY_STATE_UNINIT = 0,
+
+    /** @brief Initialization in progress (transitional) */
+    PY_STATE_INITING = 1,
+
+    /** @brief Python running and ready for work */
+    PY_STATE_RUNNING = 2,
+
+    /** @brief Shutdown in progress, rejecting new work */
+    PY_STATE_SHUTTING_DOWN = 3,
+
+    /** @brief Fully stopped, safe to reinitialize */
+    PY_STATE_STOPPED = 4
+} py_runtime_state_t;
+
+/**
+ * @brief Atomically transition runtime state using CAS
+ * @param from Expected current state
+ * @param to Desired new state
+ * @return true if transition succeeded, false if current state != from
+ */
+static inline bool runtime_transition(py_runtime_state_t from, py_runtime_state_t to) {
+    extern _Atomic py_runtime_state_t g_runtime_state;
+    py_runtime_state_t expected = from;
+    return atomic_compare_exchange_strong(&g_runtime_state, &expected, to);
+}
+
+/**
+ * @brief Get current runtime state
+ * @return Current py_runtime_state_t value
+ */
+static inline py_runtime_state_t runtime_state(void) {
+    extern _Atomic py_runtime_state_t g_runtime_state;
+    return atomic_load(&g_runtime_state);
+}
+
+/**
+ * @brief Check if runtime is in RUNNING state
+ * @return true if Python is running and accepting work
+ */
+static inline bool runtime_is_running(void) {
+    return runtime_state() == PY_STATE_RUNNING;
+}
+
+/**
+ * @brief Check if runtime is shutting down or stopped
+ * @return true if runtime is in SHUTTING_DOWN or STOPPED state
+ */
+static inline bool runtime_is_shutting_down(void) {
+    py_runtime_state_t state = runtime_state();
+    return state >= PY_STATE_SHUTTING_DOWN;
+}
+
+/** @} */
+
+/* ============================================================================
+ * Invariant Counters (Debugging/Diagnostics)
+ * ============================================================================ */
+
+/**
+ * @defgroup invariants Invariant Counters
+ * @brief Atomic counters for tracking resource lifecycle and detecting leaks
+ * @{
+ */
+
+/**
+ * @struct py_invariant_counters_t
+ * @brief Atomic counters for debugging and leak detection
+ *
+ * These counters track paired operations (acquire/release, create/destroy)
+ * to help detect resource leaks and imbalanced operations. At shutdown,
+ * paired counters should be equal.
+ */
+typedef struct {
+    /* GIL operations */
+    _Atomic uint64_t gil_ensure_count;      /**< PyGILState_Ensure calls */
+    _Atomic uint64_t gil_release_count;     /**< PyGILState_Release calls */
+
+    /* Python object references */
+    _Atomic uint64_t pyobj_created;         /**< py_object_t created */
+    _Atomic uint64_t pyobj_destroyed;       /**< py_object_t destroyed */
+
+    /* py_ref_t resources */
+    _Atomic uint64_t pyref_created;         /**< py_ref_t created */
+    _Atomic uint64_t pyref_destroyed;       /**< py_ref_t destroyed */
+
+    /* Context resources */
+    _Atomic uint64_t ctx_created;           /**< py_context_t created */
+    _Atomic uint64_t ctx_destroyed;         /**< py_context_t destroyed */
+    _Atomic uint64_t ctx_keep_count;        /**< enif_keep_resource(ctx) calls */
+    _Atomic uint64_t ctx_release_count;     /**< enif_release_resource(ctx) calls */
+
+    /* Suspended states */
+    _Atomic uint64_t suspended_created;     /**< Suspended states created */
+    _Atomic uint64_t suspended_resumed;     /**< Suspended states resumed */
+    _Atomic uint64_t suspended_destroyed;   /**< Suspended states destroyed */
+
+    /* Executor queue operations */
+    _Atomic uint64_t enqueue_count;         /**< Requests enqueued */
+    _Atomic uint64_t complete_count;        /**< Requests completed */
+    _Atomic uint64_t rejected_count;        /**< Requests rejected (shutdown) */
+} py_invariant_counters_t;
+
+/** @brief Global invariant counters for debugging */
+extern py_invariant_counters_t g_counters;
 
 /** @} */
 
@@ -256,6 +397,9 @@ typedef struct {
 typedef struct {
     /** @brief The wrapped Python object (owned reference) */
     PyObject *obj;
+
+    /** @brief Interpreter ID that owns this object (0 = main, >0 = subinterp) */
+    uint32_t interp_id;
 } py_object_t;
 
 /**
@@ -540,21 +684,75 @@ typedef struct {
 #endif
 
 /**
+ * @enum py_cmd_type_t
+ * @brief Command types for thread-per-context dispatch
+ *
+ * Commands are dispatched from the dirty scheduler to the subinterpreter's
+ * dedicated thread via mutex/condvar signaling.
+ */
+typedef enum {
+    PY_CMD_NONE = 0,      /**< No command (initial state) */
+    PY_CMD_CALL,          /**< Call a Python function */
+    PY_CMD_EVAL,          /**< Evaluate a Python expression */
+    PY_CMD_EXEC,          /**< Execute Python statements */
+    PY_CMD_SHUTDOWN       /**< Shutdown the thread */
+} py_cmd_type_t;
+
+/**
+ * @struct py_cmd_t
+ * @brief Command structure for thread-per-context dispatch
+ *
+ * This structure is used to pass commands from the dirty scheduler
+ * to the subinterpreter's dedicated thread. The thread executes the
+ * command and stores the result in result_env/result.
+ */
+typedef struct {
+    /** @brief Type of command to execute */
+    py_cmd_type_t type;
+
+    /** @brief Caller's NIF environment (for reading terms) */
+    ErlNifEnv *caller_env;
+
+    /* Call parameters */
+    ERL_NIF_TERM module;      /**< Module name term (for CALL) */
+    ERL_NIF_TERM func;        /**< Function name term (for CALL) */
+    ERL_NIF_TERM args;        /**< Arguments list (for CALL) */
+    ERL_NIF_TERM kwargs;      /**< Keyword arguments map (for CALL) */
+
+    /* Eval/Exec parameters */
+    ERL_NIF_TERM code;        /**< Code string (for EVAL/EXEC) */
+    ERL_NIF_TERM locals;      /**< Local variables map (for EVAL) */
+
+    /* Result */
+    ErlNifEnv *result_env;    /**< Environment for result term (allocated by thread) */
+    ERL_NIF_TERM result;      /**< Result term (in result_env) */
+    bool success;             /**< True if command succeeded */
+    bool completed;           /**< True when command execution finished (even on error) */
+
+    /* Copied command environment for cross-thread safety */
+    ErlNifEnv *cmd_env;       /**< Environment for copied command terms (owned by dispatcher) */
+} py_cmd_t;
+
+/**
  * @struct py_context_t
- * @brief Process-owned Python context (NO MUTEX)
+ * @brief Process-owned Python context with shared-GIL subinterpreter pool
  *
  * A py_context_t is owned by a single Erlang process, which serializes
- * all access to it. This eliminates mutex contention and enables true
- * N-way parallelism when combined with subinterpreters.
+ * all access to it. For subinterpreters, contexts reference a slot in
+ * the pre-created subinterpreter pool (shared GIL model).
  *
- * Unlike py_subinterp_worker_t, this structure has NO mutex - the owning
- * Erlang process guarantees exclusive access through message passing.
+ * Execution happens directly on dirty schedulers using PyThreadState_Swap()
+ * to switch to the subinterpreter's thread state. This avoids:
+ * - Dedicated pthread per context
+ * - Mutex/condvar dispatch overhead
+ * - Term copying between environments
  *
- * @note For Python 3.12+, each context has its own GIL (OWN_GIL)
- * @note For older Python, contexts share the GIL but still avoid mutex overhead
+ * @note Python 3.12+ uses shared-GIL subinterpreters via pool slots
+ * @note Older Python uses worker mode with main interpreter namespace
  *
  * @see nif_context_create
  * @see nif_context_call
+ * @see subinterp_pool_alloc
  */
 typedef struct {
     /** @brief Unique interpreter ID for routing (0 = main, >0 = subinterp) */
@@ -576,11 +774,8 @@ typedef struct {
     int callback_pipe[2];
 
 #ifdef HAVE_SUBINTERPRETERS
-    /** @brief Python interpreter state (only for subinterp mode) */
-    PyInterpreterState *interp;
-
-    /** @brief Thread state for this interpreter */
-    PyThreadState *tstate;
+    /** @brief Index into subinterpreter pool (-1 = not using pool / worker mode) */
+    int pool_slot;
 #else
     /** @brief Worker thread state (non-subinterp mode) */
     PyThreadState *thread_state;
@@ -595,6 +790,174 @@ typedef struct {
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
 } py_context_t;
+
+/* ============================================================================
+ * Shared-GIL Pool Architecture for Subinterpreters
+ * ============================================================================
+ *
+ * Architecture: Subinterpreters share the GIL but provide namespace isolation.
+ * A pool of pre-created subinterpreters is initialized at startup.
+ * Contexts allocate slots from this pool.
+ *
+ *   Erlang Process --> Dirty Scheduler --> PyGILState_Ensure()
+ *                                          PyThreadState_Swap(slot->tstate)
+ *                                          [execute in subinterpreter]
+ *                                          PyThreadState_Swap(saved)
+ *                                          PyGILState_Release()
+ *
+ * Benefits over OWN_GIL thread-per-context model:
+ * - No dedicated pthread per context (resource savings)
+ * - No mutex/condvar dispatch overhead (direct execution)
+ * - No term copying between environments (safe enif_make_* on dirty scheduler)
+ * - ~4x better performance (400K vs 100K calls/sec)
+ *
+ * Lifecycle:
+ * 1. Pool init: create N subinterpreters with shared GIL at Python startup
+ * 2. Context creation: allocate slot from pool
+ * 3. Each operation: swap to slot's tstate, execute, swap back
+ * 4. Context destroy: release slot back to pool
+ * 5. Pool shutdown: destroy all subinterpreters at Python finalization
+ */
+
+/* ============================================================================
+ * Thread State Guard
+ * ============================================================================
+ *
+ * For both worker mode and subinterpreter mode (shared GIL), we use
+ * PyGILState_Ensure/Release. For subinterpreters, we additionally swap
+ * to the subinterpreter's thread state.
+ */
+
+/**
+ * @enum py_guard_mode_t
+ * @brief Acquisition mode for py_context_guard_t
+ */
+typedef enum {
+    /** @brief Failed to acquire - guard.acquired will be false */
+    PY_GUARD_FAILED = 0,
+
+    /** @brief Worker mode: Uses PyGILState_Ensure/Release (main interpreter) */
+    PY_GUARD_WORKER,
+
+    /** @brief Subinterp mode: GIL + PyThreadState_Swap to pool slot */
+    PY_GUARD_SUBINTERP
+} py_guard_mode_t;
+
+/**
+ * @struct py_context_guard_t
+ * @brief Thread state guard for context execution
+ *
+ * Use py_context_acquire() to obtain a guard before Python operations,
+ * and py_context_release() when done.
+ *
+ * For worker mode: acquires GIL via PyGILState_Ensure
+ * For subinterp mode: acquires GIL + swaps to subinterpreter's tstate
+ */
+typedef struct {
+    /** @brief Context being guarded */
+    py_context_t *ctx;
+
+    /** @brief Acquisition mode - determines release behavior */
+    py_guard_mode_t mode;
+
+    /** @brief GIL state from PyGILState_Ensure */
+    PyGILState_STATE gstate;
+
+    /** @brief Saved thread state before swap (subinterp mode) */
+    PyThreadState *saved_tstate;
+
+    /** @brief Success flag: true if acquisition succeeded */
+    bool acquired;
+} py_context_guard_t;
+
+/**
+ * @brief Acquire thread state for context execution
+ *
+ * For worker mode: acquires GIL via PyGILState_Ensure
+ * For subinterp mode: acquires GIL + swaps to pool slot's tstate
+ *
+ * @param ctx The context to acquire (may be NULL)
+ * @return Guard structure with acquired=true on success, false on failure
+ *
+ * @note Caller MUST call py_context_release() when done with Python work
+ *
+ * @par Usage:
+ * @code
+ * py_context_guard_t guard = py_context_acquire(ctx);
+ * if (!guard.acquired) {
+ *     return make_error(env, "acquire_failed");
+ * }
+ * // ... do Python work using ctx->globals, ctx->locals ...
+ * py_context_release(&guard);
+ * @endcode
+ */
+static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
+    py_context_guard_t guard = {
+        .ctx = ctx,
+        .mode = PY_GUARD_FAILED,
+        .gstate = PyGILState_UNLOCKED,
+        .saved_tstate = NULL,
+        .acquired = false
+    };
+
+    if (ctx == NULL || ctx->destroyed) {
+        return guard;
+    }
+
+    /* Acquire the GIL first (works for both modes) */
+    guard.gstate = PyGILState_Ensure();
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
+        /* Subinterpreter mode: swap to the pool slot's thread state */
+        subinterp_slot_t *slot = subinterp_pool_get(ctx->pool_slot);
+
+        if (slot == NULL || !slot->initialized) {
+            /* Pool slot invalid - release GIL and fail */
+            PyGILState_Release(guard.gstate);
+            return guard;
+        }
+
+        /* Swap to subinterpreter's thread state */
+        guard.saved_tstate = PyThreadState_Swap(slot->tstate);
+        guard.mode = PY_GUARD_SUBINTERP;
+        guard.acquired = true;
+        return guard;
+    }
+#endif
+
+    /* Worker mode: just use the GIL we acquired */
+    guard.mode = PY_GUARD_WORKER;
+    guard.acquired = true;
+    return guard;
+}
+
+/**
+ * @brief Release thread state acquired by py_context_acquire
+ *
+ * For worker mode: releases GIL via PyGILState_Release
+ * For subinterp mode: swaps back to saved tstate + releases GIL
+ *
+ * @param guard Pointer to guard structure from py_context_acquire()
+ *
+ * @note Safe to call multiple times - checks acquired flag
+ */
+static inline void py_context_release(py_context_guard_t *guard) {
+    if (!guard->acquired) {
+        return;
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (guard->mode == PY_GUARD_SUBINTERP) {
+        /* Swap back to saved thread state */
+        PyThreadState_Swap(guard->saved_tstate);
+    }
+#endif
+
+    /* Release the GIL */
+    PyGILState_Release(guard->gstate);
+    guard->acquired = false;
+}
 
 /**
  * @struct suspended_context_state_t
@@ -779,8 +1142,8 @@ extern ErlNifResourceType *PY_CONTEXT_SUSPENDED_RESOURCE_TYPE;
 /** @brief Atomic counter for unique interpreter IDs */
 extern _Atomic uint32_t g_context_id_counter;
 
-/** @brief Flag: Python interpreter is initialized */
-extern bool g_python_initialized;
+/** @brief Atomic runtime state for thread-safe lifecycle management */
+extern _Atomic py_runtime_state_t g_runtime_state;
 
 /** @brief Main Python thread state (saved on init) */
 extern PyThreadState *g_main_thread_state;
@@ -797,8 +1160,8 @@ extern executor_t g_executors[MAX_EXECUTORS];
 /** @brief Round-robin counter for executor selection */
 extern _Atomic int g_next_executor;
 
-/** @brief Flag: multi-executor pool is initialized */
-extern bool g_multi_executor_initialized;
+/** @brief Flag: multi-executor pool is initialized (atomic for thread-safe access) */
+extern _Atomic bool g_multi_executor_initialized;
 
 /* Single executor state */
 
@@ -817,11 +1180,11 @@ extern py_request_t *g_executor_queue_head;
 /** @brief Single executor queue tail */
 extern py_request_t *g_executor_queue_tail;
 
-/** @brief Single executor running flag */
-extern volatile bool g_executor_running;
+/** @brief Single executor running flag (atomic for thread-safe access) */
+extern _Atomic bool g_executor_running;
 
-/** @brief Single executor shutdown flag */
-extern volatile bool g_executor_shutdown;
+/** @brief Single executor shutdown flag (atomic for thread-safe access) */
+extern _Atomic bool g_executor_shutdown;
 
 /** @brief Global counter for unique callback IDs */
 extern _Atomic uint64_t g_callback_id_counter;
@@ -1201,7 +1564,7 @@ static void process_request(py_request_t *req);
  *
  * @param req Request to submit
  */
-static void executor_enqueue(py_request_t *req);
+static int executor_enqueue(py_request_t *req);
 
 /**
  * @brief Wait for a request to complete

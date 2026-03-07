@@ -161,7 +161,7 @@ init(Parent, Id, Mode, Opts) ->
 
     %% Create Python context
     case py_nif:context_create(ActualMode) of
-        {ok, Ref} ->
+        {ok, Ref, _InterpId} ->
             %% Set up callback handler
             py_nif:context_set_callback_handler(Ref, self()),
 

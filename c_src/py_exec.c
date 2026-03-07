@@ -321,6 +321,8 @@ static void process_request(py_request_t *req) {
                 req->result = make_error(env, "alloc_failed");
             } else {
                 wrapper->obj = py_result;
+                wrapper->interp_id = 0;  /* Main interpreter */
+                atomic_fetch_add(&g_counters.pyobj_created, 1);
                 ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
                 enif_release_resource(wrapper);
                 req->result = enif_make_tuple2(env, ATOM_OK,
@@ -406,6 +408,8 @@ static void process_request(py_request_t *req) {
                     req->result = make_error(env, "alloc_failed");
                 } else {
                     wrapper->obj = py_result;
+                    wrapper->interp_id = 0;  /* Main interpreter */
+                    atomic_fetch_add(&g_counters.pyobj_created, 1);
                     ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
                     enif_release_resource(wrapper);
                     req->result = enif_make_tuple2(env, ATOM_OK,
@@ -482,6 +486,8 @@ static void process_request(py_request_t *req) {
                 req->result = make_error(env, "alloc_failed");
             } else {
                 wrapper->obj = item;
+                wrapper->interp_id = 0;  /* Main interpreter */
+                atomic_fetch_add(&g_counters.pyobj_created, 1);
                 ERL_NIF_TERM gen_ref = enif_make_resource(env, wrapper);
                 enif_release_resource(wrapper);
                 req->result = enif_make_tuple2(env, ATOM_OK,
@@ -514,6 +520,8 @@ static void process_request(py_request_t *req) {
                 req->result = make_error(env, "alloc_failed");
             } else {
                 wrapper->obj = module;
+                wrapper->interp_id = 0;  /* Main interpreter */
+                atomic_fetch_add(&g_counters.pyobj_created, 1);
                 ERL_NIF_TERM mod_ref = enif_make_resource(env, wrapper);
                 enif_release_resource(wrapper);
                 req->result = enif_make_tuple2(env, ATOM_OK, mod_ref);
@@ -655,7 +663,7 @@ static void *executor_thread_main(void *arg) {
     /* Acquire GIL for this thread */
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    g_executor_running = true;
+    atomic_store(&g_executor_running, true);
 
     /*
      * Main processing loop.
@@ -670,7 +678,7 @@ static void *executor_thread_main(void *arg) {
         Py_BEGIN_ALLOW_THREADS
 
         pthread_mutex_lock(&g_executor_mutex);
-        while (g_executor_queue_head == NULL && !g_executor_shutdown) {
+        while (g_executor_queue_head == NULL && !atomic_load(&g_executor_shutdown)) {
             pthread_cond_wait(&g_executor_cond, &g_executor_mutex);
         }
 
@@ -682,7 +690,7 @@ static void *executor_thread_main(void *arg) {
                 g_executor_queue_tail = NULL;
             }
             req->next = NULL;
-        } else if (g_executor_shutdown) {
+        } else if (atomic_load(&g_executor_shutdown)) {
             /* Queue is empty and shutdown requested - exit */
             should_exit = true;
         }
@@ -702,6 +710,9 @@ static void *executor_thread_main(void *arg) {
                 /* Process the request with GIL held */
                 process_request(req);
 
+                /* Track completed requests */
+                atomic_fetch_add(&g_counters.complete_count, 1);
+
                 /* Signal completion */
                 pthread_mutex_lock(&req->mutex);
                 req->completed = true;
@@ -711,7 +722,7 @@ static void *executor_thread_main(void *arg) {
         }
     }
 
-    g_executor_running = false;
+    atomic_store(&g_executor_running, false);
     PyGILState_Release(gstate);
 
     return NULL;
@@ -720,8 +731,19 @@ static void *executor_thread_main(void *arg) {
 /**
  * Enqueue a request to the appropriate executor based on execution mode.
  * Routes to multi-executor pool, single executor, or executes directly.
+ *
+ * @return 0 on success, -1 if shutting down (request rejected)
  */
-static void executor_enqueue(py_request_t *req) {
+static int executor_enqueue(py_request_t *req) {
+    /* Reject work if runtime is shutting down (except shutdown requests) */
+    if (runtime_is_shutting_down() && req->type != PY_REQ_SHUTDOWN) {
+        atomic_fetch_add(&g_counters.rejected_count, 1);
+        return -1;
+    }
+
+    /* Track enqueued requests */
+    atomic_fetch_add(&g_counters.enqueue_count, 1);
+
     switch (g_execution_mode) {
 #ifdef HAVE_FREE_THREADED
         case PY_MODE_FREE_THREADED:
@@ -736,15 +758,15 @@ static void executor_enqueue(py_request_t *req) {
                 pthread_cond_signal(&req->cond);
                 pthread_mutex_unlock(&req->mutex);
             }
-            return;
+            return 0;
 #endif
 
         case PY_MODE_MULTI_EXECUTOR:
-            if (g_multi_executor_initialized) {
+            if (atomic_load(&g_multi_executor_initialized)) {
                 /* Route to multi-executor pool */
                 int exec_id = select_executor();
                 multi_executor_enqueue(exec_id, req);
-                return;
+                return 0;
             }
             /* Fall through to single executor if multi not initialized */
             break;
@@ -767,6 +789,7 @@ static void executor_enqueue(py_request_t *req) {
     }
     pthread_cond_signal(&g_executor_cond);
     pthread_mutex_unlock(&g_executor_mutex);
+    return 0;
 }
 
 /**
@@ -785,7 +808,7 @@ static void executor_wait(py_request_t *req) {
  * Called during Python initialization.
  */
 static int executor_start(void) {
-    g_executor_shutdown = false;
+    atomic_store(&g_executor_shutdown, false);
     g_executor_queue_head = NULL;
     g_executor_queue_tail = NULL;
 
@@ -795,11 +818,11 @@ static int executor_start(void) {
 
     /* Wait for executor to be ready */
     int max_wait = 100;  /* 1 second max */
-    while (!g_executor_running && max_wait-- > 0) {
+    while (!atomic_load(&g_executor_running) && max_wait-- > 0) {
         usleep(10000);  /* 10ms */
     }
 
-    return g_executor_running ? 0 : -1;
+    return atomic_load(&g_executor_running) ? 0 : -1;
 }
 
 /**
@@ -807,7 +830,7 @@ static int executor_start(void) {
  * Called during Python finalization.
  */
 static void executor_stop(void) {
-    if (!g_executor_running) {
+    if (!atomic_load(&g_executor_running)) {
         return;
     }
 
@@ -816,7 +839,7 @@ static void executor_stop(void) {
     request_init(&shutdown_req);
     shutdown_req.type = PY_REQ_SHUTDOWN;
 
-    g_executor_shutdown = true;
+    atomic_store(&g_executor_shutdown, true);
     executor_enqueue(&shutdown_req);
     executor_wait(&shutdown_req);
     request_cleanup(&shutdown_req);
@@ -926,7 +949,7 @@ static void multi_executor_enqueue(int exec_id, py_request_t *req) {
  * Start the multi-executor pool.
  */
 static int multi_executor_start(int num_executors) {
-    if (g_multi_executor_initialized) {
+    if (atomic_load(&g_multi_executor_initialized)) {
         return 0;
     }
 
@@ -978,7 +1001,7 @@ static int multi_executor_start(int num_executors) {
         }
     }
 
-    g_multi_executor_initialized = all_ready;
+    atomic_store(&g_multi_executor_initialized, all_ready);
     return all_ready ? 0 : -1;
 }
 
@@ -986,7 +1009,7 @@ static int multi_executor_start(int num_executors) {
  * Stop the multi-executor pool.
  */
 static void multi_executor_stop(void) {
-    if (!g_multi_executor_initialized) {
+    if (!atomic_load(&g_multi_executor_initialized)) {
         return;
     }
 
@@ -1023,7 +1046,7 @@ static void multi_executor_stop(void) {
         }
     }
 
-    g_multi_executor_initialized = false;
+    atomic_store(&g_multi_executor_initialized, false);
 }
 
 /*

@@ -58,7 +58,8 @@
     ref :: reference(),
     id :: pos_integer(),
     interp_id :: non_neg_integer(),
-    event_state = #{} :: map()  %% #{loop_ref => ref(), worker_pid => pid()}
+    event_state = #{} :: map(),  %% #{loop_ref => ref(), worker_pid => pid()}
+    callback_handler :: pid() | undefined  %% For thread-model callback handling
 }).
 
 %% ============================================================================
@@ -233,12 +234,23 @@ init(Parent, Id, Mode) ->
         {ok, Ref, InterpId} ->
             %% For subinterpreters, create a dedicated event worker
             EventState = setup_event_worker(Ref, InterpId),
+            %% For thread-model subinterpreters, spawn a dedicated callback handler
+            %% because the main context process will be blocked in the NIF
+            CallbackHandler = case maps:get(mode, EventState, normal) of
+                thread_model ->
+                    Handler = spawn_callback_handler(Ref),
+                    ok = py_nif:context_set_callback_handler(Ref, Handler),
+                    Handler;
+                _ ->
+                    undefined
+            end,
             Parent ! {self(), started},
             State = #state{
                 ref = Ref,
                 id = Id,
                 interp_id = InterpId,
-                event_state = EventState
+                event_state = EventState,
+                callback_handler = CallbackHandler
             },
             loop(State);
         {error, Reason} ->
@@ -266,6 +278,10 @@ setup_event_worker(Ref, InterpId) ->
         {error, not_subinterp} ->
             %% Worker mode - uses shared router (lazy initialization)
             #{};
+        {error, event_loop_owned_by_thread} ->
+            %% Thread-model subinterpreter: event loop is managed by dedicated thread.
+            %% This is expected behavior, not a failure.
+            #{mode => thread_model};
         {error, Reason} ->
             error_logger:warning_msg(
                 "py_context ~p: Failed to get event loop: ~p~n",
@@ -338,29 +354,47 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
 
         {'EXIT', Pid, Reason} ->
             %% Handle EXIT from linked processes
-            case State#state.event_state of
-                #{worker_pid := Pid} ->
-                    %% Event worker died - log and continue (degraded asyncio support)
+            case State#state.callback_handler of
+                Pid ->
+                    %% Callback handler died - restart it for thread-model contexts
                     error_logger:warning_msg(
-                        "py_context ~p: Event worker died: ~p~n",
+                        "py_context ~p: Callback handler died: ~p, restarting~n",
                         [InterpId, Reason]),
-                    NewState = State#state{event_state = #{}},
+                    NewHandler = spawn_callback_handler(Ref),
+                    ok = py_nif:context_set_callback_handler(Ref, NewHandler),
+                    NewState = State#state{callback_handler = NewHandler},
                     loop(NewState);
-                _ when Reason =:= shutdown; Reason =:= kill ->
-                    %% Supervisor shutdown or kill signal - clean exit
-                    terminate(Reason, State);
-                _ when is_tuple(Reason), element(1, Reason) =:= shutdown ->
-                    %% Supervisor shutdown with extra info: {shutdown, _}
-                    terminate(Reason, State);
                 _ ->
-                    %% Ignore EXIT from other processes (e.g. callback handlers)
-                    %% These are normal operations in the callback mechanism
-                    loop(State)
+                    case State#state.event_state of
+                        #{worker_pid := Pid} ->
+                            %% Event worker died - log and continue (degraded asyncio support)
+                            error_logger:warning_msg(
+                                "py_context ~p: Event worker died: ~p~n",
+                                [InterpId, Reason]),
+                            NewState = State#state{event_state = #{}},
+                            loop(NewState);
+                        _ when Reason =:= shutdown; Reason =:= kill ->
+                            %% Supervisor shutdown or kill signal - clean exit
+                            terminate(Reason, State);
+                        _ when is_tuple(Reason), element(1, Reason) =:= shutdown ->
+                            %% Supervisor shutdown with extra info: {shutdown, _}
+                            terminate(Reason, State);
+                        _ ->
+                            %% Ignore EXIT from other processes
+                            loop(State)
+                    end
             end
     end.
 
 %% @private Clean up resources on termination
-terminate(_Reason, #state{ref = Ref, event_state = EventState}) ->
+terminate(_Reason, #state{ref = Ref, event_state = EventState, callback_handler = CallbackHandler}) ->
+    %% Stop the callback handler if it exists
+    case CallbackHandler of
+        Pid when is_pid(Pid) ->
+            Pid ! stop;
+        _ ->
+            ok
+    end,
     %% Stop the event worker first (if it exists and is still alive)
     case EventState of
         #{worker_pid := WorkerPid} ->
@@ -371,6 +405,61 @@ terminate(_Reason, #state{ref = Ref, event_state = EventState}) ->
     %% Destroy the Python context
     catch py_nif:context_destroy(Ref),
     ok.
+
+%% ============================================================================
+%% Blocking callback handling (for thread-model subinterpreters)
+%% ============================================================================
+%%
+%% Thread-model subinterpreters use blocking pipe-based callbacks because
+%% the suspension mechanism doesn't work when Python runs in a dedicated thread.
+%% The Python thread blocks waiting for a response on the callback pipe.
+%%
+%% A separate callback handler process is spawned because the main context
+%% process is blocked in the NIF (dispatch_to_thread) and cannot receive messages.
+
+%% @private
+%% Spawn a dedicated callback handler process for thread-model subinterpreters.
+spawn_callback_handler(Ref) ->
+    spawn_link(fun() -> callback_handler_loop(Ref) end).
+
+%% @private
+%% Callback handler loop - receives erlang_callback messages and responds.
+callback_handler_loop(Ref) ->
+    receive
+        {erlang_callback, _CallbackId, FuncName, Args} ->
+            handle_blocking_callback(Ref, FuncName, Args),
+            callback_handler_loop(Ref);
+        stop ->
+            ok
+    end.
+
+%% @private
+%% Handle a blocking callback from a thread-model subinterpreter.
+%% Executes the callback and writes the response to the callback pipe.
+handle_blocking_callback(Ref, FuncName, Args) ->
+    %% Convert Args from tuple to list if needed
+    ArgsList = case Args of
+        T when is_tuple(T) -> tuple_to_list(T);
+        L when is_list(L) -> L;
+        _ -> [Args]
+    end,
+    %% Execute the registered function
+    Response = case py_callback:execute(FuncName, ArgsList) of
+        {ok, Result} ->
+            %% Format: status_byte (0=ok) + python_repr
+            ResultStr = term_to_python_repr(Result),
+            <<0, ResultStr/binary>>;
+        {error, {not_found, Name}} ->
+            ErrMsg = iolist_to_binary(
+                io_lib:format("Function '~s' not registered", [Name])),
+            <<1, ErrMsg/binary>>;
+        {error, {Class, Reason, _Stack}} ->
+            ErrMsg = iolist_to_binary(
+                io_lib:format("~p: ~p", [Class, Reason])),
+            <<1, ErrMsg/binary>>
+    end,
+    %% Write response to context's callback pipe
+    py_nif:context_write_callback_response(Ref, Response).
 
 %% ============================================================================
 %% Suspension-based callback handling

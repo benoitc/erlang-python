@@ -295,23 +295,6 @@ static thread_worker_t *acquire_thread_worker(void) {
     return tw;
 }
 
-/**
- * @brief Release a thread worker back to the pool
- *
- * Marks the worker as available for reuse.
- *
- * @param tw Worker to release
- */
-static void release_thread_worker(thread_worker_t *tw) {
-    if (tw == NULL) {
-        return;
-    }
-
-    pthread_mutex_lock(&tw->mutex);
-    tw->in_use = false;
-    pthread_mutex_unlock(&tw->mutex);
-}
-
 /* ============================================================================
  * Thread Worker Call Implementation
  * ============================================================================ */

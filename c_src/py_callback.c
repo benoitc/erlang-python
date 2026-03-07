@@ -121,6 +121,32 @@ static void cleanup_callback_cache(void) {
     g_ast_literal_eval = NULL;
 }
 
+/**
+ * Get the ProcessError exception class from the current interpreter's erlang module.
+ * This ensures the correct class is used in subinterpreter contexts where each
+ * interpreter has its own erlang module with its own ProcessError class.
+ */
+static PyObject *get_current_process_error(void) {
+    PyObject *erlang_module = PyImport_ImportModule("erlang");
+    if (erlang_module == NULL) {
+        PyErr_Clear();
+        return ProcessErrorException;  /* Fallback to global */
+    }
+
+    PyObject *exc_class = PyObject_GetAttrString(erlang_module, "ProcessError");
+    Py_DECREF(erlang_module);
+
+    if (exc_class == NULL) {
+        PyErr_Clear();
+        return ProcessErrorException;  /* Fallback to global */
+    }
+
+    /* Note: Returns new reference, but PyErr_SetString expects borrowed.
+     * We decref here and rely on the module keeping it alive. */
+    Py_DECREF(exc_class);
+    return exc_class;
+}
+
 /* ============================================================================
  * Callback Name Registry
  *
@@ -633,6 +659,7 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
     memset(state, 0, sizeof(suspended_context_state_t));
 
     state->ctx = ctx;
+    enif_keep_resource(ctx);  /* Keep ctx alive while suspended state exists */
     state->callback_id = tl_pending_callback_id;
     state->request_type = PY_REQ_CALL;
 
@@ -684,6 +711,7 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
     state->orig_args = enif_make_copy(state->orig_env, args_term);
     state->orig_kwargs = enif_make_copy(state->orig_env, kwargs_term);
 
+    atomic_fetch_add(&g_counters.suspended_created, 1);
     return state;
 }
 
@@ -718,6 +746,7 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
     memset(state, 0, sizeof(suspended_context_state_t));
 
     state->ctx = ctx;
+    enif_keep_resource(ctx);  /* Keep ctx alive while suspended state exists */
     state->callback_id = tl_pending_callback_id;
     state->request_type = PY_REQ_EVAL;
 
@@ -757,6 +786,7 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
     /* Copy locals to our environment */
     state->orig_locals = enif_make_copy(state->orig_env, locals_term);
 
+    atomic_fetch_add(&g_counters.suspended_created, 1);
     return state;
 }
 
@@ -1593,7 +1623,7 @@ static PyObject *erlang_send_impl(PyObject *self, PyObject *args) {
     /* Fire-and-forget send */
     if (!enif_send(NULL, &pid->pid, msg_env, msg)) {
         enif_free_env(msg_env);
-        PyErr_SetString(ProcessErrorException,
+        PyErr_SetString(get_current_process_error(),
             "Failed to send message: process may not exist");
         return NULL;
     }
@@ -2031,6 +2061,22 @@ static struct PyModuleDef ErlangModuleDef = {
  * Called during Python initialization.
  */
 static int create_erlang_module(void) {
+    /* Check if module already exists (e.g., after app restart without Py_Finalize).
+     * This makes the function idempotent and safe to call multiple times. */
+    PyObject *name = PyUnicode_FromString("erlang");
+    if (name == NULL) {
+        return -1;
+    }
+    PyObject *existing = PyImport_GetModule(name);
+    Py_DECREF(name);
+    if (existing != NULL) {
+        Py_DECREF(existing);
+        /* Module already exists, just reinitialize the callback cache */
+        init_callback_cache();
+        return 0;
+    }
+    PyErr_Clear();  /* Clear any error from GetModule */
+
     /* Initialize cached Python function references */
     init_callback_cache();
 
@@ -2423,6 +2469,10 @@ static ERL_NIF_TERM nif_resume_callback(ErlNifEnv *env, int argc, const ERL_NIF_
     suspended_state_t *state;
     ErlNifBinary result_bin;
 
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
     if (!enif_get_resource(env, argv[0], SUSPENDED_STATE_RESOURCE_TYPE, (void **)&state)) {
         return make_error(env, "invalid_state_ref");
     }
@@ -2468,6 +2518,10 @@ static ERL_NIF_TERM nif_resume_callback(ErlNifEnv *env, int argc, const ERL_NIF_
 static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     suspended_state_t *state;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
 
     if (!enif_get_resource(env, argv[0], SUSPENDED_STATE_RESOURCE_TYPE, (void **)&state)) {
         return make_error(env, "invalid_state_ref");

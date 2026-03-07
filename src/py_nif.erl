@@ -37,6 +37,7 @@
     get_attr/3,
     version/0,
     memory_stats/0,
+    get_debug_counters/0,
     gc/0,
     gc/1,
     tracemalloc_start/0,
@@ -51,13 +52,28 @@
     async_call/6,
     async_gather/3,
     async_stream/6,
-    %% Sub-interpreters (Python 3.12+)
+    %% Sub-interpreters (Python 3.12+) - shared GIL pool model
     subinterp_supported/0,
     subinterp_worker_new/0,
     subinterp_worker_destroy/1,
     subinterp_call/5,
     subinterp_asgi_run/6,
     parallel_execute/2,
+    %% OWN_GIL subinterpreter thread pool (true parallelism)
+    subinterp_thread_pool_start/0,
+    subinterp_thread_pool_start/1,
+    subinterp_thread_pool_stop/0,
+    subinterp_thread_pool_ready/0,
+    subinterp_thread_pool_stats/0,
+    subinterp_thread_create/0,
+    subinterp_thread_destroy/1,
+    subinterp_thread_call/4,
+    subinterp_thread_call/5,
+    subinterp_thread_eval/2,
+    subinterp_thread_eval/3,
+    subinterp_thread_exec/2,
+    subinterp_thread_cast/4,
+    subinterp_thread_async_call/6,
     %% Execution mode info
     execution_mode/0,
     num_executors/0,
@@ -319,6 +335,12 @@ version() ->
 memory_stats() ->
     ?NIF_STUB.
 
+%% @doc Get debug counters for tracking resource lifecycle.
+%% Returns a map with counter names and their values. Used for detecting leaks.
+-spec get_debug_counters() -> map().
+get_debug_counters() ->
+    ?NIF_STUB.
+
 %% @doc Force Python garbage collection.
 %% Returns the number of unreachable objects collected.
 -spec gc() -> {ok, integer()} | {error, term()}.
@@ -452,6 +474,90 @@ subinterp_asgi_run(_WorkerRef, _Runner, _Module, _Callable, _Scope, _Body) ->
 -spec parallel_execute([reference()], [{binary(), binary(), list()}]) ->
     {ok, list()} | {error, term()}.
 parallel_execute(_WorkerRefs, _Calls) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% OWN_GIL Subinterpreter Thread Pool (True Parallelism)
+%%% ============================================================================
+
+%% @doc Start the OWN_GIL subinterpreter thread pool with default workers.
+%% Creates a pool of pthreads, each with an OWN_GIL subinterpreter.
+-spec subinterp_thread_pool_start() -> ok | {error, term()}.
+subinterp_thread_pool_start() ->
+    ?NIF_STUB.
+
+%% @doc Start the OWN_GIL subinterpreter thread pool with N workers.
+-spec subinterp_thread_pool_start(non_neg_integer()) -> ok | {error, term()}.
+subinterp_thread_pool_start(_NumWorkers) ->
+    ?NIF_STUB.
+
+%% @doc Stop the OWN_GIL subinterpreter thread pool.
+-spec subinterp_thread_pool_stop() -> ok.
+subinterp_thread_pool_stop() ->
+    ?NIF_STUB.
+
+%% @doc Check if the OWN_GIL thread pool is ready.
+-spec subinterp_thread_pool_ready() -> boolean().
+subinterp_thread_pool_ready() ->
+    ?NIF_STUB.
+
+%% @doc Get OWN_GIL thread pool statistics.
+-spec subinterp_thread_pool_stats() -> map().
+subinterp_thread_pool_stats() ->
+    ?NIF_STUB.
+
+%% @doc Create a new OWN_GIL subinterpreter handle.
+%% The handle is bound to a worker thread and has isolated namespace.
+-spec subinterp_thread_create() -> {ok, reference()} | {error, term()}.
+subinterp_thread_create() ->
+    ?NIF_STUB.
+
+%% @doc Destroy an OWN_GIL subinterpreter handle.
+-spec subinterp_thread_destroy(reference()) -> ok | {error, term()}.
+subinterp_thread_destroy(_Handle) ->
+    ?NIF_STUB.
+
+%% @doc Call a Python function through OWN_GIL subinterpreter (blocking).
+-spec subinterp_thread_call(reference(), binary(), binary(), list()) ->
+    {ok, term()} | {error, term()}.
+subinterp_thread_call(_Handle, _Module, _Func, _Args) ->
+    ?NIF_STUB.
+
+%% @doc Call a Python function through OWN_GIL subinterpreter with kwargs.
+-spec subinterp_thread_call(reference(), binary(), binary(), list(), map()) ->
+    {ok, term()} | {error, term()}.
+subinterp_thread_call(_Handle, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Evaluate Python expression through OWN_GIL subinterpreter.
+-spec subinterp_thread_eval(reference(), binary()) ->
+    {ok, term()} | {error, term()}.
+subinterp_thread_eval(_Handle, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Evaluate Python expression with locals through OWN_GIL subinterpreter.
+-spec subinterp_thread_eval(reference(), binary(), map()) ->
+    {ok, term()} | {error, term()}.
+subinterp_thread_eval(_Handle, _Code, _Locals) ->
+    ?NIF_STUB.
+
+%% @doc Execute Python statements through OWN_GIL subinterpreter (no return).
+-spec subinterp_thread_exec(reference(), binary()) -> ok | {error, term()}.
+subinterp_thread_exec(_Handle, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Cast (fire-and-forget) through OWN_GIL subinterpreter.
+%% Returns immediately, result is discarded.
+-spec subinterp_thread_cast(reference(), binary(), binary(), list()) -> ok.
+subinterp_thread_cast(_Handle, _Module, _Func, _Args) ->
+    ?NIF_STUB.
+
+%% @doc Async call through OWN_GIL subinterpreter.
+%% Args: Handle, Module, Func, Args, CallerPid, Ref
+%% Result is sent to CallerPid as {py_subinterp_result, Ref, Result}.
+-spec subinterp_thread_async_call(reference(), binary(), binary(), list(), pid(), reference()) ->
+    ok | {error, term()}.
+subinterp_thread_async_call(_Handle, _Module, _Func, _Args, _CallerPid, _Ref) ->
     ?NIF_STUB.
 
 %%% ============================================================================
@@ -1091,9 +1197,10 @@ context_destroy(_ContextRef) ->
 %% @param Func Function name
 %% @param Args List of arguments
 %% @param Kwargs Map of keyword arguments
-%% @returns {ok, Result} | {error, Reason}
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...}
 -spec context_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {atom(), list()}}.
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
@@ -1104,9 +1211,10 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
 %% @param ContextRef Context reference
 %% @param Code Python code to evaluate
 %% @param Locals Map of local variables
-%% @returns {ok, Result} | {error, Reason}
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...}
 -spec context_eval(reference(), binary(), map()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {atom(), list()}}.
 context_eval(_ContextRef, _Code, _Locals) ->
     ?NIF_STUB.
 
@@ -1130,8 +1238,12 @@ context_exec(_ContextRef, _Code) ->
 %% @param Method Method name
 %% @param Args List of arguments
 %% @returns {ok, Result} | {error, Reason}
+%%
+%% Note: In thread-model subinterpreters (Python 3.13+ OWN_GIL), this function
+%% returns {error, not_supported_in_thread_model}. Use context_call with the
+%% object reference instead.
 -spec context_call_method(reference(), reference(), binary(), list()) ->
-    {ok, term()} | {error, term()}.
+    {ok, term()} | {error, term()} | {error, not_supported_in_thread_model}.
 context_call_method(_ContextRef, _ObjRef, _Method, _Args) ->
     ?NIF_STUB.
 
@@ -1196,8 +1308,13 @@ context_write_callback_response(_ContextRef, _Data) ->
 %% @param StateRef Suspended state reference from {suspended, _, StateRef, _}
 %% @param Result Binary result to return to Python (format: status_byte + repr)
 %% @returns {ok, Result} | {error, Reason} | {suspended, CallbackId, StateRef, {FuncName, Args}}
+%%
+%% Note: In thread-model subinterpreters (Python 3.13+ OWN_GIL), this function
+%% returns {error, not_supported_in_thread_model}. Thread-model contexts use
+%% blocking pipe-based callbacks instead of suspension/resume.
 -spec context_resume(reference(), reference(), binary()) ->
-    {ok, term()} | {error, term()} | {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
+    {ok, term()} | {error, term()} | {error, not_supported_in_thread_model} |
+    {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
 context_resume(_ContextRef, _StateRef, _Result) ->
     ?NIF_STUB.
 
@@ -1215,9 +1332,9 @@ context_cancel_resume(_ContextRef, _StateRef) ->
 
 %% @doc Get the event loop for a subinterpreter context.
 %%
-%% For subinterpreter contexts (Python 3.12+), this returns the event loop
+%% For subinterpreter contexts (Python 3.12 and later), this returns the event loop
 %% reference that can be used to create a dedicated event worker. Worker mode
-%% contexts (Python < 3.12) use the shared router instead and return an error.
+%% contexts (Python before 3.12) use the shared router instead and return an error.
 %%
 %% @param ContextRef Context reference
 %% @returns {ok, LoopRef} for subinterpreter contexts, or {error, not_subinterp} for worker mode

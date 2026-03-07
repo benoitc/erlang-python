@@ -253,6 +253,9 @@ typedef struct erlang_event_loop {
 
     /** @brief Whether sync_sleep_cond has been initialized */
     bool sync_sleep_cond_initialized;
+
+    /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
+    uint32_t interp_id;
 } erlang_event_loop_t;
 
 /* ============================================================================

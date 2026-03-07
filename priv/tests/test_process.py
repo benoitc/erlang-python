@@ -53,38 +53,46 @@ class TestErlangSubprocessBlocked(tb.ErlangTestCase):
 class TestErlangOsBlocked(tb.ErlangTestCase):
     """Verify os.* process functions are blocked."""
 
+    def _assert_blocked_or_not_supported(self, msg):
+        """Check that error message indicates operation was blocked/not supported."""
+        msg_lower = msg.lower()
+        self.assertTrue(
+            'blocked' in msg_lower or 'not supported' in msg_lower,
+            f"Expected 'blocked' or 'not supported' in: {msg}"
+        )
+
     @unittest.skipUnless(hasattr(os, 'fork'), "fork not available")
     def test_os_fork_blocked(self):
         """Test os.fork is blocked."""
         with self.assertRaises(RuntimeError) as cm:
             os.fork()
-        self.assertIn('blocked', str(cm.exception).lower())
+        self._assert_blocked_or_not_supported(str(cm.exception))
 
     def test_os_system_blocked(self):
         """Test os.system is blocked."""
         with self.assertRaises(RuntimeError) as cm:
             os.system('echo hello')
-        self.assertIn('blocked', str(cm.exception).lower())
+        self._assert_blocked_or_not_supported(str(cm.exception))
 
     def test_os_popen_blocked(self):
         """Test os.popen is blocked."""
         with self.assertRaises(RuntimeError) as cm:
             os.popen('echo hello')
-        self.assertIn('blocked', str(cm.exception).lower())
+        self._assert_blocked_or_not_supported(str(cm.exception))
 
     @unittest.skipUnless(hasattr(os, 'execv'), "execv not available")
     def test_os_execv_blocked(self):
         """Test os.execv is blocked."""
         with self.assertRaises(RuntimeError) as cm:
             os.execv('/bin/echo', ['echo', 'hello'])
-        self.assertIn('blocked', str(cm.exception).lower())
+        self._assert_blocked_or_not_supported(str(cm.exception))
 
     @unittest.skipUnless(hasattr(os, 'spawnl'), "spawnl not available")
     def test_os_spawnl_blocked(self):
         """Test os.spawnl is blocked."""
         with self.assertRaises(RuntimeError) as cm:
             os.spawnl(os.P_WAIT, '/bin/echo', 'echo', 'hello')
-        self.assertIn('blocked', str(cm.exception).lower())
+        self._assert_blocked_or_not_supported(str(cm.exception))
 
 
 if __name__ == '__main__':

@@ -99,21 +99,28 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
-    case application:ensure_all_started(erlang_python) of
-        {ok, _} ->
-            {ok, _} = py:start_contexts(),
-            %% Wait for event loop to be fully initialized
-            case wait_for_event_loop(5000) of
-                ok ->
-                    %% Set up Python path for tests
-                    PrivDir = code:priv_dir(erlang_python),
-                    ok = setup_python_path(PrivDir),
-                    [{priv_dir, PrivDir} | Config];
-                {error, Reason} ->
-                    ct:fail({event_loop_not_ready, Reason})
-            end;
-        {error, {App, Reason}} ->
-            ct:fail({failed_to_start, App, Reason})
+    %% Skip asyncio compat tests when subinterpreters are in use
+    %% The event loop integration is not yet compatible with OWN_GIL subinterpreters
+    case py_nif:subinterp_supported() of
+        true ->
+            {skip, "asyncio compat tests not supported with subinterpreters"};
+        false ->
+            case application:ensure_all_started(erlang_python) of
+                {ok, _} ->
+                    {ok, _} = py:start_contexts(),
+                    %% Wait for event loop to be fully initialized
+                    case wait_for_event_loop(5000) of
+                        ok ->
+                            %% Set up Python path for tests
+                            PrivDir = code:priv_dir(erlang_python),
+                            ok = setup_python_path(PrivDir),
+                            [{priv_dir, PrivDir} | Config];
+                        {error, Reason} ->
+                            ct:fail({event_loop_not_ready, Reason})
+                    end;
+                {error, {App, Reason}} ->
+                    ct:fail({failed_to_start, App, Reason})
+            end
     end.
 
 end_per_suite(_Config) ->

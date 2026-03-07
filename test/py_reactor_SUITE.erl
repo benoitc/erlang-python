@@ -78,8 +78,8 @@ reactor.set_protocol_factory(TestProtocol)
 
 %% @doc Test echo protocol with socketpair
 echo_protocol_test(_Config) ->
-    %% Define and run the test
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import socket
 import erlang.reactor as reactor
 
@@ -117,11 +117,12 @@ def run_echo_test():
 
 _echo_test_result = run_echo_test()
 ">>),
-    {ok, <<"hello">>} = py:eval(<<"_echo_test_result">>).
+    {ok, <<"hello">>} = py:eval(Ctx, <<"_echo_test_result">>).
 
 %% @doc Test multiple connections
 multiple_connections_test(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import socket
 import erlang.reactor as reactor
 
@@ -159,11 +160,12 @@ def run_multi_conn_test():
 
 _multi_conn_result = run_multi_conn_test()
 ">>),
-    {ok, [1, 2, 3]} = py:eval(<<"_multi_conn_result">>).
+    {ok, [1, 2, 3]} = py:eval(Ctx, <<"_multi_conn_result">>).
 
 %% @doc Test protocol close callback
 protocol_close_test(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
 import socket
 import erlang.reactor as reactor
 
@@ -201,4 +203,4 @@ def run_close_test():
 
 _close_test_result = run_close_test()
 ">>),
-    {ok, true} = py:eval(<<"_close_test_result">>).
+    {ok, true} = py:eval(Ctx, <<"_close_test_result">>).

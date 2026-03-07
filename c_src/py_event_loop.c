@@ -237,17 +237,34 @@ int create_default_event_loop(ErlNifEnv *env);
  * @brief Destructor for event loop resources
  */
 void event_loop_destructor(ErlNifEnv *env, void *obj) {
+    (void)env;
     erlang_event_loop_t *loop = (erlang_event_loop_t *)obj;
 
-    /* If this is the active Python event loop, clear references.
-     * Acquire GIL to safely access module state. */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    erlang_event_loop_t *interp_loop = get_interpreter_event_loop();
-    if (interp_loop == loop) {
-        set_interpreter_event_loop(NULL);
+#ifdef HAVE_SUBINTERPRETERS
+    /* For subinterpreter event loops, skip Python API calls.
+     * PyGILState_Ensure only works for the main interpreter. The subinterpreter
+     * may already be destroyed via Py_EndInterpreter before this destructor runs. */
+    if (loop->interp_id > 0) {
+        goto cleanup_native;
     }
-    PyGILState_Release(gstate);
+#endif
 
+    /* Main interpreter: safe to use PyGILState_Ensure if runtime is running
+     * and this thread doesn't already have Python state bound and GIL is not held. */
+    if (runtime_is_running() &&
+        PyGILState_GetThisThreadState() == NULL &&
+        !PyGILState_Check()) {
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        erlang_event_loop_t *interp_loop = get_interpreter_event_loop();
+        if (interp_loop == loop) {
+            set_interpreter_event_loop(NULL);
+        }
+        PyGILState_Release(gstate);
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+cleanup_native:
+#endif
     /* Signal shutdown */
     loop->shutdown = true;
 
@@ -531,6 +548,7 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     loop->shutdown = false;
     loop->has_router = false;
     loop->has_self = false;
+    loop->interp_id = 0;  /* Main interpreter */
 
     /* Create result */
     ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
@@ -1019,7 +1037,7 @@ ERL_NIF_TERM nif_poll_events(ErlNifEnv *env, int argc,
      * PyGILState_GetThisThreadState() returns NULL if thread has no Python state.
      */
     PyThreadState *tstate = PyGILState_GetThisThreadState();
-    if (tstate != NULL && g_python_initialized && PyGILState_Check()) {
+    if (tstate != NULL && runtime_is_running() && PyGILState_Check()) {
         /* We have valid thread state and GIL - release it while waiting */
         Py_BEGIN_ALLOW_THREADS
         num_events = poll_events_wait(loop, timeout_ms);
@@ -1360,6 +1378,11 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
     erlang_event_loop_t *loop;
     ErlNifPid caller_pid;
     ErlNifBinary module_bin, func_bin;
+
+    /* Reject work if Python runtime is shutting down */
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
 
     /* Get loop reference */
     if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
@@ -2800,6 +2823,9 @@ ERL_NIF_TERM nif_set_udp_broadcast(ErlNifEnv *env, int argc,
  *
  * Get the event loop for a subinterpreter context.
  * This allows Erlang to create a dedicated event worker for the context.
+ *
+ * Note: With the thread-per-context model, event loop access from Erlang
+ * is limited. The event loop is owned by the subinterpreter's dedicated thread.
  */
 ERL_NIF_TERM nif_context_get_event_loop(ErlNifEnv *env, int argc,
                                          const ERL_NIF_TERM argv[]) {
@@ -2811,28 +2837,34 @@ ERL_NIF_TERM nif_context_get_event_loop(ErlNifEnv *env, int argc,
     }
 
 #ifdef HAVE_SUBINTERPRETERS
-    if (ctx->is_subinterp && ctx->tstate != NULL) {
-        /* Enter the subinterpreter - same pattern as context_call/context_eval */
-        PyThreadState *saved_tstate = PyThreadState_Swap(NULL);
-        PyThreadState_Swap(ctx->tstate);
-
-        erlang_event_loop_t *loop = get_interpreter_event_loop();
-
-        /* Restore previous thread state */
-        PyThreadState_Swap(saved_tstate);
-
-        if (loop == NULL) {
-            return make_error(env, "no_event_loop");
-        }
-
-        /* Return reference to the event loop */
-        ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
-        return enif_make_tuple2(env, ATOM_OK, loop_term);
+    /* Only OWN_GIL subinterpreters have their own event loop */
+    if (!ctx->is_subinterp) {
+        return make_error(env, "not_subinterp");
     }
-#endif
 
-    /* Worker mode contexts don't have their own event loop */
+    /* With shared-GIL pool model, event loop operations work on dirty schedulers.
+     * py_context_acquire handles PyThreadState_Swap to the subinterpreter. */
+
+    /* Acquire thread state (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
+
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+
+    py_context_release(&guard);
+
+    if (loop == NULL) {
+        return make_error(env, "no_event_loop");
+    }
+
+    /* Return reference to the event loop */
+    ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
+    return enif_make_tuple2(env, ATOM_OK, loop_term);
+#else
     return make_error(env, "not_subinterp");
+#endif
 }
 
 /* ============================================================================
@@ -3934,14 +3966,6 @@ static erlang_event_loop_t *loop_from_capsule(PyObject *capsule) {
 }
 
 /**
- * Get the default event loop for backward compatibility.
- * Used by legacy API methods.
- */
-static erlang_event_loop_t *default_loop_for_compat(void) {
-    return get_interpreter_event_loop();
-}
-
-/**
  * Destructor callback for loop capsules.
  * Called when the capsule is garbage collected.
  */
@@ -4010,6 +4034,19 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     loop->has_self = false;
     loop->event_freelist = NULL;
     loop->freelist_count = 0;
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* Detect if this is being called from a subinterpreter */
+    PyInterpreterState *current_interp = PyInterpreterState_Get();
+    PyInterpreterState *main_interp = PyInterpreterState_Main();
+    if (current_interp != main_interp) {
+        loop->interp_id = (uint32_t)PyInterpreterState_GetID(current_interp);
+    } else {
+        loop->interp_id = 0;  /* Main interpreter */
+    }
+#else
+    loop->interp_id = 0;  /* Main interpreter */
+#endif
 
     /* Use shared router if available from module state (for per-loop mode) */
     py_event_loop_module_state_t *state = get_module_state();
@@ -4887,6 +4924,20 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->shutdown = false;
     loop->has_router = false;
     loop->has_self = false;
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* Check if this is a subinterpreter by comparing to main interpreter */
+    PyInterpreterState *current_interp = PyInterpreterState_Get();
+    PyInterpreterState *main_interp = PyInterpreterState_Main();
+    if (current_interp != main_interp) {
+        /* Use interpreter's unique ID for subinterpreters (always > 0) */
+        loop->interp_id = (uint32_t)PyInterpreterState_GetID(current_interp);
+    } else {
+        loop->interp_id = 0;  /* Main interpreter */
+    }
+#else
+    loop->interp_id = 0;  /* Main interpreter */
+#endif
 
     /* Try to use the global shared router if available (for subinterpreters) */
     pthread_mutex_lock(&g_global_router_mutex);

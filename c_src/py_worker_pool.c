@@ -205,12 +205,6 @@ static PyObject *py_pool_get_module(py_pool_worker_t *worker,
     return PyDict_GetItemString(worker->module_cache, module_name);
 }
 
-static void py_pool_clear_module_cache(py_pool_worker_t *worker) {
-    if (worker->module_cache != NULL) {
-        PyDict_Clear(worker->module_cache);
-    }
-}
-
 /* ============================================================================
  * Response Sending
  * ============================================================================ */
@@ -602,82 +596,6 @@ static void py_pool_process_request(py_pool_worker_t *worker,
  * Worker Thread
  * ============================================================================ */
 
-static int worker_init_python_state(py_pool_worker_t *worker) {
-#ifdef HAVE_SUBINTERPRETERS
-    if (g_pool.use_subinterpreters) {
-        /* Create sub-interpreter with its own GIL */
-        PyInterpreterConfig config = {
-            .use_main_obmalloc = 0,
-            .allow_fork = 0,
-            .allow_exec = 0,
-            .allow_threads = 1,
-            .allow_daemon_threads = 0,
-            .check_multi_interp_extensions = 1,
-            .gil = PyInterpreterConfig_OWN_GIL,
-        };
-
-        PyStatus status = Py_NewInterpreterFromConfig(&worker->tstate, &config);
-        if (PyStatus_Exception(status)) {
-            return -1;
-        }
-
-        worker->interp = PyThreadState_GetInterpreter(worker->tstate);
-
-        /* Initialize event loop for this subinterpreter */
-        if (init_subinterpreter_event_loop(NULL) < 0) {
-            return -1;
-        }
-    } else
-#endif
-    {
-        /* Non-subinterpreter mode: acquire GIL */
-        gil_guard_t guard = gil_acquire();
-        (void)guard;  /* Will be released when worker exits */
-    }
-
-    /* Create per-worker state */
-    worker->module_cache = PyDict_New();
-    worker->globals = PyDict_New();
-    worker->locals = PyDict_New();
-
-    if (worker->module_cache == NULL ||
-        worker->globals == NULL ||
-        worker->locals == NULL) {
-        Py_XDECREF(worker->module_cache);
-        Py_XDECREF(worker->globals);
-        Py_XDECREF(worker->locals);
-        return -1;
-    }
-
-    /* Add builtins to globals */
-    PyObject *builtins = PyEval_GetBuiltins();
-    if (builtins != NULL) {
-        PyDict_SetItemString(worker->globals, "__builtins__", builtins);
-    }
-
-    /* Initialize ASGI state for this interpreter */
-    worker->asgi_state = get_asgi_interp_state();
-
-    return 0;
-}
-
-static void worker_cleanup_python_state(py_pool_worker_t *worker) {
-    Py_XDECREF(worker->module_cache);
-    Py_XDECREF(worker->globals);
-    Py_XDECREF(worker->locals);
-    worker->module_cache = NULL;
-    worker->globals = NULL;
-    worker->locals = NULL;
-
-#ifdef HAVE_SUBINTERPRETERS
-    if (g_pool.use_subinterpreters && worker->tstate != NULL) {
-        Py_EndInterpreter(worker->tstate);
-        worker->tstate = NULL;
-        worker->interp = NULL;
-    }
-#endif
-}
-
 static void *py_pool_worker_thread(void *arg) {
     py_pool_worker_t *worker = (py_pool_worker_t *)arg;
 
@@ -916,10 +834,6 @@ static void py_pool_shutdown(void) {
     queue_destroy(&g_pool.queue);
     g_pool.initialized = false;
     g_pool.shutting_down = false;
-}
-
-static bool py_pool_is_initialized(void) {
-    return g_pool.initialized;
 }
 
 static int py_pool_enqueue(py_pool_request_t *req) {

@@ -502,7 +502,6 @@ static void asgi_scope_cleanup(void);
  * @pre GIL must be held
  * @pre asgi_scope_init() has been called
  */
-static PyObject *asgi_build_scope(const asgi_scope_data_t *data);
 
 /**
  * @brief Get HTTP method as cached Python string
@@ -518,73 +517,6 @@ static PyObject *asgi_build_scope(const asgi_scope_data_t *data);
  * @pre GIL must be held
  */
 static PyObject *asgi_get_method(const char *method, size_t len);
-
-/**
- * @brief Get HTTP version as cached Python string
- *
- * @param version Version code: 10, 11, 20, 30
- * @return Cached Python string (borrowed reference)
- *
- * @pre GIL must be held
- */
-static PyObject *asgi_get_http_version(int version);
-
-/**
- * @brief Get scheme as cached Python string
- *
- * @param scheme 0=http, 1=https, 2=ws, 3=wss
- * @return Cached Python string (borrowed reference)
- *
- * @pre GIL must be held
- */
-static PyObject *asgi_get_scheme(int scheme);
-
-/**
- * @brief Acquire a pooled response structure
- *
- * Gets a pre-allocated response from the thread-local pool.
- * If the pool is exhausted, allocates a new structure.
- *
- * @return Pooled response, or NULL on allocation failure
- *
- * @pre GIL must be held
- */
-static asgi_pooled_response_t *asgi_acquire_response(void);
-
-/**
- * @brief Release a pooled response structure
- *
- * Returns a response to the pool for reuse. Clears the body
- * buffer and resets fields.
- *
- * @param resp Response to release
- *
- * @pre GIL must be held
- */
-static void asgi_release_response(asgi_pooled_response_t *resp);
-
-/**
- * @brief Reset response for reuse
- *
- * Clears body buffer and resets status/headers without
- * releasing to pool.
- *
- * @param resp Response to reset
- *
- * @pre GIL must be held
- */
-static void asgi_reset_response(asgi_pooled_response_t *resp);
-
-/**
- * @brief Ensure body buffer has sufficient capacity
- *
- * Grows the body buffer if needed to accommodate additional data.
- *
- * @param resp Response with body buffer
- * @param needed Required capacity in bytes
- * @return 0 on success, -1 if growth exceeds ASGI_MAX_BODY_BUFFER_SIZE
- */
-static int asgi_ensure_body_capacity(asgi_pooled_response_t *resp, size_t needed);
 
 /**
  * @brief Create a zero-copy buffer view of Erlang binary

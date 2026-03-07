@@ -57,6 +57,33 @@ if(ASGI_PROFILING)
     add_definitions(-DASGI_PROFILING)
 endif()
 
+# Sanitizer options for debugging race conditions and memory issues
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+
+if(ENABLE_ASAN)
+    message(STATUS "AddressSanitizer enabled")
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g -O1)
+    add_link_options(-fsanitize=address)
+    # ASan is incompatible with TSan
+    if(ENABLE_TSAN)
+        message(FATAL_ERROR "ASan and TSan cannot be used together")
+    endif()
+endif()
+
+if(ENABLE_TSAN)
+    message(STATUS "ThreadSanitizer enabled")
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g -O1)
+    add_link_options(-fsanitize=thread)
+endif()
+
+if(ENABLE_UBSAN)
+    message(STATUS "UndefinedBehaviorSanitizer enabled")
+    add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer -g -O1)
+    add_link_options(-fsanitize=undefined)
+endif()
+
 if(PERF_BUILD)
     message(STATUS "Performance build enabled - using aggressive optimizations")
     # Override compiler flags for maximum performance

@@ -36,8 +36,8 @@
 
 all() ->
     [
-        {group, worker_mode},
-        {group, subinterp_mode}
+        {group, worker},
+        {group, subinterp}
     ].
 
 groups() ->
@@ -56,8 +56,8 @@ groups() ->
         test_context_type_conversions
     ],
     [
-        {worker_mode, [sequence], Tests},
-        {subinterp_mode, [sequence], Tests}
+        {worker, [sequence], Tests},
+        {subinterp, [sequence], Tests}
     ].
 
 init_per_suite(Config) ->
@@ -68,12 +68,12 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
-init_per_group(worker_mode, Config) ->
-    [{context_mode, worker} | Config];
-init_per_group(subinterp_mode, Config) ->
+init_per_group(worker, Config) ->
+    [{context_type, worker} | Config];
+init_per_group(subinterp, Config) ->
     case py_nif:subinterp_supported() of
         true ->
-            [{context_mode, subinterp} | Config];
+            [{context_type, subinterp} | Config];
         false ->
             {skip, "Subinterpreters not supported (requires Python 3.12+)"}
     end.
@@ -87,7 +87,7 @@ end_per_group(_Group, _Config) ->
 
 %% @doc Test that a context can be started and stopped.
 test_context_start_stop(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
     true = is_process_alive(Ctx),
     ok = py_context:stop(Ctx),
@@ -96,7 +96,7 @@ test_context_start_stop(Config) ->
 
 %% @doc Test basic Python function calls.
 test_context_call(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
     try
         %% Test math.sqrt
@@ -113,7 +113,7 @@ test_context_call(Config) ->
 
 %% @doc Test Python expression evaluation.
 test_context_eval(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
     try
         %% Simple arithmetic
@@ -130,7 +130,7 @@ test_context_eval(Config) ->
 
 %% @doc Test Python statement execution.
 test_context_exec(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
     try
         %% Execute statements
@@ -146,7 +146,7 @@ test_context_exec(Config) ->
 
 %% @doc Test that contexts are isolated from each other.
 test_context_isolation(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx1} = py_context:start_link(1, Mode),
     {ok, Ctx2} = py_context:start_link(2, Mode),
     try
@@ -169,7 +169,7 @@ test_context_isolation(Config) ->
 
 %% @doc Test that modules are cached within a context.
 test_context_module_caching(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
     try
         %% First call imports the module
@@ -187,7 +187,7 @@ test_context_module_caching(Config) ->
 
 %% @doc Test contexts under the supervisor.
 test_context_under_supervisor(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
 
     %% Start supervisor if not already running
     case whereis(py_context_sup) of
@@ -224,7 +224,7 @@ test_context_under_supervisor(Config) ->
 
 %% @doc Test multiple contexts working in parallel.
 test_multiple_contexts(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     NumContexts = 4,
 
     %% Start multiple contexts
@@ -256,7 +256,7 @@ test_multiple_contexts(Config) ->
 
 %% @doc Test parallel calls to the same context.
 test_context_parallel_calls(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
 
     try
@@ -286,7 +286,7 @@ test_context_parallel_calls(Config) ->
 
 %% @doc Test call timeout handling.
 test_context_timeout(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
 
     try
@@ -302,7 +302,7 @@ test_context_timeout(Config) ->
 
 %% @doc Test error handling in context calls.
 test_context_error_handling(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
 
     try
@@ -326,7 +326,7 @@ test_context_error_handling(Config) ->
 
 %% @doc Test type conversions between Erlang and Python.
 test_context_type_conversions(Config) ->
-    Mode = ?config(context_mode, Config),
+    Mode = ?config(context_type, Config),
     {ok, Ctx} = py_context:start_link(1, Mode),
 
     try
