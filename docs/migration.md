@@ -324,6 +324,33 @@ serve(sock, EchoProtocol)
 
 See [Reactor](reactor.md) for full documentation.
 
+### Socket FD Handoff
+
+Pass socket file descriptors directly from Erlang to Python for high-performance I/O:
+
+```erlang
+%% Erlang: Accept connection and get fd
+{ok, ClientSock} = gen_tcp:accept(ListenSock),
+{ok, Fd} = inet:getfd(ClientSock),
+
+%% Hand off to Python reactor (Erlang releases ownership)
+py_reactor_context:handoff(Fd, #{type => tcp}).
+
+%% Or pass fd to asyncio-based Python code
+Ctx = py:context(1),
+py:call(Ctx, my_handler, handle_fd, [Fd]).
+```
+
+```python
+# Python: Use fd with reactor or asyncio
+import socket
+sock = socket.socket(fileno=fd)  # Takes ownership
+sock.setblocking(False)
+# ... use with asyncio or reactor
+```
+
+See [Reactor](reactor.md#passing-sockets-from-erlang-to-python) for details.
+
 ### `erlang.send()` for Fire-and-Forget Messages
 
 Send messages directly to Erlang processes without waiting:
