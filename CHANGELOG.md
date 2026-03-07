@@ -4,6 +4,15 @@
 
 ### Added
 
+- **OWN_GIL Subinterpreter Thread Pool** - True parallelism with Python 3.12+ subinterpreters
+  - Each subinterpreter runs in its own thread with its own GIL (`Py_GIL_OWN`)
+  - Thread pool manages N subinterpreters for parallel Python execution
+  - `py:context(N)` returns the Nth context PID for explicit context selection
+  - `py_context_router` provides scheduler-affinity routing for automatic distribution
+  - Cast operations are 25-30% faster compared to worker mode
+  - Full isolation between subinterpreters (separate namespaces, modules, state)
+  - New C files: `py_subinterp_pool.c`, `py_subinterp_pool.h`
+
 - **`erlang.reactor` module** - FD-based protocol handling for building custom servers
   - `reactor.Protocol` - Base class for implementing protocols
   - `reactor.serve(sock, protocol_factory)` - Serve connections using a protocol
@@ -111,6 +120,11 @@
 
 - **Subinterpreter cleanup and thread worker re-registration** - Fixed cleanup
   issues when subinterpreters are destroyed and recreated
+
+- **ProcessError exception class identity in subinterpreters** - Fixed exception
+  class mismatch when raising `erlang.ProcessError` in subinterpreter contexts.
+  The exception class is now looked up from the current interpreter's `erlang`
+  module at runtime instead of using a global variable.
 
 - **Thread worker handlers not re-registering after app restart** - Workers now
   properly re-register when application restarts

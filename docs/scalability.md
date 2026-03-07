@@ -30,13 +30,173 @@ When running on a free-threaded Python build (compiled with `--disable-gil`), er
 
 ### Sub-interpreter Mode (Python 3.12+)
 
-Uses Python's sub-interpreter feature with per-interpreter GIL. Each sub-interpreter has its own GIL, allowing true parallel execution across interpreters.
+Uses Python's sub-interpreter feature with per-interpreter GIL (`Py_GIL_OWN`). Each sub-interpreter runs in its own dedicated thread with its own GIL, enabling true parallel execution across interpreters.
+
+**Architecture:**
+- Thread pool manages N subinterpreters (default: number of schedulers)
+- Each subinterpreter has its own thread, GIL, and Python state
+- Requests are routed to subinterpreters via `py_context_router`
+- 25-30% faster cast operations compared to worker mode
 
 **Note:** Each sub-interpreter has isolated state. Use the [Shared State](#shared-state) API to share data between workers.
+
+**Explicit Context Selection:**
+```erlang
+%% Get a specific context by index (1-based)
+Ctx = py:context(1),
+{ok, Result} = py:call(Ctx, math, sqrt, [16]).
+
+%% Or use automatic scheduler-affinity routing
+{ok, Result} = py:call(math, sqrt, [16]).
+```
 
 ### Multi-Executor Mode (Python < 3.12)
 
 Runs N executor threads that share the GIL. Requests are distributed round-robin across executors. Good for I/O-bound workloads where Python releases the GIL during I/O operations.
+
+## Choosing the Right Mode
+
+### Mode Comparison
+
+| Aspect | Free-Threaded | Subinterpreter | Multi-Executor |
+|--------|---------------|----------------|----------------|
+| **Parallelism** | True N-way | True N-way | GIL contention |
+| **State Isolation** | Shared | Isolated | Shared |
+| **Memory Overhead** | Low | Higher (per-interp) | Low |
+| **Module Compatibility** | Limited | Most modules | All modules |
+| **Python Version** | 3.13+ (nogil) | 3.12+ | Any |
+
+### When to Use Each Mode
+
+**Use Free-Threaded (Python 3.13t) when:**
+- You need maximum parallelism with shared state
+- Your libraries are GIL-free compatible
+- You're running CPU-bound workloads
+- Memory efficiency is important
+
+**Use Subinterpreters (Python 3.12+) when:**
+- You need parallelism with state isolation
+- You want crash isolation between contexts
+- You're running untrusted or unstable code
+- You need predictable per-request state
+
+**Use Multi-Executor (Python < 3.12) when:**
+- Running on older Python versions
+- Your workload is I/O-bound (GIL released during I/O)
+- You need compatibility with all Python modules
+- Shared state between workers is required
+
+### Pros and Cons
+
+**Subinterpreter Mode Pros:**
+- True parallelism without GIL contention
+- Complete isolation (crashes don't affect other contexts)
+- Each context has clean namespace (no state bleed)
+- 25-30% faster cast operations vs worker mode
+
+**Subinterpreter Mode Cons:**
+- Higher memory usage (each interpreter loads modules separately)
+- Some C extensions don't support subinterpreters
+- No shared state between contexts (use Shared State API)
+- asyncio event loop integration requires main interpreter
+
+**Free-Threaded Mode Pros:**
+- True parallelism with shared state
+- Lower memory overhead than subinterpreters
+- Simplest mental model (like regular threading)
+
+**Free-Threaded Mode Cons:**
+- Requires Python 3.13+ built with `--disable-gil`
+- Many C extensions not yet compatible
+- Shared state requires careful synchronization
+- Still experimental
+
+## Subinterpreter Architecture
+
+### Design Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Erlang VM (BEAM)                            │
+├─────────────────────────────────────────────────────────────────┤
+│  py_context_router                                              │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Scheduler 1 ──► Context 1 (pid)                        │   │
+│  │  Scheduler 2 ──► Context 2 (pid)                        │   │
+│  │  Scheduler N ──► Context N (pid)                        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│         │              │              │                         │
+│         ▼              ▼              ▼                         │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐                   │
+│  │ Context  │   │ Context  │   │ Context  │                   │
+│  │ Process  │   │ Process  │   │ Process  │                   │
+│  │ (gen_srv)│   │ (gen_srv)│   │ (gen_srv)│                   │
+│  └────┬─────┘   └────┬─────┘   └────┬─────┘                   │
+└───────┼──────────────┼──────────────┼───────────────────────────┘
+        │              │              │
+        ▼              ▼              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Subinterpreter Thread Pool                     │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │   Thread 1   │  │   Thread 2   │  │   Thread N   │         │
+│  │ ┌──────────┐ │  │ ┌──────────┐ │  │ ┌──────────┐ │         │
+│  │ │  Interp  │ │  │ │  Interp  │ │  │ │  Interp  │ │         │
+│  │ │  (GIL 1) │ │  │ │  (GIL 2) │ │  │ │  (GIL N) │ │         │
+│  │ └──────────┘ │  │ └──────────┘ │  │ └──────────┘ │         │
+│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│                                                                 │
+│  Each thread owns its interpreter's GIL (Py_GIL_OWN)           │
+│  No GIL contention between threads                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Components
+
+**py_context_router**: Routes requests to context processes based on scheduler affinity or explicit binding.
+
+**py_context_process**: Gen_server that owns a Python context reference and handles call/eval/exec operations.
+
+**Subinterpreter Thread Pool (C)**: Manages N threads, each with its own Python subinterpreter created with `Py_NewInterpreterFromConfig()` and `Py_GIL_OWN`.
+
+### Request Flow
+
+1. Erlang process calls `py:call(Module, Func, Args)`
+2. `py_context_router` selects context based on scheduler ID
+3. Request sent to `py_context_process` gen_server
+4. Gen_server calls NIF which executes on subinterpreter's thread
+5. Result returned through gen_server to caller
+
+### Pool Size
+
+The subinterpreter pool size is configured at two levels:
+
+| Level | Default | Max |
+|-------|---------|-----|
+| **Erlang (py_context_router)** | `erlang:system_info(schedulers)` | configurable |
+| **C pool (py_subinterp_pool)** | 32 | 64 |
+
+On a typical 8-core machine, 8 context processes are started, each with one subinterpreter slot.
+
+**Configuration via sys.config:**
+```erlang
+{erlang_python, [
+    {num_contexts, 16}  %% Override scheduler count
+]}
+```
+
+**Configuration at runtime:**
+```erlang
+%% Start with custom pool size
+py_context_router:start(#{contexts => 16}).
+```
+
+### Thread Safety
+
+- Each subinterpreter has its own GIL (no cross-interpreter contention)
+- NIF calls are serialized per-context via gen_server
+- Erlang message passing provides synchronization
+- C code uses atomics for cross-thread state (`thread_running` flag)
 
 ## Rate Limiting
 
@@ -106,12 +266,83 @@ This allows your application to implement backpressure or shed load gracefully.
 
 ## Parallel Execution with Sub-interpreters
 
-For CPU-bound workloads on Python 3.12+, use explicit parallel execution:
+For CPU-bound workloads on Python 3.12+, erlang_python provides true parallelism via OWN_GIL subinterpreters.
+
+### Check Support
 
 ```erlang
-%% Check if supported
+%% Check if subinterpreters are supported (Python 3.12+)
 true = py:subinterp_supported().
 
+%% Check current execution mode
+subinterp = py:execution_mode().
+```
+
+### Using the Context Router
+
+The context router automatically distributes calls across subinterpreters:
+
+```erlang
+%% Start contexts (usually done by application startup)
+{ok, _} = py:start_contexts().
+
+%% Calls are automatically routed to subinterpreters
+{ok, 4.0} = py:call(math, sqrt, [16]).
+{ok, 6} = py:eval(<<"2 + 4">>).
+ok = py:exec(<<"x = 42">>).
+```
+
+### Explicit Context Selection
+
+For fine-grained control, use explicit context selection:
+
+```erlang
+%% Get a specific context by index (1-based)
+Ctx = py:context(1),
+
+%% All operations on this context share state
+ok = py:exec(Ctx, <<"my_var = 'hello'">>),
+{ok, <<"hello">>} = py:eval(Ctx, <<"my_var">>),
+{ok, 4.0} = py:call(Ctx, math, sqrt, [16]).
+
+%% Different context has isolated state
+Ctx2 = py:context(2),
+{error, _} = py:eval(Ctx2, <<"my_var">>).  %% Not defined in Ctx2
+```
+
+### Context Router API
+
+```erlang
+%% Start router with default number of contexts (scheduler count)
+{ok, Contexts} = py_context_router:start().
+
+%% Start with custom number of contexts
+{ok, Contexts} = py_context_router:start(#{contexts => 8}).
+
+%% Get context for current scheduler (automatic affinity)
+Ctx = py_context_router:get_context().
+
+%% Get specific context by index
+Ctx = py_context_router:get_context(1).
+
+%% Bind current process to a specific context
+ok = py_context_router:bind_context(Ctx).
+
+%% Unbind (return to scheduler-based routing)
+ok = py_context_router:unbind_context().
+
+%% Get number of active contexts
+N = py_context_router:num_contexts().
+
+%% Stop all contexts
+ok = py_context_router:stop().
+```
+
+### Parallel Execution
+
+Execute multiple calls in parallel across subinterpreters:
+
+```erlang
 %% Execute multiple calls in parallel
 {ok, Results} = py:parallel([
     {math, sqrt, [16]},
