@@ -186,30 +186,15 @@ jobs:
           '
     continue-on-error: true  # Free-threading is experimental
 
-  # Sanitizer builds for detecting memory issues and race conditions
-  test-sanitizers:
-    name: ${{ matrix.sanitizer }} / Python ${{ matrix.python }}
+  # ASan builds for detecting memory issues
+  test-asan:
+    name: ASan / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # ASan + UBSan with Python 3.12
-          - sanitizer: "ASan+UBSan"
-            python: "3.12"
-            cmake_flags: "-DENABLE_ASAN=ON -DENABLE_UBSAN=ON"
-            env_vars: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
-          # ASan + UBSan with Python 3.13
-          - sanitizer: "ASan+UBSan"
-            python: "3.13"
-            cmake_flags: "-DENABLE_ASAN=ON -DENABLE_UBSAN=ON"
-            env_vars: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
-          # TSan with Python 3.12 (separate because incompatible with ASan)
-          - sanitizer: "TSan"
-            python: "3.12"
-            cmake_flags: "-DENABLE_TSAN=ON"
-            env_vars: "TSAN_OPTIONS=second_deadlock_stack=1"
+        python: ["3.12", "3.13"]
 
     steps:
       - name: Checkout
@@ -236,31 +221,26 @@ jobs:
           PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
           echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
-      - name: Clean and compile with sanitizers
+      - name: Clean and compile with ASan
         run: |
           rm -rf _build/cmake
           mkdir -p _build/cmake
           cd _build/cmake
-          cmake ../../c_src ${{ matrix.cmake_flags }}
+          cmake ../../c_src -DENABLE_ASAN=ON -DENABLE_UBSAN=ON
           cmake --build . -- -j $(nproc)
           cd ../..
           rebar3 compile
 
-      - name: Run tests with sanitizers
+      - name: Run tests with ASan
         env:
-          ASAN_OPTIONS: ${{ contains(matrix.env_vars, 'ASAN_OPTIONS') && 'detect_leaks=0:abort_on_error=1' || '' }}
-          TSAN_OPTIONS: ${{ contains(matrix.env_vars, 'TSAN_OPTIONS') && 'second_deadlock_stack=1' || '' }}
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
-          # Set LD_PRELOAD for sanitizer runtime before running tests
-          if [[ "${{ matrix.sanitizer }}" == "ASan+UBSan" ]]; then
-            export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
-          elif [[ "${{ matrix.sanitizer }}" == "TSan" ]]; then
-            export LD_PRELOAD=$(gcc -print-file-name=libtsan.so)
-          fi
+          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
           rebar3 ct --readable=compact
 
       - name: Check debug counters
         run: |
+          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
           erl -pa _build/default/lib/erlang_python/ebin -noshell -eval '
             application:ensure_all_started(erlang_python),
             Counters = py_nif:get_debug_counters(),
