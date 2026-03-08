@@ -120,6 +120,76 @@ static ErlNifPid g_global_shared_router;
 static bool g_global_shared_router_valid = false;
 static pthread_mutex_t g_global_router_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* ============================================================================
+ * Cached Reactor Callables (Performance Optimization)
+ * ============================================================================
+ *
+ * Cache erlang.reactor module and callbacks to avoid expensive PyImport
+ * on every read/write callback in the hot path.
+ */
+static PyObject *g_reactor_module = NULL;
+static PyObject *g_on_read_ready = NULL;
+static PyObject *g_on_write_ready = NULL;
+static bool g_reactor_cached = false;
+static pthread_mutex_t g_reactor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * Initialize cached reactor callables.
+ * MUST be called with GIL held.
+ * Thread-safe: uses mutex for first initialization.
+ *
+ * @return true if callables are cached and ready, false on error
+ */
+static bool ensure_reactor_cached(void) {
+    /* Fast path: already cached */
+    if (g_reactor_cached) {
+        return true;
+    }
+
+    pthread_mutex_lock(&g_reactor_cache_mutex);
+
+    /* Double-check after acquiring lock */
+    if (g_reactor_cached) {
+        pthread_mutex_unlock(&g_reactor_cache_mutex);
+        return true;
+    }
+
+    /* Import erlang.reactor module */
+    PyObject *module = PyImport_ImportModule("erlang.reactor");
+    if (module == NULL) {
+        pthread_mutex_unlock(&g_reactor_cache_mutex);
+        return false;
+    }
+
+    /* Get on_read_ready function */
+    PyObject *on_read = PyObject_GetAttrString(module, "on_read_ready");
+    if (on_read == NULL || !PyCallable_Check(on_read)) {
+        Py_XDECREF(on_read);
+        Py_DECREF(module);
+        pthread_mutex_unlock(&g_reactor_cache_mutex);
+        return false;
+    }
+
+    /* Get on_write_ready function */
+    PyObject *on_write = PyObject_GetAttrString(module, "on_write_ready");
+    if (on_write == NULL || !PyCallable_Check(on_write)) {
+        Py_XDECREF(on_write);
+        Py_DECREF(on_read);
+        Py_DECREF(module);
+        pthread_mutex_unlock(&g_reactor_cache_mutex);
+        return false;
+    }
+
+    /* Store cached references */
+    g_reactor_module = module;
+    g_on_read_ready = on_read;
+    g_on_write_ready = on_write;
+    g_reactor_cached = true;
+
+    pthread_mutex_unlock(&g_reactor_cache_mutex);
+    return true;
+}
+
 /* Forward declaration for module state access */
 static py_event_loop_module_state_t *get_module_state(void);
 static py_event_loop_module_state_t *get_module_state_from_module(PyObject *module);
@@ -3176,19 +3246,25 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         return make_error(env, "buffer_creation_failed");
     }
 
-    /* Import erlang.reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
-    if (reactor_module == NULL) {
+    /* Ensure reactor callables are cached (fast path after first call) */
+    if (!ensure_reactor_cached()) {
         PyErr_Clear();
         Py_DECREF(py_buffer);
         py_context_release(&guard);
-        return make_error(env, "import_erlang_reactor_failed");
+        return make_error(env, "reactor_cache_init_failed");
     }
 
-    /* Call on_read_ready(fd, data) with the buffer */
-    PyObject *result = PyObject_CallMethod(reactor_module, "on_read_ready",
-                                            "iO", fd, py_buffer);
-    Py_DECREF(reactor_module);
+    /* Call cached on_read_ready(fd, data) - avoids PyImport on every call */
+    PyObject *py_fd = PyLong_FromLong(fd);
+    if (py_fd == NULL) {
+        PyErr_Clear();
+        Py_DECREF(py_buffer);
+        py_context_release(&guard);
+        return make_error(env, "fd_conversion_failed");
+    }
+
+    PyObject *result = PyObject_CallFunctionObjArgs(g_on_read_ready, py_fd, py_buffer, NULL);
+    Py_DECREF(py_fd);
     Py_DECREF(py_buffer);
 
     if (result == NULL) {
@@ -3246,18 +3322,23 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         return make_error(env, "acquire_failed");
     }
 
-    /* Import erlang.reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
-    if (reactor_module == NULL) {
+    /* Ensure reactor callables are cached (fast path after first call) */
+    if (!ensure_reactor_cached()) {
         PyErr_Clear();
         py_context_release(&guard);
-        return make_error(env, "import_erlang_reactor_failed");
+        return make_error(env, "reactor_cache_init_failed");
     }
 
-    /* Call on_write_ready(fd) */
-    PyObject *result = PyObject_CallMethod(reactor_module, "on_write_ready",
-                                            "i", fd);
-    Py_DECREF(reactor_module);
+    /* Call cached on_write_ready(fd) - avoids PyImport on every call */
+    PyObject *py_fd = PyLong_FromLong(fd);
+    if (py_fd == NULL) {
+        PyErr_Clear();
+        py_context_release(&guard);
+        return make_error(env, "fd_conversion_failed");
+    }
+
+    PyObject *result = PyObject_CallFunctionObjArgs(g_on_write_ready, py_fd, NULL);
+    Py_DECREF(py_fd);
 
     if (result == NULL) {
         PyErr_Clear();
