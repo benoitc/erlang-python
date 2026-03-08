@@ -223,6 +223,9 @@ test_venv_info(Config) ->
     TempDir = ?config(temp_dir, Config),
     VenvPath = filename:join(TempDir, "venv"),
 
+    %% Ensure no venv is active from previous tests
+    py:deactivate_venv(),
+
     %% Before activation, should be inactive
     {ok, Info1} = py:venv_info(),
     false = maps:get(<<"active">>, Info1),
