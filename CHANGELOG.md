@@ -2,8 +2,21 @@
 
 ## Unreleased
 
-<<<<<<< HEAD
 ### Added
+
+- **Channel API** - Bidirectional message passing between Erlang and Python
+  - `py_channel:new/0,1` - Create channels with optional backpressure (`max_size`)
+  - `py_channel:send/2` - Send Erlang terms to Python (returns `busy` on backpressure)
+  - `py_channel:close/1` - Close channel, signals `StopIteration` to Python
+  - Python `Channel` class with sync and async interfaces:
+    - `channel.receive()` - Blocking receive (suspends Python, yields to Erlang)
+    - `channel.try_receive()` - Non-blocking receive
+    - `await channel.async_receive()` - Asyncio-compatible receive
+    - `for msg in channel:` - Sync iteration
+    - `async for msg in channel:` - Async iteration
+  - `erlang.channel.reply(pid, term)` - Send messages to Erlang processes
+  - Zero-copy IOQueue buffering via `enif_ioq`
+  - 8x faster than Reactor for small messages, 2x faster for 16KB messages
 
 - **OWN_GIL Subinterpreter Thread Pool** - True parallelism with Python 3.12+ subinterpreters
   - Each subinterpreter runs in its own thread with its own GIL (`Py_GIL_OWN`)
