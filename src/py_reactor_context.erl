@@ -40,7 +40,9 @@
     start_link/2,
     start_link/3,
     stop/1,
-    stats/1
+    stats/1,
+    handoff/2,
+    handoff/3
 ]).
 
 %% Internal exports
@@ -89,6 +91,8 @@ start_link(Id, Mode) ->
 %% - max_connections: Maximum connections per context (default: 100)
 %% - app_module: Python module containing ASGI/WSGI app
 %% - app_callable: Python callable name (e.g., "app", "application")
+%% - setup_code: Binary Python code to execute after context creation
+%%               (useful for setting up protocol factory)
 %%
 %% @param Id Unique identifier for this context
 %% @param Mode Context mode (auto, subinterp, worker)
@@ -141,6 +145,33 @@ stats(Ctx) when is_pid(Ctx) ->
         {error, timeout}
     end.
 
+%% @doc Hand off a file descriptor to this reactor context.
+%%
+%% The context takes ownership of the FD and will handle I/O events.
+%% This is the main entry point for handing off accepted connections.
+%%
+%% @param Fd The raw file descriptor (from inet:getfd/1)
+%% @param ClientInfo Map with connection metadata (addr, port, type, etc.)
+-spec handoff(integer(), map()) -> ok | {error, term()}.
+handoff(Fd, ClientInfo) when is_integer(Fd), is_map(ClientInfo) ->
+    %% Get a reactor context from the pool or use default
+    case whereis(py_reactor_context_default) of
+        undefined ->
+            {error, no_reactor_context};
+        Ctx ->
+            handoff(Ctx, Fd, ClientInfo)
+    end.
+
+%% @doc Hand off a file descriptor to a specific reactor context.
+%%
+%% @param Ctx The reactor context pid
+%% @param Fd The raw file descriptor (from inet:getfd/1)
+%% @param ClientInfo Map with connection metadata
+-spec handoff(pid(), integer(), map()) -> ok | {error, term()}.
+handoff(Ctx, Fd, ClientInfo) when is_pid(Ctx), is_integer(Fd), is_map(ClientInfo) ->
+    Ctx ! {fd_handoff, Fd, ClientInfo},
+    ok.
+
 %% ============================================================================
 %% Process loop
 %% ============================================================================
@@ -168,6 +199,19 @@ init(Parent, Id, Mode, Opts) ->
             MaxConns = maps:get(max_connections, Opts, ?DEFAULT_MAX_CONNECTIONS),
             AppModule = maps:get(app_module, Opts, undefined),
             AppCallable = maps:get(app_callable, Opts, undefined),
+
+            %% Execute setup code if specified (e.g., set protocol factory)
+            SetupCode = maps:get(setup_code, Opts, undefined),
+            case SetupCode of
+                undefined -> ok;
+                _ when is_binary(SetupCode) ->
+                    case py_nif:context_exec(Ref, SetupCode) of
+                        ok -> ok;
+                        {error, Reason} ->
+                            error_logger:error_msg(
+                                "py_reactor_context setup_code failed: ~p~n", [Reason])
+                    end
+            end,
 
             %% Initialize app in Python context if specified
             case AppModule of
@@ -213,6 +257,15 @@ loop(State) ->
 
         {select, FdRes, _Ref, ready_output} ->
             handle_write_ready(FdRes, State);
+
+        %% Async completion signal from Python
+        %% Sent when an async task (e.g., ASGI app) completes and response is ready
+        %% Accept both atom and binary forms since Python sends binaries
+        {write_ready, Fd} ->
+            handle_async_write_ready(Fd, State);
+
+        {<<"write_ready">>, Fd} ->
+            handle_async_write_ready(Fd, State);
 
         %% Control messages
         {stop, From, MRef} ->
@@ -265,8 +318,11 @@ handle_fd_handoff(Fd, ClientInfo, State) ->
             %% Register FD for monitoring
             case py_nif:reactor_register_fd(Ref, Fd, self()) of
                 {ok, FdRef} ->
+                    %% Inject reactor_pid into client_info for async signaling
+                    ClientInfoWithPid = ClientInfo#{reactor_pid => self()},
+
                     %% Initialize Python protocol handler
-                    case py_nif:reactor_init_connection(Ref, Fd, ClientInfo) of
+                    case py_nif:reactor_init_connection(Ref, Fd, ClientInfoWithPid) of
                         ok ->
                             %% Store connection info
                             ConnInfo = #{
@@ -283,7 +339,7 @@ handle_fd_handoff(Fd, ClientInfo, State) ->
 
                         {error, _Reason} ->
                             %% Failed to init connection, close
-                            py_nif:reactor_close_fd(FdRef),
+                            py_nif:reactor_close_fd(Ref, FdRef),
                             loop(State)
                     end;
 
@@ -314,6 +370,16 @@ handle_read_ready(FdRes, State) ->
                 {ok, <<"write_pending">>} ->
                     %% Response ready, switch to write mode
                     py_nif:reactor_select_write(FdRes),
+                    NewState = State#state{
+                        total_requests = State#state.total_requests + 1
+                    },
+                    loop(NewState);
+
+                {ok, <<"async_pending">>} ->
+                    %% Async task submitted (e.g., ASGI app running as task)
+                    %% Don't reselect - wait for {write_ready, Fd} signal from Python
+                    %% Increment request count since task was accepted
+                    error_logger:info_msg("Received async_pending for fd=~p~n", [Fd]),
                     NewState = State#state{
                         total_requests = State#state.total_requests + 1
                     },
@@ -371,18 +437,44 @@ handle_write_ready(FdRes, State) ->
     end.
 
 %% ============================================================================
+%% Async Write Ready Handler
+%% ============================================================================
+
+%% @private
+%% Handle async completion signal from Python.
+%% This is sent when an async task (like an ASGI app) has completed
+%% and the response buffer is ready to be written.
+handle_async_write_ready(Fd, State) ->
+    #state{connections = Conns} = State,
+
+    error_logger:info_msg("handle_async_write_ready called for fd=~p~n", [Fd]),
+
+    case maps:get(Fd, Conns, undefined) of
+        #{fd_ref := FdRef} ->
+            %% Response buffer is ready, trigger write selection
+            error_logger:info_msg("Triggering write selection for fd=~p~n", [Fd]),
+            py_nif:reactor_select_write(FdRef),
+            loop(State);
+        undefined ->
+            %% Connection not found (may have been closed), ignore
+            error_logger:warning_msg("Connection not found for fd=~p~n", [Fd]),
+            loop(State)
+    end.
+
+%% ============================================================================
 %% Connection Management
 %% ============================================================================
 
 %% @private
 close_connection(Fd, FdRes, State) ->
     #state{
+        ref = Ref,
         connections = Conns,
         active_connections = Active
     } = State,
 
     %% Close via NIF (cleans up Python protocol handler)
-    py_nif:reactor_close_fd(FdRes),
+    py_nif:reactor_close_fd(Ref, FdRes),
 
     %% Remove from connections map
     NewConns = maps:remove(Fd, Conns),
@@ -398,7 +490,7 @@ cleanup(State) ->
 
     %% Close all connections
     maps:foreach(fun(_Fd, #{fd_ref := FdRef}) ->
-        py_nif:reactor_close_fd(FdRef)
+        py_nif:reactor_close_fd(Ref, FdRef)
     end, Conns),
 
     %% Destroy Python context

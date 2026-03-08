@@ -20,7 +20,8 @@
     set_protocol_factory_test/1,
     echo_protocol_test/1,
     multiple_connections_test/1,
-    protocol_close_test/1
+    protocol_close_test/1,
+    async_pending_test/1
 ]).
 
 all() -> [
@@ -29,7 +30,8 @@ all() -> [
     set_protocol_factory_test,
     echo_protocol_test,
     multiple_connections_test,
-    protocol_close_test
+    protocol_close_test,
+    async_pending_test
 ].
 
 init_per_suite(Config) ->
@@ -204,3 +206,117 @@ def run_close_test():
 _close_test_result = run_close_test()
 ">>),
     {ok, true} = py:eval(Ctx, <<"_close_test_result">>).
+
+%% @doc Test async_pending action for task-based async operations.
+%% This tests the pattern used by task-based ASGI where:
+%% 1. Protocol returns "async_pending" to indicate a task was submitted
+%% 2. Later, Python sends {write_ready, Fd} to signal completion
+%% 3. Reactor then triggers write selection
+async_pending_test(_Config) ->
+    %% Protocol factory code to run in reactor context
+    SetupCode = <<"
+import erlang.reactor as reactor
+
+class AsyncPendingProtocol(reactor.Protocol):
+    '''Protocol that returns async_pending and signals completion.'''
+
+    def __init__(self):
+        super().__init__()
+        self.pending_response = b''
+
+    def data_received(self, data):
+        self.pending_response = b'ASYNC:' + data
+        # Immediately complete the task and signal reactor
+        self.write_buffer.extend(self.pending_response)
+        reactor.signal_write_ready(self.fd)
+        return 'async_pending'
+
+    def write_ready(self):
+        if not self.write_buffer:
+            return 'close'
+        written = self.write(bytes(self.write_buffer))
+        del self.write_buffer[:written]
+        return 'continue' if self.write_buffer else 'close'
+
+reactor.set_protocol_factory(AsyncPendingProtocol)
+">>,
+
+    %% Start reactor context with protocol factory setup
+    {ok, ReactorCtx} = py_reactor_context:start_link(1, auto, #{
+        setup_code => SetupCode
+    }),
+
+    %% Use py:context(1) for test helpers (socket management)
+    PyCtx = py:context(1),
+    ok = py:exec(PyCtx, <<"
+import socket
+
+_async_test_state = {}
+
+def setup_socketpair():
+    global _async_test_state
+    s1, s2 = socket.socketpair()
+    s1.setblocking(False)
+    s2.setblocking(False)
+    _async_test_state = {'s1': s1, 's2': s2, 'fd': s1.fileno()}
+    return s1.fileno()
+
+def send_test_data():
+    s2 = _async_test_state['s2']
+    s2.send(b'hello')
+    return True
+
+def read_response():
+    s2 = _async_test_state['s2']
+    s2.setblocking(True)
+    s2.settimeout(2.0)
+    try:
+        return s2.recv(1024)
+    except socket.timeout:
+        return b'TIMEOUT'
+
+def cleanup():
+    s1 = _async_test_state.get('s1')
+    s2 = _async_test_state.get('s2')
+    try:
+        if s1: s1.close()
+    except:
+        pass
+    try:
+        if s2: s2.close()
+    except:
+        pass
+    _async_test_state.clear()
+    return True
+">>),
+
+    %% Step 1: Create socketpair
+    {ok, Fd} = py:eval(PyCtx, <<"setup_socketpair()">>),
+    ct:pal("Created socketpair with fd=~p", [Fd]),
+
+    %% Check reactor context is alive
+    ct:pal("Reactor context ~p is alive: ~p", [ReactorCtx, is_process_alive(ReactorCtx)]),
+
+    %% Step 2: Send fd_handoff to reactor context
+    ok = py_reactor_context:handoff(ReactorCtx, Fd, #{}),
+    timer:sleep(100),
+
+    %% Check reactor stats after handoff
+    Stats = py_reactor_context:stats(ReactorCtx),
+    ct:pal("Reactor stats after handoff: ~p", [Stats]),
+
+    %% Step 3: Send test data - triggers async_pending and immediate completion
+    {ok, true} = py:eval(PyCtx, <<"send_test_data()">>),
+    timer:sleep(200),
+
+    %% Step 4: Read response
+    {ok, Response} = py:eval(PyCtx, <<"read_response()">>),
+    ct:pal("Response: ~p", [Response]),
+
+    %% Verify response
+    <<"ASYNC:hello">> = Response,
+
+    %% Cleanup
+    {ok, _} = py:eval(PyCtx, <<"cleanup()">>),
+    py_reactor_context:stop(ReactorCtx),
+    ok.

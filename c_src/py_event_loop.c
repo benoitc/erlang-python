@@ -3084,14 +3084,17 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd");
     }
 
-    /* Acquire GIL and call Python */
-    gil_guard_t guard = gil_acquire();
+    /* Acquire context (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
 
-    /* Import erlang_reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    /* Import erlang.reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
@@ -3102,7 +3105,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
 
     if (result == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "on_read_ready_failed");
     }
 
@@ -3122,7 +3125,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
     }
 
     Py_DECREF(result);
-    gil_release(guard);
+    py_context_release(&guard);
 
     return enif_make_tuple2(env, ATOM_OK, action);
 }
@@ -3149,14 +3152,17 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd");
     }
 
-    /* Acquire GIL and call Python */
-    gil_guard_t guard = gil_acquire();
+    /* Acquire context (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
 
-    /* Import erlang_reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    /* Import erlang.reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
@@ -3167,7 +3173,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
 
     if (result == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "on_write_ready_failed");
     }
 
@@ -3187,7 +3193,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
     }
 
     Py_DECREF(result);
-    gil_release(guard);
+    py_context_release(&guard);
 
     return enif_make_tuple2(env, ATOM_OK, action);
 }
@@ -3219,23 +3225,26 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_client_info");
     }
 
-    /* Acquire GIL and call Python */
-    gil_guard_t guard = gil_acquire();
+    /* Acquire context (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
 
     /* Convert Erlang map to Python dict */
     PyObject *client_info = term_to_py(env, argv[2]);
     if (client_info == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "client_info_conversion_failed");
     }
 
-    /* Import erlang_reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    /* Import erlang.reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         Py_DECREF(client_info);
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
@@ -3247,18 +3256,18 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
 
     if (result == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "init_connection_failed");
     }
 
     Py_DECREF(result);
-    gil_release(guard);
+    py_context_release(&guard);
 
     return ATOM_OK;
 }
 
 /**
- * reactor_close_fd(FdRef) -> ok | {error, Reason}
+ * reactor_close_fd(ContextRef, FdRef) -> ok | {error, Reason}
  *
  * Close an FD and clean up the protocol handler.
  * Calls Python's erlang_reactor.close_connection(fd) if registered.
@@ -3267,8 +3276,13 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]) {
     (void)argc;
 
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
     fd_resource_t *fd_res;
-    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+    if (!enif_get_resource(env, argv[1], FD_RESOURCE_TYPE, (void **)&fd_res)) {
         return make_error(env, "invalid_fd_ref");
     }
 
@@ -3284,20 +3298,21 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
 
     /* Call Python to clean up protocol handler */
     if (fd >= 0) {
-        gil_guard_t guard = gil_acquire();
+        py_context_guard_t guard = py_context_acquire(ctx);
+        if (guard.acquired) {
+            PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
+            if (reactor_module != NULL) {
+                PyObject *result = PyObject_CallMethod(reactor_module,
+                                                        "close_connection", "i", fd);
+                Py_XDECREF(result);
+                Py_DECREF(reactor_module);
+                PyErr_Clear();  /* Ignore errors during cleanup */
+            } else {
+                PyErr_Clear();
+            }
 
-        PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
-        if (reactor_module != NULL) {
-            PyObject *result = PyObject_CallMethod(reactor_module,
-                                                    "close_connection", "i", fd);
-            Py_XDECREF(result);
-            Py_DECREF(reactor_module);
-            PyErr_Clear();  /* Ignore errors during cleanup */
-        } else {
-            PyErr_Clear();
+            py_context_release(&guard);
         }
-
-        gil_release(guard);
     }
 
     /* Take ownership for cleanup */
