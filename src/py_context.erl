@@ -43,7 +43,9 @@
     exec/2,
     call_method/4,
     to_term/1,
-    get_interp_id/1
+    get_interp_id/1,
+    reset/1,
+    reload/2
 ]).
 
 %% Internal exports
@@ -187,6 +189,46 @@ exec(Ctx, Code) when is_pid(Ctx) ->
     after infinity ->
         erlang:demonitor(MRef, [flush]),
         {error, timeout}
+    end.
+
+%% @doc Reset a context by clearing its namespace.
+%%
+%% Clears all user-defined names from the context's globals dict,
+%% keeping only dunder items (__builtins__, __name__, etc.) and
+%% the erlang module.
+%%
+%% @param Ctx Context process
+%% @returns ok | {error, Reason}
+-spec reset(context()) -> ok | {error, term()}.
+reset(Ctx) when is_pid(Ctx) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {reset, self(), MRef},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    end.
+
+%% @doc Reload modules in a context.
+%%
+%% Reloads the specified modules using importlib.reload().
+%% Only modules that are already loaded will be reloaded.
+%%
+%% @param Ctx Context process
+%% @param Modules List of module names as binaries
+%% @returns ok | {error, Reason}
+-spec reload(context(), [binary()]) -> ok | {error, term()}.
+reload(Ctx, Modules) when is_pid(Ctx), is_list(Modules) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {reload, self(), MRef, Modules},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
     end.
 
 %% @doc Call a method on a Python object reference.
@@ -336,6 +378,16 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
 
         {exec, From, MRef, Code} ->
             Result = py_nif:context_exec(Ref, Code),
+            From ! {MRef, Result},
+            loop(State);
+
+        {reset, From, MRef} ->
+            Result = py_nif:context_reset(Ref),
+            From ! {MRef, Result},
+            loop(State);
+
+        {reload, From, MRef, Modules} ->
+            Result = py_nif:context_reload(Ref, Modules),
             From ! {MRef, Result},
             loop(State);
 
@@ -546,6 +598,18 @@ wait_for_callback(Ref, CallbackPid) ->
         %% Handle nested py:exec while waiting for callback
         {exec, From, MRef, Code} ->
             NestedResult = py_nif:context_exec(Ref, Code),
+            From ! {MRef, NestedResult},
+            wait_for_callback(Ref, CallbackPid);
+
+        %% Handle nested reset while waiting for callback
+        {reset, From, MRef} ->
+            NestedResult = py_nif:context_reset(Ref),
+            From ! {MRef, NestedResult},
+            wait_for_callback(Ref, CallbackPid);
+
+        %% Handle nested reload while waiting for callback
+        {reload, From, MRef, Modules} ->
+            NestedResult = py_nif:context_reload(Ref, Modules),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
 
