@@ -196,6 +196,27 @@ static void cleanup_wsgi_interp_state_internal(wsgi_interp_state_t *state) {
     Py_XDECREF(state->bytesio_class);
     Py_XDECREF(state->http_prefix);
 
+    /* Clean up callable cache */
+    if (state->cached_module_name) {
+        enif_free(state->cached_module_name);
+        state->cached_module_name = NULL;
+    }
+    if (state->cached_callable_name) {
+        enif_free(state->cached_callable_name);
+        state->cached_callable_name = NULL;
+    }
+    Py_XDECREF(state->cached_callable);
+    state->cached_callable = NULL;
+
+    if (state->cached_runner_name) {
+        enif_free(state->cached_runner_name);
+        state->cached_runner_name = NULL;
+    }
+    Py_XDECREF(state->cached_runner);
+    state->cached_runner = NULL;
+    Py_XDECREF(state->cached_run_func);
+    state->cached_run_func = NULL;
+
     state->initialized = false;
 }
 
@@ -297,6 +318,58 @@ void cleanup_all_wsgi_interp_states(void) {
     g_wsgi_interp_state_count = 0;
 
     pthread_mutex_unlock(&g_wsgi_interp_state_mutex);
+}
+
+/* ============================================================================
+ * Callable Caching
+ * ============================================================================
+ * Cache module imports and callable lookups to avoid per-request overhead.
+ * Most WSGI apps use a single module/callable, so a simple last-used cache
+ * provides excellent hit rates.
+ */
+
+/**
+ * @brief Get cached runner function or import and cache it
+ *
+ * Returns a borrowed reference to the cached _run_wsgi_sync function.
+ */
+static PyObject *get_cached_wsgi_runner(wsgi_interp_state_t *state,
+                                        const char *runner_name) {
+    /* Check if cached */
+    if (state->cached_runner_name &&
+        strcmp(state->cached_runner_name, runner_name) == 0 &&
+        state->cached_run_func != NULL) {
+        return state->cached_run_func;  /* Cache hit - borrowed reference */
+    }
+
+    /* Cache miss - import and cache */
+    PyObject *runner = PyImport_ImportModule(runner_name);
+    if (!runner) return NULL;
+
+    PyObject *run_func = PyObject_GetAttrString(runner, "_run_wsgi_sync");
+    if (!run_func) {
+        Py_DECREF(runner);
+        return NULL;
+    }
+
+    /* Update cache */
+    if (state->cached_runner_name) {
+        enif_free(state->cached_runner_name);
+    }
+    Py_XDECREF(state->cached_runner);
+    Py_XDECREF(state->cached_run_func);
+
+    state->cached_runner_name = enif_alloc(strlen(runner_name) + 1);
+    if (!state->cached_runner_name) {
+        Py_DECREF(run_func);
+        Py_DECREF(runner);
+        return NULL;
+    }
+    strcpy(state->cached_runner_name, runner_name);
+    state->cached_runner = runner;      /* Takes ownership */
+    state->cached_run_func = run_func;  /* Takes ownership */
+
+    return run_func;  /* Borrowed reference */
 }
 
 /* ============================================================================
@@ -638,6 +711,13 @@ static ERL_NIF_TERM nif_wsgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return make_error(env, "alloc_failed");
     }
 
+    /* Get per-interpreter state for callable caching */
+    wsgi_interp_state_t *state = get_wsgi_interp_state();
+    if (state == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
     /* Build optimized environ dict from Erlang map */
     PyObject *environ = wsgi_environ_from_map(env, argv[3]);
     if (environ == NULL) {
@@ -645,21 +725,33 @@ static ERL_NIF_TERM nif_wsgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         goto cleanup;
     }
 
-    /* Import the WSGI runner module */
-    PyObject *runner_module = PyImport_ImportModule(runner_name);
-    if (runner_module == NULL) {
+    /* Get cached runner function (avoids per-request import) */
+    PyObject *run_func = get_cached_wsgi_runner(state, runner_name);
+    if (run_func == NULL) {
         Py_DECREF(environ);
         result = make_py_error(env);
         goto cleanup;
     }
 
-    /* Call _run_wsgi_sync(module_name, callable_name, environ) */
-    PyObject *run_result = PyObject_CallMethod(
-        runner_module, "_run_wsgi_sync", "ssO",
-        module_name, callable_name, environ);
+    /* Create Python strings for module/callable names (for runner call) */
+    PyObject *py_module_name = PyUnicode_FromString(module_name);
+    PyObject *py_callable_name = PyUnicode_FromString(callable_name);
+    if (py_module_name == NULL || py_callable_name == NULL) {
+        Py_XDECREF(py_module_name);
+        Py_XDECREF(py_callable_name);
+        Py_DECREF(environ);
+        result = make_py_error(env);
+        goto cleanup;
+    }
 
-    Py_DECREF(runner_module);
+    /* Call _run_wsgi_sync(module_name, callable_name, environ) using cached function */
+    PyObject *run_result = PyObject_CallFunctionObjArgs(
+        run_func, py_module_name, py_callable_name, environ, NULL);
+
+    Py_DECREF(py_module_name);
+    Py_DECREF(py_callable_name);
     Py_DECREF(environ);
+    /* Note: run_func is borrowed reference from cache - don't decref */
 
     if (run_result == NULL) {
         result = make_py_error(env);

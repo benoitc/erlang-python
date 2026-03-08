@@ -90,22 +90,6 @@
  */
 #define ASGI_MAX_INTERPRETERS 64
 
-/**
- * @def SCOPE_CACHE_SIZE
- * @brief Number of scope templates to cache per thread
- */
-#define SCOPE_CACHE_SIZE 64
-
-/**
- * @def LAZY_HEADERS_THRESHOLD
- * @brief Minimum number of headers to use lazy conversion
- *
- * For small header counts, eager conversion is faster due to lower overhead.
- * Only use lazy conversion when there are enough headers to benefit.
- */
-#ifndef LAZY_HEADERS_THRESHOLD
-#define LAZY_HEADERS_THRESHOLD 4
-#endif
 
 /* ============================================================================
  * ASGI Erlang Atoms
@@ -119,9 +103,6 @@ extern ERL_NIF_TERM ATOM_ASGI_METHOD;
 
 /* Resource type for zero-copy body buffers */
 extern ErlNifResourceType *ASGI_BUFFER_RESOURCE_TYPE;
-
-/* Resource type for lazy header conversion */
-extern ErlNifResourceType *ASGI_LAZY_HEADERS_RESOURCE_TYPE;
 
 /* ============================================================================
  * Per-Interpreter State (Sub-interpreter & Free-threading Support)
@@ -237,6 +218,15 @@ typedef struct asgi_interp_state {
     PyObject *status_500;   /**< 500 Internal Server Error */
     PyObject *status_502;   /**< 502 Bad Gateway */
     PyObject *status_503;   /**< 503 Service Unavailable */
+
+    /* Callable cache (avoids per-request module imports) */
+    char *cached_module_name;       /**< Last used module name */
+    char *cached_callable_name;     /**< Last used callable name */
+    PyObject *cached_callable;      /**< Cached callable object */
+
+    char *cached_runner_name;       /**< Last used runner module name */
+    PyObject *cached_runner;        /**< Cached runner module */
+    PyObject *cached_run_func;      /**< Cached _run_asgi_sync function */
 } asgi_interp_state_t;
 
 /**
