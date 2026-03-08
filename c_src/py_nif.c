@@ -40,6 +40,7 @@
 #include "py_asgi.h"
 #include "py_wsgi.h"
 #include "py_event_loop.h"
+#include "py_channel.h"
 
 /* ============================================================================
  * Global state definitions
@@ -170,6 +171,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_subinterp_pool.c"
 #include "py_subinterp_thread.c"
 #include "py_reactor_buffer.c"
+#include "py_channel.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -3669,6 +3671,21 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         reactor_buffer_resource_dtor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
+    /* Channel resource type for bidirectional message passing */
+    CHANNEL_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "py_channel",
+        channel_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
+    if (CHANNEL_RESOURCE_TYPE == NULL) {
+        return -1;
+    }
+
+    /* Initialize channel module atoms */
+    if (channel_init(env) < 0) {
+        return -1;
+    }
+
     /* Initialize event loop module */
     if (event_loop_init(env) < 0) {
         return -1;
@@ -3905,7 +3922,19 @@ static ErlNifFunc nif_funcs[] = {
     {"fd_select_read", 1, nif_fd_select_read, 0},
     {"fd_select_write", 1, nif_fd_select_write, 0},
     {"fd_close", 1, nif_fd_close, 0},
-    {"socketpair", 0, nif_socketpair, 0}
+    {"socketpair", 0, nif_socketpair, 0},
+
+    /* Channel API - bidirectional message passing */
+    {"channel_create", 0, nif_channel_create, 0},
+    {"channel_create", 1, nif_channel_create, 0},
+    {"channel_send", 2, nif_channel_send, 0},
+    {"channel_receive", 2, nif_channel_receive, 0},
+    {"channel_try_receive", 1, nif_channel_try_receive, 0},
+    {"channel_reply", 3, nif_channel_reply, 0},
+    {"channel_close", 1, nif_channel_close, 0},
+    {"channel_info", 1, nif_channel_info, 0},
+    {"channel_wait", 3, nif_channel_wait, 0},
+    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

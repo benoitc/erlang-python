@@ -195,7 +195,18 @@
     fd_select_read/1,
     fd_select_write/1,
     fd_close/1,
-    socketpair/0
+    socketpair/0,
+    %% Channel API - bidirectional message passing
+    channel_create/0,
+    channel_create/1,
+    channel_send/2,
+    channel_receive/2,
+    channel_try_receive/1,
+    channel_reply/3,
+    channel_close/1,
+    channel_info/1,
+    channel_wait/3,
+    channel_cancel_wait/2
 ]).
 
 -on_load(load_nif/0).
@@ -1597,4 +1608,107 @@ fd_close(_Fd) ->
 %% @returns {ok, {Fd1, Fd2}} | {error, Reason}
 -spec socketpair() -> {ok, {integer(), integer()}} | {error, term()}.
 socketpair() ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Channel API - Bidirectional Message Passing
+%%%
+%%% Channels provide efficient bidirectional communication between Erlang
+%%% processes and Python code using enif_ioq for zero-copy buffering.
+%%% ============================================================================
+
+%% @doc Create a new channel with default settings.
+%%
+%% @returns {ok, ChannelRef} | {error, Reason}
+-spec channel_create() -> {ok, reference()} | {error, term()}.
+channel_create() ->
+    ?NIF_STUB.
+
+%% @doc Create a new channel with specified max size for backpressure.
+%%
+%% @param MaxSize Maximum queue size in bytes (0 = unlimited)
+%% @returns {ok, ChannelRef} | {error, Reason}
+-spec channel_create(non_neg_integer()) -> {ok, reference()} | {error, term()}.
+channel_create(_MaxSize) ->
+    ?NIF_STUB.
+
+%% @doc Send a message to a channel.
+%%
+%% @param ChannelRef Channel reference
+%% @param Term Erlang term to send
+%% @returns ok | busy | {error, closed}
+-spec channel_send(reference(), term()) -> ok | busy | {error, term()}.
+channel_send(_ChannelRef, _Term) ->
+    ?NIF_STUB.
+
+%% @doc Receive a message from a channel (may trigger Python suspension).
+%%
+%% @param ContextRef Context reference for suspension support
+%% @param ChannelRef Channel reference
+%% @returns {ok, Term} | {error, empty} | {error, closed}
+-spec channel_receive(reference(), reference()) ->
+    {ok, term()} | {error, empty | closed | term()}.
+channel_receive(_ContextRef, _ChannelRef) ->
+    ?NIF_STUB.
+
+%% @doc Try to receive a message from a channel (non-blocking).
+%%
+%% @param ChannelRef Channel reference
+%% @returns {ok, Term} | {error, empty} | {error, closed}
+-spec channel_try_receive(reference()) ->
+    {ok, term()} | {error, empty | closed | term()}.
+channel_try_receive(_ChannelRef) ->
+    ?NIF_STUB.
+
+%% @doc Send a reply to an Erlang process from Python context.
+%%
+%% @param ContextRef Context reference
+%% @param Pid Target process PID
+%% @param Term Erlang term to send
+%% @returns ok | {error, Reason}
+-spec channel_reply(reference(), pid(), term()) -> ok | {error, term()}.
+channel_reply(_ContextRef, _Pid, _Term) ->
+    ?NIF_STUB.
+
+%% @doc Close a channel.
+%%
+%% Closes the channel and signals any waiting receivers.
+%%
+%% @param ChannelRef Channel reference
+%% @returns ok
+-spec channel_close(reference()) -> ok.
+channel_close(_ChannelRef) ->
+    ?NIF_STUB.
+
+%% @doc Get channel information.
+%%
+%% @param ChannelRef Channel reference
+%% @returns #{size => N, max_size => M, closed => Bool}
+-spec channel_info(reference()) -> map().
+channel_info(_ChannelRef) ->
+    ?NIF_STUB.
+
+%% @doc Register an async waiter for a channel.
+%%
+%% If data is available, returns immediately with {ok, Data}.
+%% If empty, registers the callback_id for dispatch when data arrives.
+%%
+%% @param ChannelRef Channel reference
+%% @param CallbackId Callback ID for timer dispatch
+%% @param LoopRef Event loop reference for dispatching
+%% @returns ok | {ok, Data} | {error, closed}
+-spec channel_wait(reference(), non_neg_integer(), reference()) ->
+    ok | {ok, term()} | {error, term()}.
+channel_wait(_ChannelRef, _CallbackId, _LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Cancel an async waiter for a channel.
+%%
+%% Called when the Python Future is cancelled or times out.
+%%
+%% @param ChannelRef Channel reference
+%% @param CallbackId Callback ID to cancel
+%% @returns ok
+-spec channel_cancel_wait(reference(), non_neg_integer()) -> ok.
+channel_cancel_wait(_ChannelRef, _CallbackId) ->
     ?NIF_STUB.

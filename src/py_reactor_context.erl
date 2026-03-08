@@ -379,7 +379,6 @@ handle_read_ready(FdRes, State) ->
                     %% Async task submitted (e.g., ASGI app running as task)
                     %% Don't reselect - wait for {write_ready, Fd} signal from Python
                     %% Increment request count since task was accepted
-                    error_logger:info_msg("Received async_pending for fd=~p~n", [Fd]),
                     NewState = State#state{
                         total_requests = State#state.total_requests + 1
                     },
@@ -447,12 +446,9 @@ handle_write_ready(FdRes, State) ->
 handle_async_write_ready(Fd, State) ->
     #state{connections = Conns} = State,
 
-    error_logger:info_msg("handle_async_write_ready called for fd=~p~n", [Fd]),
-
     case maps:get(Fd, Conns, undefined) of
         #{fd_ref := FdRef} ->
             %% Response buffer is ready, trigger write selection
-            error_logger:info_msg("Triggering write selection for fd=~p~n", [Fd]),
             py_nif:reactor_select_write(FdRef),
             loop(State);
         undefined ->

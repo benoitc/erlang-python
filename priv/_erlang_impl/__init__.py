@@ -61,6 +61,8 @@ from ._loop import ErlangEventLoop
 from ._policy import ErlangEventLoopPolicy
 from ._mode import detect_mode, ExecutionMode
 from . import _reactor as reactor
+from . import _channel as channel
+from ._channel import Channel, reply, ChannelClosed
 
 __all__ = [
     'run',
@@ -73,6 +75,10 @@ __all__ = [
     'detect_mode',
     'ExecutionMode',
     'reactor',
+    'channel',
+    'Channel',
+    'reply',
+    'ChannelClosed',
 ]
 
 # Re-export for uvloop API compatibility
