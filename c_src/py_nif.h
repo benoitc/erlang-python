@@ -1064,10 +1064,16 @@ typedef struct {
  */
 
 /**
+ * @def MIN_EXECUTORS
+ * @brief Minimum number of executor threads in the pool
+ */
+#define MIN_EXECUTORS 2
+
+/**
  * @def MAX_EXECUTORS
  * @brief Maximum number of executor threads in the pool
  */
-#define MAX_EXECUTORS 16
+#define MAX_EXECUTORS 32
 
 /**
  * @struct executor_t

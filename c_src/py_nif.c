@@ -710,7 +710,7 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         default:
             /* Start multiple executors for GIL contention mode */
             {
-                int num_exec = 4;  /* Default */
+                int num_exec = MIN_EXECUTORS;  /* Fallback if not provided */
                 /* Check for config */
                 if (argc > 0 && enif_is_map(env, argv[0])) {
                     ERL_NIF_TERM key = enif_make_atom(env, "num_executors");
