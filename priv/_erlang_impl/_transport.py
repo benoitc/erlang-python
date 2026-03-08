@@ -41,7 +41,7 @@ class ErlangSocketTransport(transports.Transport):
 
     __slots__ = (
         '_loop', '_sock', '_protocol', '_buffer', '_closing', '_conn_lost',
-        '_write_ready', '_paused', '_extra', '_fileno',
+        '_write_ready', '_paused', '_extra', '_fileno', '_extra_loaded',
     )
 
     _buffer_factory = bytearray
@@ -60,14 +60,8 @@ class ErlangSocketTransport(transports.Transport):
         self._fileno = sock.fileno()
         self._extra = extra or {}
         self._extra['socket'] = sock
-        try:
-            self._extra['sockname'] = sock.getsockname()
-        except OSError:
-            pass
-        try:
-            self._extra['peername'] = sock.getpeername()
-        except OSError:
-            pass
+        # Defer getsockname/getpeername until first get_extra_info() call
+        self._extra_loaded = False
 
     async def _start(self):
         """Start the transport."""
@@ -187,6 +181,17 @@ class ErlangSocketTransport(transports.Transport):
         self.close()
 
     def get_extra_info(self, name, default=None):
+        # Lazy load sockname/peername on first access
+        if not self._extra_loaded:
+            self._extra_loaded = True
+            try:
+                self._extra['sockname'] = self._sock.getsockname()
+            except OSError:
+                pass
+            try:
+                self._extra['peername'] = self._sock.getpeername()
+            except OSError:
+                pass
         return self._extra.get(name, default)
 
     def is_closing(self):
@@ -233,7 +238,7 @@ class ErlangDatagramTransport(transports.DatagramTransport):
 
     __slots__ = (
         '_loop', '_sock', '_protocol', '_address', '_buffer',
-        '_closing', '_conn_lost', '_extra', '_fileno',
+        '_closing', '_conn_lost', '_extra', '_fileno', '_extra_loaded',
     )
 
     max_size = 256 * 1024  # 256 KB
@@ -250,10 +255,8 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         self._fileno = sock.fileno()
         self._extra = extra or {}
         self._extra['socket'] = sock
-        try:
-            self._extra['sockname'] = sock.getsockname()
-        except OSError:
-            pass
+        # Defer getsockname until first get_extra_info() call
+        self._extra_loaded = False
         if address:
             self._extra['peername'] = address
 
@@ -371,6 +374,13 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         self.close()
 
     def get_extra_info(self, name, default=None):
+        # Lazy load sockname on first access
+        if not self._extra_loaded:
+            self._extra_loaded = True
+            try:
+                self._extra['sockname'] = self._sock.getsockname()
+            except OSError:
+                pass
         return self._extra.get(name, default)
 
     def is_closing(self):

@@ -72,6 +72,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     __slots__ = (
         '_pel', '_loop_capsule',
         '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
+        '_callbacks_by_cid',  # callback_id -> (callback, args, event_type) for O(1) dispatch
         '_fd_resources',  # fd -> fd_key (shared fd_resource_t per fd)
         '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
         '_ready',
@@ -119,6 +120,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._writers = {}  # fd -> (callback, args, callback_id)
         self._readers_by_cid = {}  # callback_id -> fd (reverse map for O(1) lookup)
         self._writers_by_cid = {}  # callback_id -> fd (reverse map for O(1) lookup)
+        self._callbacks_by_cid = {}  # callback_id -> (callback, args) for O(1) dispatch
         self._fd_resources = {}  # fd -> fd_key (shared fd_resource_t per fd)
         self._timers = {}   # callback_id -> handle
         self._timer_refs = {}  # callback_id -> timer_ref (for cancellation)
@@ -405,7 +407,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Remove old callback (but not the fd_resource)
         if fd in self._readers:
             old_entry = self._readers[fd]
-            self._readers_by_cid.pop(old_entry[2], None)
+            old_cid = old_entry[2]
+            self._readers_by_cid.pop(old_cid, None)
+            self._callbacks_by_cid.pop(old_cid, None)
 
         callback_id = self._next_id()
 
@@ -421,6 +425,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
             self._readers[fd] = (callback, args, callback_id)
             self._readers_by_cid[callback_id] = fd
+            self._callbacks_by_cid[callback_id] = (callback, args)
         except Exception as e:
             raise RuntimeError(f"Failed to add reader: {e}")
 
@@ -432,6 +437,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         entry = self._readers.pop(fd)
         callback_id = entry[2]
         self._readers_by_cid.pop(callback_id, None)
+        self._callbacks_by_cid.pop(callback_id, None)
 
         if fd in self._fd_resources:
             fd_key = self._fd_resources[fd]
@@ -458,7 +464,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Remove old callback (but not the fd_resource)
         if fd in self._writers:
             old_entry = self._writers[fd]
-            self._writers_by_cid.pop(old_entry[2], None)
+            old_cid = old_entry[2]
+            self._writers_by_cid.pop(old_cid, None)
+            self._callbacks_by_cid.pop(old_cid, None)
 
         callback_id = self._next_id()
 
@@ -474,6 +482,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
             self._writers[fd] = (callback, args, callback_id)
             self._writers_by_cid[callback_id] = fd
+            self._callbacks_by_cid[callback_id] = (callback, args)
         except Exception as e:
             raise RuntimeError(f"Failed to add writer: {e}")
 
@@ -485,6 +494,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         entry = self._writers.pop(fd)
         callback_id = entry[2]
         self._writers_by_cid.pop(callback_id, None)
+        self._callbacks_by_cid.pop(callback_id, None)
 
         if fd in self._fd_resources:
             fd_key = self._fd_resources[fd]
@@ -958,14 +968,17 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if ready or self._stopping:
             timeout = 0
         elif self._timer_heap:
-            # Lazy cleanup - pop stale/cancelled entries
+            # Lazy cleanup - pop stale/cancelled entries with iteration limit
+            # to avoid O(n log n) cleanup under heavy cancellation load
             timer_heap = self._timer_heap
             timers = self._timers
-            while timer_heap:
+            cleanup_count = 0
+            while timer_heap and cleanup_count < 10:
                 when, cid = timer_heap[0]
                 handle = timers.get(cid)
                 if handle is None or handle._cancelled:
                     heapq.heappop(timer_heap)
+                    cleanup_count += 1
                     continue
                 break
 
@@ -990,13 +1003,13 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             raise RuntimeError(f"Event loop poll failed: {e}") from e
 
     def _dispatch(self, callback_id, event_type):
-        """Dispatch a callback based on event type."""
-        if event_type == EVENT_TYPE_READ:
-            entry = self._readers.get(self._readers_by_cid.get(callback_id))
-            if entry is not None:
-                self._ready_append(self._get_handle(entry[0], entry[1]))
-        elif event_type == EVENT_TYPE_WRITE:
-            entry = self._writers.get(self._writers_by_cid.get(callback_id))
+        """Dispatch a callback based on event type.
+
+        Uses _callbacks_by_cid for O(1) lookup instead of two-level lookup.
+        """
+        if event_type == EVENT_TYPE_READ or event_type == EVENT_TYPE_WRITE:
+            # O(1) direct lookup by callback_id
+            entry = self._callbacks_by_cid.get(callback_id)
             if entry is not None:
                 self._ready_append(self._get_handle(entry[0], entry[1]))
         elif event_type == EVENT_TYPE_TIMER:

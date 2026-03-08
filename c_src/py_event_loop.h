@@ -240,6 +240,11 @@ typedef struct erlang_event_loop {
     /** @brief Count of occupied slots in hash set */
     int pending_hash_count;
 
+    /* ========== Coalesced Wakeup Support ========== */
+
+    /** @brief Flag indicating a wakeup is pending (uvloop-style coalescing) */
+    _Atomic bool wake_pending;
+
     /* ========== Synchronous Sleep Support ========== */
 
     /** @brief Current synchronous sleep ID being waited on */

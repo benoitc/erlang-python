@@ -977,6 +977,9 @@ static int poll_events_wait(erlang_event_loop_t *loop, int timeout_ms) {
 
     pthread_mutex_lock(&loop->mutex);
 
+    /* Reset wake_pending flag since we're about to process events */
+    atomic_store(&loop->wake_pending, false);
+
     int current_count = atomic_load(&loop->pending_count);
     if (current_count == 0 && !loop->shutdown) {
         /* No events, wait with timeout */
@@ -1088,11 +1091,49 @@ ERL_NIF_TERM nif_get_pending(ErlNifEnv *env, int argc,
     /*
      * Phase 2: Build Erlang list outside lock (no contention)
      * Term creation and memory operations happen without holding the mutex.
+     *
+     * Optimization: Count elements first, then use enif_make_list_from_array
+     * to build the list in O(n) instead of O(2n) with build-then-reverse.
      */
-    ERL_NIF_TERM list = enif_make_list(env, 0);
-    pending_event_t *current = snapshot_head;
 
+    /* Count events in the snapshot */
+    size_t count = 0;
+    pending_event_t *current = snapshot_head;
     while (current != NULL) {
+        count++;
+        current = current->next;
+    }
+
+    if (count == 0) {
+        return enif_make_list(env, 0);
+    }
+
+    /* Allocate array for terms - use stack for small counts, heap for large */
+    ERL_NIF_TERM *terms;
+    ERL_NIF_TERM stack_terms[64];
+    bool heap_allocated = false;
+
+    if (count <= 64) {
+        terms = stack_terms;
+    } else {
+        terms = enif_alloc(count * sizeof(ERL_NIF_TERM));
+        if (terms == NULL) {
+            /* Fallback: free events and return empty list */
+            current = snapshot_head;
+            while (current != NULL) {
+                pending_event_t *next = current->next;
+                enif_free(current);
+                current = next;
+            }
+            return enif_make_list(env, 0);
+        }
+        heap_allocated = true;
+    }
+
+    /* Build terms array in forward order (matching linked list order) */
+    current = snapshot_head;
+    size_t i = 0;
+    while (current != NULL && i < count) {
         ERL_NIF_TERM type_atom;
         switch (current->type) {
             case EVENT_TYPE_READ:
@@ -1108,26 +1149,26 @@ ERL_NIF_TERM nif_get_pending(ErlNifEnv *env, int argc,
                 type_atom = ATOM_UNDEFINED;
         }
 
-        ERL_NIF_TERM event = enif_make_tuple2(
+        terms[i] = enif_make_tuple2(
             env,
             enif_make_uint64(env, current->callback_id),
             type_atom
         );
 
-        list = enif_make_list_cell(env, event, list);
         pending_event_t *next = current->next;
         enif_free(current);
         current = next;
+        i++;
     }
 
-    /* Reverse the list to maintain order */
-    ERL_NIF_TERM reversed = enif_make_list(env, 0);
-    ERL_NIF_TERM head;
-    while (enif_get_list_cell(env, list, &head, &list)) {
-        reversed = enif_make_list_cell(env, head, reversed);
+    /* Build list from array in O(n) */
+    ERL_NIF_TERM result = enif_make_list_from_array(env, terms, (unsigned int)i);
+
+    if (heap_allocated) {
+        enif_free(terms);
     }
 
-    return reversed;
+    return result;
 }
 
 /**
@@ -1705,10 +1746,13 @@ static inline uint64_t pending_hash_key(uint64_t callback_id, event_type_t type)
 
 /**
  * @brief Compute hash bucket index
+ *
+ * Note: PENDING_HASH_SIZE must be a power of 2 for bitwise AND to work.
+ * Using AND instead of modulo is faster (single instruction vs division).
  */
 static inline uint32_t pending_hash_index(uint64_t key) {
-    /* Simple hash: XOR fold and modulo */
-    return (uint32_t)((key ^ (key >> 32)) % PENDING_HASH_SIZE);
+    /* Simple hash: XOR fold and bitwise AND (faster than modulo) */
+    return (uint32_t)((key ^ (key >> 32)) & (PENDING_HASH_SIZE - 1));
 }
 
 /**
@@ -1728,9 +1772,9 @@ static inline bool pending_hash_contains(erlang_event_loop_t *loop,
     uint64_t key = pending_hash_key(callback_id, type);
     uint32_t idx = pending_hash_index(key);
 
-    /* Linear probing */
+    /* Linear probing with bitwise AND for wrap-around */
     for (int i = 0; i < PENDING_HASH_SIZE; i++) {
-        uint32_t probe = (idx + i) % PENDING_HASH_SIZE;
+        uint32_t probe = (idx + i) & (PENDING_HASH_SIZE - 1);
         if (!loop->pending_hash_occupied[probe]) {
             return false;  /* Empty slot means key not present */
         }
@@ -1759,9 +1803,9 @@ static inline bool pending_hash_insert(erlang_event_loop_t *loop,
     uint64_t key = pending_hash_key(callback_id, type);
     uint32_t idx = pending_hash_index(key);
 
-    /* Linear probing */
+    /* Linear probing with bitwise AND for wrap-around */
     for (int i = 0; i < PENDING_HASH_SIZE; i++) {
-        uint32_t probe = (idx + i) % PENDING_HASH_SIZE;
+        uint32_t probe = (idx + i) & (PENDING_HASH_SIZE - 1);
         if (!loop->pending_hash_occupied[probe]) {
             loop->pending_hash_keys[probe] = key;
             loop->pending_hash_occupied[probe] = true;
@@ -1822,7 +1866,14 @@ void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
     pending_hash_insert(loop, callback_id, type);
 
     atomic_fetch_add(&loop->pending_count, 1);
-    pthread_cond_signal(&loop->event_cond);
+
+    /*
+     * Coalesced wakeup (uvloop-style): Only signal if no wakeup is pending.
+     * This reduces condition variable signals under high event rates.
+     */
+    if (!atomic_exchange(&loop->wake_pending, true)) {
+        pthread_cond_signal(&loop->event_cond);
+    }
 
     pthread_mutex_unlock(&loop->mutex);
 }
