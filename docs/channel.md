@@ -26,9 +26,14 @@ Use channels when you need:
 %% Create a channel
 {ok, Ch} = py_channel:new(),
 
-%% Send messages to Python
-ok = py_channel:send(Ch, {request, <<"data">>}),
-ok = py_channel:send(Ch, {request, <<"more">>}),
+%% Send messages with sender PID for replies
+ok = py_channel:send(Ch, {request, self(), <<"data">>}),
+
+%% Wait for response
+receive
+    {response, Result} ->
+        io:format("Got result: ~p~n", [Result])
+end,
 
 %% Close when done
 py_channel:close(Ch).
@@ -37,27 +42,35 @@ py_channel:close(Ch).
 ### Python Side (Sync)
 
 ```python
-from erlang.channel import Channel
+from erlang.channel import Channel, reply
 
 def process_messages(channel_ref):
     ch = Channel(channel_ref)
 
-    # Iterate over messages until closed
     for msg in ch:
-        print(f"Received: {msg}")
+        # Extract sender PID from message
+        _, sender_pid, data = msg
+
+        # Process and reply
+        result = process(data)
+        reply(sender_pid, ('response', result))
 ```
 
 ### Python Side (Async)
 
 ```python
-from erlang.channel import Channel
+from erlang.channel import Channel, reply
 
 async def process_messages(channel_ref):
     ch = Channel(channel_ref)
 
-    # Async iteration - yields to other coroutines while waiting
     async for msg in ch:
-        print(f"Received: {msg}")
+        # Extract sender PID from message
+        _, sender_pid, data = msg
+
+        # Process and reply
+        result = await process(data)
+        reply(sender_pid, ('response', result))
 ```
 
 ## Erlang API
