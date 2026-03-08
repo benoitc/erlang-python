@@ -867,4 +867,56 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
 ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]);
 
+/* ============================================================================
+ * Direct FD Operations
+ * ============================================================================ */
+
+/**
+ * @brief Read from file descriptor
+ *
+ * NIF: fd_read(Fd, Size) -> {ok, Data} | {error, Reason}
+ */
+ERL_NIF_TERM nif_fd_read(ErlNifEnv *env, int argc,
+                          const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Write to file descriptor
+ *
+ * NIF: fd_write(Fd, Data) -> {ok, Written} | {error, Reason}
+ */
+ERL_NIF_TERM nif_fd_write(ErlNifEnv *env, int argc,
+                           const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Register FD for read selection
+ *
+ * NIF: fd_select_read(Fd) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_fd_select_read(ErlNifEnv *env, int argc,
+                                 const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Register FD for write selection
+ *
+ * NIF: fd_select_write(Fd) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_fd_select_write(ErlNifEnv *env, int argc,
+                                  const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Create Unix socketpair
+ *
+ * NIF: socketpair() -> {ok, {Fd1, Fd2}} | {error, Reason}
+ */
+ERL_NIF_TERM nif_socketpair(ErlNifEnv *env, int argc,
+                             const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Close raw file descriptor (integer)
+ *
+ * NIF: fd_close(Fd) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_fd_close(ErlNifEnv *env, int argc,
+                           const ERL_NIF_TERM argv[]);
+
 #endif /* PY_EVENT_LOOP_H */

@@ -3338,6 +3338,237 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
 }
 
 /* ============================================================================
+ * Direct FD Operations
+ *
+ * These functions provide direct FD read/write for proxy/bridge use cases.
+ * ============================================================================ */
+
+/**
+ * fd_read(Fd, Size) -> {ok, Data} | {error, Reason}
+ *
+ * Read up to Size bytes from a file descriptor.
+ */
+ERL_NIF_TERM nif_fd_read(ErlNifEnv *env, int argc,
+                          const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    int fd;
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    unsigned long size;
+    if (!enif_get_ulong(env, argv[1], &size)) {
+        return make_error(env, "invalid_size");
+    }
+
+    if (size > 1024 * 1024) {
+        size = 1024 * 1024;
+    }
+
+    ErlNifBinary bin;
+    if (!enif_alloc_binary(size, &bin)) {
+        return make_error(env, "alloc_failed");
+    }
+
+    ssize_t n = read(fd, bin.data, bin.size);
+    if (n < 0) {
+        enif_release_binary(&bin);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return make_error(env, "eagain");
+        }
+        return make_error(env, strerror(errno));
+    }
+
+    if ((size_t)n < bin.size) {
+        enif_realloc_binary(&bin, n);
+    }
+
+    ERL_NIF_TERM data = enif_make_binary(env, &bin);
+    return enif_make_tuple2(env, ATOM_OK, data);
+}
+
+/**
+ * fd_write(Fd, Data) -> {ok, Written} | {error, Reason}
+ *
+ * Write data to a file descriptor.
+ */
+ERL_NIF_TERM nif_fd_write(ErlNifEnv *env, int argc,
+                           const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    int fd;
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    ErlNifBinary bin;
+    if (!enif_inspect_binary(env, argv[1], &bin)) {
+        return make_error(env, "invalid_data");
+    }
+
+    ssize_t n = write(fd, bin.data, bin.size);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return make_error(env, "eagain");
+        }
+        return make_error(env, strerror(errno));
+    }
+
+    return enif_make_tuple2(env, ATOM_OK, enif_make_long(env, n));
+}
+
+/**
+ * fd_select_read(Fd) -> {ok, FdRef} | {error, Reason}
+ *
+ * Register FD for read selection. Caller receives {select, FdRef, Ref, ready_input}.
+ * Returns a resource reference that must be kept alive while monitoring.
+ */
+ERL_NIF_TERM nif_fd_select_read(ErlNifEnv *env, int argc,
+                                 const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    int fd;
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    ErlNifPid caller_pid;
+    if (!enif_self(env, &caller_pid)) {
+        return make_error(env, "no_caller_pid");
+    }
+
+    /* Allocate fd resource */
+    fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
+                                                 sizeof(fd_resource_t));
+    if (fd_res == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    fd_res->fd = fd;
+    fd_res->read_callback_id = 0;
+    fd_res->write_callback_id = 0;
+    fd_res->owner_pid = caller_pid;
+    fd_res->reader_active = true;
+    fd_res->writer_active = false;
+    fd_res->loop = NULL;
+    atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
+    fd_res->monitor_active = false;
+    fd_res->owns_fd = false;  /* Caller owns the fd */
+
+    int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_READ,
+                          fd_res, &caller_pid, enif_make_ref(env));
+    if (ret < 0) {
+        enif_release_resource(fd_res);
+        return make_error(env, "select_failed");
+    }
+
+    ERL_NIF_TERM fd_term = enif_make_resource(env, fd_res);
+    enif_release_resource(fd_res);  /* Term now holds the reference */
+
+    return enif_make_tuple2(env, ATOM_OK, fd_term);
+}
+
+/**
+ * fd_select_write(Fd) -> {ok, FdRef} | {error, Reason}
+ *
+ * Register FD for write selection. Caller receives {select, FdRef, Ref, ready_output}.
+ * Returns a resource reference that must be kept alive while monitoring.
+ */
+ERL_NIF_TERM nif_fd_select_write(ErlNifEnv *env, int argc,
+                                  const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    int fd;
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    ErlNifPid caller_pid;
+    if (!enif_self(env, &caller_pid)) {
+        return make_error(env, "no_caller_pid");
+    }
+
+    /* Allocate fd resource */
+    fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
+                                                 sizeof(fd_resource_t));
+    if (fd_res == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    fd_res->fd = fd;
+    fd_res->read_callback_id = 0;
+    fd_res->write_callback_id = 0;
+    fd_res->owner_pid = caller_pid;
+    fd_res->reader_active = false;
+    fd_res->writer_active = true;
+    fd_res->loop = NULL;
+    atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
+    fd_res->monitor_active = false;
+    fd_res->owns_fd = false;  /* Caller owns the fd */
+
+    int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_WRITE,
+                          fd_res, &caller_pid, enif_make_ref(env));
+    if (ret < 0) {
+        enif_release_resource(fd_res);
+        return make_error(env, "select_failed");
+    }
+
+    ERL_NIF_TERM fd_term = enif_make_resource(env, fd_res);
+    enif_release_resource(fd_res);  /* Term now holds the reference */
+
+    return enif_make_tuple2(env, ATOM_OK, fd_term);
+}
+
+/**
+ * socketpair() -> {ok, {Fd1, Fd2}} | {error, Reason}
+ *
+ * Create a Unix socketpair for bidirectional communication.
+ */
+ERL_NIF_TERM nif_socketpair(ErlNifEnv *env, int argc,
+                             const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+        return make_error(env, strerror(errno));
+    }
+
+    int flags1 = fcntl(fds[0], F_GETFL, 0);
+    int flags2 = fcntl(fds[1], F_GETFL, 0);
+    fcntl(fds[0], F_SETFL, flags1 | O_NONBLOCK);
+    fcntl(fds[1], F_SETFL, flags2 | O_NONBLOCK);
+
+    ERL_NIF_TERM fd_tuple = enif_make_tuple2(env,
+        enif_make_int(env, fds[0]),
+        enif_make_int(env, fds[1]));
+
+    return enif_make_tuple2(env, ATOM_OK, fd_tuple);
+}
+
+/**
+ * fd_close(Fd) -> ok | {error, Reason}
+ *
+ * Close a raw file descriptor (integer).
+ */
+ERL_NIF_TERM nif_fd_close(ErlNifEnv *env, int argc,
+                           const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    int fd;
+    if (!enif_get_int(env, argv[0], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    if (close(fd) < 0) {
+        return make_error(env, strerror(errno));
+    }
+
+    return ATOM_OK;
+}
+
+/* ============================================================================
  * Python Module: py_event_loop
  *
  * This provides Python-callable functions for the event loop, allowing
