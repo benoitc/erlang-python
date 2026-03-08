@@ -799,4 +799,72 @@ int create_default_event_loop(ErlNifEnv *env);
  */
 int init_subinterpreter_event_loop(ErlNifEnv *env);
 
+/* ============================================================================
+ * Reactor NIF Functions (Erlang-as-Reactor architecture)
+ * ============================================================================ */
+
+/**
+ * @brief Register a file descriptor for reactor monitoring
+ *
+ * NIF: reactor_register_fd(ContextRef, Fd, OwnerPid) -> {ok, FdRef} | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_register_fd(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Re-register for read events after a one-shot event
+ *
+ * NIF: reactor_reselect_read(FdRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_reselect_read(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Register for write events
+ *
+ * NIF: reactor_select_write(FdRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_select_write(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Get the FD integer from an FD resource
+ *
+ * NIF: get_fd_from_resource(FdRef) -> Fd | {error, Reason}
+ */
+ERL_NIF_TERM nif_get_fd_from_resource(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Call Python protocol on_read_ready
+ *
+ * NIF: reactor_on_read_ready(ContextRef, Fd) -> {ok, Action} | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
+                                        const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Call Python protocol on_write_ready
+ *
+ * NIF: reactor_on_write_ready(ContextRef, Fd) -> {ok, Action} | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
+                                         const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Initialize connection with Python protocol
+ *
+ * NIF: reactor_init_connection(ContextRef, Fd, ClientInfo) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Close FD and cleanup Python protocol
+ *
+ * NIF: reactor_close_fd(FdRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
+                                   const ERL_NIF_TERM argv[]);
+
 #endif /* PY_EVENT_LOOP_H */
