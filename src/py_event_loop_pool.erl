@@ -40,7 +40,7 @@
 ]).
 
 -record(state, {
-    loops :: [reference()],
+    loops :: tuple(),  %% tuple of {LoopRef, WorkerPid} for O(1) access
     num_loops :: non_neg_integer(),
     next_idx :: non_neg_integer(),
     supported :: boolean()
@@ -84,12 +84,11 @@ get_stats() ->
 init([NumLoops]) ->
     process_flag(trap_exit, true),
 
-    %% Get the event loop from py_event_loop module
-    case py_event_loop:get_loop() of
-        {ok, LoopRef} ->
-            %% For now, use a single shared event loop
-            %% In the future, we could create multiple loops for parallelism
-            Loops = lists:duplicate(NumLoops, LoopRef),
+    %% Create multiple independent event loops for true parallelism
+    case create_loops(NumLoops, []) of
+        {ok, LoopList} ->
+            %% Convert to tuple for O(1) element access
+            Loops = list_to_tuple(LoopList),
             {ok, #state{
                 loops = Loops,
                 num_loops = NumLoops,
@@ -97,13 +96,32 @@ init([NumLoops]) ->
                 supported = true
             }};
         {error, Reason} ->
-            error_logger:warning_msg("py_event_loop_pool: event loop not available: ~p~n", [Reason]),
+            error_logger:warning_msg("py_event_loop_pool: failed to create loops: ~p~n", [Reason]),
             {ok, #state{
-                loops = [],
+                loops = {},
                 num_loops = 0,
                 next_idx = 0,
                 supported = false
             }}
+    end.
+
+%% @private Create NumLoops independent event loops with workers
+create_loops(0, Acc) ->
+    {ok, lists:reverse(Acc)};
+create_loops(N, Acc) ->
+    case py_nif:event_loop_new() of
+        {ok, LoopRef} ->
+            WorkerId = iolist_to_binary([<<"pool_">>, integer_to_binary(N)]),
+            case py_event_worker:start_link(WorkerId, LoopRef) of
+                {ok, WorkerPid} ->
+                    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
+                    ok = py_nif:event_loop_set_id(LoopRef, WorkerId),
+                    create_loops(N - 1, [{LoopRef, WorkerPid} | Acc]);
+                {error, Reason} ->
+                    {error, {worker_start_failed, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {loop_create_failed, Reason}}
     end.
 
 handle_call(get_stats, _From, State) ->
@@ -118,9 +136,9 @@ handle_call({run_async, _Request}, _From, #state{supported = false} = State) ->
     {reply, {error, event_loop_not_available}, State};
 
 handle_call({run_async, Request}, _From, State) ->
-    %% Get the next loop in round-robin fashion
+    %% Get the next loop in round-robin fashion with O(1) tuple access
     Idx = State#state.next_idx rem State#state.num_loops + 1,
-    LoopRef = lists:nth(Idx, State#state.loops),
+    {LoopRef, _WorkerPid} = element(Idx, State#state.loops),
 
     %% Submit to the event loop
     Result = py_event_loop:run_async(LoopRef, Request),
@@ -135,11 +153,17 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({'EXIT', _Pid, _Reason}, State) ->
-    %% Event loop died, mark as unsupported
-    {noreply, State#state{supported = false, loops = [], num_loops = 0}};
+    %% A worker died, mark pool as unsupported
+    %% Future: could try to restart just the failed loop/worker pair
+    {noreply, State#state{supported = false, loops = {}, num_loops = 0}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{loops = Loops}) ->
+    %% Clean up all loops and workers
+    lists:foreach(fun({LoopRef, WorkerPid}) ->
+        catch py_event_worker:stop(WorkerPid),
+        catch py_nif:event_loop_destroy(LoopRef)
+    end, tuple_to_list(Loops)),
     ok.
