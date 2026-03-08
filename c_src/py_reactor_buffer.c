@@ -144,6 +144,30 @@ static PyBufferProcs ReactorBuffer_as_buffer = {
 };
 
 /* ============================================================================
+ * Cached Memoryview Helper
+ * ============================================================================ */
+
+/**
+ * Get or create the cached memoryview for fast buffer operations.
+ * The memoryview is created lazily and cached for subsequent accesses.
+ */
+static PyObject *ReactorBuffer_get_memoryview(ReactorBufferObject *self) {
+    if (self->cached_memoryview == NULL) {
+        if (self->resource == NULL || self->resource->data == NULL) {
+            PyErr_SetString(PyExc_BufferError, "Buffer has been released");
+            return NULL;
+        }
+        /* Create memoryview from self (uses our buffer protocol) */
+        self->cached_memoryview = PyMemoryView_FromObject((PyObject *)self);
+        if (self->cached_memoryview == NULL) {
+            return NULL;
+        }
+    }
+    Py_INCREF(self->cached_memoryview);
+    return self->cached_memoryview;
+}
+
+/* ============================================================================
  * Python Sequence Protocol
  * ============================================================================ */
 
@@ -230,6 +254,7 @@ static PyMappingMethods ReactorBuffer_as_mapping = {
  * ============================================================================ */
 
 static void ReactorBuffer_dealloc(ReactorBufferObject *self) {
+    Py_CLEAR(self->cached_memoryview);
     if (self->resource_ref != NULL) {
         enif_release_resource(self->resource_ref);
         self->resource_ref = NULL;
@@ -244,6 +269,11 @@ static PyObject *ReactorBuffer_bytes(ReactorBufferObject *self, PyObject *Py_UNU
     }
     return PyBytes_FromStringAndSize((char *)self->resource->data,
                                       self->resource->size);
+}
+
+/* Return memoryview for zero-copy access */
+static PyObject *ReactorBuffer_memoryview(ReactorBufferObject *self, PyObject *Py_UNUSED(ignored)) {
+    return ReactorBuffer_get_memoryview(self);
 }
 
 static PyObject *ReactorBuffer_repr(ReactorBufferObject *self) {
@@ -663,6 +693,8 @@ static PyObject *ReactorBuffer_test_create(PyTypeObject *type, PyObject *args) {
 static PyMethodDef ReactorBuffer_methods[] = {
     {"__bytes__", (PyCFunction)ReactorBuffer_bytes, METH_NOARGS,
      "Return bytes copy of buffer"},
+    {"memoryview", (PyCFunction)ReactorBuffer_memoryview, METH_NOARGS,
+     "Return a memoryview for zero-copy access"},
     {"startswith", (PyCFunction)ReactorBuffer_startswith, METH_VARARGS,
      "Return True if buffer starts with prefix"},
     {"endswith", (PyCFunction)ReactorBuffer_endswith, METH_VARARGS,
@@ -724,6 +756,7 @@ PyObject *ReactorBuffer_from_resource(reactor_buffer_resource_t *resource,
 
     obj->resource = resource;
     obj->resource_ref = resource_ref;
+    obj->cached_memoryview = NULL;  /* Created lazily on first use */
     enif_keep_resource(resource_ref);
 
     return (PyObject *)obj;

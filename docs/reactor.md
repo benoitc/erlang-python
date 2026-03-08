@@ -226,10 +226,19 @@ def data_received(self, data):
 
 ### Performance Considerations
 
-- For small reads (<1KB), the overhead of buffer management may exceed benefits
-- For large reads (>=1KB), zero-copy provides 15-25% throughput improvement
-- Use `memoryview()` for parsing without copying
-- Call `bytes(data)` only when you need a persistent copy
+The zero-copy benefit is in the NIF read path - data is read directly into a buffer that Python wraps without copying. This avoids the overhead of creating a Python bytes object for every read.
+
+- **NIF read path**: Data goes directly from kernel to Python without intermediate copies
+- **Parsing operations**: `startswith()`, `find()` etc. are optimized C implementations
+- **Direct memoryview access**: Use `data.memoryview()` for maximum zero-copy performance
+- **Creating bytes**: Call `bytes(data)` only when you need a persistent copy
+
+```python
+# For maximum performance, use memoryview slicing for comparisons
+mv = data.memoryview()
+if mv[:3] == b'GET':
+    # Process GET request
+```
 
 ## Action Return Values
 

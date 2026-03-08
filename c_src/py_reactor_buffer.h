@@ -91,11 +91,15 @@ extern PyTypeObject ReactorBufferType;
 /**
  * @struct ReactorBufferObject
  * @brief Python object wrapping a reactor buffer resource
+ *
+ * Uses a cached memoryview internally for optimal buffer protocol performance.
+ * The memoryview is created lazily on first buffer access.
  */
 typedef struct {
     PyObject_HEAD
     reactor_buffer_resource_t *resource;  /**< NIF resource (we hold a reference) */
     void *resource_ref;                   /**< For releasing the resource */
+    PyObject *cached_memoryview;          /**< Cached memoryview for fast buffer access */
 } ReactorBufferObject;
 
 /* ============================================================================
