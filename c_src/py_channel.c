@@ -157,6 +157,61 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
     return 0;
 }
 
+int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
+    pthread_mutex_lock(&channel->mutex);
+
+    if (channel->closed) {
+        enif_release_binary(bin);
+        pthread_mutex_unlock(&channel->mutex);
+        return -1;
+    }
+
+    /* Check backpressure */
+    if (channel->max_size > 0 && channel->current_size + bin->size > channel->max_size) {
+        enif_release_binary(bin);
+        pthread_mutex_unlock(&channel->mutex);
+        return 1;  /* Busy - backpressure */
+    }
+
+    size_t msg_size = bin->size;
+
+    /* Directly enqueue - transfers ownership to IOQueue */
+    if (!enif_ioq_enq_binary(channel->queue, bin, 0)) {
+        enif_release_binary(bin);
+        pthread_mutex_unlock(&channel->mutex);
+        return -1;
+    }
+
+    channel->current_size += msg_size;
+
+    /* Check if there's a waiting context to resume */
+    bool should_resume = (channel->waiting != NULL);
+
+    /* Check if there's an async waiter to dispatch */
+    erlang_event_loop_t *loop_to_wake = NULL;
+    uint64_t callback_id = 0;
+
+    if (channel->has_waiter) {
+        loop_to_wake = channel->waiter_loop;
+        callback_id = channel->waiter_callback_id;
+        channel->has_waiter = false;
+        channel->waiter_loop = NULL;
+    }
+
+    pthread_mutex_unlock(&channel->mutex);
+
+    if (should_resume) {
+        channel_resume_waiting(channel);
+    }
+
+    if (loop_to_wake != NULL) {
+        event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
+        enif_release_resource(loop_to_wake);
+    }
+
+    return 0;
+}
+
 int channel_try_receive(py_channel_t *channel, unsigned char **out_data, size_t *out_size) {
     pthread_mutex_lock(&channel->mutex);
 
@@ -516,6 +571,10 @@ static ERL_NIF_TERM nif_channel_create(ErlNifEnv *env, int argc, const ERL_NIF_T
  * @brief Send a message to a channel
  *
  * nif_channel_send(ChannelRef, Term) -> ok | busy | {error, closed}
+ *
+ * Optimized: serializes the term once and passes the binary directly to
+ * channel_send_owned_binary, eliminating the extra allocation and copy
+ * that would occur in channel_send.
  */
 static ERL_NIF_TERM nif_channel_send(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
@@ -525,15 +584,19 @@ static ERL_NIF_TERM nif_channel_send(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_channel");
     }
 
-    /* Serialize term to binary using external term format */
+    /*
+     * Serialize term to binary using external term format.
+     * term_to_binary allocates and we own the binary, so pass it
+     * directly to channel_send_owned_binary to avoid double copy.
+     */
     ErlNifBinary bin;
     if (!enif_term_to_binary(env, argv[1], &bin)) {
         return make_error(env, "term_to_binary_failed");
     }
 
-    int result = channel_send(channel, bin.data, bin.size);
-    enif_release_binary(&bin);
+    int result = channel_send_owned_binary(channel, &bin);
 
+    /* bin is now owned by IOQueue or released on error */
     switch (result) {
         case 0:
             return ATOM_OK;

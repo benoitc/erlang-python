@@ -205,6 +205,19 @@ py_channel_t *channel_alloc(size_t max_size);
 int channel_send(py_channel_t *channel, const unsigned char *data, size_t size);
 
 /**
+ * @brief Send an owned binary to a channel (zero-copy fast path)
+ *
+ * Takes ownership of the binary and directly enqueues it to the IOQueue
+ * without an additional copy. The binary is either consumed by the queue
+ * or released on error.
+ *
+ * @param channel Channel to send to
+ * @param bin Binary to send (ownership transferred, do not release after call)
+ * @return 0 on success, 1 if busy (backpressure), -1 on error
+ */
+int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin);
+
+/**
  * @brief Try to receive a message from a channel (non-blocking)
  *
  * @param channel Channel to receive from
