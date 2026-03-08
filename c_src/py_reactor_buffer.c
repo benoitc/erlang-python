@@ -29,6 +29,30 @@
 #include <errno.h>
 #include <string.h>
 
+/* Portable memmem fallback for systems that don't have it.
+ * memmem is available on: Linux (glibc), macOS, FreeBSD >= 13
+ * Not available on: older BSDs, some embedded systems */
+#if !defined(__GLIBC__) && !defined(__APPLE__) && !defined(__FreeBSD__)
+static void *portable_memmem(const void *haystack, size_t haystacklen,
+                              const void *needle, size_t needlelen) {
+    if (needlelen == 0) return (void *)haystack;
+    if (needlelen > haystacklen) return NULL;
+
+    const unsigned char *h = haystack;
+    const unsigned char *n = needle;
+    const unsigned char *end = h + haystacklen - needlelen + 1;
+
+    while (h < end) {
+        h = memchr(h, n[0], end - h);
+        if (h == NULL) return NULL;
+        if (memcmp(h, n, needlelen) == 0) return (void *)h;
+        h++;
+    }
+    return NULL;
+}
+#define memmem portable_memmem
+#endif
+
 /* Resource type - initialized in py_nif.c */
 ErlNifResourceType *REACTOR_BUFFER_RESOURCE_TYPE = NULL;
 
