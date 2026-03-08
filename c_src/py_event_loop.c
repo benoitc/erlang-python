@@ -36,6 +36,7 @@
 
 #include "py_nif.h"
 #include "py_event_loop.h"
+#include "py_reactor_buffer.h"
 
 /* ============================================================================
  * Global State
@@ -3065,7 +3066,8 @@ ERL_NIF_TERM nif_get_fd_from_resource(ErlNifEnv *env, int argc,
 /**
  * reactor_on_read_ready(ContextRef, Fd) -> {ok, Action} | {error, Reason}
  *
- * Call Python's erlang_reactor.on_read_ready(fd) and return the action.
+ * Read data from fd and call Python's erlang_reactor.on_read_ready(fd, data).
+ * Uses zero-copy ReactorBuffer for efficient data transfer.
  * Action is one of: <<"continue">>, <<"write_pending">>, <<"close">>
  *
  * This is a dirty NIF since it acquires the GIL and calls Python.
@@ -3084,24 +3086,54 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd");
     }
 
+    /* Read data from fd into buffer resource (before acquiring GIL) */
+    reactor_buffer_resource_t *buffer = NULL;
+    size_t bytes_read = 0;
+    int read_result = reactor_buffer_read_fd(fd, REACTOR_MAX_READ_SIZE,
+                                              &buffer, &bytes_read);
+
+    if (read_result < 0) {
+        return make_error(env, "read_failed");
+    }
+
+    if (read_result == 1 || (read_result == 0 && buffer == NULL)) {
+        /* EOF or would block with no data */
+        return enif_make_tuple2(env, ATOM_OK,
+            enif_make_atom(env, read_result == 1 ? "close" : "continue"));
+    }
+
     /* Acquire context (handles both worker mode and subinterpreter mode) */
     py_context_guard_t guard = py_context_acquire(ctx);
     if (!guard.acquired) {
+        enif_release_resource(buffer);
         return make_error(env, "acquire_failed");
+    }
+
+    /* Create ReactorBuffer Python object wrapping the resource */
+    PyObject *py_buffer = ReactorBuffer_from_resource(buffer, buffer);
+    /* Release our reference - Python now owns the only reference */
+    enif_release_resource(buffer);
+
+    if (py_buffer == NULL) {
+        PyErr_Clear();
+        py_context_release(&guard);
+        return make_error(env, "buffer_creation_failed");
     }
 
     /* Import erlang.reactor module */
     PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
+        Py_DECREF(py_buffer);
         py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
-    /* Call on_read_ready(fd) */
+    /* Call on_read_ready(fd, data) with the buffer */
     PyObject *result = PyObject_CallMethod(reactor_module, "on_read_ready",
-                                            "i", fd);
+                                            "iO", fd, py_buffer);
     Py_DECREF(reactor_module);
+    Py_DECREF(py_buffer);
 
     if (result == NULL) {
         PyErr_Clear();
