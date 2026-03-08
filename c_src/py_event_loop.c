@@ -3084,14 +3084,17 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd");
     }
 
-    /* Acquire GIL and call Python */
-    gil_guard_t guard = gil_acquire();
+    /* Acquire context (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
 
-    /* Import erlang_reactor module */
+    /* Import erlang.reactor module */
     PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
@@ -3102,7 +3105,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
 
     if (result == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "on_read_ready_failed");
     }
 
@@ -3122,7 +3125,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
     }
 
     Py_DECREF(result);
-    gil_release(guard);
+    py_context_release(&guard);
 
     return enif_make_tuple2(env, ATOM_OK, action);
 }
@@ -3149,14 +3152,17 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd");
     }
 
-    /* Acquire GIL and call Python */
-    gil_guard_t guard = gil_acquire();
+    /* Acquire context (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
 
-    /* Import erlang_reactor module */
+    /* Import erlang.reactor module */
     PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
@@ -3167,7 +3173,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
 
     if (result == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "on_write_ready_failed");
     }
 
@@ -3187,7 +3193,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
     }
 
     Py_DECREF(result);
-    gil_release(guard);
+    py_context_release(&guard);
 
     return enif_make_tuple2(env, ATOM_OK, action);
 }
@@ -3219,23 +3225,26 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_client_info");
     }
 
-    /* Acquire GIL and call Python */
-    gil_guard_t guard = gil_acquire();
+    /* Acquire context (handles both worker mode and subinterpreter mode) */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
 
     /* Convert Erlang map to Python dict */
     PyObject *client_info = term_to_py(env, argv[2]);
     if (client_info == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "client_info_conversion_failed");
     }
 
-    /* Import erlang_reactor module */
+    /* Import erlang.reactor module */
     PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         Py_DECREF(client_info);
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "import_erlang_reactor_failed");
     }
 
@@ -3247,12 +3256,12 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
 
     if (result == NULL) {
         PyErr_Clear();
-        gil_release(guard);
+        py_context_release(&guard);
         return make_error(env, "init_connection_failed");
     }
 
     Py_DECREF(result);
-    gil_release(guard);
+    py_context_release(&guard);
 
     return ATOM_OK;
 }
