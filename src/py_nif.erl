@@ -188,7 +188,7 @@
     reactor_on_read_ready/2,
     reactor_on_write_ready/2,
     reactor_init_connection/3,
-    reactor_close_fd/1
+    reactor_close_fd/2
 ]).
 
 -on_load(load_nif/0).
@@ -1524,8 +1524,9 @@ reactor_init_connection(_ContextRef, _Fd, _ClientInfo) ->
 %% Calls Python's erlang_reactor.close_connection(fd) to clean up
 %% the protocol handler, then closes the FD.
 %%
+%% @param ContextRef Context resource reference
 %% @param FdRef FD resource reference
 %% @returns ok | {error, Reason}
--spec reactor_close_fd(reference()) -> ok | {error, term()}.
-reactor_close_fd(_FdRef) ->
+-spec reactor_close_fd(reference(), reference()) -> ok | {error, term()}.
+reactor_close_fd(_ContextRef, _FdRef) ->
     ?NIF_STUB.

@@ -862,7 +862,7 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
 /**
  * @brief Close FD and cleanup Python protocol
  *
- * NIF: reactor_close_fd(FdRef) -> ok | {error, Reason}
+ * NIF: reactor_close_fd(ContextRef, FdRef) -> ok | {error, Reason}
  */
 ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]);
