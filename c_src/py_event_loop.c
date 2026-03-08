@@ -3088,7 +3088,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
     gil_guard_t guard = gil_acquire();
 
     /* Import erlang_reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
         gil_release(guard);
@@ -3153,7 +3153,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
     gil_guard_t guard = gil_acquire();
 
     /* Import erlang_reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         PyErr_Clear();
         gil_release(guard);
@@ -3231,7 +3231,7 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
     }
 
     /* Import erlang_reactor module */
-    PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
     if (reactor_module == NULL) {
         Py_DECREF(client_info);
         PyErr_Clear();
@@ -3286,7 +3286,7 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
     if (fd >= 0) {
         gil_guard_t guard = gil_acquire();
 
-        PyObject *reactor_module = PyImport_ImportModule("erlang_reactor");
+        PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
         if (reactor_module != NULL) {
             PyObject *result = PyObject_CallMethod(reactor_module,
                                                     "close_connection", "i", fd);

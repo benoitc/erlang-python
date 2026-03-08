@@ -39,6 +39,7 @@
 #include "py_nif.h"
 #include "py_asgi.h"
 #include "py_wsgi.h"
+#include "py_event_loop.h"
 
 /* ============================================================================
  * Global state definitions
@@ -3865,7 +3866,17 @@ static ErlNifFunc nif_funcs[] = {
     {"ref_interp_id", 1, nif_ref_interp_id, 0},
     {"ref_to_term", 1, nif_ref_to_term, 0},
     {"ref_getattr", 2, nif_ref_getattr, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"ref_call_method", 3, nif_ref_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND}
+    {"ref_call_method", 3, nif_ref_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+
+    /* Reactor NIFs - Erlang-as-Reactor architecture */
+    {"reactor_register_fd", 3, nif_reactor_register_fd, 0},
+    {"reactor_reselect_read", 1, nif_reactor_reselect_read, 0},
+    {"reactor_select_write", 1, nif_reactor_select_write, 0},
+    {"get_fd_from_resource", 1, nif_get_fd_from_resource, 0},
+    {"reactor_on_read_ready", 2, nif_reactor_on_read_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"reactor_on_write_ready", 2, nif_reactor_on_write_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"reactor_init_connection", 3, nif_reactor_init_connection, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"reactor_close_fd", 1, nif_reactor_close_fd, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)
