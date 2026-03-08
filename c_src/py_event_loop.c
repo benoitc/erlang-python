@@ -1833,6 +1833,11 @@ static inline void pending_hash_clear(erlang_event_loop_t *loop) {
 
 void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
                             uint64_t callback_id, int fd) {
+    /* Backpressure: check pending count before acquiring lock (fast path) */
+    if (atomic_load(&loop->pending_count) >= MAX_PENDING_EVENTS) {
+        return;  /* Queue full, drop event */
+    }
+
     pthread_mutex_lock(&loop->mutex);
 
     /* O(1) duplicate check using hash set */
