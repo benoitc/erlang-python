@@ -859,21 +859,20 @@ static void executor_stop(void) {
 /**
  * Main function for a multi-executor thread.
  * Each executor has its own queue and processes requests independently.
+ *
+ * GIL handling: Acquire GIL only when processing work, not while idle.
+ * This prevents idle executors from competing with dirty schedulers
+ * running actual Python work via the context-based API.
  */
 static void *multi_executor_thread_main(void *arg) {
     executor_t *exec = (executor_t *)arg;
-
-    /* Acquire GIL for this thread */
-    PyGILState_STATE gstate = PyGILState_Ensure();
 
     exec->running = true;
 
     while (!exec->shutdown) {
         py_request_t *req = NULL;
 
-        /* Release GIL while waiting for work */
-        Py_BEGIN_ALLOW_THREADS
-
+        /* Wait for work - NO GIL held while idle */
         pthread_mutex_lock(&exec->mutex);
         while (exec->queue_head == NULL && !exec->shutdown) {
             pthread_cond_wait(&exec->cond, &exec->mutex);
@@ -890,8 +889,6 @@ static void *multi_executor_thread_main(void *arg) {
         }
         pthread_mutex_unlock(&exec->mutex);
 
-        Py_END_ALLOW_THREADS
-
         if (req != NULL) {
             if (req->type == PY_REQ_SHUTDOWN) {
                 pthread_mutex_lock(&req->mutex);
@@ -900,10 +897,16 @@ static void *multi_executor_thread_main(void *arg) {
                 pthread_mutex_unlock(&req->mutex);
                 break;
             } else {
-                /* Process the request with GIL held */
+                /* Acquire GIL only for actual work */
+                PyGILState_STATE gstate = PyGILState_Ensure();
+
+                /* Process the request */
                 process_request(req);
 
-                /* Signal completion */
+                /* Release GIL immediately after processing */
+                PyGILState_Release(gstate);
+
+                /* Signal completion (outside GIL) */
                 pthread_mutex_lock(&req->mutex);
                 req->completed = true;
                 pthread_cond_signal(&req->cond);
@@ -913,7 +916,6 @@ static void *multi_executor_thread_main(void *arg) {
     }
 
     exec->running = false;
-    PyGILState_Release(gstate);
 
     return NULL;
 }
@@ -953,8 +955,8 @@ static int multi_executor_start(int num_executors) {
         return 0;
     }
 
-    if (num_executors <= 0) {
-        num_executors = 4;
+    if (num_executors < MIN_EXECUTORS) {
+        num_executors = MIN_EXECUTORS;
     }
     if (num_executors > MAX_EXECUTORS) {
         num_executors = MAX_EXECUTORS;

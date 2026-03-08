@@ -37,8 +37,12 @@ init([]) ->
     ContextMode = application:get_env(erlang_python, context_mode, auto),
     NumAsyncWorkers = application:get_env(erlang_python, num_async_workers, 2),
 
+    %% Default executors: 4 (benchmarked sweet spot for most workloads)
+    %% Can be overridden via {erlang_python, [{num_executors, N}]}
+    NumExecutors = application:get_env(erlang_python, num_executors, 4),
+
     %% Initialize Python runtime first
-    ok = py_nif:init(),
+    ok = py_nif:init(#{num_executors => NumExecutors}),
 
     %% Initialize the semaphore ETS table for rate limiting
     ok = py_semaphore:init(),
