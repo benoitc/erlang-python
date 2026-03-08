@@ -19,6 +19,11 @@
  * @brief Zero-copy buffer implementation for reactor protocol layer
  */
 
+/* Enable memmem on Linux (it's a GNU extension) */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "py_reactor_buffer.h"
 #include <unistd.h>
 #include <errno.h>
@@ -393,7 +398,6 @@ static PyObject *ReactorBuffer_find(ReactorBufferObject *self, PyObject *args) {
 
     Py_ssize_t result = -1;
     if (start <= end && sub_buf.len <= (end - start)) {
-        /* Simple search - for small patterns memmem isn't always available */
         const unsigned char *haystack = self->resource->data + start;
         Py_ssize_t haystack_len = end - start;
         const unsigned char *needle = sub_buf.buf;
@@ -401,12 +405,26 @@ static PyObject *ReactorBuffer_find(ReactorBufferObject *self, PyObject *args) {
 
         if (needle_len == 0) {
             result = start;
+        } else if (needle_len == 1) {
+            /* Single byte: use memchr (very fast) */
+            void *found = memchr(haystack, needle[0], haystack_len);
+            if (found != NULL) {
+                result = start + ((const unsigned char *)found - haystack);
+            }
         } else {
-            for (Py_ssize_t i = 0; i <= haystack_len - needle_len; i++) {
-                if (memcmp(haystack + i, needle, needle_len) == 0) {
-                    result = start + i;
+            /* Multi-byte: use memchr to find first byte, then memcmp to verify.
+             * This is faster than memmem for short patterns (HTTP parsing). */
+            const unsigned char *p = haystack;
+            Py_ssize_t remaining = haystack_len;
+            while (remaining >= needle_len) {
+                p = memchr(p, needle[0], remaining);
+                if (p == NULL) break;
+                if (memcmp(p, needle, needle_len) == 0) {
+                    result = start + (p - haystack);
                     break;
                 }
+                p++;
+                remaining = haystack_len - (p - haystack);
             }
         }
     }
@@ -450,11 +468,16 @@ static PyObject *ReactorBuffer_rfind(ReactorBufferObject *self, PyObject *args) 
         if (needle_len == 0) {
             result = end;
         } else {
-            for (Py_ssize_t i = haystack_len - needle_len; i >= 0; i--) {
-                if (memcmp(haystack + i, needle, needle_len) == 0) {
-                    result = start + i;
-                    break;
-                }
+            /* Use memmem iteratively to find last occurrence */
+            const unsigned char *search_start = haystack;
+            Py_ssize_t search_len = haystack_len;
+            void *found;
+            while ((found = memmem(search_start, search_len, needle, needle_len)) != NULL) {
+                result = start + ((const unsigned char *)found - haystack);
+                /* Continue searching after this match */
+                search_start = (const unsigned char *)found + 1;
+                search_len = haystack_len - (search_start - haystack);
+                if (search_len < needle_len) break;
             }
         }
     }
@@ -512,10 +535,29 @@ static PyObject *ReactorBuffer_count(ReactorBufferObject *self, PyObject *args) 
         const unsigned char *needle = sub_buf.buf;
         Py_ssize_t needle_len = sub_buf.len;
 
-        for (Py_ssize_t i = 0; i <= haystack_len - needle_len; i++) {
-            if (memcmp(haystack + i, needle, needle_len) == 0) {
+        if (needle_len == 1) {
+            /* Single byte: use memchr repeatedly */
+            const unsigned char *p = haystack;
+            Py_ssize_t remaining = haystack_len;
+            while ((p = memchr(p, needle[0], remaining)) != NULL) {
                 count++;
-                i += needle_len - 1;  /* Non-overlapping */
+                p++;
+                remaining = haystack_len - (p - haystack);
+            }
+        } else {
+            /* Multi-byte: use memchr + memcmp pattern */
+            const unsigned char *p = haystack;
+            Py_ssize_t remaining = haystack_len;
+            while (remaining >= needle_len) {
+                p = memchr(p, needle[0], remaining);
+                if (p == NULL) break;
+                if (memcmp(p, needle, needle_len) == 0) {
+                    count++;
+                    p += needle_len;  /* Non-overlapping */
+                } else {
+                    p++;
+                }
+                remaining = haystack_len - (p - haystack);
             }
         }
     } else if (sub_buf.len == 0 && start <= end) {
