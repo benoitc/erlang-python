@@ -76,6 +76,7 @@ stop(Pid) ->
 %% ============================================================================
 
 init([LoopRef]) ->
+    process_flag(message_queue_data, off_heap),
     process_flag(trap_exit, true),
     {ok, #state{loop_ref = LoopRef}}.
 
@@ -87,18 +88,14 @@ handle_cast(_Msg, State) ->
 
 %% Handle enif_select messages for read readiness
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
-    py_nif:handle_fd_event(FdRes, read),
-    %% Re-register for more events (enif_select is one-shot)
-    %% Uses fd_res->loop internally, no need to pass LoopRef
-    py_nif:reselect_reader_fd(FdRes),
+    %% Combined dispatch + reselect in single NIF call
+    py_nif:handle_fd_event_and_reselect(FdRes, read),
     {noreply, State};
 
 %% Handle enif_select messages for write readiness
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
-    py_nif:handle_fd_event(FdRes, write),
-    %% Re-register for more events (enif_select is one-shot)
-    %% Uses fd_res->loop internally, no need to pass LoopRef
-    py_nif:reselect_writer_fd(FdRes),
+    %% Combined dispatch + reselect in single NIF call
+    py_nif:handle_fd_event_and_reselect(FdRes, write),
     {noreply, State};
 
 %% Handle timer start request from call_later NIF (new format with LoopRef)

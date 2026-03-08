@@ -49,8 +49,9 @@
 /** @brief Maximum events to keep in freelist (Phase 7 optimization) */
 #define EVENT_FREELIST_SIZE 256
 
-/** @brief Size of pending event hash set for O(1) duplicate detection */
-#define PENDING_HASH_SIZE 128
+/** @brief Size of pending event hash set for O(1) duplicate detection
+ *  Note: Must be a power of 2 for efficient bitwise AND indexing */
+#define PENDING_HASH_SIZE 256
 
 /** @brief Event types for pending callbacks */
 typedef enum {
@@ -239,6 +240,11 @@ typedef struct erlang_event_loop {
 
     /** @brief Count of occupied slots in hash set */
     int pending_hash_count;
+
+    /* ========== Coalesced Wakeup Support ========== */
+
+    /** @brief Flag indicating a wakeup is pending (uvloop-style coalescing) */
+    _Atomic bool wake_pending;
 
     /* ========== Synchronous Sleep Support ========== */
 

@@ -22,18 +22,17 @@ Compared to generic `py:call()`-based handling:
 | Direct NIF | +25-30% | +25-30% |
 | **Total** | ~60-80% | ~60-80% |
 
-#### ASGI NIF Optimizations
+#### ASGI/WSGI NIF Optimizations
 
-The ASGI module includes six additional NIF-level optimizations:
+The ASGI and WSGI modules include additional NIF-level optimizations:
 
 | Optimization | Improvement | Description |
 |--------------|-------------|-------------|
+| Callable Caching | 3-5µs/req | Module imports and callable lookups cached per-interpreter |
 | Direct Response Extraction | 5-10% | Extract `(status, headers, body)` directly to Erlang terms |
 | Pre-Interned Headers | 3-5% | 16 common HTTP headers cached as PyBytes |
 | Cached Status Codes | 1-2% | 14 common status codes cached as PyLong |
 | Zero-Copy Body | 10-15% | Large bodies (≥1KB) use buffer protocol |
-| Scope Template Caching | 15-20% | Thread-local cache of 64 scope templates |
-| Lazy Header Conversion | 5-10% | Headers converted on-demand (≥4 headers) |
 
 **Total expected improvement: 40-60%** for typical ASGI workloads on top of the base optimizations.
 

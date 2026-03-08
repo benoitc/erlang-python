@@ -45,34 +45,24 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
-    #state{loop_ref = LoopRef, stats = Stats} = State,
     py_nif:handle_fd_event_and_reselect(FdRes, read),
-    py_nif:event_loop_wakeup(LoopRef),
-    NewStats = Stats#{select_count => maps:get(select_count, Stats, 0) + 1,
-                      dispatch_count => maps:get(dispatch_count, Stats, 0) + 1},
-    {noreply, State#state{stats = NewStats}};
+    {noreply, State};
 
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
-    #state{loop_ref = LoopRef, stats = Stats} = State,
     py_nif:handle_fd_event_and_reselect(FdRes, write),
-    py_nif:event_loop_wakeup(LoopRef),
-    NewStats = Stats#{select_count => maps:get(select_count, Stats, 0) + 1,
-                      dispatch_count => maps:get(dispatch_count, Stats, 0) + 1},
-    {noreply, State#state{stats = NewStats}};
+    {noreply, State};
 
 handle_info({start_timer, _LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
-    #state{timers = Timers, stats = Stats} = State,
+    #state{timers = Timers} = State,
     ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
     NewTimers = maps:put(TimerRef, {ErlTimerRef, CallbackId}, Timers),
-    NewStats = Stats#{timer_count => maps:get(timer_count, Stats, 0) + 1},
-    {noreply, State#state{timers = NewTimers, stats = NewStats}};
+    {noreply, State#state{timers = NewTimers}};
 
 handle_info({start_timer, DelayMs, CallbackId, TimerRef}, State) ->
-    #state{timers = Timers, stats = Stats} = State,
+    #state{timers = Timers} = State,
     ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
     NewTimers = maps:put(TimerRef, {ErlTimerRef, CallbackId}, Timers),
-    NewStats = Stats#{timer_count => maps:get(timer_count, Stats, 0) + 1},
-    {noreply, State#state{timers = NewTimers, stats = NewStats}};
+    {noreply, State#state{timers = NewTimers}};
 
 handle_info({cancel_timer, TimerRef}, State) ->
     #state{timers = Timers} = State,
@@ -86,31 +76,27 @@ handle_info({cancel_timer, TimerRef}, State) ->
 
 %% Synchronous sleep support for ASGI fast path
 handle_info({sleep_wait, DelayMs, SleepId}, State) ->
-    #state{sleeps = Sleeps, stats = Stats} = State,
+    #state{sleeps = Sleeps} = State,
     %% Schedule a timer that will trigger sleep_complete
     ErlTimerRef = erlang:send_after(DelayMs, self(), {sleep_complete, SleepId}),
     NewSleeps = maps:put(SleepId, ErlTimerRef, Sleeps),
-    NewStats = Stats#{sleep_count => maps:get(sleep_count, Stats, 0) + 1},
-    {noreply, State#state{sleeps = NewSleeps, stats = NewStats}};
+    {noreply, State#state{sleeps = NewSleeps}};
 
 handle_info({sleep_complete, SleepId}, State) ->
-    #state{loop_ref = LoopRef, sleeps = Sleeps, stats = Stats} = State,
+    #state{loop_ref = LoopRef, sleeps = Sleeps} = State,
     %% Remove from sleeps map and signal Python that sleep is done
     NewSleeps = maps:remove(SleepId, Sleeps),
     py_nif:dispatch_sleep_complete(LoopRef, SleepId),
-    NewStats = Stats#{dispatch_count => maps:get(dispatch_count, Stats, 0) + 1},
-    {noreply, State#state{sleeps = NewSleeps, stats = NewStats}};
+    {noreply, State#state{sleeps = NewSleeps}};
 
 handle_info({timeout, TimerRef}, State) ->
-    #state{loop_ref = LoopRef, timers = Timers, stats = Stats} = State,
+    #state{loop_ref = LoopRef, timers = Timers} = State,
     case maps:get(TimerRef, Timers, undefined) of
         undefined -> {noreply, State};
         {_ErlTimerRef, CallbackId} ->
             py_nif:dispatch_timer(LoopRef, CallbackId),
-            py_nif:event_loop_wakeup(LoopRef),
             NewTimers = maps:remove(TimerRef, Timers),
-            NewStats = Stats#{dispatch_count => maps:get(dispatch_count, Stats, 0) + 1},
-            {noreply, State#state{timers = NewTimers, stats = NewStats}}
+            {noreply, State#state{timers = NewTimers}}
     end;
 
 handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};

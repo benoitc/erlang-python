@@ -128,6 +128,15 @@ typedef struct wsgi_interp_state {
 
     /* HTTP header prefix */
     PyObject *http_prefix;          /**< "HTTP_" */
+
+    /* Callable cache (avoids per-request module imports) */
+    char *cached_module_name;       /**< Last used module name */
+    char *cached_callable_name;     /**< Last used callable name */
+    PyObject *cached_callable;      /**< Cached callable object */
+
+    char *cached_runner_name;       /**< Last used runner module name */
+    PyObject *cached_runner;        /**< Cached runner module */
+    PyObject *cached_run_func;      /**< Cached _run_wsgi_sync function */
 } wsgi_interp_state_t;
 
 /**
