@@ -339,7 +339,7 @@ handle_fd_handoff(Fd, ClientInfo, State) ->
 
                         {error, _Reason} ->
                             %% Failed to init connection, close
-                            py_nif:reactor_close_fd(FdRef),
+                            py_nif:reactor_close_fd(Ref, FdRef),
                             loop(State)
                     end;
 
