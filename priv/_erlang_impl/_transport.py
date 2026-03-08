@@ -40,8 +40,8 @@ class ErlangSocketTransport(transports.Transport):
     """
 
     __slots__ = (
-        '_loop', '_sock', '_protocol', '_buffer', '_closing', '_conn_lost',
-        '_write_ready', '_paused', '_extra', '_fileno', '_extra_loaded',
+        '_loop', '_sock', '_protocol', '_buffer', '_buffer_offset', '_closing',
+        '_conn_lost', '_write_ready', '_paused', '_extra', '_fileno', '_extra_loaded',
     )
 
     _buffer_factory = bytearray
@@ -53,6 +53,7 @@ class ErlangSocketTransport(transports.Transport):
         self._sock = sock
         self._protocol = protocol
         self._buffer = self._buffer_factory()
+        self._buffer_offset = 0  # Track consumed bytes for O(1) buffer management
         self._closing = False
         self._conn_lost = 0
         self._write_ready = True
@@ -99,7 +100,12 @@ class ErlangSocketTransport(transports.Transport):
         if not data:
             return
 
-        if not self._buffer:
+        # Check if no pending data (buffer empty or fully consumed)
+        no_pending = self._buffer_offset >= len(self._buffer)
+        if no_pending:
+            # Reset buffer state before adding new data
+            self._buffer = self._buffer_factory()
+            self._buffer_offset = 0
             try:
                 n = self._sock.send(data)
             except (BlockingIOError, InterruptedError):
@@ -118,14 +124,17 @@ class ErlangSocketTransport(transports.Transport):
 
     def _write_ready_cb(self):
         """Called when socket is ready for writing."""
-        if not self._buffer:
+        remaining = len(self._buffer) - self._buffer_offset
+        if remaining <= 0:
             self._loop.remove_writer(self._fileno)
             if self._closing:
                 self._call_connection_lost(None)
             return
 
         try:
-            n = self._sock.send(self._buffer)
+            # Use memoryview with offset for O(1) access to remaining data
+            data_view = memoryview(self._buffer)[self._buffer_offset:]
+            n = self._sock.send(data_view)
         except (BlockingIOError, InterruptedError):
             return
         except Exception as exc:
@@ -134,9 +143,13 @@ class ErlangSocketTransport(transports.Transport):
             return
 
         if n:
-            del self._buffer[:n]
+            self._buffer_offset += n  # O(1) offset update instead of O(n) deletion
 
-        if not self._buffer:
+        # Check if buffer is fully consumed
+        if self._buffer_offset >= len(self._buffer):
+            # Reset buffer when fully consumed
+            self._buffer = self._buffer_factory()
+            self._buffer_offset = 0
             self._loop.remove_writer(self._fileno)
             if self._closing:
                 self._call_connection_lost(None)
@@ -146,7 +159,8 @@ class ErlangSocketTransport(transports.Transport):
         if self._closing:
             return
         self._closing = True
-        if not self._buffer:
+        # Check if no pending data (buffer fully consumed)
+        if self._buffer_offset >= len(self._buffer):
             self._loop.remove_reader(self._fileno)
             self._call_connection_lost(None)
 
@@ -159,7 +173,8 @@ class ErlangSocketTransport(transports.Transport):
             return
         self._closing = True
         self._loop.remove_reader(self._fileno)
-        if not self._buffer:
+        # Check if no pending data (buffer fully consumed)
+        if self._buffer_offset >= len(self._buffer):
             self._conn_lost += 1
             self._call_connection_lost(None)
 

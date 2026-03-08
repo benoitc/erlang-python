@@ -45,15 +45,11 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
-    #state{loop_ref = LoopRef} = State,
     py_nif:handle_fd_event_and_reselect(FdRes, read),
-    py_nif:event_loop_wakeup(LoopRef),
     {noreply, State};
 
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
-    #state{loop_ref = LoopRef} = State,
     py_nif:handle_fd_event_and_reselect(FdRes, write),
-    py_nif:event_loop_wakeup(LoopRef),
     {noreply, State};
 
 handle_info({start_timer, _LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
@@ -99,7 +95,6 @@ handle_info({timeout, TimerRef}, State) ->
         undefined -> {noreply, State};
         {_ErlTimerRef, CallbackId} ->
             py_nif:dispatch_timer(LoopRef, CallbackId),
-            py_nif:event_loop_wakeup(LoopRef),
             NewTimers = maps:remove(TimerRef, Timers),
             {noreply, State#state{timers = NewTimers}}
     end;
