@@ -47,6 +47,7 @@ __all__ = [
     'on_read_ready',
     'on_write_ready',
     'close_connection',
+    'signal_write_ready',
 ]
 
 
@@ -153,6 +154,7 @@ class Protocol:
 # =============================================================================
 
 _protocols: Dict[int, Protocol] = {}
+_reactor_pids: Dict[int, object] = {}  # fd -> reactor PID
 _protocol_factory: Optional[Callable[[], Protocol]] = None
 
 
@@ -193,11 +195,15 @@ def init_connection(fd: int, client_info: dict):
         fd: File descriptor
         client_info: Connection metadata from Erlang
     """
-    global _protocols, _protocol_factory
+    global _protocols, _protocol_factory, _reactor_pids
     if _protocol_factory is not None:
         proto = _protocol_factory()
         proto.connection_made(fd, client_info)
         _protocols[fd] = proto
+        # Store reactor PID for signal_write_ready
+        reactor_pid = client_info.get('reactor_pid')
+        if reactor_pid is not None:
+            _reactor_pids[fd] = reactor_pid
 
 
 def on_read_ready(fd: int) -> str:
@@ -246,6 +252,27 @@ def close_connection(fd: int):
         fd: File descriptor
     """
     proto = _protocols.pop(fd, None)
+    _reactor_pids.pop(fd, None)
     if proto is not None:
         proto.closed = True
         proto.connection_lost()
+
+
+def signal_write_ready(fd: int) -> bool:
+    """Signal the reactor that a response is ready for the given fd.
+
+    Call this after an async task completes and the response buffer is ready.
+    The reactor will then trigger write selection for the fd.
+
+    Args:
+        fd: File descriptor with pending response
+
+    Returns:
+        True if signal was sent, False if no reactor PID registered
+    """
+    import erlang
+    reactor_pid = _reactor_pids.get(fd)
+    if reactor_pid is not None:
+        erlang.send(reactor_pid, ('write_ready', fd))
+        return True
+    return False
