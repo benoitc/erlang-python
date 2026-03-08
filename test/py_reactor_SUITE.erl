@@ -215,7 +215,6 @@ _close_test_result = run_close_test()
 async_pending_test(_Config) ->
     %% Protocol factory code to run in reactor context
     SetupCode = <<"
-import erlang
 import erlang.reactor as reactor
 
 class AsyncPendingProtocol(reactor.Protocol):
@@ -223,27 +222,13 @@ class AsyncPendingProtocol(reactor.Protocol):
 
     def __init__(self):
         super().__init__()
-        self.reactor_pid = None
         self.pending_response = b''
 
-    def connection_made(self, fd, client_info):
-        super().connection_made(fd, client_info)
-        self.reactor_pid = client_info.get('reactor_pid')
-
     def data_received(self, data):
-        import sys
         self.pending_response = b'ASYNC:' + data
         # Immediately complete the task and signal reactor
         self.write_buffer.extend(self.pending_response)
-        if self.reactor_pid:
-            print(f'Sending write_ready to {self.reactor_pid} for fd={self.fd}', file=sys.stderr)
-            try:
-                erlang.send(self.reactor_pid, ('write_ready', self.fd))
-                print('write_ready sent successfully', file=sys.stderr)
-            except Exception as e:
-                print(f'erlang.send failed: {e}', file=sys.stderr)
-        else:
-            print('No reactor_pid available!', file=sys.stderr)
+        reactor.signal_write_ready(self.fd)
         return 'async_pending'
 
     def write_ready(self):
