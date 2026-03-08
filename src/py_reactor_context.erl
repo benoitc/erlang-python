@@ -468,12 +468,13 @@ handle_async_write_ready(Fd, State) ->
 %% @private
 close_connection(Fd, FdRes, State) ->
     #state{
+        ref = Ref,
         connections = Conns,
         active_connections = Active
     } = State,
 
     %% Close via NIF (cleans up Python protocol handler)
-    py_nif:reactor_close_fd(FdRes),
+    py_nif:reactor_close_fd(Ref, FdRes),
 
     %% Remove from connections map
     NewConns = maps:remove(Fd, Conns),
@@ -489,7 +490,7 @@ cleanup(State) ->
 
     %% Close all connections
     maps:foreach(fun(_Fd, #{fd_ref := FdRef}) ->
-        py_nif:reactor_close_fd(FdRef)
+        py_nif:reactor_close_fd(Ref, FdRef)
     end, Conns),
 
     %% Destroy Python context

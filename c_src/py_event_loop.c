@@ -3267,7 +3267,7 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
 }
 
 /**
- * reactor_close_fd(FdRef) -> ok | {error, Reason}
+ * reactor_close_fd(ContextRef, FdRef) -> ok | {error, Reason}
  *
  * Close an FD and clean up the protocol handler.
  * Calls Python's erlang_reactor.close_connection(fd) if registered.
@@ -3276,8 +3276,13 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]) {
     (void)argc;
 
+    py_context_t *ctx;
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
     fd_resource_t *fd_res;
-    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+    if (!enif_get_resource(env, argv[1], FD_RESOURCE_TYPE, (void **)&fd_res)) {
         return make_error(env, "invalid_fd_ref");
     }
 
@@ -3293,20 +3298,21 @@ ERL_NIF_TERM nif_reactor_close_fd(ErlNifEnv *env, int argc,
 
     /* Call Python to clean up protocol handler */
     if (fd >= 0) {
-        gil_guard_t guard = gil_acquire();
+        py_context_guard_t guard = py_context_acquire(ctx);
+        if (guard.acquired) {
+            PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
+            if (reactor_module != NULL) {
+                PyObject *result = PyObject_CallMethod(reactor_module,
+                                                        "close_connection", "i", fd);
+                Py_XDECREF(result);
+                Py_DECREF(reactor_module);
+                PyErr_Clear();  /* Ignore errors during cleanup */
+            } else {
+                PyErr_Clear();
+            }
 
-        PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
-        if (reactor_module != NULL) {
-            PyObject *result = PyObject_CallMethod(reactor_module,
-                                                    "close_connection", "i", fd);
-            Py_XDECREF(result);
-            Py_DECREF(reactor_module);
-            PyErr_Clear();  /* Ignore errors during cleanup */
-        } else {
-            PyErr_Clear();
+            py_context_release(&guard);
         }
-
-        gil_release(guard);
     }
 
     /* Take ownership for cleanup */
