@@ -3876,7 +3876,15 @@ static ErlNifFunc nif_funcs[] = {
     {"reactor_on_read_ready", 2, nif_reactor_on_read_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"reactor_on_write_ready", 2, nif_reactor_on_write_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"reactor_init_connection", 3, nif_reactor_init_connection, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"reactor_close_fd", 2, nif_reactor_close_fd, 0}
+    {"reactor_close_fd", 2, nif_reactor_close_fd, 0},
+
+    /* Direct FD operations */
+    {"fd_read", 2, nif_fd_read, 0},
+    {"fd_write", 2, nif_fd_write, 0},
+    {"fd_select_read", 1, nif_fd_select_read, 0},
+    {"fd_select_write", 1, nif_fd_select_write, 0},
+    {"fd_close", 1, nif_fd_close, 0},
+    {"socketpair", 0, nif_socketpair, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

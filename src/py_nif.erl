@@ -188,7 +188,14 @@
     reactor_on_read_ready/2,
     reactor_on_write_ready/2,
     reactor_init_connection/3,
-    reactor_close_fd/2
+    reactor_close_fd/2,
+    %% Direct FD operations
+    fd_read/2,
+    fd_write/2,
+    fd_select_read/1,
+    fd_select_write/1,
+    fd_close/1,
+    socketpair/0
 ]).
 
 -on_load(load_nif/0).
@@ -1529,4 +1536,65 @@ reactor_init_connection(_ContextRef, _Fd, _ClientInfo) ->
 %% @returns ok | {error, Reason}
 -spec reactor_close_fd(reference(), reference()) -> ok | {error, term()}.
 reactor_close_fd(_ContextRef, _FdRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Direct FD Operations
+%%% ============================================================================
+
+%% @doc Read up to Size bytes from a file descriptor.
+%%
+%% @param Fd File descriptor
+%% @param Size Maximum bytes to read
+%% @returns {ok, Data} | {error, Reason}
+-spec fd_read(integer(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
+fd_read(_Fd, _Size) ->
+    ?NIF_STUB.
+
+%% @doc Write data to a file descriptor.
+%%
+%% @param Fd File descriptor
+%% @param Data Binary data to write
+%% @returns {ok, Written} | {error, Reason}
+-spec fd_write(integer(), binary()) -> {ok, non_neg_integer()} | {error, term()}.
+fd_write(_Fd, _Data) ->
+    ?NIF_STUB.
+
+%% @doc Register FD for read selection.
+%%
+%% Caller will receive {select, FdRef, Ref, ready_input} when readable.
+%% The returned FdRef must be kept alive while monitoring.
+%%
+%% @param Fd File descriptor
+%% @returns {ok, FdRef} | {error, Reason}
+-spec fd_select_read(integer()) -> {ok, reference()} | {error, term()}.
+fd_select_read(_Fd) ->
+    ?NIF_STUB.
+
+%% @doc Register FD for write selection.
+%%
+%% Caller will receive {select, FdRef, Ref, ready_output} when writable.
+%% The returned FdRef must be kept alive while monitoring.
+%%
+%% @param Fd File descriptor
+%% @returns {ok, FdRef} | {error, Reason}
+-spec fd_select_write(integer()) -> {ok, reference()} | {error, term()}.
+fd_select_write(_Fd) ->
+    ?NIF_STUB.
+
+%% @doc Close a raw file descriptor.
+%%
+%% @param Fd File descriptor to close
+%% @returns ok | {error, Reason}
+-spec fd_close(integer()) -> ok | {error, term()}.
+fd_close(_Fd) ->
+    ?NIF_STUB.
+
+%% @doc Create a Unix socketpair for bidirectional communication.
+%%
+%% Both FDs are set to non-blocking mode.
+%%
+%% @returns {ok, {Fd1, Fd2}} | {error, Reason}
+-spec socketpair() -> {ok, {integer(), integer()}} | {error, term()}.
+socketpair() ->
     ?NIF_STUB.
