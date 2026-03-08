@@ -169,6 +169,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
 #include "py_worker_pool.c"
 #include "py_subinterp_pool.c"
 #include "py_subinterp_thread.c"
+#include "py_reactor_buffer.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -632,6 +633,20 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         Py_Finalize();
         atomic_store(&g_runtime_state, PY_STATE_STOPPED);
         return make_error(env, "wsgi_scope_init_failed");
+    }
+
+    /* Initialize ReactorBuffer Python type for zero-copy read handling */
+    if (ReactorBuffer_init_type() < 0) {
+        Py_Finalize();
+        atomic_store(&g_runtime_state, PY_STATE_STOPPED);
+        return make_error(env, "reactor_buffer_init_failed");
+    }
+
+    /* Register ReactorBuffer type with erlang module for testing access */
+    if (ReactorBuffer_register_with_reactor() < 0) {
+        Py_Finalize();
+        atomic_store(&g_runtime_state, PY_STATE_STOPPED);
+        return make_error(env, "reactor_buffer_register_failed");
     }
 
     /* Create a default event loop so Python asyncio always has one available */
@@ -3646,6 +3661,12 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ASGI_LAZY_HEADERS_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "asgi_lazy_headers",
         lazy_headers_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
+    /* Reactor buffer resource type for zero-copy read handling */
+    REACTOR_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "reactor_buffer",
+        reactor_buffer_resource_dtor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
     /* Initialize event loop module */

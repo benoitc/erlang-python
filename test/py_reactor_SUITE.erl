@@ -21,7 +21,8 @@
     echo_protocol_test/1,
     multiple_connections_test/1,
     protocol_close_test/1,
-    async_pending_test/1
+    async_pending_test/1,
+    reactor_buffer_test/1
 ]).
 
 all() -> [
@@ -31,7 +32,8 @@ all() -> [
     echo_protocol_test,
     multiple_connections_test,
     protocol_close_test,
-    async_pending_test
+    async_pending_test,
+    reactor_buffer_test
 ].
 
 init_per_suite(Config) ->
@@ -320,3 +322,67 @@ def cleanup():
     {ok, _} = py:eval(PyCtx, <<"cleanup()">>),
     py_reactor_context:stop(ReactorCtx),
     ok.
+
+%% @doc Test ReactorBuffer behaves like bytes
+reactor_buffer_test(_Config) ->
+    %% Test that ReactorBuffer type exists in erlang module
+    {ok, true} = py:eval(<<"hasattr(erlang, 'ReactorBuffer')">>),
+
+    %% Test bytes-like operations - use exec for all assertions
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+
+# Test _test_create works
+buf_simple = erlang.ReactorBuffer._test_create(b'hello')
+assert len(buf_simple) == 5, f'simple len mismatch: {len(buf_simple)}'
+
+test_data = b'GET / HTTP/1.1' + bytes([13, 10])  # Use bytes for \\r\\n
+buf = erlang.ReactorBuffer._test_create(test_data)
+
+# Test len()
+assert len(buf) == 16, f'len mismatch: {len(buf)}'  # 14 chars + 2 for \\r\\n
+
+# Test startswith()
+assert buf.startswith(b'GET'), 'startswith failed'
+assert not buf.startswith(b'POST'), 'startswith should fail for POST'
+
+# Test endswith()
+assert buf.endswith(bytes([13, 10])), 'endswith failed'
+
+# Test indexing
+assert buf[0] == ord('G'), f'index 0 mismatch: {buf[0]}'
+assert buf[-1] == 10, f'index -1 mismatch'
+
+# Test slicing
+assert buf[0:3] == b'GET', f'slice mismatch: {buf[0:3]}'
+
+# Test bytes() conversion
+assert bytes(buf) == test_data, 'bytes conversion failed'
+
+# Test memoryview
+mv = memoryview(buf)
+assert bytes(mv) == test_data, 'memoryview failed'
+
+# Test find()
+assert buf.find(b'HTTP') == 6, f'find mismatch: {buf.find(b\"HTTP\")}'
+assert buf.find(b'HTTPS') == -1, 'find should return -1'
+
+# Test count()
+assert buf.count(b'/') == 2, f'count mismatch: {buf.count(b\"/\")}'  # '/' in path and '1.1'
+
+# Test 'in' operator
+assert b'HTTP' in buf, 'in operator failed'
+assert b'HTTPS' not in buf, 'not in operator failed'
+
+# Test decode()
+decoded = buf.decode('utf-8')
+assert decoded == 'GET / HTTP/1.1' + chr(13) + chr(10), f'decode mismatch: {decoded}'
+
+# Test comparison
+assert buf == test_data, 'equality comparison failed'
+assert buf != b'other', 'inequality comparison failed'
+
+_reactor_buffer_test_passed = True
+">>),
+    {ok, true} = py:eval(Ctx, <<"_reactor_buffer_test_passed">>).

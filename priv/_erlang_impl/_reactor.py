@@ -90,7 +90,10 @@ class Protocol:
         Called when data has been read from the fd.
 
         Args:
-            data: The bytes that were read
+            data: The bytes that were read. This is a bytes-like object
+                  that supports the buffer protocol, indexing, slicing,
+                  and common bytes methods (startswith, find, decode, etc.).
+                  Can be used directly with memoryview() for zero-copy access.
 
         Returns:
             Action string:
@@ -206,13 +209,16 @@ def init_connection(fd: int, client_info: dict):
             _reactor_pids[fd] = reactor_pid
 
 
-def on_read_ready(fd: int) -> str:
+def on_read_ready(fd: int, data: bytes = None) -> str:
     """Called by NIF when fd readable.
 
-    Reads data from the fd and passes it to the protocol.
+    Receives data from the NIF and passes it to the protocol.
+    Data is provided as a zero-copy ReactorBuffer when available.
 
     Args:
         fd: File descriptor
+        data: Read data from NIF (ReactorBuffer or bytes-like object).
+              If None, falls back to calling proto.read() for compatibility.
 
     Returns:
         Action string from protocol.data_received()
@@ -220,7 +226,11 @@ def on_read_ready(fd: int) -> str:
     proto = _protocols.get(fd)
     if proto is None:
         return "close"
-    data = proto.read()
+
+    # Use data from NIF if provided, otherwise fall back to proto.read()
+    if data is None:
+        data = proto.read()
+
     if not data:
         return "close"
     return proto.data_received(data)

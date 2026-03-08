@@ -25,6 +25,7 @@
  */
 
 #include "py_subinterp_pool.h"
+#include "py_reactor_buffer.h"
 #include <string.h>
 
 #ifdef HAVE_SUBINTERPRETERS
@@ -163,6 +164,12 @@ int subinterp_pool_init(int size) {
             PyErr_Clear();
             /* Non-fatal - continue without erlang module */
         } else {
+            /* Register ReactorBuffer with erlang module in this subinterpreter */
+            if (ReactorBuffer_register_with_reactor() < 0) {
+                PyErr_Clear();
+                /* Non-fatal - ReactorBuffer just won't be available */
+            }
+
             /* Import erlang module into globals */
             PyObject *erlang_module = PyImport_ImportModule("erlang");
             if (erlang_module != NULL) {
