@@ -91,6 +91,8 @@
     subinterp_pool_ready/0,
     subinterp_pool_stats/0,
     %% Virtual environment
+    ensure_venv/2,
+    ensure_venv/3,
     activate_venv/1,
     deactivate_venv/0,
     venv_info/0,
@@ -704,6 +706,187 @@ subinterp_pool_stats() ->
 %%% Virtual Environment Support
 %%% ============================================================================
 
+%% @doc Ensure a virtual environment exists and activate it.
+%%
+%% Creates a venv at `Path' if it doesn't exist, installs dependencies from
+%% `RequirementsFile', and activates the venv.
+%%
+%% RequirementsFile can be:
+%% - `"requirements.txt"' - standard pip requirements file
+%% - `"pyproject.toml"' - PEP 621 project file (installs with -e .)
+%%
+%% Example:
+%% ```
+%% ok = py:ensure_venv("priv/venv", "requirements.txt").
+%% '''
+-spec ensure_venv(string() | binary(), string() | binary()) -> ok | {error, term()}.
+ensure_venv(Path, RequirementsFile) ->
+    ensure_venv(Path, RequirementsFile, []).
+
+%% @doc Ensure a virtual environment exists with options.
+%%
+%% Options:
+%% - `{extras, [string()]}' - Install optional dependencies (pyproject.toml)
+%% - `{installer, uv | pip}' - Package installer (default: auto-detect)
+%% - `{python, string()}' - Python executable for venv creation
+%% - `force' - Recreate venv even if it exists
+%%
+%% Example:
+%% ```
+%% %% With pyproject.toml and dev extras
+%% ok = py:ensure_venv("priv/venv", "pyproject.toml", [
+%%     {extras, ["dev", "test"]}
+%% ]).
+%%
+%% %% Force uv installer
+%% ok = py:ensure_venv("priv/venv", "requirements.txt", [
+%%     {installer, uv}
+%% ]).
+%% '''
+-spec ensure_venv(string() | binary(), string() | binary(), list()) -> ok | {error, term()}.
+ensure_venv(Path, RequirementsFile, Opts) ->
+    PathStr = to_string(Path),
+    ReqFileStr = to_string(RequirementsFile),
+    Force = proplists:get_bool(force, Opts),
+    case venv_exists(PathStr) of
+        true when not Force ->
+            %% Venv exists, just activate
+            activate_venv(PathStr);
+        _ ->
+            %% Create venv
+            case create_venv(PathStr, Opts) of
+                ok ->
+                    %% Install dependencies
+                    case install_deps(PathStr, ReqFileStr, Opts) of
+                        ok ->
+                            activate_venv(PathStr);
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+%% @private Check if venv exists by looking for pyvenv.cfg
+-spec venv_exists(string()) -> boolean().
+venv_exists(Path) ->
+    filelib:is_file(filename:join(Path, "pyvenv.cfg")).
+
+%% @private Create a new virtual environment
+-spec create_venv(string(), list()) -> ok | {error, term()}.
+create_venv(Path, Opts) ->
+    Installer = detect_installer(Opts),
+    Python = case proplists:get_value(python, Opts, undefined) of
+        undefined -> get_python_executable();
+        P -> P
+    end,
+    Cmd = case Installer of
+        uv ->
+            %% uv venv is faster, use --python to match the running interpreter
+            io_lib:format("uv venv --python ~s ~s", [quote(Python), quote(Path)]);
+        pip ->
+            io_lib:format("~s -m venv ~s", [quote(Python), quote(Path)])
+    end,
+    run_cmd(lists:flatten(Cmd)).
+
+%% @private Get the Python executable path
+%% When embedded, sys.executable returns the embedding app (beam.smp)
+%% so we reconstruct the path from sys.prefix and version info
+-spec get_python_executable() -> string().
+get_python_executable() ->
+    %% Use a single expression to find the Python executable
+    %% Searches for pythonX.Y, python3, python in sys.prefix/bin (Unix)
+    %% or python.exe in sys.prefix (Windows)
+    Expr = <<"(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if __import__('sys').platform == 'win32' and __import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, 'python.exe')) else next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3')))()">>,
+    case eval(Expr) of
+        {ok, Path} when is_binary(Path) -> binary_to_list(Path);
+        _ -> "python3"
+    end.
+
+%% @private Install dependencies from requirements file
+-spec install_deps(string(), string(), list()) -> ok | {error, term()}.
+install_deps(Path, RequirementsFile, Opts) ->
+    Installer = detect_installer(Opts),
+    PipPath = pip_path(Path, Installer),
+    Extras = proplists:get_value(extras, Opts, []),
+
+    %% Determine file type and build install command
+    Cmd = case filename:extension(RequirementsFile) of
+        ".txt" ->
+            %% requirements.txt
+            io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)]);
+        ".toml" ->
+            %% pyproject.toml - install as editable
+            %% filename:dirname returns "." for files without directory component
+            InstallPath = filename:dirname(RequirementsFile),
+            case Extras of
+                [] ->
+                    io_lib:format("~s install -e ~s", [PipPath, quote(InstallPath)]);
+                _ ->
+                    ExtrasStr = string:join(Extras, ","),
+                    io_lib:format("~s install -e \"~s[~s]\"", [PipPath, InstallPath, ExtrasStr])
+            end;
+        _ ->
+            %% Assume requirements.txt format
+            io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)])
+    end,
+    run_cmd(lists:flatten(Cmd)).
+
+%% @private Detect which installer to use (uv or pip)
+-spec detect_installer(list()) -> uv | pip.
+detect_installer(Opts) ->
+    case proplists:get_value(installer, Opts, auto) of
+        auto ->
+            case os:find_executable("uv") of
+                false -> pip;
+                _ -> uv
+            end;
+        Installer ->
+            Installer
+    end.
+
+%% @private Get pip/uv pip command path
+-spec pip_path(string(), uv | pip) -> string().
+pip_path(VenvPath, uv) ->
+    %% uv pip uses venv from env var or --python flag
+    "VIRTUAL_ENV=" ++ quote(VenvPath) ++ " uv pip";
+pip_path(VenvPath, pip) ->
+    %% Use pip from the venv
+    case os:type() of
+        {win32, _} ->
+            filename:join([VenvPath, "Scripts", "pip"]);
+        _ ->
+            filename:join([VenvPath, "bin", "pip"])
+    end.
+
+%% @private Quote a path for shell
+-spec quote(string()) -> string().
+quote(S) ->
+    "'" ++ S ++ "'".
+
+%% @private Run a shell command and return ok or error
+-spec run_cmd(string()) -> ok | {error, term()}.
+run_cmd(Cmd) ->
+    %% Use os:cmd but check for errors
+    Result = os:cmd(Cmd ++ " 2>&1; echo \"::exitcode::$?\""),
+    %% Parse exit code from end of output
+    case string:split(Result, "::exitcode::", trailing) of
+        [Output, ExitCodeStr] ->
+            case string:trim(ExitCodeStr) of
+                "0" -> ok;
+                Code -> {error, {exit_code, list_to_integer(Code), string:trim(Output)}}
+            end;
+        _ ->
+            %% Fallback - assume success if no error marker
+            ok
+    end.
+
+%% @private Convert to string
+-spec to_string(string() | binary()) -> string().
+to_string(B) when is_binary(B) -> binary_to_list(B);
+to_string(S) when is_list(S) -> S.
+
 %% @doc Activate a Python virtual environment.
 %% This modifies sys.path to use packages from the specified venv.
 %% The venv path should be the root directory (containing bin/lib folders).
@@ -721,8 +904,20 @@ subinterp_pool_stats() ->
 -spec activate_venv(string() | binary()) -> ok | {error, term()}.
 activate_venv(VenvPath) ->
     VenvBin = ensure_binary(VenvPath),
-    %% Build site-packages path based on platform
-    {ok, SitePackages} = eval(<<"__import__('os').path.join(vp, 'Lib' if __import__('sys').platform == 'win32' else 'lib', '' if __import__('sys').platform == 'win32' else f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}', 'site-packages')">>, #{vp => VenvBin}),
+    %% Find site-packages directory dynamically (venv may use different Python version)
+    %% Uses a single expression to avoid multiline code issues
+    FindSitePackages = <<"(lambda vp: __import__('os').path.join(vp, 'Lib', 'site-packages') if __import__('os').path.exists(__import__('os').path.join(vp, 'Lib', 'site-packages')) else next((sp for name in (__import__('os').listdir(__import__('os').path.join(vp, 'lib')) if __import__('os').path.isdir(__import__('os').path.join(vp, 'lib')) else []) if name.startswith('python') for sp in [__import__('os').path.join(vp, 'lib', name, 'site-packages')] if __import__('os').path.isdir(sp)), None))(_venv_path)">>,
+    case eval(FindSitePackages, #{<<"_venv_path">> => VenvBin}) of
+        {ok, SitePackages} when SitePackages =/= none, SitePackages =/= null ->
+            activate_venv_with_site_packages(VenvBin, SitePackages);
+        {ok, _} ->
+            {error, {invalid_venv, no_site_packages_found}};
+        Error ->
+            Error
+    end.
+
+%% @private Activate venv with known site-packages path
+activate_venv_with_site_packages(VenvBin, SitePackages) ->
     %% Verify site-packages exists
     case eval(<<"__import__('os').path.isdir(sp)">>, #{sp => SitePackages}) of
         {ok, true} ->
