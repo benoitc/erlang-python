@@ -1,8 +1,17 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 (2026-03-09)
 
 ### Added
+
+- **Virtual Environment Management** - Automatic venv creation and activation
+  - `py:ensure_venv/2,3` - Create venv if missing, then activate
+  - Automatically detects Python executable
+  - Supports pip install of dependencies
+
+- **File Descriptor Duplication** - Safe socket handoff from Erlang to Python
+  - `py:dup_fd/1` - Duplicate fd for independent ownership
+  - Prevents double-close issues when passing sockets to Python reactor
 
 - **Dual Pool Support** - Separate pools for CPU-bound and I/O-bound operations
   - `default` pool - For quick CPU-bound operations, sized to number of schedulers

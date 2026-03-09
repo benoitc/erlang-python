@@ -381,17 +381,17 @@ parse_wsgi_status(Status) ->
 
 ## Performance Tips
 
-### Use erlang_asyncio for Sleep Operations
+### Use Erlang Event Loop for Sleep Operations
 
-For ASGI handlers that use `await asyncio.sleep()`, consider using `erlang_asyncio.sleep()` instead. This eliminates Python event loop overhead (~0.5-1ms per call) by using Erlang's native timer system:
+For ASGI handlers that use `await asyncio.sleep()`, the Erlang event loop automatically optimizes sleep operations. When running via `py_asgi`, asyncio integrates with Erlang's native timer system, eliminating Python event loop overhead (~0.5-1ms per call):
 
 ```python
-# In your ASGI application
-import erlang_asyncio
+# In your ASGI application - uses Erlang timers automatically
+import asyncio
 
 async def delay_handler(scope, receive, send):
-    # More efficient than asyncio.sleep()
-    await erlang_asyncio.sleep(0.001)  # 1ms delay
+    # When running in erlang_python, this uses Erlang's timer system
+    await asyncio.sleep(0.001)  # 1ms delay
 
     await send({
         'type': 'http.response.start',
@@ -404,11 +404,11 @@ async def delay_handler(scope, receive, send):
     })
 ```
 
-For endpoints with short delays (1-10ms), this can improve throughput by 2-3x. See [Asyncio](asyncio.md#erlang_asyncio-module) for the full API.
+For endpoints with short delays (1-10ms), this can improve throughput by 2-3x. See [Asyncio](asyncio.md) for the full API.
 
 ## See Also
 
 - [Getting Started](getting-started.md) - Basic usage guide
-- [Asyncio](asyncio.md) - Async event loop integration and erlang_asyncio module
+- [Asyncio](asyncio.md) - Erlang-backed asyncio event loop integration
 - [Threading](threading.md) - Thread support and callbacks
 - [Scalability](scalability.md) - Performance tuning

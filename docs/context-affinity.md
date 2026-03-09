@@ -1,132 +1,138 @@
 # Context Affinity
 
-Context affinity allows you to bind an Erlang process to a dedicated Python worker, preserving Python state (variables, imports, objects) across multiple `py:call/eval/exec` invocations.
+Context affinity allows you to bind an Erlang process to a dedicated Python context, preserving Python state (variables, imports, objects) across multiple `py:call/eval/exec` invocations.
 
 ## Why Context Affinity?
 
-By default, each call to `py:call`, `py:eval`, or `py:exec` may be handled by a different worker from the pool. This means:
+By default, each call to `py:call`, `py:eval`, or `py:exec` may be handled by a different context from the pool. This means:
 
 - Variables defined in one call are not available in the next
 - Imported modules must be re-imported
 - Objects created in one call cannot be accessed later
 
-Context affinity solves this by dedicating a worker to your process, ensuring all calls go to the same Python interpreter with preserved state.
+Context affinity solves this by dedicating a context to your process, ensuring all calls go to the same Python interpreter with preserved state.
 
-## Process-Implicit Binding
+## Using Explicit Contexts
 
-The simplest approach binds the current Erlang process to a worker:
+The simplest approach is to use explicit context handles:
 
 ```erlang
-%% Bind current process to a dedicated worker
-ok = py:bind(),
+%% Get a specific context by index (1-based)
+Ctx = py:context(1),
 
-%% Now all calls use the same worker - state persists!
-ok = py:exec(<<"counter = 0">>),
-ok = py:exec(<<"counter += 1">>),
-{ok, 1} = py:eval(<<"counter">>),
+%% Now all calls to this context share state
+ok = py:exec(Ctx, <<"counter = 0">>),
+ok = py:exec(Ctx, <<"counter += 1">>),
+{ok, 1} = py:eval(Ctx, <<"counter">>),
 
-ok = py:exec(<<"counter += 1">>),
-{ok, 2} = py:eval(<<"counter">>),
-
-%% Release the worker back to the pool
-ok = py:unbind().
+ok = py:exec(Ctx, <<"counter += 1">>),
+{ok, 2} = py:eval(Ctx, <<"counter">>).
 ```
 
-### Checking Binding Status
+### Multiple Independent Contexts
+
+Use multiple contexts for isolation:
 
 ```erlang
-false = py:is_bound(),
-ok = py:bind(),
-true = py:is_bound(),
-ok = py:unbind(),
-false = py:is_bound().
-```
-
-## Explicit Contexts
-
-For more control, create explicit context handles. This allows multiple independent Python contexts within a single Erlang process:
-
-```erlang
-%% Create two independent contexts
-{ok, Ctx1} = py:bind(new),
-{ok, Ctx2} = py:bind(new),
+%% Get two different contexts
+Ctx1 = py:context(1),
+Ctx2 = py:context(2),
 
 %% Each context has its own namespace
-ok = py:ctx_exec(Ctx1, <<"x = 'context one'">>),
-ok = py:ctx_exec(Ctx2, <<"x = 'context two'">>),
+ok = py:exec(Ctx1, <<"x = 'context one'">>),
+ok = py:exec(Ctx2, <<"x = 'context two'">>),
 
 %% Values are isolated
-{ok, <<"context one">>} = py:ctx_eval(Ctx1, <<"x">>),
-{ok, <<"context two">>} = py:ctx_eval(Ctx2, <<"x">>),
-
-%% Release both
-ok = py:unbind(Ctx1),
-ok = py:unbind(Ctx2).
+{ok, <<"context one">>} = py:eval(Ctx1, <<"x">>),
+{ok, <<"context two">>} = py:eval(Ctx2, <<"x">>).
 ```
 
-### Context-Aware Functions
+## Binding Contexts to Processes
 
-When using explicit contexts, use these functions:
-
-| Function | Description |
-|----------|-------------|
-| `py:ctx_call(Ctx, Module, Func, Args)` | Call with context |
-| `py:ctx_call(Ctx, Module, Func, Args, Kwargs)` | Call with kwargs |
-| `py:ctx_call(Ctx, Module, Func, Args, Kwargs, Timeout)` | Call with timeout |
-| `py:ctx_eval(Ctx, Code)` | Evaluate expression |
-| `py:ctx_eval(Ctx, Code, Locals)` | Evaluate with locals |
-| `py:ctx_eval(Ctx, Code, Locals, Timeout)` | Evaluate with timeout |
-| `py:ctx_exec(Ctx, Code)` | Execute statements |
-
-## Scoped Helper
-
-The `with_context/1` function provides automatic bind/unbind with cleanup on exception:
-
-### Implicit Binding (arity-0 function)
+For automatic context routing, bind a context to the current process:
 
 ```erlang
-Result = py:with_context(fun() ->
+%% Get a context
+Ctx = py_context_router:get_context(),
+
+%% Bind it to the current process
+ok = py_context_router:bind_context(Ctx),
+
+%% Now all py:call/eval/exec from this process use the bound context
+ok = py:exec(<<"x = 42">>),
+{ok, 42} = py:eval(<<"x">>),
+
+%% Unbind when done
+ok = py_context_router:unbind_context().
+```
+
+### Scoped Binding with try/after
+
+Always ensure cleanup with try/after:
+
+```erlang
+run_with_context(Fun) ->
+    Ctx = py_context_router:get_context(),
+    ok = py_context_router:bind_context(Ctx),
+    try
+        Fun()
+    after
+        py_context_router:unbind_context()
+    end.
+
+%% Usage
+Result = run_with_context(fun() ->
     ok = py:exec(<<"total = 0">>),
     ok = py:exec(<<"for i in range(10): total += i">>),
     py:eval(<<"total">>)
 end),
 {ok, 45} = Result.
-%% Process is automatically unbound here
 ```
 
-### Explicit Context (arity-1 function)
+## Context API Reference
+
+### `py:context/0`
+
+Get the context for the current scheduler (automatic affinity):
 
 ```erlang
-Result = py:with_context(fun(Ctx) ->
-    ok = py:ctx_exec(Ctx, <<"import json">>),
-    ok = py:ctx_exec(Ctx, <<"data = {'key': 'value'}">>),
-    py:ctx_eval(Ctx, <<"json.dumps(data)">>)
-end),
-{ok, <<"{\"key\": \"value\"}">>} = Result.
+Ctx = py:context().
 ```
 
-## Automatic Cleanup
+### `py:context/1`
 
-### Process Death
-
-If a bound process dies, the worker is automatically returned to the pool:
+Get a specific context by index (1-based):
 
 ```erlang
-Pid = spawn(fun() ->
-    ok = py:bind(),
-    %% Do some work...
-    exit(normal)  %% Worker automatically returned
-end).
+Ctx = py:context(1).
 ```
 
-### Worker Crash
+### `py_context_router:bind_context/1`
 
-If a bound worker crashes, the binding is cleaned up and a new worker is created:
+Bind a context to the current process:
 
 ```erlang
-ok = py:bind(),
-%% If the worker crashes, binding is cleaned up
-%% Next bind() will get a fresh worker
+ok = py_context_router:bind_context(Ctx).
+```
+
+### `py_context_router:unbind_context/0`
+
+Remove the context binding for the current process:
+
+```erlang
+ok = py_context_router:unbind_context().
+```
+
+### `py_context_router:get_context/0,1`
+
+Get a context from the pool:
+
+```erlang
+%% Get context for current scheduler
+Ctx = py_context_router:get_context().
+
+%% Get context from a specific pool
+Ctx = py_context_router:get_context(io).
 ```
 
 ## Use Cases
@@ -134,28 +140,27 @@ ok = py:bind(),
 ### Stateful Computation
 
 ```erlang
-py:with_context(fun() ->
-    %% Load a model once
-    py:exec(<<"
+Ctx = py:context(1),
+
+%% Load a model once
+py:exec(Ctx, <<"
 import pickle
 with open('model.pkl', 'rb') as f:
     model = pickle.load(f)
 ">>),
 
-    %% Use it multiple times
-    {ok, Pred1} = py:eval(<<"model.predict([[1, 2, 3]])">>),
-    {ok, Pred2} = py:eval(<<"model.predict([[4, 5, 6]])">>),
-    {Pred1, Pred2}
-end).
+%% Use it multiple times
+{ok, Pred1} = py:eval(Ctx, <<"model.predict([[1, 2, 3]])">>),
+{ok, Pred2} = py:eval(Ctx, <<"model.predict([[4, 5, 6]])">>).
 ```
 
 ### Database Connections
 
 ```erlang
-ok = py:bind(),
+Ctx = py:context(1),
 
 %% Establish connection once
-py:exec(<<"
+py:exec(Ctx, <<"
 import sqlite3
 conn = sqlite3.connect(':memory:')
 cursor = conn.cursor()
@@ -163,79 +168,82 @@ cursor.execute('CREATE TABLE users (id INTEGER, name TEXT)')
 ">>),
 
 %% Use the connection across multiple calls
-py:exec(<<"cursor.execute('INSERT INTO users VALUES (1, \"Alice\")')">>),
-py:exec(<<"cursor.execute('INSERT INTO users VALUES (2, \"Bob\")')">>),
-{ok, Users} = py:eval(<<"cursor.execute('SELECT * FROM users').fetchall()">>),
+py:exec(Ctx, <<"cursor.execute('INSERT INTO users VALUES (1, \"Alice\")')">>),
+py:exec(Ctx, <<"cursor.execute('INSERT INTO users VALUES (2, \"Bob\")')">>),
+{ok, Users} = py:eval(Ctx, <<"cursor.execute('SELECT * FROM users').fetchall()">>),
 
 %% Clean up
-py:exec(<<"conn.close()">>),
-py:unbind().
+py:exec(Ctx, <<"conn.close()">>).
 ```
 
 ### Incremental Processing
 
 ```erlang
-{ok, Ctx} = py:bind(new),
+Ctx = py:context(1),
 
 %% Initialize accumulator
-py:ctx_exec(Ctx, <<"results = []">>),
+py:exec(Ctx, <<"results = []">>),
 
 %% Process items one at a time
 lists:foreach(fun(Item) ->
-    py:ctx_exec(Ctx, <<"results.append(process_item(item))">>,
-                #{item => Item})
-end, Items),
+    py:eval(Ctx, <<"results.append(item * 2)">>, #{item => Item})
+end, [1, 2, 3, 4, 5]),
 
 %% Get final results
-{ok, Results} = py:ctx_eval(Ctx, <<"results">>),
-
-py:unbind(Ctx).
+{ok, [2, 4, 6, 8, 10]} = py:eval(Ctx, <<"results">>).
 ```
+
+## Scheduler Affinity (Default Behavior)
+
+By default, without explicit binding, calls are routed based on the current Erlang scheduler. This provides good cache locality while allowing multiple processes to share contexts:
+
+```erlang
+%% Processes on the same scheduler share a context
+%% Processes on different schedulers use different contexts
+{ok, Result} = py:call(math, sqrt, [16]).
+```
+
+This is usually what you want for stateless operations where isolation isn't critical.
 
 ## Performance Considerations
 
-- **Binding overhead**: `bind()` requires a gen_server call to checkout a worker
+- **Context binding overhead**: `bind_context()` requires a gen_server call
 - **Lookup overhead**: Once bound, routing adds only an O(1) ETS lookup
-- **Pool exhaustion**: Each bound context removes a worker from the pool
-- **Recommendation**: Use `with_context/1` for short-lived operations; explicit `bind/unbind` for long-lived sessions
+- **Pool exhaustion**: Each bound context removes it from round-robin rotation
+- **Recommendation**: Use explicit `py:context(N)` for stateful operations; let automatic routing handle stateless calls
 
-## Pool Statistics
+## Context Pool Statistics
 
-Check how many workers are bound:
+Check pool status:
 
 ```erlang
-Stats = py_pool:get_stats(),
-#{
-    num_workers := 8,
-    available_workers := 6,  %% 2 workers are checked out
-    checked_out := 2,
-    pending_requests := 0
-} = Stats.
+%% Check number of contexts
+N = py_context_router:num_contexts().
+
+%% Check if a pool is started
+true = py_context_router:pool_started(default).
+true = py_context_router:pool_started(io).
+
+%% Get all contexts in a pool
+Contexts = py_context_router:contexts(default).
 ```
 
 ## Error Handling
 
-### No Workers Available
+### Context Not Available
 
 ```erlang
-%% If all workers are bound
-{error, no_workers_available} = py:bind().
-```
-
-### Context Not Bound
-
-```erlang
-%% Using a context after unbind raises an error
-{ok, Ctx} = py:bind(new),
-ok = py:unbind(Ctx),
-%% This will crash with context_not_bound
-py:ctx_eval(Ctx, <<"1 + 1">>).  %% error(context_not_bound)
+%% If contexts aren't started
+case py:contexts_started() of
+    true -> proceed();
+    false -> {error, contexts_not_started}
+end.
 ```
 
 ## Best Practices
 
-1. **Always unbind**: Use `with_context/1` or ensure `unbind` in a `try/after` block
-2. **Minimize binding time**: Don't hold workers longer than necessary
-3. **Watch pool size**: Monitor `py_pool:get_stats()` to avoid exhaustion
-4. **Use explicit contexts**: When you need multiple independent namespaces
-5. **Prefer implicit binding**: For simple sequential operations in a single process
+1. **Use explicit contexts for stateful operations**: `Ctx = py:context(1)` ensures state persists
+2. **Use automatic routing for stateless calls**: Let the router handle distribution
+3. **Always unbind in finally blocks**: Prevent context leaks
+4. **Minimize binding time**: Don't hold contexts longer than necessary
+5. **Monitor pool size**: Check `py_context_router:num_contexts()` to understand capacity

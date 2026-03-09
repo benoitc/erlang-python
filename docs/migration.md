@@ -150,7 +150,7 @@ The semantics are identical - only the name changed.
 
 ### `erlang_asyncio` module removed
 
-The separate `erlang_asyncio` Python module has been consolidated into the main `erlang` module.
+The separate `erlang_asyncio` Python module has been consolidated into the main `erlang` module. Use `erlang.run()` with standard asyncio functions.
 
 **Before (v1.8.x):**
 ```python
@@ -166,12 +166,13 @@ result = erlang_asyncio.run(handler())
 **After (v2.0):**
 ```python
 import erlang
+import asyncio
 
 async def handler():
-    await erlang.sleep(0.1)
+    await asyncio.sleep(0.1)  # Standard asyncio, uses Erlang timers
     return "done"
 
-result = erlang.run(handler())
+result = erlang.run(handler())  # Run with Erlang event loop
 ```
 
 **Function mapping:**
@@ -179,10 +180,11 @@ result = erlang.run(handler())
 | v1.8.x | v2.0 |
 |--------|------|
 | `erlang_asyncio.run(coro)` | `erlang.run(coro)` |
-| `erlang_asyncio.sleep(delay)` | `erlang.sleep(delay)` |
-| `erlang_asyncio.gather(*coros)` | `erlang.gather(*coros)` |
-| `erlang_asyncio.wait_for(coro, timeout)` | `erlang.wait_for(coro, timeout)` |
-| `erlang_asyncio.create_task(coro)` | `erlang.create_task(coro)` |
+| `erlang_asyncio.sleep(delay)` | `asyncio.sleep(delay)` inside `erlang.run()` |
+| `erlang_asyncio.gather(*coros)` | `asyncio.gather(*coros)` inside `erlang.run()` |
+| `erlang_asyncio.wait_for(coro, timeout)` | `asyncio.wait_for(coro, timeout)` inside `erlang.run()` |
+| `erlang_asyncio.create_task(coro)` | `asyncio.create_task(coro)` inside `erlang.run()` |
+| `erlang_asyncio.new_event_loop()` | `erlang.new_event_loop()` |
 
 ## Removed Features
 

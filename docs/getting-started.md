@@ -8,7 +8,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {erlang_python, "1.8.0"}
+    {erlang_python, "2.0.0"}
 ]}.
 ```
 
@@ -191,33 +191,71 @@ Values are automatically converted between Erlang and Python:
 
 ## Context Affinity
 
-By default, each call may go to a different worker. To preserve Python state across
-calls (variables, imports, objects), bind to a dedicated worker:
+By default, each call may go to a different context. To preserve Python state across
+calls (variables, imports, objects), use an explicit context:
 
 ```erlang
-%% Bind current process to a worker
-ok = py:bind(),
+%% Get a specific context
+Ctx = py:context(1),
 
-%% State persists across calls
-ok = py:exec(<<"counter = 0">>),
-ok = py:exec(<<"counter += 1">>),
-{ok, 1} = py:eval(<<"counter">>),
+%% State persists across calls to the same context
+ok = py:exec(Ctx, <<"counter = 0">>),
+ok = py:exec(Ctx, <<"counter += 1">>),
+{ok, 1} = py:eval(Ctx, <<"counter">>),
 
-%% Release the worker
-ok = py:unbind().
+ok = py:exec(Ctx, <<"counter += 1">>),
+{ok, 2} = py:eval(Ctx, <<"counter">>).
 ```
 
-Or use the scoped helper for automatic cleanup:
+Or bind a context to the current process for automatic routing:
 
 ```erlang
-Result = py:with_context(fun() ->
+Ctx = py_context_router:get_context(),
+ok = py_context_router:bind_context(Ctx),
+try
     ok = py:exec(<<"x = 10">>),
-    py:eval(<<"x * 2">>)
-end),
-{ok, 20} = Result.
+    {ok, 20} = py:eval(<<"x * 2">>)
+after
+    py_context_router:unbind_context()
+end.
 ```
 
 See [Context Affinity](context-affinity.md) for explicit contexts and advanced usage.
+
+## Virtual Environments
+
+### Automatic Virtual Environment Setup
+
+Use `py:ensure_venv/2,3` to automatically create and activate a virtual environment:
+
+```erlang
+%% Create venv if missing, then activate
+{ok, activated} = py:ensure_venv(<<"/path/to/myapp/venv">>, []).
+
+%% With pip dependencies
+{ok, activated} = py:ensure_venv(<<"/path/to/venv">>, [
+    {pip_install, [<<"numpy">>, <<"pandas">>]}
+]).
+
+%% With custom Python executable
+{ok, activated} = py:ensure_venv(<<"/path/to/venv">>, [
+    {python, <<"/usr/bin/python3.12">>},
+    {pip_install, [<<"sentence-transformers">>]}
+]).
+```
+
+### Manual Virtual Environment Activation
+
+```erlang
+%% Activate an existing venv
+ok = py:activate_venv(<<"/path/to/venv">>).
+
+%% Check current venv
+{ok, #{path := Path, active := true}} = py:venv_info().
+
+%% Deactivate when done
+ok = py:deactivate_venv().
+```
 
 ## Execution Mode and Scalability
 

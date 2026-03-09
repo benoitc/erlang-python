@@ -52,8 +52,8 @@ erlang.run(main())
 │   └──────────────────┘                │  Routes events to correct loop     │ │
 │                                       │  based on resource backref         │ │
 │   ┌──────────────────┐                └────────────────────────────────────┘ │
-│   │  erlang_asyncio  │                                                       │
-│   │                  │                ┌────────────────────────────────────┐ │
+│   │  asyncio (via    │                                                       │
+│   │  erlang.run())   │                ┌────────────────────────────────────┐ │
 │   │  sleep()       ──┼─{sleep_wait}──▶│  erlang:send_after() + cond_wait   │ │
 │   │  gather()        │                │                                    │ │
 │   │  wait_for()      │◀──{complete}───│  pthread_cond_broadcast()          │ │
@@ -70,7 +70,7 @@ erlang.run(main())
 | `ErlangEventLoop` | Python asyncio event loop using Erlang for I/O and timers |
 | `py_event_worker` | Erlang gen_server managing FDs and timers for a Python context |
 | `py_event_router` | Routes timer/FD events to the correct event loop instance |
-| `erlang_asyncio` | High-level asyncio-compatible API with direct Erlang integration |
+| `erlang.run()` | Entry point to run asyncio code with the Erlang event loop |
 
 ## Usage Patterns
 
@@ -620,34 +620,32 @@ A shared router process handles timer and FD events for all loops:
 
 Each loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The shared router dispatches timer and FD events to the correct loop based on the capsule backref.
 
-## Erlang Asyncio Primitives
+## Erlang Timer Integration
 
-> **Note:** The `erlang_asyncio` module has been unified into the main `erlang` module. Use `import erlang` and `erlang.run()` instead.
-
-The `erlang` module provides asyncio-compatible primitives that use Erlang's native scheduler for maximum performance. This is the recommended way to use async/await patterns when you need explicit Erlang timer integration.
+When using `erlang.run()` to execute asyncio code, standard asyncio functions like `asyncio.sleep()` are automatically backed by Erlang's native timer system for maximum performance.
 
 ### Overview
 
-Unlike the standard `asyncio` module which uses Python's polling-based event loop, the `erlang` module uses Erlang's `erlang:send_after/3` for timers and integrates directly with the BEAM scheduler. This eliminates Python event loop overhead (~0.5-1ms per operation) and provides more precise timing.
+Unlike Python's standard polling-based event loop, the Erlang event loop uses `erlang:send_after/3` for timers and integrates directly with the BEAM scheduler. This eliminates Python event loop overhead (~0.5-1ms per operation) and provides more precise timing.
 
 ### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         erlang_asyncio.sleep()                          │
+│                         asyncio.sleep() via ErlangEventLoop              │
 │                                                                         │
 │   Python                           Erlang                               │
 │   ──────                           ──────                               │
 │                                                                         │
 │   ┌─────────────────┐              ┌─────────────────────────────────┐  │
-│   │ erlang_asyncio  │              │         py_event_worker         │  │
-│   │    .sleep(0.1)  │              │                                 │  │
+│   │  asyncio.sleep  │              │         py_event_worker         │  │
+│   │    (0.1)        │              │                                 │  │
 │   └────────┬────────┘              │  handle_info({sleep_wait,...})  │  │
 │            │                       │         │                       │  │
 │            ▼                       │         ▼                       │  │
 │   ┌─────────────────┐              │  erlang:send_after(100ms)       │  │
-│   │ py_event_loop.  │──{sleep_wait,│         │                       │  │
-│   │ _erlang_sleep() │   100, Id}──▶│         ▼                       │  │
+│   │ ErlangEventLoop │──{sleep_wait,│         │                       │  │
+│   │   call_later()  │   100, Id}──▶│         ▼                       │  │
 │   └────────┬────────┘              │  handle_info({sleep_complete})  │  │
 │            │                       │         │                       │  │
 │   ┌────────▼────────┐              │         ▼                       │  │
