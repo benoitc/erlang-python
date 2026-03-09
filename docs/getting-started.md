@@ -395,8 +395,29 @@ end.
 
 See [Security](security.md) for details on blocked operations and recommended alternatives.
 
+## Dual Pool Support
+
+erlang_python provides two pools to separate CPU-bound and I/O-bound operations:
+
+```erlang
+%% Register entire modules to io pool
+py:register_pool(io, requests).
+py:register_pool(io, psycopg2).
+
+%% Or register specific callables
+py:register_pool(io, {db, query}).        %% Only db.query goes to io pool
+
+%% Calls automatically route to the right pool
+{ok, 4.0} = py:call(math, sqrt, [16]).       %% -> default pool (fast)
+{ok, Resp} = py:call(requests, get, [Url]).  %% -> io pool (module registered)
+{ok, Rows} = py:call(db, query, [Sql]).      %% -> io pool (callable registered)
+```
+
+This prevents slow HTTP requests from blocking quick math operations. See [Dual Pool Support](pools.md) for configuration and advanced usage.
+
 ## Next Steps
 
+- See [Dual Pool Support](pools.md) for separating CPU and I/O operations
 - See [Type Conversion](type-conversion.md) for detailed type mapping
 - See [Context Affinity](context-affinity.md) for preserving Python state
 - See [Streaming](streaming.md) for working with generators

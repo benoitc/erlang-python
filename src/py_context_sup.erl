@@ -43,10 +43,10 @@ start_link() ->
 
 %% @doc Start a new py_context under this supervisor.
 %%
-%% @param Id Unique identifier for the context
+%% @param Id Unique identifier for the context (integer or {Pool, N} tuple)
 %% @param Mode Context mode (auto | subinterp | worker)
 %% @returns {ok, Pid} | {error, Reason}
--spec start_context(pos_integer(), py_context:context_mode()) ->
+-spec start_context(term(), py_context:context_mode()) ->
     {ok, pid()} | {error, term()}.
 start_context(Id, Mode) ->
     supervisor:start_child(?MODULE, [Id, Mode]).

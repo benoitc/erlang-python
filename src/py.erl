@@ -131,7 +131,10 @@
     to_term/1,
     is_ref/1,
     %% File descriptor utilities
-    dup_fd/1
+    dup_fd/1,
+    %% Pool registration API
+    register_pool/2,
+    unregister_pool/1
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -155,54 +158,66 @@
 call(Module, Func, Args) ->
     call(Module, Func, Args, #{}).
 
-%% @doc Call a Python function with keyword arguments.
+%% @doc Call a Python function with keyword arguments or on a named pool.
 %%
-%% When the first argument is a pid (context), calls using the new
-%% process-per-context architecture.
+%% This function has multiple signatures:
+%% - `call(Ctx, Module, Func, Args)' - Call using a specific context pid
+%% - `call(Pool, Module, Func, Args)' - Call using a named pool (default, io, etc.)
+%% - `call(Module, Func, Args, Kwargs)' - Call with keyword arguments on default pool
 %%
-%% @param CtxOrModule Context pid or Python module
+%% @param CtxOrPoolOrModule Context pid, pool name, or Python module
 %% @param ModuleOrFunc Python module or function name
 %% @param FuncOrArgs Function name or arguments list
 %% @param ArgsOrKwargs Arguments list or keyword arguments
 -spec call(pid(), py_module(), py_func(), py_args()) -> py_result()
+    ; (py_context_router:pool_name(), py_module(), py_func(), py_args()) -> py_result()
     ; (py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
 call(Ctx, Module, Func, Args) when is_pid(Ctx) ->
     py_context:call(Ctx, Module, Func, Args, #{});
+call(Pool, Module, Func, Args) when is_atom(Pool), is_atom(Func) ->
+    %% Pool-based call (e.g., py:call(io, math, sqrt, [16]))
+    call(Pool, Module, Func, Args, #{});
 call(Module, Func, Args, Kwargs) ->
     call(Module, Func, Args, Kwargs, ?DEFAULT_TIMEOUT).
 
-%% @doc Call a Python function with keyword arguments and custom timeout.
+%% @doc Call a Python function with keyword arguments and optional timeout or pool.
 %%
-%% When the first argument is a pid (context), calls using the new
-%% process-per-context architecture with options map.
+%% This function has multiple signatures:
+%% - `call(Ctx, Module, Func, Args, Opts)' - Call using context with options map
+%% - `call(Pool, Module, Func, Args, Kwargs)' - Call using named pool with kwargs
+%% - `call(Module, Func, Args, Kwargs, Timeout)' - Call on default pool with timeout
 %%
 %% Timeout is in milliseconds. Use `infinity' for no timeout.
 %% Rate limited via ETS-based semaphore to prevent overload.
 -spec call(pid(), py_module(), py_func(), py_args(), map()) -> py_result()
+    ; (py_context_router:pool_name(), py_module(), py_func(), py_args(), py_kwargs()) -> py_result()
     ; (py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
 call(Ctx, Module, Func, Args, Opts) when is_pid(Ctx), is_map(Opts) ->
     Kwargs = maps:get(kwargs, Opts, #{}),
     Timeout = maps:get(timeout, Opts, infinity),
     py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout);
+call(Pool, Module, Func, Args, Kwargs) when is_atom(Pool), is_atom(Func), is_map(Kwargs) ->
+    %% Pool-based call with kwargs (e.g., py:call(io, math, pow, [2, 3], #{round => true}))
+    do_pool_call(Pool, Module, Func, Args, Kwargs, ?DEFAULT_TIMEOUT);
 call(Module, Func, Args, Kwargs, Timeout) ->
-    %% Acquire semaphore slot before making the call
+    %% Look up which pool to use based on registered module/function
+    Pool = py_context_router:lookup_pool(Module, Func),
+    do_pool_call(Pool, Module, Func, Args, Kwargs, Timeout).
+
+%% @private
+%% Call using a named pool with semaphore protection
+do_pool_call(Pool, Module, Func, Args, Kwargs, Timeout) ->
     case py_semaphore:acquire(Timeout) of
         ok ->
             try
-                do_call(Module, Func, Args, Kwargs, Timeout)
+                Ctx = py_context_router:get_context(Pool),
+                py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout)
             after
                 py_semaphore:release()
             end;
         {error, max_concurrent} ->
             {error, {overloaded, py_semaphore:current(), py_semaphore:max_concurrent()}}
     end.
-
-%% @private
-%% Always route through context process - it handles callbacks inline using
-%% suspension-based approach (no separate callback handler, no blocking)
-do_call(Module, Func, Args, Kwargs, Timeout) ->
-    Ctx = py_context_router:get_context(),
-    py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout).
 
 %% @doc Evaluate a Python expression and return the result.
 -spec eval(string() | binary()) -> py_result().
@@ -1319,4 +1334,47 @@ is_ref(Term) ->
 -spec dup_fd(integer()) -> {ok, integer()} | {error, term()}.
 dup_fd(Fd) when is_integer(Fd) ->
     py_nif:dup_fd(Fd).
+
+%%% ============================================================================
+%%% Pool Registration API
+%%% ============================================================================
+
+%% @doc Register a module or module/function to use a specific pool.
+%%
+%% After registration, calls to the module (or specific function) are
+%% automatically routed to the registered pool without changing call sites.
+%%
+%% Examples:
+%% ```
+%% %% Route all requests.* calls to io pool
+%% py:register_pool(io, requests).
+%%
+%% %% Route only aiohttp.get to io pool
+%% py:register_pool(io, {aiohttp, get}).
+%%
+%% %% Calls now automatically route to the correct pool
+%% {ok, Resp} = py:call(requests, get, [Url]).  %% -> io pool
+%% {ok, 4.0} = py:call(math, sqrt, [16]).       %% -> default pool
+%% '''
+%%
+%% @param Pool Pool name (io, default, or custom)
+%% @param ModuleOrTuple Module atom or {Module, Func} tuple
+%% @returns ok
+-spec register_pool(py_context_router:pool_name(), atom() | {atom(), atom()}) -> ok.
+register_pool(Pool, Module) when is_atom(Pool), is_atom(Module) ->
+    py_context_router:register_pool(Pool, Module);
+register_pool(Pool, {Module, Func}) when is_atom(Pool), is_atom(Module), is_atom(Func) ->
+    py_context_router:register_pool(Pool, Module, Func).
+
+%% @doc Unregister a module or module/function from pool routing.
+%%
+%% After unregistering, calls return to using the default pool.
+%%
+%% @param ModuleOrTuple Module atom or {Module, Func} tuple
+%% @returns ok
+-spec unregister_pool(atom() | {atom(), atom()}) -> ok.
+unregister_pool(Module) when is_atom(Module) ->
+    py_context_router:unregister_pool(Module);
+unregister_pool({Module, Func}) when is_atom(Module), is_atom(Func) ->
+    py_context_router:unregister_pool(Module, Func).
 
