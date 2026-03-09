@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`erlang.spawn_task(coro)`** - Spawn async tasks from both sync and async contexts
+  - Works in sync code called by Erlang (where `asyncio.get_running_loop()` fails)
+  - Returns `asyncio.Task` for optional await/cancel (fire-and-forget pattern)
+  - Automatically wakes up the event loop in sync context
+  - Works with both ErlangEventLoop and standard asyncio loops
+
 ## 2.0.0 (2026-03-09)
 
 ### Added

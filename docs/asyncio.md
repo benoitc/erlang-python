@@ -784,6 +784,40 @@ async def main():
 erlang.run(main())
 ```
 
+#### erlang.spawn_task(coro, *, name=None)
+
+Spawn an async task from both sync and async contexts. This is useful for fire-and-forget background work from synchronous Python code called by Erlang.
+
+```python
+import erlang
+
+# From sync code called by Erlang
+def handle_request(data):
+    # This works even though there's no running event loop
+    erlang.spawn_task(process_async(data))
+    return 'ok'
+
+# From async code
+async def handler():
+    # Also works in async context
+    erlang.spawn_task(background_work())
+    await other_work()
+
+async def process_async(data):
+    await asyncio.sleep(0.1)
+    # Do async processing...
+
+async def background_work():
+    await asyncio.sleep(0.1)
+    # Do background work...
+```
+
+**Key features:**
+- Works in sync context where `asyncio.get_running_loop()` would fail
+- Returns `asyncio.Task` for optional await/cancel
+- Automatically wakes up the event loop to ensure the task runs promptly
+- Works with both ErlangEventLoop and standard asyncio loops
+
 #### asyncio.wait(fs, *, timeout=None, return_when=ALL_COMPLETED)
 
 Wait for multiple futures/tasks.
