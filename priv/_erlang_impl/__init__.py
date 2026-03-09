@@ -66,6 +66,7 @@ from ._channel import Channel, reply, ChannelClosed
 
 __all__ = [
     'run',
+    'spawn_task',
     'new_event_loop',
     'get_event_loop_policy',
     'install',
@@ -160,6 +161,89 @@ def run(main, *, debug=None, **run_kwargs):
             finally:
                 asyncio.set_event_loop(None)
                 loop.close()
+
+
+def spawn_task(coro, *, name=None):
+    """Spawn an async task, working in both async and sync contexts.
+
+    This function creates and schedules a task on the event loop, with
+    automatic wakeup for Erlang-driven loops where the loop may not be
+    actively polling.
+
+    Args:
+        coro: The coroutine to run as a task.
+        name: Optional name for the task (Python 3.8+).
+
+    Returns:
+        asyncio.Task: The created task. Can be ignored (fire-and-forget)
+        or awaited/cancelled if needed.
+
+    Raises:
+        RuntimeError: If no event loop is available or the loop is closed.
+
+    Example:
+        # From sync code called by Erlang
+        def handle_request(data):
+            erlang.spawn_task(process_async(data))
+            return 'ok'
+
+        # From async code
+        async def handler():
+            erlang.spawn_task(background_work())
+            await other_work()
+    """
+    # Try to get the running loop first (works in async context)
+    try:
+        loop = asyncio.get_running_loop()
+        # In async context, just create_task directly
+        if name is not None:
+            return loop.create_task(coro, name=name)
+        else:
+            return loop.create_task(coro)
+    except RuntimeError:
+        pass
+
+    # Sync context: get the event loop
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        coro.close()  # Prevent "coroutine was never awaited" warning
+        raise RuntimeError(
+            "No event loop available. Ensure erlang is initialized or "
+            "call from within an async context."
+        )
+
+    if loop.is_closed():
+        coro.close()
+        raise RuntimeError("Event loop is closed")
+
+    # Create the task
+    try:
+        if name is not None:
+            task = loop.create_task(coro, name=name)
+        else:
+            task = loop.create_task(coro)
+    except Exception:
+        coro.close()
+        raise
+
+    # Wake up the event loop to process the task
+    # This is critical for sync context - without wakeup, the task
+    # waits until the next event/timeout
+    if hasattr(loop, '_pel') and hasattr(loop, '_loop_capsule'):
+        # ErlangEventLoop - use native wakeup
+        try:
+            loop._pel._wakeup_for(loop._loop_capsule)
+        except Exception:
+            pass
+    elif hasattr(loop, '_write_to_self'):
+        # Standard asyncio loop - use self-pipe trick
+        try:
+            loop._write_to_self()
+        except Exception:
+            pass
+
+    return task
 
 
 def install():
