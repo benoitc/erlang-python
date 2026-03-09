@@ -571,6 +571,30 @@ Internal - called by NIF when fd is writable.
 
 Internal - called by NIF to close connection.
 
+## Subinterpreter Support
+
+The reactor supports isolated subinterpreters via `py_reactor_context`. Each subinterpreter has its own reactor module cache, ensuring protocol factories are isolated between contexts.
+
+```erlang
+%% Create context with subinterpreter mode
+{ok, Ctx1} = py_reactor_context:start_link(1, subinterp, #{
+    setup_code => <<"
+import erlang.reactor as reactor
+reactor.set_protocol_factory(EchoProtocol)
+">>
+}),
+
+%% Create another context with different protocol
+{ok, Ctx2} = py_reactor_context:start_link(2, subinterp, #{
+    setup_code => <<"
+import erlang.reactor as reactor
+reactor.set_protocol_factory(HttpProtocol)
+">>
+}).
+```
+
+Each context runs in its own subinterpreter with isolated protocol factory and connection state. This enables running multiple protocol handlers in the same BEAM VM without interference.
+
 ## See Also
 
 - [Asyncio](asyncio.md) - Higher-level asyncio event loop for Python

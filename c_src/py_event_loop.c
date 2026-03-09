@@ -106,6 +106,20 @@ typedef struct {
 
     /** @brief Isolation mode: 0=global, 1=per_loop */
     int isolation_mode;
+
+    /* ========== Per-Interpreter Reactor Cache ========== */
+
+    /** @brief Cached erlang.reactor module for this interpreter */
+    PyObject *reactor_module;
+
+    /** @brief Cached on_read_ready callable */
+    PyObject *reactor_on_read;
+
+    /** @brief Cached on_write_ready callable */
+    PyObject *reactor_on_write;
+
+    /** @brief Whether reactor cache has been initialized */
+    bool reactor_initialized;
 } py_event_loop_module_state_t;
 
 /* ============================================================================
@@ -121,43 +135,40 @@ static bool g_global_shared_router_valid = false;
 static pthread_mutex_t g_global_router_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ============================================================================
- * Cached Reactor Callables (Performance Optimization)
+ * Per-Interpreter Reactor Cache
  * ============================================================================
  *
- * Cache erlang.reactor module and callbacks to avoid expensive PyImport
- * on every read/write callback in the hot path.
+ * Reactor callables (erlang.reactor.on_read_ready, on_write_ready) are cached
+ * per-interpreter in the module state. This ensures that subinterpreters use
+ * their own reactor module instance rather than the main interpreter's.
+ *
+ * The cache is populated lazily on first reactor operation within each
+ * interpreter.
  */
-static PyObject *g_reactor_module = NULL;
-static PyObject *g_on_read_ready = NULL;
-static PyObject *g_on_write_ready = NULL;
-static bool g_reactor_cached = false;
-static pthread_mutex_t g_reactor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
- * Initialize cached reactor callables.
+ * Initialize cached reactor callables for the current interpreter.
  * MUST be called with GIL held.
- * Thread-safe: uses mutex for first initialization.
  *
+ * Uses the module state to cache per-interpreter reactor references.
+ * This is safe for subinterpreters since each has its own module state.
+ *
+ * @param state Module state for current interpreter
  * @return true if callables are cached and ready, false on error
  */
-static bool ensure_reactor_cached(void) {
-    /* Fast path: already cached */
-    if (g_reactor_cached) {
+static bool ensure_reactor_cached_for_interp(py_event_loop_module_state_t *state) {
+    if (state == NULL) {
+        return false;
+    }
+
+    /* Fast path: already cached for this interpreter */
+    if (state->reactor_initialized) {
         return true;
     }
 
-    pthread_mutex_lock(&g_reactor_cache_mutex);
-
-    /* Double-check after acquiring lock */
-    if (g_reactor_cached) {
-        pthread_mutex_unlock(&g_reactor_cache_mutex);
-        return true;
-    }
-
-    /* Import erlang.reactor module */
+    /* Import erlang.reactor module in THIS interpreter */
     PyObject *module = PyImport_ImportModule("erlang.reactor");
     if (module == NULL) {
-        pthread_mutex_unlock(&g_reactor_cache_mutex);
         return false;
     }
 
@@ -166,7 +177,6 @@ static bool ensure_reactor_cached(void) {
     if (on_read == NULL || !PyCallable_Check(on_read)) {
         Py_XDECREF(on_read);
         Py_DECREF(module);
-        pthread_mutex_unlock(&g_reactor_cache_mutex);
         return false;
     }
 
@@ -176,18 +186,34 @@ static bool ensure_reactor_cached(void) {
         Py_XDECREF(on_write);
         Py_DECREF(on_read);
         Py_DECREF(module);
-        pthread_mutex_unlock(&g_reactor_cache_mutex);
         return false;
     }
 
-    /* Store cached references */
-    g_reactor_module = module;
-    g_on_read_ready = on_read;
-    g_on_write_ready = on_write;
-    g_reactor_cached = true;
+    /* Store cached references in module state */
+    state->reactor_module = module;
+    state->reactor_on_read = on_read;
+    state->reactor_on_write = on_write;
+    state->reactor_initialized = true;
 
-    pthread_mutex_unlock(&g_reactor_cache_mutex);
     return true;
+}
+
+/**
+ * Clean up reactor cache in module state.
+ * Called during module deallocation.
+ */
+static void cleanup_reactor_cache(py_event_loop_module_state_t *state) {
+    if (state == NULL) {
+        return;
+    }
+
+    Py_XDECREF(state->reactor_module);
+    Py_XDECREF(state->reactor_on_read);
+    Py_XDECREF(state->reactor_on_write);
+    state->reactor_module = NULL;
+    state->reactor_on_read = NULL;
+    state->reactor_on_write = NULL;
+    state->reactor_initialized = false;
 }
 
 /* Forward declaration for module state access */
@@ -3246,15 +3272,16 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         return make_error(env, "buffer_creation_failed");
     }
 
-    /* Ensure reactor callables are cached (fast path after first call) */
-    if (!ensure_reactor_cached()) {
+    /* Get module state for THIS interpreter's reactor cache */
+    py_event_loop_module_state_t *state = get_module_state();
+    if (!ensure_reactor_cached_for_interp(state)) {
         PyErr_Clear();
         Py_DECREF(py_buffer);
         py_context_release(&guard);
         return make_error(env, "reactor_cache_init_failed");
     }
 
-    /* Call cached on_read_ready(fd, data) - avoids PyImport on every call */
+    /* Call cached on_read_ready(fd, data) - uses THIS interpreter's reactor */
     PyObject *py_fd = PyLong_FromLong(fd);
     if (py_fd == NULL) {
         PyErr_Clear();
@@ -3263,7 +3290,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         return make_error(env, "fd_conversion_failed");
     }
 
-    PyObject *result = PyObject_CallFunctionObjArgs(g_on_read_ready, py_fd, py_buffer, NULL);
+    PyObject *result = PyObject_CallFunctionObjArgs(state->reactor_on_read, py_fd, py_buffer, NULL);
     Py_DECREF(py_fd);
     Py_DECREF(py_buffer);
 
@@ -3322,14 +3349,15 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         return make_error(env, "acquire_failed");
     }
 
-    /* Ensure reactor callables are cached (fast path after first call) */
-    if (!ensure_reactor_cached()) {
+    /* Get module state for THIS interpreter's reactor cache */
+    py_event_loop_module_state_t *state = get_module_state();
+    if (!ensure_reactor_cached_for_interp(state)) {
         PyErr_Clear();
         py_context_release(&guard);
         return make_error(env, "reactor_cache_init_failed");
     }
 
-    /* Call cached on_write_ready(fd) - avoids PyImport on every call */
+    /* Call cached on_write_ready(fd) - uses THIS interpreter's reactor */
     PyObject *py_fd = PyLong_FromLong(fd);
     if (py_fd == NULL) {
         PyErr_Clear();
@@ -3337,7 +3365,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         return make_error(env, "fd_conversion_failed");
     }
 
-    PyObject *result = PyObject_CallFunctionObjArgs(g_on_write_ready, py_fd, NULL);
+    PyObject *result = PyObject_CallFunctionObjArgs(state->reactor_on_write, py_fd, NULL);
     Py_DECREF(py_fd);
 
     if (result == NULL) {
@@ -5257,6 +5285,17 @@ static PyMethodDef PyEventLoopMethods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+/**
+ * Module free callback - cleans up per-interpreter state.
+ * Called when the module is being deallocated.
+ */
+static void py_event_loop_module_free(void *module) {
+    py_event_loop_module_state_t *state = PyModule_GetState((PyObject *)module);
+    if (state != NULL) {
+        cleanup_reactor_cache(state);
+    }
+}
+
 /* Module definition with module state for per-interpreter isolation */
 static struct PyModuleDef PyEventLoopModuleDef = {
     PyModuleDef_HEAD_INIT,
@@ -5264,6 +5303,7 @@ static struct PyModuleDef PyEventLoopModuleDef = {
     .m_doc = "Erlang-native asyncio event loop",
     .m_size = sizeof(py_event_loop_module_state_t),
     .m_methods = PyEventLoopMethods,
+    .m_free = py_event_loop_module_free,
 };
 
 /**
@@ -5290,6 +5330,11 @@ int create_py_event_loop_module(void) {
         state->event_loop = NULL;
         state->shared_router_valid = false;
         state->isolation_mode = 0;  /* global mode by default */
+        /* Initialize reactor cache (will be populated lazily) */
+        state->reactor_module = NULL;
+        state->reactor_on_read = NULL;
+        state->reactor_on_write = NULL;
+        state->reactor_initialized = false;
     }
 
     /* Add module to sys.modules (reuse sys_modules from idempotency check) */

@@ -49,6 +49,9 @@
 %% Internal exports
 -export([init/3]).
 
+%% Exported for py_reactor_context
+-export([extend_erlang_module_in_context/1]).
+
 -type context_mode() :: auto | subinterp | worker.
 -type context() :: pid().
 

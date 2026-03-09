@@ -196,6 +196,9 @@ init(Parent, Id, Mode, Opts) ->
             %% Set up callback handler
             py_nif:context_set_callback_handler(Ref, self()),
 
+            %% Extend erlang module to make erlang.reactor available
+            py_context:extend_erlang_module_in_context(Ref),
+
             MaxConns = maps:get(max_connections, Opts, ?DEFAULT_MAX_CONNECTIONS),
             AppModule = maps:get(app_module, Opts, undefined),
             AppCallable = maps:get(app_callable, Opts, undefined),
@@ -362,12 +365,12 @@ handle_read_ready(FdRes, State) ->
         Fd when is_integer(Fd) ->
             %% Call Python on_read_ready
             case py_nif:reactor_on_read_ready(Ref, Fd) of
-                {ok, <<"continue">>} ->
+                {ok, Action} when Action =:= <<"continue">>; Action =:= continue ->
                     %% More data expected, re-register for read
                     py_nif:reactor_reselect_read(FdRes),
                     loop(State);
 
-                {ok, <<"write_pending">>} ->
+                {ok, Action} when Action =:= <<"write_pending">>; Action =:= write_pending ->
                     %% Response ready, switch to write mode
                     py_nif:reactor_select_write(FdRes),
                     NewState = State#state{
@@ -375,7 +378,7 @@ handle_read_ready(FdRes, State) ->
                     },
                     loop(NewState);
 
-                {ok, <<"async_pending">>} ->
+                {ok, Action} when Action =:= <<"async_pending">>; Action =:= async_pending ->
                     %% Async task submitted (e.g., ASGI app running as task)
                     %% Don't reselect - wait for {write_ready, Fd} signal from Python
                     %% Increment request count since task was accepted
@@ -384,7 +387,7 @@ handle_read_ready(FdRes, State) ->
                     },
                     loop(NewState);
 
-                {ok, <<"close">>} ->
+                {ok, Action} when Action =:= <<"close">>; Action =:= close ->
                     %% Close connection
                     close_connection(Fd, FdRes, State);
 
@@ -411,17 +414,17 @@ handle_write_ready(FdRes, State) ->
         Fd when is_integer(Fd) ->
             %% Call Python on_write_ready
             case py_nif:reactor_on_write_ready(Ref, Fd) of
-                {ok, <<"continue">>} ->
+                {ok, Action} when Action =:= <<"continue">>; Action =:= continue ->
                     %% More data to write, re-register for write
                     py_nif:reactor_select_write(FdRes),
                     loop(State);
 
-                {ok, <<"read_pending">>} ->
+                {ok, Action} when Action =:= <<"read_pending">>; Action =:= read_pending ->
                     %% Keep-alive, switch back to read mode
                     py_nif:reactor_reselect_read(FdRes),
                     loop(State);
 
-                {ok, <<"close">>} ->
+                {ok, Action} when Action =:= <<"close">>; Action =:= close ->
                     %% Close connection
                     close_connection(Fd, FdRes, State);
 
