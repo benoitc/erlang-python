@@ -33,6 +33,8 @@
   - `reactor.run_fd(fd, protocol_factory)` - Handle a single FD with a protocol
   - Integrates with Erlang's `enif_select` for efficient I/O multiplexing
   - Zero-copy buffer management for high-throughput scenarios
+  - Supports SHARED_GIL subinterpreters via `py_reactor_context`
+  - Each reactor context has isolated protocol factory when using `mode=subinterp`
 
 - **ETF encoding for PIDs and References** - Full Erlang term format support
   - Erlang PIDs encode/decode properly in ETF binary format
@@ -121,6 +123,11 @@
   for subprocess management instead.
 
 ### Fixed
+
+- **`py_reactor_context` now extends erlang module in subinterpreters** - Previously,
+  `py_reactor_context` with `mode=subinterp` would fail to import `erlang.reactor`
+  because the erlang module extension was not applied. Now calls
+  `py_context:extend_erlang_module_in_context/1` after context creation.
 
 - **FD stealing and UDP connected socket issues** - Fixed file descriptor handling
   for UDP sockets in connected mode
