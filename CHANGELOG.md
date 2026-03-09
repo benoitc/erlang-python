@@ -4,6 +4,34 @@
 
 ### Added
 
+- **Dual Pool Support** - Separate pools for CPU-bound and I/O-bound operations
+  - `default` pool - For quick CPU-bound operations, sized to number of schedulers
+  - `io` pool - For I/O-bound operations, larger pool (default: 10) for concurrency
+  - `py:call(io, Module, Func, Args)` - Execute on the io pool
+  - `py:call(io, Module, Func, Args, Kwargs)` - Execute with kwargs on io pool
+  - Registration-based routing (no call site changes needed):
+    - `py:register_pool(io, requests)` - Route all `requests.*` calls to io pool
+    - `py:register_pool(io, {aiohttp, get})` - Route specific function to io pool
+    - `py:unregister_pool(Module)` - Remove module registration
+    - `py:unregister_pool({Module, Func})` - Remove function registration
+    - Automatic routing: `py:call(requests, get, [Url])` goes to io pool when registered
+  - `py_context_router:start_pool/2,3` - Start named pools programmatically
+  - `py_context_router:stop_pool/1` - Stop a named pool
+  - `py_context_router:pool_started/1` - Check if a pool is running
+  - `py_context_router:get_context(Pool)` - Get context from a named pool
+  - `py_context_router:num_contexts(Pool)` - Get pool size
+  - `py_context_router:contexts(Pool)` - Get all contexts in a pool
+  - `py_context_router:lookup_pool(Module, Func)` - Query pool routing
+  - Configuration via application env:
+    ```erlang
+    {erlang_python, [
+        {io_pool_size, 10},      % Size of io pool (default: 10)
+        {io_pool_mode, worker}   % Mode for io pool (default: auto)
+    ]}.
+    ```
+  - Backward compatible: existing code using `py:call/3,4,5` works unchanged
+  - New test suite: `test/py_pool_SUITE.erl`
+
 - **Channel API** - Bidirectional message passing between Erlang and Python
   - `py_channel:new/0,1` - Create channels with optional backpressure (`max_size`)
   - `py_channel:send/2` - Send Erlang terms to Python (returns `busy` on backpressure)
