@@ -1,5 +1,7 @@
 # Web Framework Integration (ASGI/WSGI)
 
+> **Deprecation Notice:** The `py_asgi` and `py_wsgi` modules are deprecated and will be removed in a future release. For new projects, use the [Channel API](channel.md) or [Reactor API](reactor.md) instead, which provide better performance and more flexible request handling.
+
 This guide covers the optimized ASGI and WSGI modules for integrating Python web frameworks with erlang_python.
 
 ## Overview

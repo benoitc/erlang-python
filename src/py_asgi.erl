@@ -14,6 +14,10 @@
 
 %%% @doc Optimized ASGI request handling.
 %%%
+%%% @deprecated This module is deprecated and will be removed in a future release.
+%%% Use the Channel API (`py_channel`) or Reactor API (`erlang.reactor`) instead,
+%%% which provide better performance and more flexible request handling.
+%%%
 %%% This module provides high-performance ASGI request handling by using
 %%% optimized C-level marshalling between Erlang and Python:
 %%%
@@ -51,6 +55,13 @@
 %%%
 %%% @end
 -module(py_asgi).
+
+-deprecated([
+    {run, 4, "use py_channel or erlang.reactor instead"},
+    {run, 5, "use py_channel or erlang.reactor instead"},
+    {build_scope, 1, "use py_channel or erlang.reactor instead"},
+    {build_scope, 2, "use py_channel or erlang.reactor instead"}
+]).
 
 -export([
     run/4,

@@ -144,6 +144,16 @@
 - **ErlangEventLoopPolicy always returns ErlangEventLoop** - Previously only
   returned ErlangEventLoop for main thread; now consistent across all threads.
 
+### Deprecated
+
+- **`py_asgi` module** - Deprecated in favor of the Channel API (`py_channel`)
+  or Reactor API (`erlang.reactor`). The module still works but will be removed
+  in a future release.
+
+- **`py_wsgi` module** - Deprecated in favor of the Channel API (`py_channel`)
+  or Reactor API (`erlang.reactor`). The module still works but will be removed
+  in a future release.
+
 ### Removed
 
 - **Context affinity functions** - Removed `py:bind`, `py:unbind`, `py:is_bound`,
