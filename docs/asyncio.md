@@ -915,7 +915,7 @@ The `py:async_call/3,4` and `py:await/1,2` APIs use an event-driven backend base
 | Component | Role |
 |-----------|------|
 | `py_event_loop_pool` | Pool manager for event loop-based async execution |
-| `py_event_loop:run_async/2` | Submit coroutine to event loop |
+| `run_async/2` (internal) | Submit coroutine to event loop |
 | `_run_and_send` | Python wrapper that sends result via `erlang.send()` |
 | `nif_event_loop_run_async` | NIF for direct coroutine submission |
 

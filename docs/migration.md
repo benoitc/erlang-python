@@ -225,13 +225,13 @@ ok = py_context:exec(Ctx, <<"x = 42">>),
 ```
 
 **Removed functions:**
-- `py:bind/0`, `py:bind/1`
-- `py:unbind/0`, `py:unbind/1`
-- `py:is_bound/0`
-- `py:with_context/1`
-- `py:ctx_call/4,5,6`
-- `py:ctx_eval/2,3,4`
-- `py:ctx_exec/2`
+- `bind/0`, `bind/1` - process binding
+- `unbind/0`, `unbind/1` - process unbinding
+- `is_bound/0` - check if process is bound
+- `with_context/1` - scoped context execution
+- `ctx_call/4,5,6` - context-specific call
+- `ctx_eval/2,3,4` - context-specific eval
+- `ctx_exec/2` - context-specific exec
 
 ### Subprocess Support
 
