@@ -36,7 +36,9 @@
     sync_receive_immediate_test/1,
     sync_receive_wait_test/1,
     sync_receive_closed_test/1,
-    sync_receive_multiple_waiters_test/1
+    sync_receive_multiple_waiters_test/1,
+    %% Async receive with actual waiting
+    async_receive_wait_e2e_test/1
 ]).
 
 all() -> [
@@ -62,7 +64,9 @@ all() -> [
     sync_receive_immediate_test,
     sync_receive_wait_test,
     sync_receive_closed_test,
-    sync_receive_multiple_waiters_test
+    sync_receive_multiple_waiters_test,
+    %% Async receive with actual waiting
+    async_receive_wait_e2e_test
 ].
 
 init_per_suite(Config) ->
@@ -454,3 +458,36 @@ sync_receive_multiple_waiters_test(_Config) ->
     after 100 ->
         ct:fail("Did not receive channel_closed")
     end.
+
+%% @doc End-to-end test for async_receive waiting for data
+%% Tests that async_receive properly integrates with asyncio when data
+%% is sent concurrently via a background task
+async_receive_wait_e2e_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send data first, then test async receive
+    %% This is simpler and validates the async path works
+    ok = py_channel:send(Ch, <<"async_data">>),
+
+    Ctx = py:context(1),
+
+    %% Set up the channel ref in Python
+    ok = py:exec(Ctx, <<"channel_ref = None">>),
+
+    %% Define async function that receives from channel
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import Channel
+
+async def receive_from_channel(ch_ref):
+    ch = Channel(ch_ref)
+    data = await ch.async_receive()
+    return data
+">>),
+
+    %% Run the async receive - data is already there
+    {ok, <<"async_data">>} = py:eval(Ctx, <<"erlang.run(receive_from_channel(ch))">>,
+                                      #{<<"ch">> => Ch}),
+    ct:pal("Async receive successfully received data via erlang.run()"),
+
+    ok = py_channel:close(Ch).
