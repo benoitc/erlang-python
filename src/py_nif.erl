@@ -1721,7 +1721,7 @@ channel_cancel_wait(_ChannelRef, _CallbackId) ->
 %% closes, receives 'channel_closed'.
 %%
 %% @param ChannelRef Channel reference
-%% @returns ok | {error, closed} | {error, waiter_exists}
--spec channel_register_sync_waiter(reference()) -> ok | {error, term()}.
+%% @returns ok | has_data | {error, closed} | {error, waiter_exists}
+-spec channel_register_sync_waiter(reference()) -> ok | has_data | {error, term()}.
 channel_register_sync_waiter(_ChannelRef) ->
     ?NIF_STUB.

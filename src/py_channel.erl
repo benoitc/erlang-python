@@ -170,6 +170,10 @@ handle_receive([ChannelRef]) ->
             case py_nif:channel_register_sync_waiter(ChannelRef) of
                 ok ->
                     wait_for_channel_data(ChannelRef);
+                has_data ->
+                    %% Race condition: data arrived between try_receive and
+                    %% register_sync_waiter. Retry the receive.
+                    handle_receive([ChannelRef]);
                 {error, Reason} ->
                     {error, Reason}
             end
@@ -192,6 +196,9 @@ wait_for_channel_data(ChannelRef) ->
                     case py_nif:channel_register_sync_waiter(ChannelRef) of
                         ok ->
                             wait_for_channel_data(ChannelRef);
+                        has_data ->
+                            %% Data arrived, retry receive
+                            handle_receive([ChannelRef]);
                         {error, Reason} ->
                             {error, Reason}
                     end;

@@ -444,12 +444,15 @@ sync_receive_multiple_waiters_test(_Config) ->
     %% Send data to clear the first waiter
     ok = py_channel:send(Ch, <<"data">>),
 
-    %% Consume the message that was sent to us
+    %% Consume the notification message that was sent to us
     receive
         channel_data_ready -> ok
     after 100 ->
         ct:fail("Did not receive channel_data_ready")
     end,
+
+    %% Consume the data from the queue (required before re-registering)
+    {ok, <<"data">>} = py_nif:channel_try_receive(Ch),
 
     %% Now we should be able to register again
     ok = py_nif:channel_register_sync_waiter(Ch),

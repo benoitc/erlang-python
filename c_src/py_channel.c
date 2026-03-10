@@ -44,7 +44,19 @@ void channel_resource_dtor(ErlNifEnv *env, void *obj) {
     (void)env;
     py_channel_t *channel = (py_channel_t *)obj;
 
-    /* Release waiter loop reference if held */
+    /* Notify sync waiter that channel is being destroyed.
+     * This is safe because enif_send just puts a message in the process mailbox. */
+    if (channel->has_sync_waiter) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        enif_send(NULL, &channel->sync_waiter_pid, msg_env,
+                  enif_make_atom(msg_env, "channel_closed"));
+        enif_free_env(msg_env);
+    }
+
+    /* Note: We do NOT notify async waiter here because the event loop
+     * may already be destroyed (resources can be GC'd in any order).
+     * The async waiter will timeout or be cancelled when the event loop
+     * is destroyed. We just release our reference to the loop. */
     if (channel->waiter_loop != NULL) {
         enif_release_resource(channel->waiter_loop);
         channel->waiter_loop = NULL;
@@ -957,11 +969,14 @@ ERL_NIF_TERM nif_channel_cancel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TER
 /**
  * @brief Register a sync waiter for blocking receive
  *
- * nif_channel_register_sync_waiter(ChannelRef) -> ok | {error, Reason}
+ * nif_channel_register_sync_waiter(ChannelRef) -> ok | has_data | {error, Reason}
  *
  * Registers the calling process as a sync waiter. When data arrives,
  * the waiter receives a 'channel_data_ready' message. When the channel
  * closes, receives 'channel_closed'.
+ *
+ * Returns 'has_data' if data is already available (race condition fix).
+ * The caller should retry the receive in this case.
  */
 ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
@@ -977,6 +992,14 @@ ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc, const ER
     if (channel->closed) {
         pthread_mutex_unlock(&channel->mutex);
         return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "closed"));
+    }
+
+    /* Check if data is already available (race condition fix).
+     * If data arrived between try_receive and register_sync_waiter,
+     * return has_data so the caller can retry the receive. */
+    if (enif_ioq_size(channel->queue) > 0) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_atom(env, "has_data");
     }
 
     /* Check if another sync waiter is already registered */
