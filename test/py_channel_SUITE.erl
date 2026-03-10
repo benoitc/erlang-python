@@ -29,7 +29,9 @@
     async_receive_immediate_test/1,
     async_receive_wait_test/1,
     async_iteration_test/1,
-    async_closed_channel_test/1
+    async_closed_channel_test/1,
+    channel_ref_roundtrip_test/1,
+    channel_ref_call_test/1
 ]).
 
 all() -> [
@@ -48,7 +50,9 @@ all() -> [
     async_receive_immediate_test,
     async_receive_wait_test,
     async_iteration_test,
-    async_closed_channel_test
+    async_closed_channel_test,
+    channel_ref_roundtrip_test,
+    channel_ref_call_test
 ].
 
 init_per_suite(Config) ->
@@ -287,3 +291,56 @@ async_closed_channel_test(_Config) ->
     {ok, true} = py:eval(Ctx, <<"issubclass(ChannelClosed, Exception)">>),
 
     ok.
+
+%% @doc Test that channel references can be passed to Python and back via eval
+channel_ref_roundtrip_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Pass channel ref to Python via NIF and get it back
+    %% This tests the PyCapsule conversion in py_convert.c
+    {ok, ReturnedRef} = py:eval(<<"ch_ref">>, #{<<"ch_ref">> => Ch}),
+
+    %% The returned ref should be usable as a channel
+    %% Send data through original channel
+    ok = py_channel:send(Ch, <<"test_data">>),
+
+    %% Receive using the returned ref (should be the same channel)
+    {ok, <<"test_data">>} = py_nif:channel_try_receive(ReturnedRef),
+
+    %% Verify channel info works on returned ref
+    Info = py_channel:info(ReturnedRef),
+    false = maps:get(closed, Info),
+
+    ok = py_channel:close(Ch).
+
+%% @doc Test that channel references can be passed via py:call
+channel_ref_call_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Test passing channel ref through py:call to a Python function
+    %% The test_channel_ref module has identity, get_channel_type, store_and_return
+    {ok, ReturnedRef} = py:call(test_channel_ref, identity, [Ch]),
+
+    %% The returned ref should be usable as a channel
+    ok = py_channel:send(Ch, <<"identity_data">>),
+    {ok, <<"identity_data">>} = py_nif:channel_try_receive(ReturnedRef),
+
+    %% Test that Python sees it as a PyCapsule
+    {ok, <<"PyCapsule">>} = py:call(test_channel_ref, get_channel_type, [Ch]),
+
+    %% Test storing in a container and returning
+    {ok, StoredRef} = py:call(test_channel_ref, store_and_return, [Ch]),
+
+    ok = py_channel:send(Ch, <<"stored_data">>),
+    {ok, <<"stored_data">>} = py_nif:channel_try_receive(StoredRef),
+
+    %% Also test passing through containers via eval
+    {ok, [Ref1, Ref2]} = py:eval(<<"[a, b]">>, #{<<"a">> => Ch, <<"b">> => Ch}),
+
+    ok = py_channel:send(Ch, <<"ref1_data">>),
+    {ok, <<"ref1_data">>} = py_nif:channel_try_receive(Ref1),
+
+    ok = py_channel:send(Ch, <<"ref2_data">>),
+    {ok, <<"ref2_data">>} = py_nif:channel_try_receive(Ref2),
+
+    ok = py_channel:close(Ch).

@@ -49,6 +49,22 @@
 /* Stack allocation threshold for small tuples/maps to avoid heap allocation */
 #define SMALL_CONTAINER_THRESHOLD 16
 
+/* Capsule name for channel references */
+#define CHANNEL_CAPSULE_NAME "erlang.channel_ref"
+
+/**
+ * @brief PyCapsule destructor for channel references
+ *
+ * Called when a PyCapsule wrapping a channel resource is garbage collected.
+ * Releases the resource reference that was kept when the capsule was created.
+ */
+static void channel_capsule_destructor(PyObject *capsule) {
+    void *ptr = PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (ptr != NULL) {
+        enif_release_resource(ptr);
+    }
+}
+
 /* ============================================================================
  * Python to Erlang Conversion
  * ============================================================================ */
@@ -334,6 +350,18 @@ static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         PyErr_Clear();
     }
 
+    /* Handle PyCapsule containing channel reference */
+    if (PyCapsule_CheckExact(obj)) {
+        void *ptr = PyCapsule_GetPointer(obj, CHANNEL_CAPSULE_NAME);
+        if (ptr != NULL) {
+            /* This is a channel reference capsule - convert back to resource term */
+            py_channel_t *channel = (py_channel_t *)ptr;
+            return enif_make_resource(env, channel);
+        }
+        /* Not a channel capsule, clear error and fall through */
+        PyErr_Clear();
+    }
+
     /*
      * Fallback: convert any other object to its string representation.
      * This handles custom classes, functions, modules, etc.
@@ -550,6 +578,21 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
     if (enif_get_resource(env, term, PYOBJ_RESOURCE_TYPE, (void **)&wrapper)) {
         Py_INCREF(wrapper->obj);
         return wrapper->obj;
+    }
+
+    /* Check for channel resource - wrap in PyCapsule for round-trip */
+    py_channel_t *channel;
+    if (enif_get_resource(env, term, CHANNEL_RESOURCE_TYPE, (void **)&channel)) {
+        /* Create a PyCapsule wrapping the channel pointer.
+         * We increment the resource refcount so it stays valid while Python holds it.
+         * The destructor will decrement it when the capsule is garbage collected. */
+        enif_keep_resource(channel);
+        PyObject *capsule = PyCapsule_New(channel, CHANNEL_CAPSULE_NAME, channel_capsule_destructor);
+        if (capsule == NULL) {
+            enif_release_resource(channel);
+            return NULL;
+        }
+        return capsule;
     }
 
     /* Fallback: return None for unknown types */
