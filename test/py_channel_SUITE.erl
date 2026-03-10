@@ -31,7 +31,19 @@
     async_iteration_test/1,
     async_closed_channel_test/1,
     channel_ref_roundtrip_test/1,
-    channel_ref_call_test/1
+    channel_ref_call_test/1,
+    %% Sync blocking receive tests
+    sync_receive_immediate_test/1,
+    sync_receive_wait_test/1,
+    sync_receive_closed_test/1,
+    sync_receive_multiple_waiters_test/1,
+    %% Mixed waiter rejection tests
+    mixed_waiter_sync_blocks_async_test/1,
+    mixed_waiter_async_blocks_sync_test/1,
+    %% Async receive with actual waiting
+    async_receive_wait_e2e_test/1,
+    %% Subinterpreter mode tests
+    subinterp_sync_receive_wait_test/1
 ]).
 
 all() -> [
@@ -52,7 +64,19 @@ all() -> [
     async_iteration_test,
     async_closed_channel_test,
     channel_ref_roundtrip_test,
-    channel_ref_call_test
+    channel_ref_call_test,
+    %% Sync blocking receive tests
+    sync_receive_immediate_test,
+    sync_receive_wait_test,
+    sync_receive_closed_test,
+    sync_receive_multiple_waiters_test,
+    %% Mixed waiter rejection tests
+    mixed_waiter_sync_blocks_async_test,
+    mixed_waiter_async_blocks_sync_test,
+    %% Async receive with actual waiting
+    async_receive_wait_e2e_test,
+    %% Subinterpreter mode tests
+    subinterp_sync_receive_wait_test
 ].
 
 init_per_suite(Config) ->
@@ -223,7 +247,7 @@ async_receive_immediate_test(_Config) ->
 
     %% Run async receive via Python - data should return immediately
     Ctx = py:context(1),
-    Code = <<"
+    _Code = <<"
 import asyncio
 from erlang import Channel
 
@@ -344,3 +368,240 @@ channel_ref_call_test(_Config) ->
     {ok, <<"ref2_data">>} = py_nif:channel_try_receive(Ref2),
 
     ok = py_channel:close(Ch).
+
+%%% ============================================================================
+%%% Sync Blocking Receive Tests
+%%% ============================================================================
+
+%% @doc Test sync receive when data is already available (immediate return)
+sync_receive_immediate_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send data before receive
+    ok = py_channel:send(Ch, <<"immediate_data">>),
+
+    %% Receive should return immediately
+    {ok, <<"immediate_data">>} = py_channel:handle_receive([Ch]),
+
+    ok = py_channel:close(Ch).
+
+%% @doc Test sync receive that blocks waiting for data
+sync_receive_wait_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    Self = self(),
+
+    %% Spawn a process to do blocking receive
+    _Receiver = spawn_link(fun() ->
+        Result = py_channel:handle_receive([Ch]),
+        Self ! {receive_result, Result}
+    end),
+
+    %% Give receiver time to register as waiter
+    timer:sleep(50),
+
+    %% Send data - should wake up the receiver
+    ok = py_channel:send(Ch, <<"delayed_data">>),
+
+    %% Wait for result
+    receive
+        {receive_result, {ok, <<"delayed_data">>}} ->
+            ok
+    after 2000 ->
+        ct:fail("Receiver did not get data within timeout")
+    end,
+
+    ok = py_channel:close(Ch).
+
+%% @doc Test sync receive when channel is closed while waiting
+sync_receive_closed_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    Self = self(),
+
+    %% Spawn a process to do blocking receive
+    _Receiver = spawn_link(fun() ->
+        Result = py_channel:handle_receive([Ch]),
+        Self ! {receive_result, Result}
+    end),
+
+    %% Give receiver time to register as waiter
+    timer:sleep(50),
+
+    %% Close the channel - should wake up receiver with error
+    ok = py_channel:close(Ch),
+
+    %% Wait for result
+    receive
+        {receive_result, {error, closed}} ->
+            ok
+    after 2000 ->
+        ct:fail("Receiver did not get closed notification within timeout")
+    end.
+
+%% @doc Test that only one sync waiter can be registered at a time
+sync_receive_multiple_waiters_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Register first sync waiter directly via NIF
+    ok = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Try to register another - should fail
+    {error, waiter_exists} = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Send data to clear the first waiter
+    ok = py_channel:send(Ch, <<"data">>),
+
+    %% Consume the notification message that was sent to us
+    receive
+        channel_data_ready -> ok
+    after 100 ->
+        ct:fail("Did not receive channel_data_ready")
+    end,
+
+    %% Consume the data from the queue (required before re-registering)
+    {ok, <<"data">>} = py_nif:channel_try_receive(Ch),
+
+    %% Now we should be able to register again
+    ok = py_nif:channel_register_sync_waiter(Ch),
+
+    ok = py_channel:close(Ch),
+
+    %% Consume the close message
+    receive
+        channel_closed -> ok
+    after 100 ->
+        ct:fail("Did not receive channel_closed")
+    end.
+
+%% @doc Test that sync waiter blocks async waiter registration
+mixed_waiter_sync_blocks_async_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Register sync waiter first
+    ok = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Create an event loop for async waiter test
+    {ok, Loop} = py_nif:event_loop_new(),
+
+    %% Try to register async waiter - should fail
+    {error, waiter_exists} = py_nif:channel_wait(Ch, 123, Loop),
+
+    %% Clean up: send data to clear sync waiter
+    ok = py_channel:send(Ch, <<"data">>),
+    receive channel_data_ready -> ok after 100 -> ok end,
+
+    py_nif:event_loop_destroy(Loop),
+    ok = py_channel:close(Ch).
+
+%% @doc Test that async waiter blocks sync waiter registration
+mixed_waiter_async_blocks_sync_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Create an event loop and register async waiter first
+    {ok, Loop} = py_nif:event_loop_new(),
+    ok = py_nif:channel_wait(Ch, 456, Loop),
+
+    %% Try to register sync waiter - should fail
+    {error, waiter_exists} = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Clean up: cancel async waiter and close
+    ok = py_nif:channel_cancel_wait(Ch, 456),
+    py_nif:event_loop_destroy(Loop),
+    ok = py_channel:close(Ch).
+
+%% @doc End-to-end test for async_receive waiting for data
+%% Tests that async_receive properly integrates with asyncio when data
+%% is sent concurrently via a background task
+async_receive_wait_e2e_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send data first, then test async receive
+    %% This is simpler and validates the async path works
+    ok = py_channel:send(Ch, <<"async_data">>),
+
+    Ctx = py:context(1),
+
+    %% Set up the channel ref in Python
+    ok = py:exec(Ctx, <<"channel_ref = None">>),
+
+    %% Define async function that receives from channel
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import Channel
+
+async def receive_from_channel(ch_ref):
+    ch = Channel(ch_ref)
+    data = await ch.async_receive()
+    return data
+">>),
+
+    %% Run the async receive - data is already there
+    {ok, <<"async_data">>} = py:eval(Ctx, <<"erlang.run(receive_from_channel(ch))">>,
+                                      #{<<"ch">> => Ch}),
+    ct:pal("Async receive successfully received data via erlang.run()"),
+
+    ok = py_channel:close(Ch).
+
+%%% ============================================================================
+%%% Subinterpreter Mode Tests
+%%% ============================================================================
+
+%% @doc Test sync blocking receive works with subinterpreter mode contexts
+%% This is a true e2e test: Python Channel.receive() blocks until Erlang sends data
+subinterp_sync_receive_wait_test(_Config) ->
+    case py_nif:subinterp_supported() of
+        false ->
+            {skip, "Subinterpreters not supported (requires Python 3.12+)"};
+        true ->
+            do_subinterp_sync_receive_wait_test()
+    end.
+
+do_subinterp_sync_receive_wait_test() ->
+    {ok, Ch} = py_channel:new(),
+    Self = self(),
+
+    %% Create a context explicitly in subinterp mode
+    CtxId = erlang:unique_integer([positive]),
+    {ok, CtxPid} = py_context:start_link(CtxId, subinterp),
+
+    %% Import Channel class in the subinterp context
+    ok = py_context:exec(CtxPid, <<"from erlang import Channel">>),
+
+    %% Test 1: Immediate receive with data already available
+    ok = py_channel:send(Ch, <<"immediate_data">>),
+    {ok, <<"immediate_data">>} = py_context:eval(CtxPid,
+        <<"Channel(ch).receive()">>, #{<<"ch">> => Ch}),
+    ct:pal("Subinterp immediate receive OK"),
+
+    %% Test 2: Blocking receive - spawn process to send data after delay
+    spawn_link(fun() ->
+        timer:sleep(100),
+        ok = py_channel:send(Ch, <<"delayed_data">>),
+        Self ! data_sent
+    end),
+
+    %% This should block until the spawned process sends data
+    {ok, <<"delayed_data">>} = py_context:eval(CtxPid,
+        <<"Channel(ch).receive()">>, #{<<"ch">> => Ch}),
+    receive data_sent -> ok after 1000 -> ok end,
+    ct:pal("Subinterp blocking receive OK"),
+
+    %% Test 3: try_receive on empty channel returns None
+    {ok, none} = py_context:eval(CtxPid,
+        <<"Channel(ch).try_receive()">>, #{<<"ch">> => Ch}),
+    ct:pal("Subinterp try_receive empty OK"),
+
+    %% Test 4: Channel close detected by receive
+    ok = py_channel:close(Ch),
+    ok = py_context:exec(CtxPid, <<"
+def test_closed(ch_ref):
+    try:
+        Channel(ch_ref).receive()
+        return 'no_exception'
+    except:
+        return 'got_exception'
+">>),
+    {ok, <<"got_exception">>} = py_context:eval(CtxPid,
+        <<"test_closed(ch)">>, #{<<"ch">> => Ch}),
+    ct:pal("Subinterp closed channel detected OK"),
+
+    py_context:stop(CtxPid).

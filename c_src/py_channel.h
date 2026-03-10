@@ -39,10 +39,6 @@
  *   -> enif_send() to process mailbox
  * ```
  *
- * @par Zero-Copy Design
- *
- * ChannelBuffer wraps dequeued binaries without copying, exposing them
- * through Python's buffer protocol. This follows the ReactorBuffer pattern.
  */
 
 #ifndef PY_CHANNEL_H
@@ -105,35 +101,18 @@ typedef struct {
     /** @brief Flag: async waiter is registered */
     bool has_waiter;
 
+    /** @brief Sync waiter Erlang PID (for blocking receive) */
+    ErlNifPid sync_waiter_pid;
+
+    /** @brief Flag: sync waiter is registered */
+    bool has_sync_waiter;
+
     /** @brief Flag: channel is closed */
     bool closed;
 
     /** @brief Unique channel ID for debugging */
     uint64_t channel_id;
 } py_channel_t;
-
-/* ============================================================================
- * ChannelBuffer Python Type
- * ============================================================================ */
-
-/**
- * @brief The ChannelBuffer Python type object
- */
-extern PyTypeObject ChannelBufferType;
-
-/**
- * @struct ChannelBufferObject
- * @brief Python object wrapping channel message data
- *
- * ChannelBuffer exposes dequeued binary data via the buffer protocol,
- * enabling zero-copy access to channel messages in Python.
- */
-typedef struct {
-    PyObject_HEAD
-    unsigned char *data;           /**< Message data (owned) */
-    size_t size;                   /**< Data size */
-    PyObject *cached_memoryview;   /**< Cached memoryview for fast access */
-} ChannelBufferObject;
 
 /* ============================================================================
  * Function Declarations
@@ -148,38 +127,6 @@ typedef struct {
  * @return 0 on success, -1 on error
  */
 int channel_init(ErlNifEnv *env);
-
-/**
- * @brief Initialize the ChannelBuffer Python type
- *
- * Must be called during Python initialization with the GIL held.
- *
- * @return 0 on success, -1 on error
- */
-int ChannelBuffer_init_type(void);
-
-/**
- * @brief Register ChannelBuffer with erlang.channel module
- *
- * Makes ChannelBuffer accessible from Python.
- *
- * @return 0 on success, -1 on error
- *
- * @pre GIL must be held
- * @pre ChannelBuffer_init_type() must have been called
- */
-int ChannelBuffer_register(void);
-
-/**
- * @brief Create a ChannelBuffer from raw data
- *
- * @param data Data to wrap (ownership transferred to buffer)
- * @param size Size of data
- * @return New ChannelBuffer object, or NULL on error
- *
- * @pre GIL must be held
- */
-PyObject *ChannelBuffer_from_data(unsigned char *data, size_t size);
 
 /**
  * @brief Resource destructor for channels
@@ -264,5 +211,17 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_channel_cancel_wait(ErlNifEnv *env, int argc,
                                       const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Register a sync waiter for blocking receive
+ *
+ * NIF: channel_register_sync_waiter(ChannelRef) -> ok | {error, Reason}
+ *
+ * Registers the calling process as a sync waiter. When data arrives via
+ * channel_send, the waiter receives a 'channel_data_ready' message.
+ * When the channel closes, receives 'channel_closed'.
+ */
+ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]);
 
 #endif /* PY_CHANNEL_H */

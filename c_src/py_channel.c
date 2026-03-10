@@ -44,7 +44,21 @@ void channel_resource_dtor(ErlNifEnv *env, void *obj) {
     (void)env;
     py_channel_t *channel = (py_channel_t *)obj;
 
-    /* Release waiter loop reference if held */
+    /* Notify sync waiter that channel is being destroyed.
+     * This is safe because enif_send just puts a message in the process mailbox. */
+    if (channel->has_sync_waiter) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env != NULL) {
+            enif_send(NULL, &channel->sync_waiter_pid, msg_env,
+                      enif_make_atom(msg_env, "channel_closed"));
+            enif_free_env(msg_env);
+        }
+    }
+
+    /* Note: We do NOT notify async waiter here because the event loop
+     * may already be destroyed (resources can be GC'd in any order).
+     * The async waiter will timeout or be cancelled when the event loop
+     * is destroyed. We just release our reference to the loop. */
     if (channel->waiter_loop != NULL) {
         enif_release_resource(channel->waiter_loop);
         channel->waiter_loop = NULL;
@@ -82,6 +96,8 @@ py_channel_t *channel_alloc(size_t max_size) {
     channel->waiter_loop = NULL;
     channel->waiter_callback_id = 0;
     channel->has_waiter = false;
+    channel->has_sync_waiter = false;
+    memset(&channel->sync_waiter_pid, 0, sizeof(ErlNifPid));
     channel->closed = false;
     channel->channel_id = atomic_fetch_add(&g_channel_id_counter, 1);
 
@@ -128,16 +144,26 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
     /* Check if there's a waiting context to resume */
     bool should_resume = (channel->waiting != NULL);
 
-    /* Check if there's an async waiter to dispatch */
+    /* Check if there's an async waiter to dispatch.
+     * We only clear the waiter state after successful dispatch to avoid
+     * lost wakeups if the event queue is full. */
     erlang_event_loop_t *loop_to_wake = NULL;
     uint64_t callback_id = 0;
+    bool has_async_waiter = channel->has_waiter;
 
-    if (channel->has_waiter) {
+    if (has_async_waiter) {
         loop_to_wake = channel->waiter_loop;
         callback_id = channel->waiter_callback_id;
-        channel->has_waiter = false;
-        channel->waiter_loop = NULL;
-        /* Note: Keep the reference until after dispatch */
+        /* Don't clear yet - will clear after successful dispatch */
+    }
+
+    /* Check if there's a sync waiter to notify */
+    ErlNifPid sync_waiter;
+    bool has_sync_waiter = channel->has_sync_waiter;
+
+    if (has_sync_waiter) {
+        sync_waiter = channel->sync_waiter_pid;
+        /* Don't clear yet - will clear after successful send */
     }
 
     pthread_mutex_unlock(&channel->mutex);
@@ -149,9 +175,36 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
 
     /* Dispatch async waiter via timer dispatch (same path as timers) */
     if (loop_to_wake != NULL) {
-        event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
-        /* Release the reference we kept in channel_wait */
-        enif_release_resource(loop_to_wake);
+        bool dispatched = event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
+        if (dispatched) {
+            /* Successfully dispatched - now clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_waiter && channel->waiter_callback_id == callback_id) {
+                channel->has_waiter = false;
+                channel->waiter_loop = NULL;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+            /* Release the reference we kept in channel_wait */
+            enif_release_resource(loop_to_wake);
+        }
+        /* If dispatch failed, waiter remains registered for next send */
+    }
+
+    /* Notify sync waiter via Erlang message */
+    if (has_sync_waiter) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env != NULL) {
+            enif_send(NULL, &sync_waiter, msg_env,
+                      enif_make_atom(msg_env, "channel_data_ready"));
+            enif_free_env(msg_env);
+            /* Successfully notified - clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_sync_waiter) {
+                channel->has_sync_waiter = false;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+        }
+        /* If alloc failed, waiter remains registered for next send */
     }
 
     return 0;
@@ -187,15 +240,26 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
     /* Check if there's a waiting context to resume */
     bool should_resume = (channel->waiting != NULL);
 
-    /* Check if there's an async waiter to dispatch */
+    /* Check if there's an async waiter to dispatch.
+     * We only clear the waiter state after successful dispatch to avoid
+     * lost wakeups if the event queue is full. */
     erlang_event_loop_t *loop_to_wake = NULL;
     uint64_t callback_id = 0;
+    bool has_async_waiter = channel->has_waiter;
 
-    if (channel->has_waiter) {
+    if (has_async_waiter) {
         loop_to_wake = channel->waiter_loop;
         callback_id = channel->waiter_callback_id;
-        channel->has_waiter = false;
-        channel->waiter_loop = NULL;
+        /* Don't clear yet - will clear after successful dispatch */
+    }
+
+    /* Check if there's a sync waiter to notify */
+    ErlNifPid sync_waiter;
+    bool has_sync_waiter = channel->has_sync_waiter;
+
+    if (has_sync_waiter) {
+        sync_waiter = channel->sync_waiter_pid;
+        /* Don't clear yet - will clear after successful send */
     }
 
     pthread_mutex_unlock(&channel->mutex);
@@ -204,9 +268,38 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
         channel_resume_waiting(channel);
     }
 
+    /* Dispatch async waiter via timer dispatch (same path as timers) */
     if (loop_to_wake != NULL) {
-        event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
-        enif_release_resource(loop_to_wake);
+        bool dispatched = event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
+        if (dispatched) {
+            /* Successfully dispatched - now clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_waiter && channel->waiter_callback_id == callback_id) {
+                channel->has_waiter = false;
+                channel->waiter_loop = NULL;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+            /* Release the reference we kept in channel_wait */
+            enif_release_resource(loop_to_wake);
+        }
+        /* If dispatch failed, waiter remains registered for next send */
+    }
+
+    /* Notify sync waiter via Erlang message */
+    if (has_sync_waiter) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env != NULL) {
+            enif_send(NULL, &sync_waiter, msg_env,
+                      enif_make_atom(msg_env, "channel_data_ready"));
+            enif_free_env(msg_env);
+            /* Successfully notified - clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_sync_waiter) {
+                channel->has_sync_waiter = false;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+        }
+        /* If alloc failed, waiter remains registered for next send */
     }
 
     return 0;
@@ -262,7 +355,9 @@ void channel_close(py_channel_t *channel) {
     channel->closed = true;
     bool should_resume = (channel->waiting != NULL);
 
-    /* Check if there's an async waiter to dispatch */
+    /* Check if there's an async waiter to dispatch.
+     * For close, we unconditionally clear the waiter since the channel
+     * is now closed - any future receive will see the closed state. */
     erlang_event_loop_t *loop_to_wake = NULL;
     uint64_t callback_id = 0;
 
@@ -271,6 +366,16 @@ void channel_close(py_channel_t *channel) {
         callback_id = channel->waiter_callback_id;
         channel->has_waiter = false;
         channel->waiter_loop = NULL;
+    }
+
+    /* Check if there's a sync waiter to notify */
+    ErlNifPid sync_waiter;
+    bool notify_sync = false;
+
+    if (channel->has_sync_waiter) {
+        sync_waiter = channel->sync_waiter_pid;
+        notify_sync = true;
+        channel->has_sync_waiter = false;
     }
 
     pthread_mutex_unlock(&channel->mutex);
@@ -283,6 +388,16 @@ void channel_close(py_channel_t *channel) {
     if (loop_to_wake != NULL) {
         event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
         enif_release_resource(loop_to_wake);
+    }
+
+    /* Notify sync waiter that channel is closed */
+    if (notify_sync) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env != NULL) {
+            enif_send(NULL, &sync_waiter, msg_env,
+                      enif_make_atom(msg_env, "channel_closed"));
+            enif_free_env(msg_env);
+        }
     }
 }
 
@@ -299,238 +414,6 @@ int channel_init(ErlNifEnv *env) {
     ATOM_CLOSED = enif_make_atom(env, "closed");
     ATOM_EMPTY = enif_make_atom(env, "empty");
 
-    return 0;
-}
-
-/* ============================================================================
- * ChannelBuffer Python Type
- * ============================================================================ */
-
-static void ChannelBuffer_dealloc(ChannelBufferObject *self) {
-    Py_CLEAR(self->cached_memoryview);
-    if (self->data != NULL) {
-        enif_free(self->data);
-        self->data = NULL;
-    }
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static int ChannelBuffer_getbuffer(PyObject *obj, Py_buffer *view, int flags) {
-    ChannelBufferObject *self = (ChannelBufferObject *)obj;
-
-    if (self->data == NULL) {
-        PyErr_SetString(PyExc_BufferError, "Buffer has been released");
-        return -1;
-    }
-
-    view->obj = obj;
-    view->buf = self->data;
-    view->len = self->size;
-    view->readonly = 1;
-    view->itemsize = 1;
-    view->format = (flags & PyBUF_FORMAT) ? "B" : NULL;
-    view->ndim = 1;
-    view->shape = (flags & PyBUF_ND) ? &view->len : NULL;
-    view->strides = (flags & PyBUF_STRIDES) ? &view->itemsize : NULL;
-    view->suboffsets = NULL;
-    view->internal = NULL;
-
-    Py_INCREF(obj);
-    return 0;
-}
-
-static void ChannelBuffer_releasebuffer(PyObject *obj, Py_buffer *view) {
-    (void)obj;
-    (void)view;
-    /* No cleanup needed - data lifetime managed by ChannelBufferObject */
-}
-
-static PyBufferProcs ChannelBuffer_as_buffer = {
-    .bf_getbuffer = ChannelBuffer_getbuffer,
-    .bf_releasebuffer = ChannelBuffer_releasebuffer,
-};
-
-static Py_ssize_t ChannelBuffer_length(ChannelBufferObject *self) {
-    return (Py_ssize_t)self->size;
-}
-
-static PyObject *ChannelBuffer_item(ChannelBufferObject *self, Py_ssize_t i) {
-    if (self->data == NULL) {
-        PyErr_SetString(PyExc_IndexError, "Buffer has been released");
-        return NULL;
-    }
-
-    if (i < 0) {
-        i += self->size;
-    }
-
-    if (i < 0 || (size_t)i >= self->size) {
-        PyErr_SetString(PyExc_IndexError, "index out of range");
-        return NULL;
-    }
-
-    return PyLong_FromLong(self->data[i]);
-}
-
-static PyObject *ChannelBuffer_subscript(ChannelBufferObject *self, PyObject *key) {
-    if (self->data == NULL) {
-        PyErr_SetString(PyExc_IndexError, "Buffer has been released");
-        return NULL;
-    }
-
-    if (PyLong_Check(key)) {
-        Py_ssize_t i = PyLong_AsSsize_t(key);
-        if (i == -1 && PyErr_Occurred()) {
-            return NULL;
-        }
-        return ChannelBuffer_item(self, i);
-    }
-
-    if (PySlice_Check(key)) {
-        Py_ssize_t start, stop, step, slicelength;
-        if (PySlice_GetIndicesEx(key, self->size, &start, &stop, &step, &slicelength) < 0) {
-            return NULL;
-        }
-
-        if (step == 1) {
-            /* Contiguous slice - return bytes directly */
-            return PyBytes_FromStringAndSize((char *)self->data + start, slicelength);
-        }
-
-        /* Non-contiguous slice */
-        PyObject *result = PyBytes_FromStringAndSize(NULL, slicelength);
-        if (result == NULL) {
-            return NULL;
-        }
-        char *dest = PyBytes_AS_STRING(result);
-        for (Py_ssize_t i = 0, j = start; i < slicelength; i++, j += step) {
-            dest[i] = self->data[j];
-        }
-        return result;
-    }
-
-    PyErr_SetString(PyExc_TypeError, "indices must be integers or slices");
-    return NULL;
-}
-
-static PySequenceMethods ChannelBuffer_as_sequence = {
-    .sq_length = (lenfunc)ChannelBuffer_length,
-    .sq_item = (ssizeargfunc)ChannelBuffer_item,
-};
-
-static PyMappingMethods ChannelBuffer_as_mapping = {
-    .mp_length = (lenfunc)ChannelBuffer_length,
-    .mp_subscript = (binaryfunc)ChannelBuffer_subscript,
-};
-
-static PyObject *ChannelBuffer_bytes(ChannelBufferObject *self, PyObject *Py_UNUSED(ignored)) {
-    if (self->data == NULL) {
-        return PyBytes_FromStringAndSize("", 0);
-    }
-    return PyBytes_FromStringAndSize((char *)self->data, self->size);
-}
-
-static PyObject *ChannelBuffer_memoryview(ChannelBufferObject *self, PyObject *Py_UNUSED(ignored)) {
-    if (self->cached_memoryview == NULL) {
-        if (self->data == NULL) {
-            PyErr_SetString(PyExc_BufferError, "Buffer has been released");
-            return NULL;
-        }
-        self->cached_memoryview = PyMemoryView_FromObject((PyObject *)self);
-        if (self->cached_memoryview == NULL) {
-            return NULL;
-        }
-    }
-    Py_INCREF(self->cached_memoryview);
-    return self->cached_memoryview;
-}
-
-static PyObject *ChannelBuffer_repr(ChannelBufferObject *self) {
-    if (self->data == NULL) {
-        return PyUnicode_FromString("<ChannelBuffer (released)>");
-    }
-    return PyUnicode_FromFormat("<ChannelBuffer size=%zu>", self->size);
-}
-
-static PyObject *ChannelBuffer_decode(ChannelBufferObject *self, PyObject *args, PyObject *kwargs) {
-    static char *kwlist[] = {"encoding", "errors", NULL};
-    const char *encoding = "utf-8";
-    const char *errors = "strict";
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|ss:decode", kwlist, &encoding, &errors)) {
-        return NULL;
-    }
-
-    if (self->data == NULL) {
-        return PyUnicode_FromStringAndSize("", 0);
-    }
-
-    return PyUnicode_Decode((char *)self->data, self->size, encoding, errors);
-}
-
-static PyMethodDef ChannelBuffer_methods[] = {
-    {"__bytes__", (PyCFunction)ChannelBuffer_bytes, METH_NOARGS,
-     "Return bytes copy of buffer"},
-    {"memoryview", (PyCFunction)ChannelBuffer_memoryview, METH_NOARGS,
-     "Return a memoryview for zero-copy access"},
-    {"decode", (PyCFunction)ChannelBuffer_decode, METH_VARARGS | METH_KEYWORDS,
-     "Decode the buffer using the specified encoding"},
-    {NULL}
-};
-
-PyTypeObject ChannelBufferType = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "erlang.channel.ChannelBuffer",
-    .tp_doc = "Zero-copy channel message buffer",
-    .tp_basicsize = sizeof(ChannelBufferObject),
-    .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_dealloc = (destructor)ChannelBuffer_dealloc,
-    .tp_repr = (reprfunc)ChannelBuffer_repr,
-    .tp_as_buffer = &ChannelBuffer_as_buffer,
-    .tp_as_sequence = &ChannelBuffer_as_sequence,
-    .tp_as_mapping = &ChannelBuffer_as_mapping,
-    .tp_methods = ChannelBuffer_methods,
-};
-
-int ChannelBuffer_init_type(void) {
-    if (PyType_Ready(&ChannelBufferType) < 0) {
-        return -1;
-    }
-    return 0;
-}
-
-PyObject *ChannelBuffer_from_data(unsigned char *data, size_t size) {
-    ChannelBufferObject *obj = PyObject_New(ChannelBufferObject, &ChannelBufferType);
-    if (obj == NULL) {
-        enif_free(data);
-        return NULL;
-    }
-
-    obj->data = data;
-    obj->size = size;
-    obj->cached_memoryview = NULL;
-
-    return (PyObject *)obj;
-}
-
-int ChannelBuffer_register(void) {
-    /* Import erlang module */
-    PyObject *erlang_module = PyImport_ImportModule("erlang");
-    if (erlang_module == NULL) {
-        PyErr_Clear();
-        return -1;
-    }
-
-    /* Add ChannelBuffer type to the erlang module */
-    Py_INCREF(&ChannelBufferType);
-    if (PyModule_AddObject(erlang_module, "ChannelBuffer", (PyObject *)&ChannelBufferType) < 0) {
-        Py_DECREF(&ChannelBufferType);
-        Py_DECREF(erlang_module);
-        return -1;
-    }
-
-    Py_DECREF(erlang_module);
     return 0;
 }
 
@@ -810,6 +693,12 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
         return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "closed"));
     }
 
+    /* Reject if any waiter already exists (no mixed or duplicate waiters) */
+    if (channel->has_waiter || channel->has_sync_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "waiter_exists"));
+    }
+
     /* Check if data already available */
     size_t queue_size = enif_ioq_size(channel->queue);
     if (queue_size > 0) {
@@ -846,11 +735,6 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
     /* No data - register waiter */
     /* Keep reference to event loop to prevent destruction while waiting */
     enif_keep_resource(loop);
-
-    /* Clear any previous waiter (should not happen, but be safe) */
-    if (channel->waiter_loop != NULL) {
-        enif_release_resource(channel->waiter_loop);
-    }
 
     channel->waiter_loop = loop;
     channel->waiter_callback_id = callback_id;
@@ -893,6 +777,60 @@ ERL_NIF_TERM nif_channel_cancel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TER
         channel->has_waiter = false;
         channel->waiter_callback_id = 0;
     }
+
+    pthread_mutex_unlock(&channel->mutex);
+    return ATOM_OK;
+}
+
+/**
+ * @brief Register a sync waiter for blocking receive
+ *
+ * nif_channel_register_sync_waiter(ChannelRef) -> ok | has_data | {error, Reason}
+ *
+ * Registers the calling process as a sync waiter. When data arrives,
+ * the waiter receives a 'channel_data_ready' message. When the channel
+ * closes, receives 'channel_closed'.
+ *
+ * Returns 'has_data' if data is already available (race condition fix).
+ * The caller should retry the receive in this case.
+ */
+ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_channel_t *channel;
+
+    if (!enif_get_resource(env, argv[0], CHANNEL_RESOURCE_TYPE, (void **)&channel)) {
+        return make_error(env, "invalid_channel");
+    }
+
+    pthread_mutex_lock(&channel->mutex);
+
+    /* Check if channel is closed */
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "closed"));
+    }
+
+    /* Check if data is already available (race condition fix).
+     * If data arrived between try_receive and register_sync_waiter,
+     * return has_data so the caller can retry the receive. */
+    if (enif_ioq_size(channel->queue) > 0) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_atom(env, "has_data");
+    }
+
+    /* Reject if any waiter already exists (no mixed or duplicate waiters) */
+    if (channel->has_sync_waiter || channel->has_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "waiter_exists"));
+    }
+
+    /* Get calling process PID */
+    if (!enif_self(env, &channel->sync_waiter_pid)) {
+        pthread_mutex_unlock(&channel->mutex);
+        return make_error(env, "no_calling_process");
+    }
+
+    channel->has_sync_waiter = true;
 
     pthread_mutex_unlock(&channel->mutex);
     return ATOM_OK;

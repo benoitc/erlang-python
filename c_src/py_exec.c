@@ -306,6 +306,7 @@ static void process_request(py_request_t *req) {
                     Py_DECREF(exc_args);
                     if (suspended == NULL) {
                         tl_pending_callback = false;
+                        Py_CLEAR(tl_pending_args);
                         req->result = make_error(env, "create_suspended_state_failed");
                     } else {
                         req->result = build_suspended_result(env, suspended);
@@ -393,6 +394,7 @@ static void process_request(py_request_t *req) {
                         Py_DECREF(exc_args);
                         if (suspended == NULL) {
                             tl_pending_callback = false;
+                            Py_CLEAR(tl_pending_args);
                             req->result = make_error(env, "create_suspended_state_failed");
                         } else {
                             req->result = build_suspended_result(env, suspended);

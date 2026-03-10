@@ -498,8 +498,9 @@ ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
  * @param type Event type (read, write, timer)
  * @param callback_id Callback ID to dispatch
  * @param fd File descriptor (for read/write), -1 for timers
+ * @return true if event was added, false if queue is full or allocation failed
  */
-void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
+bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
                             uint64_t callback_id, int fd);
 
 /**

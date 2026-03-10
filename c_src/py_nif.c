@@ -116,6 +116,24 @@ __thread char *tl_pending_func_name = NULL;
 __thread size_t tl_pending_func_name_len = 0;
 __thread PyObject *tl_pending_args = NULL;
 
+/**
+ * Clear all pending callback thread-local state.
+ *
+ * Must be called at context boundaries while still in the correct interpreter
+ * context, to prevent cross-interpreter contamination if Python code caught
+ * and swallowed SuspensionRequiredException.
+ */
+static inline void clear_pending_callback_tls(void) {
+    tl_pending_callback = false;
+    tl_pending_callback_id = 0;
+    if (tl_pending_func_name != NULL) {
+        enif_free(tl_pending_func_name);
+        tl_pending_func_name = NULL;
+    }
+    tl_pending_func_name_len = 0;
+    Py_CLEAR(tl_pending_args);
+}
+
 /* Thread-local timeout state */
 __thread uint64_t tl_timeout_deadline = 0;
 __thread bool tl_timeout_enabled = false;
@@ -2280,6 +2298,7 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
 
             if (suspended == NULL) {
                 tl_pending_callback = false;
+                Py_CLEAR(tl_pending_args);
                 result = make_error(env, "create_suspended_state_failed");
             } else {
                 result = build_suspended_context_result(env, suspended);
@@ -2297,6 +2316,9 @@ cleanup:
     /* Restore thread-local state */
     tl_allow_suspension = prev_allow_suspension;
     tl_current_context = prev_context;
+
+    /* Clear pending callback TLS before releasing context */
+    clear_pending_callback_tls();
 
     enif_free(module_name);
     enif_free(func_name);
@@ -2382,6 +2404,7 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
 
             if (suspended == NULL) {
                 tl_pending_callback = false;
+                Py_CLEAR(tl_pending_args);
                 result = make_error(env, "create_suspended_state_failed");
             } else {
                 result = build_suspended_context_result(env, suspended);
@@ -2398,6 +2421,9 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
     /* Restore thread-local state */
     tl_allow_suspension = prev_allow_suspension;
     tl_current_context = prev_context;
+
+    /* Clear pending callback TLS before releasing context */
+    clear_pending_callback_tls();
 
     enif_free(code);
 
@@ -2867,12 +2893,14 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
 
                 if (nested == NULL) {
                     tl_pending_callback = false;
+                    Py_CLEAR(tl_pending_args);
                     result = make_error(env, "create_nested_suspended_state_failed");
                 } else {
                     /* Copy accumulated callback results from parent to nested state */
                     if (copy_callback_results_to_nested(nested, state) != 0) {
                         enif_release_resource(nested);
                         tl_pending_callback = false;
+                        Py_CLEAR(tl_pending_args);
                         result = make_error(env, "copy_callback_results_failed");
                     } else {
                         result = build_suspended_context_result(env, nested);
@@ -2921,12 +2949,14 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
 
                 if (nested == NULL) {
                     tl_pending_callback = false;
+                    Py_CLEAR(tl_pending_args);
                     result = make_error(env, "create_nested_suspended_state_failed");
                 } else {
                     /* Copy accumulated callback results from parent to nested state */
                     if (copy_callback_results_to_nested(nested, state) != 0) {
                         enif_release_resource(nested);
                         tl_pending_callback = false;
+                        Py_CLEAR(tl_pending_args);
                         result = make_error(env, "copy_callback_results_failed");
                     } else {
                         result = build_suspended_context_result(env, nested);
@@ -2950,6 +2980,9 @@ cleanup:
     tl_current_context_suspended = prev_suspended;
     tl_allow_suspension = prev_allow_suspension;
     tl_current_context = prev_context;
+
+    /* Clear pending callback TLS before releasing context */
+    clear_pending_callback_tls();
 
     /* Release thread state using centralized guard */
     py_context_release(&guard);
@@ -3928,7 +3961,8 @@ static ErlNifFunc nif_funcs[] = {
     {"channel_close", 1, nif_channel_close, 0},
     {"channel_info", 1, nif_channel_info, 0},
     {"channel_wait", 3, nif_channel_wait, 0},
-    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0}
+    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0},
+    {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

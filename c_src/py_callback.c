@@ -563,6 +563,7 @@ static PyObject *build_pending_callback_exc_args(void) {
     PyObject *exc_args = PyTuple_New(3);
     if (exc_args == NULL) {
         tl_pending_callback = false;
+        Py_CLEAR(tl_pending_args);
         return NULL;
     }
 
@@ -575,6 +576,7 @@ static PyObject *build_pending_callback_exc_args(void) {
         Py_XDECREF(func_name_obj);
         Py_DECREF(exc_args);
         tl_pending_callback = false;
+        Py_CLEAR(tl_pending_args);
         return NULL;
     }
 
@@ -610,6 +612,7 @@ static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *su
     ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
 
     tl_pending_callback = false;
+    Py_CLEAR(tl_pending_args);
 
     return enif_make_tuple4(env,
         ATOM_SUSPENDED,
@@ -811,6 +814,7 @@ static ERL_NIF_TERM build_suspended_context_result(ErlNifEnv *env, suspended_con
     ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
 
     tl_pending_callback = false;
+    Py_CLEAR(tl_pending_args);
 
     return enif_make_tuple4(env,
         ATOM_SUSPENDED,
@@ -1291,6 +1295,19 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     (void)self;
 
     /*
+     * Invariant check: pending callback TLS must be clear when entering.
+     * If any state is still set, it's leaked from a prior context that didn't
+     * properly clean up - fail loudly rather than risk cross-interpreter corruption.
+     */
+    if (tl_pending_callback || tl_pending_args != NULL ||
+        tl_pending_func_name != NULL || tl_pending_callback_id != 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "erlang.call: stale pending callback TLS detected - "
+            "prior context did not clean up properly");
+        return NULL;
+    }
+
+    /*
      * Check if we have a callback handler available.
      * Priority:
      * 1. tl_current_context with suspension enabled (new process-per-context API)
@@ -1553,6 +1570,7 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     tl_pending_func_name = enif_alloc(func_name_len + 1);
     if (tl_pending_func_name == NULL) {
         tl_pending_callback = false;
+        Py_CLEAR(tl_pending_args);
         Py_DECREF(call_args);
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate function name");
         return NULL;
@@ -1561,9 +1579,12 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     tl_pending_func_name[func_name_len] = '\0';
     tl_pending_func_name_len = func_name_len;
 
-    /* Store args (take ownership) */
-    Py_XDECREF(tl_pending_args);
-    tl_pending_args = call_args;  /* Takes ownership, don't decref */
+    /* Store args (take ownership)
+     * Use Py_XSETREF for swap-first pattern: sets tl_pending_args to new value
+     * BEFORE decref'ing old value. This prevents re-entrancy issues if the old
+     * object's finalizer triggers another erlang.call() during decref.
+     */
+    Py_XSETREF(tl_pending_args, call_args);
 
     /* Raise exception to abort Python execution */
     PyErr_SetString(SuspensionRequiredException, "callback pending");
@@ -2649,6 +2670,7 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
                     Py_DECREF(exc_args);
                     if (new_suspended == NULL) {
                         tl_pending_callback = false;
+                        Py_CLEAR(tl_pending_args);
                         result = make_error(env, "create_nested_suspended_state_failed");
                     } else {
                         result = build_suspended_result(env, new_suspended);
@@ -2717,6 +2739,7 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
                         Py_DECREF(exc_args);
                         if (new_suspended == NULL) {
                             tl_pending_callback = false;
+                            Py_CLEAR(tl_pending_args);
                             result = make_error(env, "create_nested_suspended_state_failed");
                         } else {
                             result = build_suspended_result(env, new_suspended);
