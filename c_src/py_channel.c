@@ -48,9 +48,11 @@ void channel_resource_dtor(ErlNifEnv *env, void *obj) {
      * This is safe because enif_send just puts a message in the process mailbox. */
     if (channel->has_sync_waiter) {
         ErlNifEnv *msg_env = enif_alloc_env();
-        enif_send(NULL, &channel->sync_waiter_pid, msg_env,
-                  enif_make_atom(msg_env, "channel_closed"));
-        enif_free_env(msg_env);
+        if (msg_env != NULL) {
+            enif_send(NULL, &channel->sync_waiter_pid, msg_env,
+                      enif_make_atom(msg_env, "channel_closed"));
+            enif_free_env(msg_env);
+        }
     }
 
     /* Note: We do NOT notify async waiter here because the event loop
@@ -142,26 +144,26 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
     /* Check if there's a waiting context to resume */
     bool should_resume = (channel->waiting != NULL);
 
-    /* Check if there's an async waiter to dispatch */
+    /* Check if there's an async waiter to dispatch.
+     * We only clear the waiter state after successful dispatch to avoid
+     * lost wakeups if the event queue is full. */
     erlang_event_loop_t *loop_to_wake = NULL;
     uint64_t callback_id = 0;
+    bool has_async_waiter = channel->has_waiter;
 
-    if (channel->has_waiter) {
+    if (has_async_waiter) {
         loop_to_wake = channel->waiter_loop;
         callback_id = channel->waiter_callback_id;
-        channel->has_waiter = false;
-        channel->waiter_loop = NULL;
-        /* Note: Keep the reference until after dispatch */
+        /* Don't clear yet - will clear after successful dispatch */
     }
 
     /* Check if there's a sync waiter to notify */
     ErlNifPid sync_waiter;
-    bool notify_sync = false;
+    bool has_sync_waiter = channel->has_sync_waiter;
 
-    if (channel->has_sync_waiter) {
+    if (has_sync_waiter) {
         sync_waiter = channel->sync_waiter_pid;
-        notify_sync = true;
-        channel->has_sync_waiter = false;
+        /* Don't clear yet - will clear after successful send */
     }
 
     pthread_mutex_unlock(&channel->mutex);
@@ -173,17 +175,36 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
 
     /* Dispatch async waiter via timer dispatch (same path as timers) */
     if (loop_to_wake != NULL) {
-        event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
-        /* Release the reference we kept in channel_wait */
-        enif_release_resource(loop_to_wake);
+        bool dispatched = event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
+        if (dispatched) {
+            /* Successfully dispatched - now clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_waiter && channel->waiter_callback_id == callback_id) {
+                channel->has_waiter = false;
+                channel->waiter_loop = NULL;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+            /* Release the reference we kept in channel_wait */
+            enif_release_resource(loop_to_wake);
+        }
+        /* If dispatch failed, waiter remains registered for next send */
     }
 
     /* Notify sync waiter via Erlang message */
-    if (notify_sync) {
+    if (has_sync_waiter) {
         ErlNifEnv *msg_env = enif_alloc_env();
-        enif_send(NULL, &sync_waiter, msg_env,
-                  enif_make_atom(msg_env, "channel_data_ready"));
-        enif_free_env(msg_env);
+        if (msg_env != NULL) {
+            enif_send(NULL, &sync_waiter, msg_env,
+                      enif_make_atom(msg_env, "channel_data_ready"));
+            enif_free_env(msg_env);
+            /* Successfully notified - clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_sync_waiter) {
+                channel->has_sync_waiter = false;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+        }
+        /* If alloc failed, waiter remains registered for next send */
     }
 
     return 0;
@@ -219,25 +240,26 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
     /* Check if there's a waiting context to resume */
     bool should_resume = (channel->waiting != NULL);
 
-    /* Check if there's an async waiter to dispatch */
+    /* Check if there's an async waiter to dispatch.
+     * We only clear the waiter state after successful dispatch to avoid
+     * lost wakeups if the event queue is full. */
     erlang_event_loop_t *loop_to_wake = NULL;
     uint64_t callback_id = 0;
+    bool has_async_waiter = channel->has_waiter;
 
-    if (channel->has_waiter) {
+    if (has_async_waiter) {
         loop_to_wake = channel->waiter_loop;
         callback_id = channel->waiter_callback_id;
-        channel->has_waiter = false;
-        channel->waiter_loop = NULL;
+        /* Don't clear yet - will clear after successful dispatch */
     }
 
     /* Check if there's a sync waiter to notify */
     ErlNifPid sync_waiter;
-    bool notify_sync = false;
+    bool has_sync_waiter = channel->has_sync_waiter;
 
-    if (channel->has_sync_waiter) {
+    if (has_sync_waiter) {
         sync_waiter = channel->sync_waiter_pid;
-        notify_sync = true;
-        channel->has_sync_waiter = false;
+        /* Don't clear yet - will clear after successful send */
     }
 
     pthread_mutex_unlock(&channel->mutex);
@@ -246,17 +268,38 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
         channel_resume_waiting(channel);
     }
 
+    /* Dispatch async waiter via timer dispatch (same path as timers) */
     if (loop_to_wake != NULL) {
-        event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
-        enif_release_resource(loop_to_wake);
+        bool dispatched = event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
+        if (dispatched) {
+            /* Successfully dispatched - now clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_waiter && channel->waiter_callback_id == callback_id) {
+                channel->has_waiter = false;
+                channel->waiter_loop = NULL;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+            /* Release the reference we kept in channel_wait */
+            enif_release_resource(loop_to_wake);
+        }
+        /* If dispatch failed, waiter remains registered for next send */
     }
 
     /* Notify sync waiter via Erlang message */
-    if (notify_sync) {
+    if (has_sync_waiter) {
         ErlNifEnv *msg_env = enif_alloc_env();
-        enif_send(NULL, &sync_waiter, msg_env,
-                  enif_make_atom(msg_env, "channel_data_ready"));
-        enif_free_env(msg_env);
+        if (msg_env != NULL) {
+            enif_send(NULL, &sync_waiter, msg_env,
+                      enif_make_atom(msg_env, "channel_data_ready"));
+            enif_free_env(msg_env);
+            /* Successfully notified - clear the waiter state */
+            pthread_mutex_lock(&channel->mutex);
+            if (channel->has_sync_waiter) {
+                channel->has_sync_waiter = false;
+            }
+            pthread_mutex_unlock(&channel->mutex);
+        }
+        /* If alloc failed, waiter remains registered for next send */
     }
 
     return 0;
@@ -312,7 +355,9 @@ void channel_close(py_channel_t *channel) {
     channel->closed = true;
     bool should_resume = (channel->waiting != NULL);
 
-    /* Check if there's an async waiter to dispatch */
+    /* Check if there's an async waiter to dispatch.
+     * For close, we unconditionally clear the waiter since the channel
+     * is now closed - any future receive will see the closed state. */
     erlang_event_loop_t *loop_to_wake = NULL;
     uint64_t callback_id = 0;
 
@@ -348,9 +393,11 @@ void channel_close(py_channel_t *channel) {
     /* Notify sync waiter that channel is closed */
     if (notify_sync) {
         ErlNifEnv *msg_env = enif_alloc_env();
-        enif_send(NULL, &sync_waiter, msg_env,
-                  enif_make_atom(msg_env, "channel_closed"));
-        enif_free_env(msg_env);
+        if (msg_env != NULL) {
+            enif_send(NULL, &sync_waiter, msg_env,
+                      enif_make_atom(msg_env, "channel_closed"));
+            enif_free_env(msg_env);
+        }
     }
 }
 
@@ -646,6 +693,12 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
         return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "closed"));
     }
 
+    /* Reject if any waiter already exists (no mixed or duplicate waiters) */
+    if (channel->has_waiter || channel->has_sync_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "waiter_exists"));
+    }
+
     /* Check if data already available */
     size_t queue_size = enif_ioq_size(channel->queue);
     if (queue_size > 0) {
@@ -682,11 +735,6 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
     /* No data - register waiter */
     /* Keep reference to event loop to prevent destruction while waiting */
     enif_keep_resource(loop);
-
-    /* Clear any previous waiter (should not happen, but be safe) */
-    if (channel->waiter_loop != NULL) {
-        enif_release_resource(channel->waiter_loop);
-    }
 
     channel->waiter_loop = loop;
     channel->waiter_callback_id = callback_id;
@@ -770,8 +818,8 @@ ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc, const ER
         return enif_make_atom(env, "has_data");
     }
 
-    /* Check if another sync waiter is already registered */
-    if (channel->has_sync_waiter) {
+    /* Reject if any waiter already exists (no mixed or duplicate waiters) */
+    if (channel->has_sync_waiter || channel->has_waiter) {
         pthread_mutex_unlock(&channel->mutex);
         return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "waiter_exists"));
     }

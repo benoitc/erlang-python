@@ -1927,27 +1927,28 @@ static inline void pending_hash_clear(erlang_event_loop_t *loop) {
     }
 }
 
-void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
+bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
                             uint64_t callback_id, int fd) {
     /* Backpressure: check pending count before acquiring lock (fast path) */
     if (atomic_load(&loop->pending_count) >= MAX_PENDING_EVENTS) {
-        return;  /* Queue full, drop event */
+        return false;  /* Queue full */
     }
 
     pthread_mutex_lock(&loop->mutex);
 
     /* O(1) duplicate check using hash set */
     if (pending_hash_contains(loop, callback_id, type)) {
-        /* Already have this event pending, skip */
+        /* Already have this event pending - this counts as success since
+         * the event will be delivered */
         pthread_mutex_unlock(&loop->mutex);
-        return;
+        return true;
     }
 
     /* Get event from freelist or allocate new (Phase 7 optimization) */
     pending_event_t *event = get_pending_event(loop);
     if (event == NULL) {
         pthread_mutex_unlock(&loop->mutex);
-        return;
+        return false;  /* Allocation failed */
     }
 
     event->type = type;
@@ -1977,6 +1978,7 @@ void event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
     }
 
     pthread_mutex_unlock(&loop->mutex);
+    return true;
 }
 
 void event_loop_clear_pending(erlang_event_loop_t *loop) {

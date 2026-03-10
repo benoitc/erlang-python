@@ -37,6 +37,9 @@
     sync_receive_wait_test/1,
     sync_receive_closed_test/1,
     sync_receive_multiple_waiters_test/1,
+    %% Mixed waiter rejection tests
+    mixed_waiter_sync_blocks_async_test/1,
+    mixed_waiter_async_blocks_sync_test/1,
     %% Async receive with actual waiting
     async_receive_wait_e2e_test/1,
     %% Subinterpreter mode tests
@@ -67,6 +70,9 @@ all() -> [
     sync_receive_wait_test,
     sync_receive_closed_test,
     sync_receive_multiple_waiters_test,
+    %% Mixed waiter rejection tests
+    mixed_waiter_sync_blocks_async_test,
+    mixed_waiter_async_blocks_sync_test,
     %% Async receive with actual waiting
     async_receive_wait_e2e_test,
     %% Subinterpreter mode tests
@@ -465,6 +471,42 @@ sync_receive_multiple_waiters_test(_Config) ->
     after 100 ->
         ct:fail("Did not receive channel_closed")
     end.
+
+%% @doc Test that sync waiter blocks async waiter registration
+mixed_waiter_sync_blocks_async_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Register sync waiter first
+    ok = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Create an event loop for async waiter test
+    {ok, Loop} = py_nif:event_loop_new(),
+
+    %% Try to register async waiter - should fail
+    {error, waiter_exists} = py_nif:channel_wait(Ch, 123, Loop),
+
+    %% Clean up: send data to clear sync waiter
+    ok = py_channel:send(Ch, <<"data">>),
+    receive channel_data_ready -> ok after 100 -> ok end,
+
+    py_nif:event_loop_destroy(Loop),
+    ok = py_channel:close(Ch).
+
+%% @doc Test that async waiter blocks sync waiter registration
+mixed_waiter_async_blocks_sync_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Create an event loop and register async waiter first
+    {ok, Loop} = py_nif:event_loop_new(),
+    ok = py_nif:channel_wait(Ch, 456, Loop),
+
+    %% Try to register sync waiter - should fail
+    {error, waiter_exists} = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Clean up: cancel async waiter and close
+    ok = py_nif:channel_cancel_wait(Ch, 456),
+    py_nif:event_loop_destroy(Loop),
+    ok = py_channel:close(Ch).
 
 %% @doc End-to-end test for async_receive waiting for data
 %% Tests that async_receive properly integrates with asyncio when data
