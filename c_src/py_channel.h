@@ -39,10 +39,6 @@
  *   -> enif_send() to process mailbox
  * ```
  *
- * @par Zero-Copy Design
- *
- * ChannelBuffer wraps dequeued binaries without copying, exposing them
- * through Python's buffer protocol. This follows the ReactorBuffer pattern.
  */
 
 #ifndef PY_CHANNEL_H
@@ -119,29 +115,6 @@ typedef struct {
 } py_channel_t;
 
 /* ============================================================================
- * ChannelBuffer Python Type
- * ============================================================================ */
-
-/**
- * @brief The ChannelBuffer Python type object
- */
-extern PyTypeObject ChannelBufferType;
-
-/**
- * @struct ChannelBufferObject
- * @brief Python object wrapping channel message data
- *
- * ChannelBuffer exposes dequeued binary data via the buffer protocol,
- * enabling zero-copy access to channel messages in Python.
- */
-typedef struct {
-    PyObject_HEAD
-    unsigned char *data;           /**< Message data (owned) */
-    size_t size;                   /**< Data size */
-    PyObject *cached_memoryview;   /**< Cached memoryview for fast access */
-} ChannelBufferObject;
-
-/* ============================================================================
  * Function Declarations
  * ============================================================================ */
 
@@ -154,38 +127,6 @@ typedef struct {
  * @return 0 on success, -1 on error
  */
 int channel_init(ErlNifEnv *env);
-
-/**
- * @brief Initialize the ChannelBuffer Python type
- *
- * Must be called during Python initialization with the GIL held.
- *
- * @return 0 on success, -1 on error
- */
-int ChannelBuffer_init_type(void);
-
-/**
- * @brief Register ChannelBuffer with erlang.channel module
- *
- * Makes ChannelBuffer accessible from Python.
- *
- * @return 0 on success, -1 on error
- *
- * @pre GIL must be held
- * @pre ChannelBuffer_init_type() must have been called
- */
-int ChannelBuffer_register(void);
-
-/**
- * @brief Create a ChannelBuffer from raw data
- *
- * @param data Data to wrap (ownership transferred to buffer)
- * @param size Size of data
- * @return New ChannelBuffer object, or NULL on error
- *
- * @pre GIL must be held
- */
-PyObject *ChannelBuffer_from_data(unsigned char *data, size_t size);
 
 /**
  * @brief Resource destructor for channels
