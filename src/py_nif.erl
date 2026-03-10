@@ -206,7 +206,8 @@
     channel_close/1,
     channel_info/1,
     channel_wait/3,
-    channel_cancel_wait/2
+    channel_cancel_wait/2,
+    channel_register_sync_waiter/1
 ]).
 
 -on_load(load_nif/0).
@@ -1711,4 +1712,16 @@ channel_wait(_ChannelRef, _CallbackId, _LoopRef) ->
 %% @returns ok
 -spec channel_cancel_wait(reference(), non_neg_integer()) -> ok.
 channel_cancel_wait(_ChannelRef, _CallbackId) ->
+    ?NIF_STUB.
+
+%% @doc Register a sync waiter for blocking receive.
+%%
+%% Registers the calling process as a sync waiter. When data arrives,
+%% the waiter receives a 'channel_data_ready' message. When the channel
+%% closes, receives 'channel_closed'.
+%%
+%% @param ChannelRef Channel reference
+%% @returns ok | {error, closed} | {error, waiter_exists}
+-spec channel_register_sync_waiter(reference()) -> ok | {error, term()}.
+channel_register_sync_waiter(_ChannelRef) ->
     ?NIF_STUB.

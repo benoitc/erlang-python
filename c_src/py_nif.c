@@ -3928,7 +3928,8 @@ static ErlNifFunc nif_funcs[] = {
     {"channel_close", 1, nif_channel_close, 0},
     {"channel_info", 1, nif_channel_info, 0},
     {"channel_wait", 3, nif_channel_wait, 0},
-    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0}
+    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0},
+    {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

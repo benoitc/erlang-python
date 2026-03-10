@@ -31,7 +31,12 @@
     async_iteration_test/1,
     async_closed_channel_test/1,
     channel_ref_roundtrip_test/1,
-    channel_ref_call_test/1
+    channel_ref_call_test/1,
+    %% Sync blocking receive tests
+    sync_receive_immediate_test/1,
+    sync_receive_wait_test/1,
+    sync_receive_closed_test/1,
+    sync_receive_multiple_waiters_test/1
 ]).
 
 all() -> [
@@ -52,7 +57,12 @@ all() -> [
     async_iteration_test,
     async_closed_channel_test,
     channel_ref_roundtrip_test,
-    channel_ref_call_test
+    channel_ref_call_test,
+    %% Sync blocking receive tests
+    sync_receive_immediate_test,
+    sync_receive_wait_test,
+    sync_receive_closed_test,
+    sync_receive_multiple_waiters_test
 ].
 
 init_per_suite(Config) ->
@@ -223,7 +233,7 @@ async_receive_immediate_test(_Config) ->
 
     %% Run async receive via Python - data should return immediately
     Ctx = py:context(1),
-    Code = <<"
+    _Code = <<"
 import asyncio
 from erlang import Channel
 
@@ -344,3 +354,103 @@ channel_ref_call_test(_Config) ->
     {ok, <<"ref2_data">>} = py_nif:channel_try_receive(Ref2),
 
     ok = py_channel:close(Ch).
+
+%%% ============================================================================
+%%% Sync Blocking Receive Tests
+%%% ============================================================================
+
+%% @doc Test sync receive when data is already available (immediate return)
+sync_receive_immediate_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send data before receive
+    ok = py_channel:send(Ch, <<"immediate_data">>),
+
+    %% Receive should return immediately
+    {ok, <<"immediate_data">>} = py_channel:handle_receive([Ch]),
+
+    ok = py_channel:close(Ch).
+
+%% @doc Test sync receive that blocks waiting for data
+sync_receive_wait_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    Self = self(),
+
+    %% Spawn a process to do blocking receive
+    _Receiver = spawn_link(fun() ->
+        Result = py_channel:handle_receive([Ch]),
+        Self ! {receive_result, Result}
+    end),
+
+    %% Give receiver time to register as waiter
+    timer:sleep(50),
+
+    %% Send data - should wake up the receiver
+    ok = py_channel:send(Ch, <<"delayed_data">>),
+
+    %% Wait for result
+    receive
+        {receive_result, {ok, <<"delayed_data">>}} ->
+            ok
+    after 2000 ->
+        ct:fail("Receiver did not get data within timeout")
+    end,
+
+    ok = py_channel:close(Ch).
+
+%% @doc Test sync receive when channel is closed while waiting
+sync_receive_closed_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    Self = self(),
+
+    %% Spawn a process to do blocking receive
+    _Receiver = spawn_link(fun() ->
+        Result = py_channel:handle_receive([Ch]),
+        Self ! {receive_result, Result}
+    end),
+
+    %% Give receiver time to register as waiter
+    timer:sleep(50),
+
+    %% Close the channel - should wake up receiver with error
+    ok = py_channel:close(Ch),
+
+    %% Wait for result
+    receive
+        {receive_result, {error, closed}} ->
+            ok
+    after 2000 ->
+        ct:fail("Receiver did not get closed notification within timeout")
+    end.
+
+%% @doc Test that only one sync waiter can be registered at a time
+sync_receive_multiple_waiters_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Register first sync waiter directly via NIF
+    ok = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Try to register another - should fail
+    {error, waiter_exists} = py_nif:channel_register_sync_waiter(Ch),
+
+    %% Send data to clear the first waiter
+    ok = py_channel:send(Ch, <<"data">>),
+
+    %% Consume the message that was sent to us
+    receive
+        channel_data_ready -> ok
+    after 100 ->
+        ct:fail("Did not receive channel_data_ready")
+    end,
+
+    %% Now we should be able to register again
+    ok = py_nif:channel_register_sync_waiter(Ch),
+
+    ok = py_channel:close(Ch),
+
+    %% Consume the close message
+    receive
+        channel_closed -> ok
+    after 100 ->
+        ct:fail("Did not receive channel_closed")
+    end.

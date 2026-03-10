@@ -155,10 +155,52 @@ register_callbacks() ->
 
 %% @private
 %% Handle blocking receive from Python.
+%% This blocks until data is available by registering as a sync waiter
+%% and blocking on Erlang receive. This releases the Python worker while waiting.
 %% Args: [ChannelRef]
 -spec handle_receive([term()]) -> term().
 handle_receive([ChannelRef]) ->
-    py_nif:channel_try_receive(ChannelRef).
+    case py_nif:channel_try_receive(ChannelRef) of
+        {ok, Data} ->
+            {ok, Data};
+        {error, closed} ->
+            {error, closed};
+        {error, empty} ->
+            %% Channel is empty, register as sync waiter and block
+            case py_nif:channel_register_sync_waiter(ChannelRef) of
+                ok ->
+                    wait_for_channel_data(ChannelRef);
+                {error, Reason} ->
+                    {error, Reason}
+            end
+    end.
+
+%% @private
+%% Wait for channel data to arrive via Erlang message passing.
+%% This function blocks using native Erlang receive, which releases
+%% the Python dirty scheduler worker while waiting.
+-spec wait_for_channel_data(reference()) -> {ok, term()} | {error, term()}.
+wait_for_channel_data(ChannelRef) ->
+    receive
+        channel_data_ready ->
+            case py_nif:channel_try_receive(ChannelRef) of
+                {ok, Data} ->
+                    {ok, Data};
+                {error, empty} ->
+                    %% Race condition: data was consumed by another waiter.
+                    %% Re-register and wait again.
+                    case py_nif:channel_register_sync_waiter(ChannelRef) of
+                        ok ->
+                            wait_for_channel_data(ChannelRef);
+                        {error, Reason} ->
+                            {error, Reason}
+                    end;
+                {error, closed} ->
+                    {error, closed}
+            end;
+        channel_closed ->
+            {error, closed}
+    end.
 
 %% @private
 %% Handle non-blocking receive from Python.

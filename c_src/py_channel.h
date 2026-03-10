@@ -105,6 +105,12 @@ typedef struct {
     /** @brief Flag: async waiter is registered */
     bool has_waiter;
 
+    /** @brief Sync waiter Erlang PID (for blocking receive) */
+    ErlNifPid sync_waiter_pid;
+
+    /** @brief Flag: sync waiter is registered */
+    bool has_sync_waiter;
+
     /** @brief Flag: channel is closed */
     bool closed;
 
@@ -264,5 +270,17 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_channel_cancel_wait(ErlNifEnv *env, int argc,
                                       const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Register a sync waiter for blocking receive
+ *
+ * NIF: channel_register_sync_waiter(ChannelRef) -> ok | {error, Reason}
+ *
+ * Registers the calling process as a sync waiter. When data arrives via
+ * channel_send, the waiter receives a 'channel_data_ready' message.
+ * When the channel closes, receives 'channel_closed'.
+ */
+ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc,
+                                               const ERL_NIF_TERM argv[]);
 
 #endif /* PY_CHANNEL_H */

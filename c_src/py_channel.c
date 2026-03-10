@@ -82,6 +82,8 @@ py_channel_t *channel_alloc(size_t max_size) {
     channel->waiter_loop = NULL;
     channel->waiter_callback_id = 0;
     channel->has_waiter = false;
+    channel->has_sync_waiter = false;
+    memset(&channel->sync_waiter_pid, 0, sizeof(ErlNifPid));
     channel->closed = false;
     channel->channel_id = atomic_fetch_add(&g_channel_id_counter, 1);
 
@@ -140,6 +142,16 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
         /* Note: Keep the reference until after dispatch */
     }
 
+    /* Check if there's a sync waiter to notify */
+    ErlNifPid sync_waiter;
+    bool notify_sync = false;
+
+    if (channel->has_sync_waiter) {
+        sync_waiter = channel->sync_waiter_pid;
+        notify_sync = true;
+        channel->has_sync_waiter = false;
+    }
+
     pthread_mutex_unlock(&channel->mutex);
 
     /* Resume happens outside the lock to avoid deadlocks */
@@ -152,6 +164,14 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
         event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
         /* Release the reference we kept in channel_wait */
         enif_release_resource(loop_to_wake);
+    }
+
+    /* Notify sync waiter via Erlang message */
+    if (notify_sync) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        enif_send(NULL, &sync_waiter, msg_env,
+                  enif_make_atom(msg_env, "channel_data_ready"));
+        enif_free_env(msg_env);
     }
 
     return 0;
@@ -198,6 +218,16 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
         channel->waiter_loop = NULL;
     }
 
+    /* Check if there's a sync waiter to notify */
+    ErlNifPid sync_waiter;
+    bool notify_sync = false;
+
+    if (channel->has_sync_waiter) {
+        sync_waiter = channel->sync_waiter_pid;
+        notify_sync = true;
+        channel->has_sync_waiter = false;
+    }
+
     pthread_mutex_unlock(&channel->mutex);
 
     if (should_resume) {
@@ -207,6 +237,14 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
     if (loop_to_wake != NULL) {
         event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
         enif_release_resource(loop_to_wake);
+    }
+
+    /* Notify sync waiter via Erlang message */
+    if (notify_sync) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        enif_send(NULL, &sync_waiter, msg_env,
+                  enif_make_atom(msg_env, "channel_data_ready"));
+        enif_free_env(msg_env);
     }
 
     return 0;
@@ -273,6 +311,16 @@ void channel_close(py_channel_t *channel) {
         channel->waiter_loop = NULL;
     }
 
+    /* Check if there's a sync waiter to notify */
+    ErlNifPid sync_waiter;
+    bool notify_sync = false;
+
+    if (channel->has_sync_waiter) {
+        sync_waiter = channel->sync_waiter_pid;
+        notify_sync = true;
+        channel->has_sync_waiter = false;
+    }
+
     pthread_mutex_unlock(&channel->mutex);
 
     if (should_resume) {
@@ -283,6 +331,14 @@ void channel_close(py_channel_t *channel) {
     if (loop_to_wake != NULL) {
         event_loop_add_pending(loop_to_wake, EVENT_TYPE_TIMER, callback_id, -1);
         enif_release_resource(loop_to_wake);
+    }
+
+    /* Notify sync waiter that channel is closed */
+    if (notify_sync) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        enif_send(NULL, &sync_waiter, msg_env,
+                  enif_make_atom(msg_env, "channel_closed"));
+        enif_free_env(msg_env);
     }
 }
 
@@ -893,6 +949,49 @@ ERL_NIF_TERM nif_channel_cancel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TER
         channel->has_waiter = false;
         channel->waiter_callback_id = 0;
     }
+
+    pthread_mutex_unlock(&channel->mutex);
+    return ATOM_OK;
+}
+
+/**
+ * @brief Register a sync waiter for blocking receive
+ *
+ * nif_channel_register_sync_waiter(ChannelRef) -> ok | {error, Reason}
+ *
+ * Registers the calling process as a sync waiter. When data arrives,
+ * the waiter receives a 'channel_data_ready' message. When the channel
+ * closes, receives 'channel_closed'.
+ */
+ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_channel_t *channel;
+
+    if (!enif_get_resource(env, argv[0], CHANNEL_RESOURCE_TYPE, (void **)&channel)) {
+        return make_error(env, "invalid_channel");
+    }
+
+    pthread_mutex_lock(&channel->mutex);
+
+    /* Check if channel is closed */
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "closed"));
+    }
+
+    /* Check if another sync waiter is already registered */
+    if (channel->has_sync_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "waiter_exists"));
+    }
+
+    /* Get calling process PID */
+    if (!enif_self(env, &channel->sync_waiter_pid)) {
+        pthread_mutex_unlock(&channel->mutex);
+        return make_error(env, "no_calling_process");
+    }
+
+    channel->has_sync_waiter = true;
 
     pthread_mutex_unlock(&channel->mutex);
     return ATOM_OK;
