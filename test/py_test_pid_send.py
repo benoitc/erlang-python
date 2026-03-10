@@ -108,3 +108,78 @@ def suspension_caught_by_except_base():
 def suspension_not_subclass_of_exception():
     """Verify SuspensionRequired is NOT a subclass of Exception."""
     return not issubclass(erlang.SuspensionRequired, Exception)
+
+
+def send_from_coroutine(pid, msg):
+    """Run erlang.send from within a coroutine.
+
+    This verifies erlang.send() works from async context.
+    """
+    import asyncio
+
+    async def async_sender():
+        erlang.send(pid, msg)
+        return True
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(async_sender())
+    finally:
+        loop.close()
+
+
+def send_multiple_from_coroutine(pid, messages):
+    """Send multiple messages from within a coroutine.
+
+    Tests that erlang.send() can be called multiple times in async context.
+    """
+    import asyncio
+
+    async def async_sender():
+        for msg in messages:
+            erlang.send(pid, msg)
+        return len(messages)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(async_sender())
+    finally:
+        loop.close()
+
+
+def send_is_nonblocking(pid, count):
+    """Send many messages and verify it returns quickly.
+
+    Returns elapsed time in seconds. Should be very small since
+    erlang.send() is non-blocking fire-and-forget.
+    """
+    import time
+
+    start = time.monotonic()
+    for i in range(count):
+        erlang.send(pid, ('msg', i))
+    elapsed = time.monotonic() - start
+
+    return elapsed
+
+
+def send_interleaved_with_async(pid, messages):
+    """Send messages interleaved with async operations.
+
+    Verifies erlang.send() can be freely mixed with async/await.
+    """
+    import asyncio
+
+    async def async_interleaved():
+        results = []
+        for i, msg in enumerate(messages):
+            erlang.send(pid, msg)
+            await asyncio.sleep(0)  # yield to event loop
+            results.append(i)
+        return results
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(async_interleaved())
+    finally:
+        loop.close()

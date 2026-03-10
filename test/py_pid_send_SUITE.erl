@@ -34,7 +34,11 @@
     test_send_to_dead_process/1,
     test_send_dead_process_raises_process_error/1,
     test_process_error_is_exception_subclass/1,
-    test_pid_in_complex_structure/1
+    test_pid_in_complex_structure/1,
+    test_send_from_coroutine/1,
+    test_send_multiple_from_coroutine/1,
+    test_send_is_nonblocking/1,
+    test_send_interleaved_with_async/1
 ]).
 
 all() ->
@@ -55,7 +59,11 @@ all() ->
         test_send_to_dead_process,
         test_send_dead_process_raises_process_error,
         test_process_error_is_exception_subclass,
-        test_pid_in_complex_structure
+        test_pid_in_complex_structure,
+        test_send_from_coroutine,
+        test_send_multiple_from_coroutine,
+        test_send_is_nonblocking,
+        test_send_interleaved_with_async
     ].
 
 init_per_suite(Config) ->
@@ -223,3 +231,60 @@ test_suspension_is_base_exception(_Config) ->
 test_suspension_not_subclass_of_exception(_Config) ->
     {ok, true} = py:call(py_test_pid_send, suspension_not_subclass_of_exception, []),
     ok.
+
+%%% ============================================================================
+%%% erlang.send() in Async Context Tests
+%%% ============================================================================
+
+%% @doc Test erlang.send() works from within a coroutine.
+test_send_from_coroutine(_Config) ->
+    Pid = self(),
+    {ok, true} = py:call(py_test_pid_send, send_from_coroutine, [Pid, <<"async_hello">>]),
+    receive
+        <<"async_hello">> -> ok
+    after 5000 ->
+        ct:fail(timeout_waiting_for_async_message)
+    end.
+
+%% @doc Test sending multiple messages from within a coroutine.
+test_send_multiple_from_coroutine(_Config) ->
+    Pid = self(),
+    Messages = [<<"async_1">>, <<"async_2">>, <<"async_3">>],
+    {ok, 3} = py:call(py_test_pid_send, send_multiple_from_coroutine, [Pid, Messages]),
+    receive <<"async_1">> -> ok after 5000 -> ct:fail(timeout_async_1) end,
+    receive <<"async_2">> -> ok after 5000 -> ct:fail(timeout_async_2) end,
+    receive <<"async_3">> -> ok after 5000 -> ct:fail(timeout_async_3) end.
+
+%% @doc Test that erlang.send() is non-blocking by sending many messages quickly.
+%% The function returns elapsed time - it should complete in under 100ms for 1000 messages.
+test_send_is_nonblocking(_Config) ->
+    Pid = self(),
+    Count = 1000,
+    {ok, Elapsed} = py:call(py_test_pid_send, send_is_nonblocking, [Pid, Count]),
+    ct:pal("Sent ~p messages in ~.6f seconds", [Count, Elapsed]),
+    %% Should complete in under 1 second (very conservative)
+    true = Elapsed < 1.0,
+    %% Drain all messages
+    drain_messages(Count).
+
+%% @doc Test erlang.send() interleaved with async operations.
+test_send_interleaved_with_async(_Config) ->
+    Pid = self(),
+    Messages = [<<"interleaved_1">>, <<"interleaved_2">>, <<"interleaved_3">>],
+    {ok, [0, 1, 2]} = py:call(py_test_pid_send, send_interleaved_with_async, [Pid, Messages]),
+    receive <<"interleaved_1">> -> ok after 5000 -> ct:fail(timeout_interleaved_1) end,
+    receive <<"interleaved_2">> -> ok after 5000 -> ct:fail(timeout_interleaved_2) end,
+    receive <<"interleaved_3">> -> ok after 5000 -> ct:fail(timeout_interleaved_3) end.
+
+%%% ============================================================================
+%%% Helper Functions
+%%% ============================================================================
+
+drain_messages(0) -> ok;
+drain_messages(N) ->
+    receive
+        {<<"msg">>, _} -> drain_messages(N - 1)
+    after 1000 ->
+        ct:pal("Drained ~p messages, ~p remaining", [1000 - N, N]),
+        ct:fail({missing_messages, N})
+    end.
