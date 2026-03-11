@@ -1191,6 +1191,184 @@ loop.remove_signal_handler(signal.SIGTERM)
 
 For building custom servers with low-level protocol handling, see the [Reactor](reactor.md) module. The reactor provides FD-based protocol handling where Erlang manages I/O scheduling via `enif_select` and Python implements protocol logic.
 
+## Async Task API (Erlang)
+
+The `py_event_loop` module provides a high-level API for submitting async Python tasks from Erlang. This API is inspired by uvloop and uses a thread-safe task queue, allowing task submission from any dirty scheduler without blocking.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Async Task Submission                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Erlang Process           C NIF Layer              py_event_worker         │
+│   ───────────────          ─────────────            ─────────────────        │
+│                                                                              │
+│   py_event_loop:           nif_submit_task          handle_info(task_ready) │
+│   create_task(M,F,A)       │                        │                       │
+│         │                  │ Thread-safe enqueue    │                       │
+│         │──────────────────▶ (pthread_mutex)        │                       │
+│         │                  │                        │                       │
+│         │                  │ enif_send(task_ready)──▶                       │
+│         │                  │                        │                       │
+│         │                  │                        │ py_nif:process_ready  │
+│         │                  │                        │       │               │
+│         │                  │                        │       ▼               │
+│         │                  │                        │ Run Python coro       │
+│         │                  │                        │       │               │
+│         │◀─────────────────────────────────────────────────┘               │
+│         │    {async_result, Ref, {ok, Result}}      │                       │
+│         │                                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Features:**
+- Thread-safe submission from any dirty scheduler via `enif_send`
+- Non-blocking task creation
+- Message-based result delivery
+- Fire-and-forget support
+
+### API Reference
+
+#### py_event_loop:run/3,4
+
+Blocking execution of an async Python function. Submits the task and waits for the result.
+
+```erlang
+%% Basic usage
+{ok, Result} = py_event_loop:run(my_module, my_async_func, [arg1, arg2]).
+
+%% With options (timeout, kwargs)
+{ok, Result} = py_event_loop:run(aiohttp, get, [Url], #{
+    timeout => 10000,
+    kwargs => #{headers => #{}}
+}).
+```
+
+**Parameters:**
+- `Module` - Python module name (atom or binary)
+- `Func` - Python function name (atom or binary)
+- `Args` - List of positional arguments
+- `Opts` - Options map (optional):
+  - `timeout` - Timeout in milliseconds (default: 5000)
+  - `kwargs` - Keyword arguments map (default: #{})
+
+**Returns:**
+- `{ok, Result}` - Task completed successfully
+- `{error, Reason}` - Task failed or timed out
+
+#### py_event_loop:create_task/3,4
+
+Non-blocking task submission. Returns immediately with a reference for awaiting the result later.
+
+```erlang
+%% Submit task
+Ref = py_event_loop:create_task(my_module, my_async_func, [arg1]).
+
+%% Do other work while task runs...
+do_other_work(),
+
+%% Await result when needed
+{ok, Result} = py_event_loop:await(Ref).
+```
+
+**Parameters:**
+- `Module` - Python module name (atom or binary)
+- `Func` - Python function name (atom or binary)
+- `Args` - List of positional arguments
+- `Kwargs` - Keyword arguments map (optional, default: #{})
+
+**Returns:**
+- `reference()` - Task reference for awaiting
+
+#### py_event_loop:await/1,2
+
+Wait for an async task result.
+
+```erlang
+%% Default timeout (5 seconds)
+{ok, Result} = py_event_loop:await(Ref).
+
+%% Custom timeout
+{ok, Result} = py_event_loop:await(Ref, 10000).
+
+%% Infinite timeout
+{ok, Result} = py_event_loop:await(Ref, infinity).
+```
+
+**Parameters:**
+- `Ref` - Task reference from `create_task`
+- `Timeout` - Timeout in milliseconds or `infinity` (optional, default: 5000)
+
+**Returns:**
+- `{ok, Result}` - Task completed successfully
+- `{error, Reason}` - Task failed with error
+- `{error, timeout}` - Timeout waiting for result
+
+#### py_event_loop:spawn_task/3,4
+
+Fire-and-forget task execution. Submits the task but does not wait for or return the result.
+
+```erlang
+%% Background logging
+ok = py_event_loop:spawn_task(logger, log_event, [EventData]).
+
+%% With kwargs
+ok = py_event_loop:spawn_task(metrics, record, [Name, Value], #{tags => Tags}).
+```
+
+**Parameters:**
+- `Module` - Python module name (atom or binary)
+- `Func` - Python function name (atom or binary)
+- `Args` - List of positional arguments
+- `Kwargs` - Keyword arguments map (optional, default: #{})
+
+**Returns:**
+- `ok` - Task submitted (result is discarded)
+
+### Example: Concurrent HTTP Requests
+
+```erlang
+%% Submit multiple requests concurrently
+Refs = [
+    py_event_loop:create_task(aiohttp, get, [<<"https://api.example.com/users">>]),
+    py_event_loop:create_task(aiohttp, get, [<<"https://api.example.com/posts">>]),
+    py_event_loop:create_task(aiohttp, get, [<<"https://api.example.com/comments">>])
+],
+
+%% Await all results
+Results = [py_event_loop:await(Ref, 10000) || Ref <- Refs].
+```
+
+### Example: Background Processing
+
+```erlang
+%% Fire-and-forget analytics
+handle_request(Request) ->
+    %% Process request...
+    Response = process(Request),
+
+    %% Log analytics in background (don't wait)
+    ok = py_event_loop:spawn_task(analytics, track_event, [
+        <<"page_view">>,
+        #{path => Request#request.path, user_id => Request#request.user_id}
+    ]),
+
+    Response.
+```
+
+### Thread Safety
+
+The async task API is fully thread-safe:
+
+- `create_task` and `spawn_task` can be called from any Erlang process, including processes running on dirty schedulers
+- Task submission uses `enif_send` which is safe to call from any thread
+- The task queue uses mutex protection for thread-safe enqueueing
+- Results are delivered via standard Erlang message passing
+
+This means you can safely call `py_event_loop:create_task` from within a callback that's already running on a dirty NIF scheduler.
+
 ## See Also
 
 - [Reactor](reactor.md) - Low-level FD-based protocol handling
