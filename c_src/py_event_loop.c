@@ -365,12 +365,9 @@ cleanup_native:
     /* Signal shutdown */
     loop->shutdown = true;
 
-    /* Wake up any waiting threads (including sync sleep waiters) */
+    /* Wake up any waiting threads */
     pthread_mutex_lock(&loop->mutex);
     pthread_cond_broadcast(&loop->event_cond);
-    if (loop->sync_sleep_cond_initialized) {
-        pthread_cond_broadcast(&loop->sync_sleep_cond);
-    }
     pthread_mutex_unlock(&loop->mutex);
 
     /* Clear pending events (returns them to freelist) */
@@ -395,9 +392,6 @@ cleanup_native:
     /* Destroy synchronization primitives */
     pthread_mutex_destroy(&loop->mutex);
     pthread_cond_destroy(&loop->event_cond);
-    if (loop->sync_sleep_cond_initialized) {
-        pthread_cond_destroy(&loop->sync_sleep_cond);
-    }
 }
 
 /**
@@ -619,19 +613,8 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
         return make_error(env, "cond_init_failed");
     }
 
-    if (pthread_cond_init(&loop->sync_sleep_cond, NULL) != 0) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_release_resource(loop);
-        return make_error(env, "sleep_cond_init_failed");
-    }
-    loop->sync_sleep_cond_initialized = true;
-    atomic_store(&loop->sync_sleep_id, 0);
-    atomic_store(&loop->sync_sleep_complete, false);
-
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
-        pthread_cond_destroy(&loop->sync_sleep_cond);
         pthread_cond_destroy(&loop->event_cond);
         pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
@@ -1321,38 +1304,6 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
     }
 
     event_loop_add_pending(loop, EVENT_TYPE_TIMER, callback_id, -1);
-
-    return ATOM_OK;
-}
-
-/**
- * dispatch_sleep_complete(LoopRef, SleepId) -> ok
- *
- * Called from Erlang when a synchronous sleep timer expires.
- * Signals the waiting Python thread to wake up.
- */
-ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
-                                          const ERL_NIF_TERM argv[]) {
-    (void)argc;
-
-    erlang_event_loop_t *loop;
-    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
-                           (void **)&loop)) {
-        return make_error(env, "invalid_loop");
-    }
-
-    ErlNifUInt64 sleep_id;
-    if (!enif_get_uint64(env, argv[1], &sleep_id)) {
-        return make_error(env, "invalid_sleep_id");
-    }
-
-    /* Only signal if this is the sleep we're waiting for */
-    pthread_mutex_lock(&loop->mutex);
-    if (atomic_load(&loop->sync_sleep_id) == sleep_id) {
-        atomic_store(&loop->sync_sleep_complete, true);
-        pthread_cond_broadcast(&loop->sync_sleep_cond);
-    }
-    pthread_mutex_unlock(&loop->mutex);
 
     return ATOM_OK;
 }
@@ -5151,102 +5102,6 @@ static PyObject *py_get_pending_for(PyObject *self, PyObject *args) {
     return list;
 }
 
-/**
- * Python function: _erlang_sleep(delay_ms) -> None
- *
- * Synchronous sleep that uses Erlang's timer system instead of asyncio.
- * Sends {sleep_wait, DelayMs, SleepId} to the worker, then blocks waiting
- * for the sleep completion signal.
- *
- * This is called from the ASGI fast path when asyncio.sleep() is detected,
- * avoiding the need to create a full event loop.
- */
-static PyObject *py_erlang_sleep(PyObject *self, PyObject *args) {
-    (void)self;
-    int delay_ms;
-
-    if (!PyArg_ParseTuple(args, "i", &delay_ms)) {
-        return NULL;
-    }
-
-    /* For zero or negative delay, return immediately */
-    if (delay_ms <= 0) {
-        Py_RETURN_NONE;
-    }
-
-    erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || loop->shutdown) {
-        PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
-        return NULL;
-    }
-
-    /* Check if we have a worker to send to */
-    if (!event_loop_ensure_router(loop)) {
-        PyErr_SetString(PyExc_RuntimeError, "No worker or router configured");
-        return NULL;
-    }
-
-    /* Generate a unique sleep ID */
-    uint64_t sleep_id = atomic_fetch_add(&loop->next_callback_id, 1);
-
-    /* FIX: Store sleep_id BEFORE sending to prevent race condition.
-     * If completion arrives before storage, it would be dropped and waiter deadlocks. */
-    pthread_mutex_lock(&loop->mutex);
-    atomic_store(&loop->sync_sleep_id, sleep_id);
-    atomic_store(&loop->sync_sleep_complete, false);
-    pthread_mutex_unlock(&loop->mutex);
-
-    /* Send {sleep_wait, DelayMs, SleepId} to worker */
-    ErlNifEnv *msg_env = enif_alloc_env();
-    if (msg_env == NULL) {
-        /* On failure, reset sleep_id */
-        pthread_mutex_lock(&loop->mutex);
-        atomic_store(&loop->sync_sleep_id, 0);
-        pthread_mutex_unlock(&loop->mutex);
-        PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
-        return NULL;
-    }
-
-    ERL_NIF_TERM msg = enif_make_tuple3(
-        msg_env,
-        enif_make_atom(msg_env, "sleep_wait"),
-        enif_make_int(msg_env, delay_ms),
-        enif_make_uint64(msg_env, sleep_id)
-    );
-
-    /* Use worker_pid when available, otherwise fall back to router_pid */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
-    if (!enif_send(NULL, target_pid, msg_env, msg)) {
-        /* On failure, reset sleep_id */
-        pthread_mutex_lock(&loop->mutex);
-        atomic_store(&loop->sync_sleep_id, 0);
-        pthread_mutex_unlock(&loop->mutex);
-        enif_free_env(msg_env);
-        PyErr_SetString(PyExc_RuntimeError, "Failed to send sleep message");
-        return NULL;
-    }
-    enif_free_env(msg_env);
-
-    /* Wait for completion - sleep_id already set above */
-    pthread_mutex_lock(&loop->mutex);
-
-    /* Release GIL and wait for completion */
-    Py_BEGIN_ALLOW_THREADS
-    while (!atomic_load(&loop->sync_sleep_complete) && !loop->shutdown) {
-        pthread_cond_wait(&loop->sync_sleep_cond, &loop->mutex);
-    }
-    Py_END_ALLOW_THREADS
-
-    pthread_mutex_unlock(&loop->mutex);
-
-    if (loop->shutdown) {
-        PyErr_SetString(PyExc_RuntimeError, "Event loop shutdown during sleep");
-        return NULL;
-    }
-
-    Py_RETURN_NONE;
-}
-
 /* Module method definitions */
 static PyMethodDef PyEventLoopMethods[] = {
     /* Legacy API (uses global event loop) */
@@ -5282,8 +5137,6 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_release_fd_resource", py_release_fd_resource, METH_VARARGS, "Release fd resource"},
     {"_schedule_timer_for", py_schedule_timer_for, METH_VARARGS, "Schedule timer on specific loop"},
     {"_cancel_timer_for", py_cancel_timer_for, METH_VARARGS, "Cancel timer on specific loop"},
-    /* Synchronous sleep (for ASGI fast path) */
-    {"_erlang_sleep", py_erlang_sleep, METH_VARARGS, "Synchronous sleep using Erlang timer"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -5382,19 +5235,8 @@ int create_default_event_loop(ErlNifEnv *env) {
         return -1;
     }
 
-    if (pthread_cond_init(&loop->sync_sleep_cond, NULL) != 0) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_release_resource(loop);
-        return -1;
-    }
-    loop->sync_sleep_cond_initialized = true;
-    atomic_store(&loop->sync_sleep_id, 0);
-    atomic_store(&loop->sync_sleep_complete, false);
-
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
-        pthread_cond_destroy(&loop->sync_sleep_cond);
         pthread_cond_destroy(&loop->event_cond);
         pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);

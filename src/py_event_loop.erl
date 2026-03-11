@@ -82,6 +82,8 @@ register_callbacks() ->
     py_callback:register(py_event_loop_get_pending, fun cb_get_pending/1),
     py_callback:register(py_event_loop_dispatch_callback, fun cb_dispatch_callback/1),
     py_callback:register(py_event_loop_dispatch_timer, fun cb_dispatch_timer/1),
+    %% Sleep callback - suspends Erlang process, fully releasing dirty scheduler
+    py_callback:register(<<"_py_sleep">>, fun cb_sleep/1),
     ok.
 
 %% @doc Run an async coroutine on the event loop.
@@ -290,3 +292,20 @@ cb_dispatch_callback([LoopRef, CallbackId, Type]) ->
 
 cb_dispatch_timer([LoopRef, CallbackId]) ->
     py_nif:dispatch_timer(LoopRef, CallbackId).
+
+%% @doc Sleep callback for Python erlang.sleep().
+%% Suspends the current Erlang process for the specified duration,
+%% fully releasing the dirty NIF scheduler to handle other work.
+%% This is true cooperative yielding - the dirty scheduler thread is freed.
+%% Args: [Seconds] - float or integer seconds (converted to ms internally)
+cb_sleep([Seconds]) when is_float(Seconds), Seconds > 0 ->
+    Ms = round(Seconds * 1000),
+    receive after Ms -> ok end;
+cb_sleep([Seconds]) when is_integer(Seconds), Seconds > 0 ->
+    Ms = Seconds * 1000,
+    receive after Ms -> ok end;
+cb_sleep([Seconds]) when is_number(Seconds) ->
+    %% Zero or negative - return immediately
+    ok;
+cb_sleep(_Args) ->
+    ok.

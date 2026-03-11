@@ -46,6 +46,7 @@ Usage patterns (matching uvloop exactly):
 
 import sys
 import asyncio
+import time
 import warnings
 
 # Install sandbox when running inside Erlang VM
@@ -66,6 +67,7 @@ from ._channel import Channel, reply, ChannelClosed
 
 __all__ = [
     'run',
+    'sleep',
     'spawn_task',
     'new_event_loop',
     'get_event_loop_policy',
@@ -161,6 +163,57 @@ def run(main, *, debug=None, **run_kwargs):
             finally:
                 asyncio.set_event_loop(None)
                 loop.close()
+
+
+def sleep(seconds):
+    """Sleep for the given duration, releasing the dirty scheduler.
+
+    Both sync and async modes release the dirty NIF scheduler thread,
+    allowing other Erlang processes to run during the sleep.
+
+    Works in both async and sync contexts:
+    - Async context: Returns an awaitable (use with await)
+    - Sync context: Blocks synchronously via Erlang callback
+
+    **Dirty Scheduler Release:**
+
+    In async context, uses asyncio.sleep() which routes through the Erlang
+    timer system via erlang:send_after. The dirty scheduler is released
+    because the Python code yields back to the event loop.
+
+    In sync context, calls into Erlang via erlang.call('_py_sleep', seconds)
+    which uses receive/after to suspend the Erlang process. This fully
+    releases the dirty NIF scheduler thread so other Erlang processes and
+    Python contexts can run. This is true cooperative yielding.
+
+    Args:
+        seconds: Duration to sleep in seconds (float or int).
+
+    Returns:
+        In async context: A coroutine that should be awaited.
+        In sync context: None (blocks until sleep completes).
+
+    Example:
+        # Async context - releases dirty scheduler via event loop yield
+        async def main():
+            await erlang.sleep(0.5)  # Uses Erlang timer system
+
+        # Sync context - releases dirty scheduler via Erlang suspension
+        def handler():
+            erlang.sleep(0.5)  # Suspends Erlang process, frees dirty scheduler
+    """
+    try:
+        asyncio.get_running_loop()
+        # Async context - return awaitable that uses Erlang timers
+        return asyncio.sleep(seconds)
+    except RuntimeError:
+        # Sync context - use erlang.call to truly suspend and free dirty scheduler
+        try:
+            import erlang
+            erlang.call('_py_sleep', seconds)
+        except (ImportError, AttributeError):
+            # Fallback when not in Erlang NIF environment
+            time.sleep(seconds)
 
 
 def spawn_task(coro, *, name=None):

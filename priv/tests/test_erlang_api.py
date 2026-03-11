@@ -29,6 +29,7 @@ The unified 'erlang' module provides both:
 
 import asyncio
 import sys
+import time
 import unittest
 import warnings
 
@@ -571,6 +572,152 @@ class TestErlangRun(unittest.TestCase):
 
         result = erlang.run(main())
         self.assertEqual(result, [2, 4, 6])
+
+
+class TestErlangSleep(tb.ErlangTestCase):
+    """Tests for erlang.sleep() function."""
+
+    def test_sleep_async_basic(self):
+        """Test await erlang.sleep() in async context."""
+        erlang = _get_erlang_module()
+
+        async def main():
+            start = time.time()
+            await erlang.sleep(0.05)
+            elapsed = time.time() - start
+            return elapsed
+
+        elapsed = self.loop.run_until_complete(main())
+        # Should sleep at least 50ms (allowing some tolerance)
+        self.assertGreaterEqual(elapsed, 0.04)
+        # Should not sleep too long (sanity check)
+        self.assertLess(elapsed, 0.5)
+
+    def test_sleep_async_zero(self):
+        """Test await erlang.sleep(0) yields but returns immediately."""
+        erlang = _get_erlang_module()
+
+        async def main():
+            start = time.time()
+            await erlang.sleep(0)
+            elapsed = time.time() - start
+            return elapsed
+
+        elapsed = self.loop.run_until_complete(main())
+        # Should return very quickly
+        self.assertLess(elapsed, 0.1)
+
+    def test_sleep_async_concurrent(self):
+        """Test erlang.sleep() works correctly with concurrent tasks."""
+        erlang = _get_erlang_module()
+
+        async def task(n, sleep_time):
+            await erlang.sleep(sleep_time)
+            return n
+
+        async def main():
+            start = time.time()
+            # Run 3 tasks concurrently, each sleeping 0.05s
+            results = await asyncio.gather(
+                task(1, 0.05),
+                task(2, 0.05),
+                task(3, 0.05),
+            )
+            elapsed = time.time() - start
+            return results, elapsed
+
+        results, elapsed = self.loop.run_until_complete(main())
+        self.assertEqual(sorted(results), [1, 2, 3])
+        # Concurrent: should complete in ~0.05s, not 0.15s
+        self.assertLess(elapsed, 0.15)
+
+    def test_sleep_async_staggered(self):
+        """Test erlang.sleep() with staggered sleep times."""
+        erlang = _get_erlang_module()
+
+        async def task(n, sleep_time):
+            await erlang.sleep(sleep_time)
+            return n
+
+        async def main():
+            # Tasks should complete in order of sleep time
+            results = []
+            tasks = [
+                asyncio.create_task(task(3, 0.06)),
+                asyncio.create_task(task(1, 0.02)),
+                asyncio.create_task(task(2, 0.04)),
+            ]
+            for coro in asyncio.as_completed(tasks):
+                results.append(await coro)
+            return results
+
+        results = self.loop.run_until_complete(main())
+        # Should complete in order: 1 (0.02s), 2 (0.04s), 3 (0.06s)
+        self.assertEqual(results, [1, 2, 3])
+
+    def test_sleep_via_erlang_run(self):
+        """Test erlang.sleep() works with erlang.run()."""
+        erlang = _get_erlang_module()
+
+        async def main():
+            start = time.time()
+            await erlang.sleep(0.03)
+            return time.time() - start
+
+        elapsed = erlang.run(main())
+        self.assertGreaterEqual(elapsed, 0.02)
+        self.assertLess(elapsed, 0.2)
+
+    def test_sleep_in_all_exported(self):
+        """Test that sleep is exported in __all__."""
+        erlang = _get_erlang_module()
+        # Check via _erlang_impl since that's where __all__ is defined
+        try:
+            import _erlang_impl
+            self.assertIn('sleep', _erlang_impl.__all__)
+        except ImportError:
+            # If we can't import _erlang_impl directly, just check erlang has it
+            self.assertTrue(hasattr(erlang, 'sleep'))
+
+
+class TestErlangSleepSync(unittest.TestCase):
+    """Tests for erlang.sleep() in sync context.
+
+    Note: Sync sleep via Erlang callback only works when running
+    inside the Erlang NIF environment. These tests verify the API
+    exists and behaves correctly.
+    """
+
+    def test_sleep_function_exists(self):
+        """Test that erlang.sleep() function exists."""
+        erlang = _get_erlang_module()
+        self.assertTrue(hasattr(erlang, 'sleep'))
+        self.assertTrue(callable(erlang.sleep))
+
+    @unittest.skipUnless(tb.INSIDE_ERLANG_NIF, "Requires Erlang NIF environment")
+    def test_sleep_sync_basic(self):
+        """Test erlang.sleep() in sync context (inside Erlang NIF)."""
+        erlang = _get_erlang_module()
+
+        start = time.time()
+        erlang.sleep(0.05)
+        elapsed = time.time() - start
+
+        # Should sleep at least 50ms
+        self.assertGreaterEqual(elapsed, 0.04)
+        self.assertLess(elapsed, 0.5)
+
+    @unittest.skipUnless(tb.INSIDE_ERLANG_NIF, "Requires Erlang NIF environment")
+    def test_sleep_sync_zero(self):
+        """Test erlang.sleep(0) in sync context."""
+        erlang = _get_erlang_module()
+
+        start = time.time()
+        erlang.sleep(0)
+        elapsed = time.time() - start
+
+        # Should return very quickly
+        self.assertLess(elapsed, 0.1)
 
 
 if __name__ == '__main__':

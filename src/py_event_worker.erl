@@ -15,8 +15,7 @@
     worker_id :: binary(),
     loop_ref :: reference(),
     timers = #{} :: #{reference() => {reference(), non_neg_integer()}},
-    sleeps = #{} :: #{non_neg_integer() => reference()},  %% SleepId => ErlTimerRef
-    stats = #{select_count => 0, timer_count => 0, dispatch_count => 0, sleep_count => 0} :: map()
+    stats = #{select_count => 0, timer_count => 0, dispatch_count => 0} :: map()
 }).
 
 start_link(WorkerId, LoopRef) -> start_link(WorkerId, LoopRef, []).
@@ -74,21 +73,6 @@ handle_info({cancel_timer, TimerRef}, State) ->
             {noreply, State#state{timers = NewTimers}}
     end;
 
-%% Synchronous sleep support for ASGI fast path
-handle_info({sleep_wait, DelayMs, SleepId}, State) ->
-    #state{sleeps = Sleeps} = State,
-    %% Schedule a timer that will trigger sleep_complete
-    ErlTimerRef = erlang:send_after(DelayMs, self(), {sleep_complete, SleepId}),
-    NewSleeps = maps:put(SleepId, ErlTimerRef, Sleeps),
-    {noreply, State#state{sleeps = NewSleeps}};
-
-handle_info({sleep_complete, SleepId}, State) ->
-    #state{loop_ref = LoopRef, sleeps = Sleeps} = State,
-    %% Remove from sleeps map and signal Python that sleep is done
-    NewSleeps = maps:remove(SleepId, Sleeps),
-    py_nif:dispatch_sleep_complete(LoopRef, SleepId),
-    {noreply, State#state{sleeps = NewSleeps}};
-
 handle_info({timeout, TimerRef}, State) ->
     #state{loop_ref = LoopRef, timers = Timers} = State,
     case maps:get(TimerRef, Timers, undefined) of
@@ -102,13 +86,10 @@ handle_info({timeout, TimerRef}, State) ->
 handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
 
-terminate(_Reason, #state{timers = Timers, sleeps = Sleeps}) ->
+terminate(_Reason, #state{timers = Timers}) ->
     maps:foreach(fun(_TimerRef, {ErlTimerRef, _CallbackId}) ->
         erlang:cancel_timer(ErlTimerRef)
     end, Timers),
-    maps:foreach(fun(_SleepId, ErlTimerRef) ->
-        erlang:cancel_timer(ErlTimerRef)
-    end, Sleeps),
     ok.
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
