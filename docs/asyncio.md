@@ -54,9 +54,9 @@ erlang.run(main())
 │   ┌──────────────────┐                └────────────────────────────────────┘ │
 │   │  asyncio (via    │                                                       │
 │   │  erlang.run())   │                ┌────────────────────────────────────┐ │
-│   │  sleep()       ──┼─{sleep_wait}──▶│  erlang:send_after() + cond_wait   │ │
-│   │  gather()        │                │                                    │ │
-│   │  wait_for()      │◀──{complete}───│  pthread_cond_broadcast()          │ │
+│   │  sleep()         │                │  asyncio.sleep() uses call_later() │ │
+│   │  gather()        │─call_later()──▶│  which triggers erlang:send_after  │ │
+│   │  wait_for()      │                │                                    │ │
 │   │  create_task()   │                └────────────────────────────────────┘ │
 │   └──────────────────┘                                                       │
 │                                                                              │
@@ -632,7 +632,7 @@ Unlike Python's standard polling-based event loop, the Erlang event loop uses `e
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         asyncio.sleep() via ErlangEventLoop              │
+│                    asyncio.sleep() via ErlangEventLoop                  │
 │                                                                         │
 │   Python                           Erlang                               │
 │   ──────                           ──────                               │
@@ -640,33 +640,34 @@ Unlike Python's standard polling-based event loop, the Erlang event loop uses `e
 │   ┌─────────────────┐              ┌─────────────────────────────────┐  │
 │   │  asyncio.sleep  │              │         py_event_worker         │  │
 │   │    (0.1)        │              │                                 │  │
-│   └────────┬────────┘              │  handle_info({sleep_wait,...})  │  │
-│            │                       │         │                       │  │
-│            ▼                       │         ▼                       │  │
-│   ┌─────────────────┐              │  erlang:send_after(100ms)       │  │
-│   │ ErlangEventLoop │──{sleep_wait,│         │                       │  │
-│   │   call_later()  │   100, Id}──▶│         ▼                       │  │
-│   └────────┬────────┘              │  handle_info({sleep_complete})  │  │
-│            │                       │         │                       │  │
-│   ┌────────▼────────┐              │         ▼                       │  │
-│   │  Release GIL    │              │  py_nif:dispatch_sleep_complete │  │
-│   │  pthread_cond_  │◀─────────────│         │                       │  │
-│   │     wait()      │   signal     └─────────┼───────────────────────┘  │
+│   └────────┬────────┘              │                                 │  │
+│            │                       │                                 │  │
+│            ▼                       │                                 │  │
+│   ┌─────────────────┐              │                                 │  │
+│   │ ErlangEventLoop │──{timer,100, │  erlang:send_after(100ms)       │  │
+│   │   call_later()  │     Id}─────▶│         │                       │  │
+│   └────────┬────────┘              │         ▼                       │  │
+│            │                       │  handle_info({timeout, ...})    │  │
+│   ┌────────▼────────┐              │         │                       │  │
+│   │  Yield to event │              │         ▼                       │  │
+│   │  loop (dirty    │              │  py_nif:dispatch_timer()        │  │
+│   │  scheduler      │◀─────────────│         │                       │  │
+│   │  released)      │   callback   └─────────┼───────────────────────┘  │
 │   └────────┬────────┘                        │                          │
 │            │                                 │                          │
 │            ▼                                 ▼                          │
 │   ┌─────────────────┐              ┌─────────────────────────────────┐  │
-│   │  Reacquire GIL  │              │  pthread_cond_broadcast()       │  │
-│   │  Return result  │              │  (wakes Python thread)          │  │
+│   │  Resume after   │              │  Timer callback dispatched to   │  │
+│   │  timer fires    │              │  Python pending queue           │  │
 │   └─────────────────┘              └─────────────────────────────────┘  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key features:**
-- **GIL released during sleep** - Python thread doesn't hold the GIL while waiting
+- **Dirty scheduler released during sleep** - Python yields to event loop, freeing the dirty NIF thread
 - **BEAM scheduler integration** - Uses Erlang's native timer system
-- **Zero CPU usage** - Condition variable wait, no polling
+- **Zero CPU usage** - No polling, event-driven callback
 - **Sub-millisecond precision** - Timers managed by BEAM scheduler
 
 ### Basic Usage
@@ -687,6 +688,33 @@ result = erlang.run(my_handler())
 ### API Reference
 
 When using `erlang.run()` or the Erlang event loop, all standard asyncio functions work seamlessly with Erlang's backend.
+
+#### erlang.sleep(seconds)
+
+Sleep for the specified duration. Works in both async and sync contexts, and **always releases the dirty NIF scheduler**.
+
+```python
+import erlang
+
+# Async context - releases dirty scheduler via event loop yield
+async def async_handler():
+    await erlang.sleep(0.1)  # Uses asyncio.sleep() internally
+    return "done"
+
+# Sync context - releases dirty scheduler via Erlang process suspension
+def sync_handler():
+    erlang.sleep(0.1)  # Uses receive/after, true cooperative yield
+    return "done"
+```
+
+**Dirty Scheduler Release:**
+
+| Context | Mechanism | Dirty Scheduler |
+|---------|-----------|-----------------|
+| Async (`await erlang.sleep()`) | `asyncio.sleep()` via `call_later()` | Released (yields to event loop) |
+| Sync (`erlang.sleep()`) | `erlang.call('_py_sleep')` with `receive/after` | Released (Erlang process suspends) |
+
+Both modes allow other Erlang processes and Python contexts to run during the sleep.
 
 #### asyncio.sleep(delay)
 

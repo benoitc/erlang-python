@@ -166,34 +166,41 @@ def run(main, *, debug=None, **run_kwargs):
 
 
 def sleep(seconds):
-    """Sleep for the given duration, yielding to other tasks.
+    """Sleep for the given duration, releasing the dirty scheduler.
+
+    Both sync and async modes release the dirty NIF scheduler thread,
+    allowing other Erlang processes to run during the sleep.
 
     Works in both async and sync contexts:
     - Async context: Returns an awaitable (use with await)
-    - Sync context: Suspends via Erlang, releasing the dirty scheduler
+    - Sync context: Blocks synchronously via Erlang callback
+
+    **Dirty Scheduler Release:**
 
     In async context, uses asyncio.sleep() which routes through the Erlang
-    timer system via erlang:send_after.
+    timer system via erlang:send_after. The dirty scheduler is released
+    because the Python code yields back to the event loop.
 
-    In sync context, calls into Erlang which blocks using receive/after,
-    fully releasing the dirty NIF scheduler so other Erlang processes can
-    run. This is true cooperative yielding like gevent.sleep().
+    In sync context, calls into Erlang via erlang.call('_py_sleep', seconds)
+    which uses receive/after to suspend the Erlang process. This fully
+    releases the dirty NIF scheduler thread so other Erlang processes and
+    Python contexts can run. This is true cooperative yielding.
 
     Args:
         seconds: Duration to sleep in seconds (float or int).
 
     Returns:
         In async context: A coroutine that should be awaited.
-        In sync context: None (suspends until sleep completes).
+        In sync context: None (blocks until sleep completes).
 
     Example:
-        # Async context
+        # Async context - releases dirty scheduler via event loop yield
         async def main():
             await erlang.sleep(0.5)  # Uses Erlang timer system
 
-        # Sync context (cooperative yield)
+        # Sync context - releases dirty scheduler via Erlang suspension
         def handler():
-            erlang.sleep(0.5)  # Suspends, frees dirty scheduler
+            erlang.sleep(0.5)  # Suspends Erlang process, frees dirty scheduler
     """
     try:
         asyncio.get_running_loop()
