@@ -83,6 +83,15 @@ handle_info({timeout, TimerRef}, State) ->
             {noreply, State#state{timers = NewTimers}}
     end;
 
+%% Thread-safe task submission wakeup (call_soon_threadsafe pattern)
+handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
+    case py_nif:process_ready_tasks(LoopRef) of
+        ok -> ok;
+        {error, Reason} ->
+            error_logger:warning_msg("Task processing failed: ~p~n", [Reason])
+    end,
+    {noreply, State};
+
 handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
 

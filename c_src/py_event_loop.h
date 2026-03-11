@@ -248,6 +248,17 @@ typedef struct erlang_event_loop {
 
     /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
     uint32_t interp_id;
+
+    /* ========== Thread-Safe Task Queue (call_soon_threadsafe) ========== */
+
+    /** @brief Task queue for thread-safe submission from any dirty scheduler */
+    ErlNifIOQueue *task_queue;
+
+    /** @brief Mutex protecting task queue operations */
+    pthread_mutex_t task_queue_mutex;
+
+    /** @brief Whether the task queue has been initialized */
+    bool task_queue_initialized;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -470,6 +481,29 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
                                           const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Thread-safe task submission (call_soon_threadsafe pattern)
+ *
+ * Submits a task to be executed on the event loop. Can be called from
+ * any dirty scheduler thread. Uses enif_iovq for atomic queue operations
+ * and enif_send for thread-safe wakeup.
+ *
+ * NIF: call_soon_threadsafe(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_call_soon_threadsafe(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Process all pending tasks from the queue
+ *
+ * Called by the event worker when it receives a task_ready message.
+ * Dequeues all pending tasks, creates coroutines, and runs them.
+ *
+ * NIF: process_ready_tasks(LoopRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]);
 
 /* ============================================================================
  * Internal Helper Functions
