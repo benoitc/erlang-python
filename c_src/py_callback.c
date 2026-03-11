@@ -2409,6 +2409,7 @@ static int create_erlang_module(void) {
         "        import erlang\n"
         "        # Primary exports (uvloop-compatible)\n"
         "        erlang.run = _erlang_impl.run\n"
+        "        erlang.sleep = _erlang_impl.sleep\n"
         "        erlang.spawn_task = _erlang_impl.spawn_task\n"
         "        erlang.new_event_loop = _erlang_impl.new_event_loop\n"
         "        erlang.ErlangEventLoop = _erlang_impl.ErlangEventLoop\n"

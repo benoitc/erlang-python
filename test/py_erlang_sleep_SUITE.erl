@@ -1,6 +1,6 @@
-%% @doc Tests for Erlang sleep and asyncio integration.
+%% @doc Tests for erlang.sleep() and asyncio integration.
 %%
-%% Tests the _erlang_sleep NIF and erlang module asyncio integration.
+%% Tests the erlang.sleep() function and erlang module asyncio integration.
 -module(py_erlang_sleep_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -38,22 +38,22 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
-%% Test that _erlang_sleep is available in py_event_loop
+%% Test that erlang.sleep is available
 test_erlang_sleep_available(_Config) ->
     ok = py:exec(<<"
-import py_event_loop as pel
-result = hasattr(pel, '_erlang_sleep')
-assert result, '_erlang_sleep not found in py_event_loop'
+import erlang
+result = hasattr(erlang, 'sleep')
+assert result, 'erlang.sleep not found'
 ">>),
-    ct:pal("_erlang_sleep is available"),
+    ct:pal("erlang.sleep is available"),
     ok.
 
-%% Test basic sleep functionality
+%% Test basic sleep functionality (sync context via callback)
 test_erlang_sleep_basic(_Config) ->
     ok = py:exec(<<"
-import py_event_loop as pel
-# Test basic sleep - should not raise
-pel._erlang_sleep(10)  # 10ms
+import erlang
+# Test basic sleep in sync context - should not raise
+erlang.sleep(0.01)  # 10ms
 ">>),
     ct:pal("Basic sleep completed"),
     ok.
@@ -61,14 +61,14 @@ pel._erlang_sleep(10)  # 10ms
 %% Test zero/negative delay returns immediately
 test_erlang_sleep_zero(_Config) ->
     ok = py:exec(<<"
-import py_event_loop as pel
+import erlang
 import time
 
 start = time.time()
-pel._erlang_sleep(0)
+erlang.sleep(0)
 elapsed = (time.time() - start) * 1000
-# Should return immediately (< 5ms accounting for Python overhead)
-assert elapsed < 5, f'Zero sleep was slow: {elapsed}ms'
+# Should return immediately (< 10ms accounting for Python overhead)
+assert elapsed < 10, f'Zero sleep was slow: {elapsed}ms'
 ">>),
     ct:pal("Zero sleep returned fast"),
     ok.
@@ -76,17 +76,17 @@ assert elapsed < 5, f'Zero sleep was slow: {elapsed}ms'
 %% Test sleep accuracy
 test_erlang_sleep_accuracy(_Config) ->
     ok = py:exec(<<"
-import py_event_loop as pel
+import erlang
 import time
 
-delays = [10, 50, 100]  # ms
+delays = [0.01, 0.05, 0.1]  # seconds
 for delay in delays:
     start = time.time()
-    pel._erlang_sleep(delay)
-    elapsed = (time.time() - start) * 1000
+    erlang.sleep(delay)
+    elapsed = time.time() - start
     # Allow wide tolerance for CI runners (can be slow/unpredictable)
     assert delay * 0.5 <= elapsed <= delay * 10.0, \\
-        f'{delay}ms sleep took {elapsed:.1f}ms'
+        f'{delay}s sleep took {elapsed:.3f}s'
 ">>),
     ct:pal("Sleep accuracy within tolerance"),
     ok.
@@ -98,7 +98,7 @@ import erlang
 import asyncio
 
 # Test erlang module has expected functions for event loop integration
-funcs = ['run', 'new_event_loop', 'EventLoopPolicy']
+funcs = ['run', 'new_event_loop', 'EventLoopPolicy', 'sleep']
 for f in funcs:
     assert hasattr(erlang, f), f'erlang missing {f}'
 

@@ -246,20 +246,6 @@ typedef struct erlang_event_loop {
     /** @brief Flag indicating a wakeup is pending (uvloop-style coalescing) */
     _Atomic bool wake_pending;
 
-    /* ========== Synchronous Sleep Support ========== */
-
-    /** @brief Current synchronous sleep ID being waited on */
-    _Atomic uint64_t sync_sleep_id;
-
-    /** @brief Flag indicating sleep has completed */
-    _Atomic bool sync_sleep_complete;
-
-    /** @brief Condition variable for sleep completion notification */
-    pthread_cond_t sync_sleep_cond;
-
-    /** @brief Whether sync_sleep_cond has been initialized */
-    bool sync_sleep_cond_initialized;
-
     /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
     uint32_t interp_id;
 } erlang_event_loop_t;
