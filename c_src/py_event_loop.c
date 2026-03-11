@@ -1874,13 +1874,28 @@ ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
 }
 
 /**
+ * Maximum tasks to dequeue in one batch before acquiring GIL.
+ * This bounds memory usage while still amortizing GIL acquisition cost.
+ */
+#define MAX_TASK_BATCH 64
+
+/**
+ * Structure to hold a dequeued task (before GIL acquisition).
+ */
+typedef struct {
+    ErlNifEnv *term_env;
+    ERL_NIF_TERM task_term;
+} dequeued_task_t;
+
+/**
  * process_ready_tasks(LoopRef) -> ok | {error, Reason}
  *
  * Called by the event worker when it receives 'task_ready' message.
  * Dequeues all pending tasks, creates coroutines, and schedules them on py_loop.
  *
  * Optimizations (uvloop-style):
- * - Check task count BEFORE acquiring GIL (early exit if nothing to do)
+ * - Dequeue ALL tasks BEFORE acquiring GIL (NIF ops don't need GIL)
+ * - Acquire GIL once, process entire batch, release
  * - Cache Python imports (asyncio, _run_and_send) across calls
  * - Only call _run_once if coroutines were actually scheduled
  */
@@ -1910,6 +1925,66 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         return make_error(env, "python_not_running");
     }
 
+    /* ========================================================================
+     * PHASE 1: Dequeue all tasks WITHOUT GIL (NIF operations only)
+     * ======================================================================== */
+
+    dequeued_task_t tasks[MAX_TASK_BATCH];
+    int num_tasks = 0;
+
+    pthread_mutex_lock(&loop->task_queue_mutex);
+
+    SysIOVec *iov;
+    int iovcnt;
+
+    while (num_tasks < MAX_TASK_BATCH && enif_ioq_size(loop->task_queue) > 0) {
+        iov = enif_ioq_peek(loop->task_queue, &iovcnt);
+        if (iov == NULL || iovcnt == 0) {
+            break;
+        }
+
+        /* Get the first IOVec element */
+        ErlNifBinary task_bin;
+        task_bin.data = iov[0].iov_base;
+        task_bin.size = iov[0].iov_len;
+
+        /* Deserialize task tuple (NIF operation, no GIL needed) */
+        ErlNifEnv *term_env = enif_alloc_env();
+        if (term_env == NULL) {
+            break;  /* Will process what we have so far */
+        }
+
+        ERL_NIF_TERM task_term;
+        if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
+                                &task_term, 0) == 0) {
+            enif_free_env(term_env);
+            /* Dequeue and skip this malformed task */
+            enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+            atomic_fetch_sub(&loop->task_count, 1);
+            continue;
+        }
+
+        /* Store for later processing */
+        tasks[num_tasks].term_env = term_env;
+        tasks[num_tasks].task_term = task_term;
+        num_tasks++;
+
+        /* Dequeue (we've copied the data) */
+        enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+        atomic_fetch_sub(&loop->task_count, 1);
+    }
+
+    pthread_mutex_unlock(&loop->task_queue_mutex);
+
+    /* If no tasks were dequeued, return early (no GIL needed) */
+    if (num_tasks == 0) {
+        return ATOM_OK;
+    }
+
+    /* ========================================================================
+     * PHASE 2: Process all tasks WITH GIL (Python operations)
+     * ======================================================================== */
+
     PyGILState_STATE gstate = PyGILState_Ensure();
 
     /* OPTIMIZATION: Use cached Python imports (uvloop-style)
@@ -1925,6 +2000,10 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         /* First call or cache invalidated - populate cache */
         asyncio = PyImport_ImportModule("asyncio");
         if (asyncio == NULL) {
+            /* Cleanup dequeued tasks */
+            for (int i = 0; i < num_tasks; i++) {
+                enif_free_env(tasks[i].term_env);
+            }
             PyGILState_Release(gstate);
             return make_error(env, "asyncio_import_failed");
         }
@@ -1936,6 +2015,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
         if (erlang_loop_mod == NULL) {
             Py_DECREF(asyncio);
+            for (int i = 0; i < num_tasks; i++) {
+                enif_free_env(tasks[i].term_env);
+            }
             PyGILState_Release(gstate);
             return make_error(env, "erlang_loop_import_failed");
         }
@@ -1944,6 +2026,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         Py_DECREF(erlang_loop_mod);
         if (run_and_send == NULL) {
             Py_DECREF(asyncio);
+            for (int i = 0; i < num_tasks; i++) {
+                enif_free_env(tasks[i].term_env);
+            }
             PyGILState_Release(gstate);
             return make_error(env, "run_and_send_not_found");
         }
@@ -1960,6 +2045,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         PyObject *new_loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
         if (new_loop == NULL) {
             PyErr_Clear();
+            for (int i = 0; i < num_tasks; i++) {
+                enif_free_env(tasks[i].term_env);
+            }
             PyGILState_Release(gstate);
             return make_error(env, "loop_creation_failed");
         }
@@ -1982,71 +2070,25 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
     }
 
-    /* Process all pending tasks */
+    /* Process all dequeued tasks */
     ERL_NIF_TERM result = ATOM_OK;
     int coros_scheduled = 0;  /* Track if any coroutines were scheduled */
 
-    /* Dequeue all tasks */
-    pthread_mutex_lock(&loop->task_queue_mutex);
-
-    SysIOVec *iov;
-    int iovcnt;
-    size_t size;
-
-    size = enif_ioq_size(loop->task_queue);
-    while (size > 0) {
-        iov = enif_ioq_peek(loop->task_queue, &iovcnt);
-        if (iov == NULL || iovcnt == 0) {
-            break;
-        }
-
-        /* Get the first IOVec element */
-        ErlNifBinary task_bin;
-        task_bin.data = iov[0].iov_base;
-        task_bin.size = iov[0].iov_len;
-
-        /* Deserialize task tuple */
-        ErlNifEnv *term_env = enif_alloc_env();
-        if (term_env == NULL) {
-            pthread_mutex_unlock(&loop->task_queue_mutex);
-            Py_DECREF(run_and_send);
-            Py_DECREF(asyncio);
-            PyGILState_Release(gstate);
-            return make_error(env, "term_env_alloc_failed");
-        }
-
-        ERL_NIF_TERM task_term;
-        if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
-                                &task_term, 0) == 0) {
-            enif_free_env(term_env);
-            /* Dequeue and skip this malformed task */
-            enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
-            size = enif_ioq_size(loop->task_queue);
-            continue;
-        }
-
-        /* Dequeue before processing (we've copied the data) */
-        enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
-        atomic_fetch_sub(&loop->task_count, 1);
-
-        /* Release mutex while processing (allows new tasks to be queued) */
-        pthread_mutex_unlock(&loop->task_queue_mutex);
+    for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
+        ErlNifEnv *term_env = tasks[task_idx].term_env;
+        ERL_NIF_TERM task_term = tasks[task_idx].task_term;
 
         /* Extract: {CallerPid, Ref, Module, Func, Args, Kwargs} */
         int arity;
         const ERL_NIF_TERM *tuple_elems;
         if (!enif_get_tuple(term_env, task_term, &arity, &tuple_elems) || arity != 6) {
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
-            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
         ErlNifPid caller_pid;
         if (!enif_get_local_pid(term_env, tuple_elems[0], &caller_pid)) {
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
-            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2054,8 +2096,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (!enif_inspect_binary(term_env, tuple_elems[2], &module_bin) ||
             !enif_inspect_binary(term_env, tuple_elems[3], &func_bin)) {
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
-            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2066,7 +2106,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             enif_free(module_name);
             enif_free(func_name);
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
             continue;
         }
         memcpy(module_name, module_bin.data, module_bin.size);
@@ -2081,8 +2120,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             enif_free(module_name);
             enif_free(func_name);
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
-            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2094,8 +2131,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (func == NULL) {
             PyErr_Clear();
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
-            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2104,7 +2139,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (!enif_get_list_length(term_env, tuple_elems[4], &args_len)) {
             Py_DECREF(func);
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
             continue;
         }
 
@@ -2126,7 +2160,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             Py_DECREF(args);
             Py_DECREF(func);
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
             continue;
         }
 
@@ -2145,7 +2178,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (coro == NULL) {
             PyErr_Clear();
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
             continue;
         }
 
@@ -2160,7 +2192,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (pid_obj == NULL) {
             Py_DECREF(coro);
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
             continue;
         }
         pid_obj->pid = caller_pid;
@@ -2172,7 +2203,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             Py_DECREF((PyObject *)pid_obj);
             Py_DECREF(coro);
             enif_free_env(term_env);
-            pthread_mutex_lock(&loop->task_queue_mutex);
             continue;
         }
 
@@ -2221,13 +2251,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         Py_DECREF(py_ref);
         Py_DECREF((PyObject *)pid_obj);
         enif_free_env(term_env);
-
-        /* Re-acquire mutex for next iteration */
-        pthread_mutex_lock(&loop->task_queue_mutex);
-        size = enif_ioq_size(loop->task_queue);
     }
-
-    pthread_mutex_unlock(&loop->task_queue_mutex);
 
     /* NOTE: We don't DECREF asyncio and run_and_send here because they're cached
      * in the loop structure. They'll be freed when the loop is destroyed. */
