@@ -99,8 +99,6 @@
     event_loop_set_id/2,
     event_loop_wakeup/1,
     event_loop_run_async/7,
-    call_soon_threadsafe/7,
-    process_ready_tasks/1,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -728,21 +726,6 @@ event_loop_wakeup(_LoopRef) ->
 -spec event_loop_run_async(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
     ok | {error, term()}.
 event_loop_run_async(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Thread-safe task submission from any dirty scheduler.
-%% Enqueues task info and sends task_ready wakeup to worker.
-%% Used for call_soon_threadsafe pattern.
--spec call_soon_threadsafe(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
-    ok | {error, term()}.
-call_soon_threadsafe(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Process all pending tasks from the thread-safe queue.
-%% Called by event worker when it receives task_ready message.
-%% Dequeues tasks, creates coroutines, schedules on event loop.
--spec process_ready_tasks(reference()) -> ok | {error, term()}.
-process_ready_tasks(_LoopRef) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.

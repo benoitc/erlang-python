@@ -22,23 +22,13 @@
 -module(py_event_loop).
 -behaviour(gen_server).
 
-%% Avoid clash with erlang:spawn/4
--compile({no_auto_import, [spawn/4]}).
-
 %% API
 -export([
     start_link/0,
     stop/0,
     get_loop/0,
     register_callbacks/0,
-    run_async/2,
-    %% High-level async task API (call_soon_threadsafe pattern)
-    run/3, run/4,
-    create_task/3, create_task/4,
-    spawn/3, spawn/4,
-    %% Await helper
-    await/1,
-    await/2
+    run_async/2
 ]).
 
 %% gen_server callbacks
@@ -120,101 +110,6 @@ run_async(LoopRef, #{ref := Ref, caller := Caller, module := Module,
     ModuleBin = py_util:to_binary(Module),
     FuncBin = py_util:to_binary(Func),
     py_nif:event_loop_run_async(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs).
-
-%% @doc Wait for an async task result.
-%% Default timeout is 5000ms.
--spec await(reference()) -> {ok, term()} | {error, term()}.
-await(Ref) ->
-    await(Ref, 5000).
-
-%% @doc Wait for an async task result with timeout.
--spec await(reference(), timeout()) -> {ok, term()} | {error, term()}.
-await(Ref, Timeout) ->
-    receive
-        {async_result, Ref, {ok, Result}} ->
-            {ok, Result};
-        {async_result, Ref, {error, Reason}} ->
-            {error, Reason};
-        {async_result, Ref, Result} ->
-            %% Handle case where result isn't wrapped
-            {ok, Result}
-    after Timeout ->
-        {error, timeout}
-    end.
-
-%% ============================================================================
-%% High-level Async Task API (call_soon_threadsafe pattern)
-%% ============================================================================
-
-%% @doc Run an async coroutine and wait for the result.
-%% This is a blocking call that submits a task and waits for completion.
-%% Thread-safe: can be called from any dirty scheduler.
--spec run(atom() | binary(), atom() | binary(), list()) ->
-    {ok, term()} | {error, term()}.
-run(Module, Func, Args) ->
-    run(Module, Func, Args, #{}).
-
-%% @doc Run an async coroutine with kwargs and wait for the result.
--spec run(atom() | binary(), atom() | binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
-run(Module, Func, Args, Kwargs) ->
-    Ref = create_task(Module, Func, Args, Kwargs),
-    await(Ref).
-
-%% @doc Create an async task and return immediately.
-%% Returns a reference that can be used with await/1,2.
-%% Thread-safe: can be called from any dirty scheduler.
--spec create_task(atom() | binary(), atom() | binary(), list()) -> reference().
-create_task(Module, Func, Args) ->
-    create_task(Module, Func, Args, #{}).
-
-%% @doc Create an async task with kwargs and return immediately.
--spec create_task(atom() | binary(), atom() | binary(), list(), map()) -> reference().
-create_task(Module, Func, Args, Kwargs) ->
-    {ok, LoopRef} = get_loop(),
-    Ref = make_ref(),
-    ModuleBin = py_util:to_binary(Module),
-    FuncBin = py_util:to_binary(Func),
-    ok = py_nif:call_soon_threadsafe(LoopRef, self(), Ref, ModuleBin, FuncBin, Args, Kwargs),
-    Ref.
-
-%% @doc Fire-and-forget: run an async coroutine without waiting for the result.
-%% Returns ok immediately.
--spec spawn(atom() | binary(), atom() | binary(), list()) -> ok.
-spawn(Module, Func, Args) ->
-    spawn(Module, Func, Args, #{}).
-
-%% @doc Fire-and-forget with options.
-%% Options:
-%%   - kwargs => map() - Keyword arguments for the coroutine
-%%   - notify => pid() - Process to notify when done (returns ref)
-%%
-%% If notify is specified, returns a reference and sends
-%% {async_result, Ref, Result} to the notify pid when done.
-%% Otherwise returns ok and discards the result.
--spec spawn(atom() | binary(), atom() | binary(), list(), map()) ->
-    ok | reference().
-spawn(Module, Func, Args, Opts) ->
-    Kwargs = maps:get(kwargs, Opts, #{}),
-    ModuleBin = py_util:to_binary(Module),
-    FuncBin = py_util:to_binary(Func),
-    case maps:get(notify, Opts, undefined) of
-        undefined ->
-            %% Discard result - use a temporary receiver process
-            Receiver = erlang:spawn(fun() -> receive _ -> ok end end),
-            {ok, LoopRef} = get_loop(),
-            Ref = make_ref(),
-            ok = py_nif:call_soon_threadsafe(LoopRef, Receiver, Ref,
-                                              ModuleBin, FuncBin, Args, Kwargs),
-            ok;
-        NotifyPid when is_pid(NotifyPid) ->
-            %% Return ref, notify when done
-            {ok, LoopRef} = get_loop(),
-            Ref = make_ref(),
-            ok = py_nif:call_soon_threadsafe(LoopRef, NotifyPid, Ref,
-                                              ModuleBin, FuncBin, Args, Kwargs),
-            Ref
-    end.
 
 %% ============================================================================
 %% gen_server callbacks
@@ -446,4 +341,3 @@ cb_execute_py([Module, Func, Args, Kwargs]) ->
     end;
 cb_execute_py(_Args) ->
     error({badarg, invalid_execute_py_args}).
-

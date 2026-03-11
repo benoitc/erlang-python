@@ -3870,8 +3870,6 @@ static ErlNifFunc nif_funcs[] = {
     {"event_loop_set_id", 2, nif_event_loop_set_id, 0},
     {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
     {"event_loop_run_async", 7, nif_event_loop_run_async, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"call_soon_threadsafe", 7, nif_call_soon_threadsafe, 0},
-    {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},
