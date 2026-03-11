@@ -994,6 +994,165 @@ The `py:async_call/3,4` and `py:await/1,2` APIs use an event-driven backend base
 The event-driven model eliminates the polling overhead of the previous pthread+usleep
 implementation, resulting in significantly lower latency for async operations.
 
+## Erlang Callbacks from Python
+
+Python code can call registered Erlang functions using `erlang.call()`. This enables Python handlers to leverage Erlang's concurrency and I/O capabilities.
+
+### erlang.call() - Blocking Callbacks
+
+`erlang.call(name, *args)` calls a registered Erlang function and blocks until it returns. The call holds the dirty NIF scheduler while waiting.
+
+```python
+import erlang
+
+def handler():
+    # Call Erlang function - blocks until complete
+    result = erlang.call('my_callback', arg1, arg2)
+    return process(result)
+```
+
+**Behavior:**
+- Blocks the current Python execution until the Erlang callback completes
+- Code executes exactly once (no replay)
+- The dirty NIF scheduler is held during the call
+- Use for quick Erlang operations where blocking is acceptable
+
+### Explicit Scheduling API
+
+For long-running operations or when you need to release the dirty scheduler, use the explicit scheduling functions. These return `ScheduleMarker` objects that **must be returned from your handler** to take effect.
+
+#### erlang.schedule(callback_name, *args)
+
+Release the dirty scheduler and continue via an Erlang callback.
+
+```python
+import erlang
+
+# Register callback in Erlang:
+# py_callback:register(<<"compute">>, fun([X]) -> X * 2 end).
+
+def handler(x):
+    # Returns ScheduleMarker - MUST be returned from handler
+    return erlang.schedule('compute', x)
+    # Nothing after this executes - Erlang callback continues
+```
+
+The result is transparent to the caller:
+```erlang
+%% Caller just gets the callback result
+{ok, 10} = py:call('__main__', 'handler', [5]).
+```
+
+#### erlang.schedule_py(module, func, args=None, kwargs=None)
+
+Release the dirty scheduler and continue by calling a Python function.
+
+```python
+import erlang
+
+def compute(x, multiplier=2):
+    return x * multiplier
+
+def handler(x):
+    # Schedule Python function - releases dirty scheduler
+    return erlang.schedule_py('__main__', 'compute', [x], {'multiplier': 3})
+```
+
+This is useful for:
+- Breaking up long computations
+- Allowing other Erlang processes to run
+- Cooperative multitasking
+
+#### erlang.consume_time_slice(percent)
+
+Check if the NIF time slice is exhausted. Returns `True` if you should yield, `False` if more time remains.
+
+```python
+import erlang
+
+def long_computation(items, start_idx=0):
+    results = []
+    for i in range(start_idx, len(items)):
+        results.append(process(items[i]))
+
+        # Check if we should yield (1% of time slice per iteration)
+        if erlang.consume_time_slice(1):
+            # Time slice exhausted - save progress and reschedule
+            return erlang.schedule_py(
+                '__main__', 'long_computation',
+                [items], {'start_idx': i + 1}
+            )
+
+    return results
+```
+
+**Parameters:**
+- `percent` (1-100): How much of the time slice was consumed by recent work
+
+**Returns:**
+- `True`: Time slice exhausted, you should yield
+- `False`: More time remains, continue processing
+
+### When to Use Each Pattern
+
+| Pattern | Use When |
+|---------|----------|
+| `erlang.call()` | Quick Erlang operations, blocking is acceptable |
+| `erlang.schedule()` | Need to call Erlang callback and release scheduler |
+| `erlang.schedule_py()` | Long Python computation, cooperative scheduling |
+| `consume_time_slice()` | Fine-grained control over yielding |
+
+### Example: Cooperative Long-Running Task
+
+```python
+import erlang
+
+def process_batch(items, batch_size=100, offset=0):
+    """Process items in batches, yielding between batches."""
+    end = min(offset + batch_size, len(items))
+
+    # Process this batch
+    for i in range(offset, end):
+        expensive_operation(items[i])
+
+    if end < len(items):
+        # More work to do - yield and continue
+        return erlang.schedule_py(
+            '__main__', 'process_batch',
+            [items], {'batch_size': batch_size, 'offset': end}
+        )
+
+    return 'done'
+```
+
+### Important Notes
+
+1. **Must return the marker**: `schedule()` and `schedule_py()` return `ScheduleMarker` objects that must be returned from your handler function. Calling them without returning has no effect:
+
+```python
+def wrong():
+    erlang.schedule('callback', arg)  # No effect!
+    return "oops"  # This is returned instead
+
+def correct():
+    return erlang.schedule('callback', arg)  # Works
+```
+
+2. **Cannot be nested**: The schedule marker must be the direct return value. You cannot return it from a nested function:
+
+```python
+def outer():
+    def inner():
+        return erlang.schedule('callback', arg)
+    return inner()  # Works - marker propagates up
+
+def broken():
+    def inner():
+        erlang.schedule('callback', arg)  # Wrong - not returned
+    inner()
+    return "oops"
+```
+
 ## Limitations
 
 ### Subprocess Operations Not Supported
