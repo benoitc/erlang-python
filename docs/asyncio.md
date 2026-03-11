@@ -691,28 +691,28 @@ When using `erlang.run()` or the Erlang event loop, all standard asyncio functio
 
 #### erlang.sleep(seconds)
 
-Sleep for the specified duration. Works in both async and sync contexts, and **always releases the dirty NIF scheduler**.
+Sleep for the specified duration. Works in both async and sync contexts.
 
 ```python
 import erlang
 
-# Async context - releases dirty scheduler via event loop yield
+# Async context - yields to event loop
 async def async_handler():
     await erlang.sleep(0.1)  # Uses asyncio.sleep() internally
     return "done"
 
-# Sync context - releases dirty scheduler via Erlang process suspension
+# Sync context - blocks Python, releases dirty scheduler
 def sync_handler():
-    erlang.sleep(0.1)  # Uses receive/after, true cooperative yield
+    erlang.sleep(0.1)  # Suspends Erlang process via receive/after
     return "done"
 ```
 
-**Dirty Scheduler Release:**
+**Behavior by Context:**
 
-| Context | Mechanism | Dirty Scheduler |
-|---------|-----------|-----------------|
-| Async (`await erlang.sleep()`) | `asyncio.sleep()` via `call_later()` | Released (yields to event loop) |
-| Sync (`erlang.sleep()`) | `erlang.call('_py_sleep')` with `receive/after` | Released (Erlang process suspends) |
+| Context | Mechanism | Effect |
+|---------|-----------|--------|
+| Async (`await erlang.sleep()`) | `asyncio.sleep()` via `call_later()` | Yields to event loop, dirty scheduler released |
+| Sync (`erlang.sleep()`) | `erlang.call('_py_sleep')` with `receive/after` | Blocks Python, Erlang process suspends, dirty scheduler released |
 
 Both modes allow other Erlang processes and Python contexts to run during the sleep.
 
@@ -1000,7 +1000,7 @@ Python code can call registered Erlang functions using `erlang.call()`. This ena
 
 ### erlang.call() - Blocking Callbacks
 
-`erlang.call(name, *args)` calls a registered Erlang function and blocks until it returns. The call holds the dirty NIF scheduler while waiting.
+`erlang.call(name, *args)` calls a registered Erlang function and blocks until it returns.
 
 ```python
 import erlang
@@ -1014,8 +1014,8 @@ def handler():
 **Behavior:**
 - Blocks the current Python execution until the Erlang callback completes
 - Code executes exactly once (no replay)
-- The dirty NIF scheduler is held during the call
-- Use for quick Erlang operations where blocking is acceptable
+- The callback can release the dirty scheduler by using Erlang's `receive` (e.g., `erlang.sleep()`, `channel.receive()`)
+- Quick callbacks hold the dirty scheduler; callbacks that wait via `receive` release it
 
 ### Explicit Scheduling API
 
@@ -1095,12 +1095,12 @@ def long_computation(items, start_idx=0):
 
 ### When to Use Each Pattern
 
-| Pattern | Use When |
-|---------|----------|
-| `erlang.call()` | Quick Erlang operations, blocking is acceptable |
-| `erlang.schedule()` | Need to call Erlang callback and release scheduler |
-| `erlang.schedule_py()` | Long Python computation, cooperative scheduling |
-| `consume_time_slice()` | Fine-grained control over yielding |
+| Pattern | Use When | Dirty Scheduler |
+|---------|----------|-----------------|
+| `erlang.call()` | Quick operations or callbacks that use `receive` | Held (unless callback suspends via `receive`) |
+| `erlang.schedule()` | Need to call Erlang callback and always release scheduler | Released |
+| `erlang.schedule_py()` | Long Python computation, cooperative scheduling | Released |
+| `consume_time_slice()` | Fine-grained control over yielding | N/A (checks time slice) |
 
 ### Example: Cooperative Long-Running Task
 
