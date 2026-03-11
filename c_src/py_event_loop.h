@@ -39,6 +39,9 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
+/* Forward declaration for Python object (avoids including Python.h in header) */
+typedef struct _object PyObject;
+
 /* ============================================================================
  * Constants
  * ============================================================================ */
@@ -268,6 +271,17 @@ typedef struct erlang_event_loop {
 
     /** @brief Atomic counter for pending tasks */
     _Atomic uint_fast64_t task_count;
+
+    /* ========== Cached Python Objects (uvloop-style) ========== */
+
+    /** @brief Cached asyncio module (avoids import on each call) */
+    PyObject *cached_asyncio;
+
+    /** @brief Cached _run_and_send function */
+    PyObject *cached_run_and_send;
+
+    /** @brief Whether Python caches have been initialized */
+    bool py_cache_valid;
 } erlang_event_loop_t;
 
 /* ============================================================================

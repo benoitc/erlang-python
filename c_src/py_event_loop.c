@@ -401,6 +401,14 @@ cleanup_native:
             !PyGILState_Check()) {
             PyGILState_STATE gstate = PyGILState_Ensure();
             Py_DECREF(loop->py_loop);
+            /* Also release cached Python objects (uvloop-style cache cleanup) */
+            if (loop->py_cache_valid) {
+                Py_XDECREF(loop->cached_asyncio);
+                Py_XDECREF(loop->cached_run_and_send);
+                loop->cached_asyncio = NULL;
+                loop->cached_run_and_send = NULL;
+                loop->py_cache_valid = false;
+            }
             PyGILState_Release(gstate);
         }
         loop->py_loop = NULL;
@@ -677,6 +685,11 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     atomic_store(&loop->task_count, 0);
     loop->py_loop = NULL;
     loop->py_loop_valid = false;
+
+    /* Initialize Python cache (uvloop-style optimization) */
+    loop->cached_asyncio = NULL;
+    loop->cached_run_and_send = NULL;
+    loop->py_cache_valid = false;
 
     /* Create result */
     ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
@@ -1866,7 +1879,10 @@ ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
  * Called by the event worker when it receives 'task_ready' message.
  * Dequeues all pending tasks, creates coroutines, and schedules them on py_loop.
  *
- * Must be called from a scheduler thread (not dirty) so it can safely acquire GIL.
+ * Optimizations (uvloop-style):
+ * - Check task count BEFORE acquiring GIL (early exit if nothing to do)
+ * - Cache Python imports (asyncio, _run_and_send) across calls
+ * - Only call _run_once if coroutines were actually scheduled
  */
 ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
                                       const ERL_NIF_TERM argv[]) {
@@ -1882,6 +1898,13 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         return make_error(env, "task_queue_not_initialized");
     }
 
+    /* OPTIMIZATION: Check task count BEFORE acquiring GIL
+     * This avoids expensive GIL acquisition when there's nothing to do */
+    uint_fast64_t task_count = atomic_load(&loop->task_count);
+    if (task_count == 0) {
+        return ATOM_OK;  /* Nothing to process, skip GIL entirely */
+    }
+
     /* Check if Python runtime is running */
     if (!runtime_is_running()) {
         return make_error(env, "python_not_running");
@@ -1889,11 +1912,46 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    /* Import asyncio early - needed for both lazy creation and task processing */
-    PyObject *asyncio = PyImport_ImportModule("asyncio");
-    if (asyncio == NULL) {
-        PyGILState_Release(gstate);
-        return make_error(env, "asyncio_import_failed");
+    /* OPTIMIZATION: Use cached Python imports (uvloop-style)
+     * Avoids PyImport_ImportModule on every call */
+    PyObject *asyncio;
+    PyObject *run_and_send;
+
+    if (loop->py_cache_valid && loop->cached_asyncio != NULL && loop->cached_run_and_send != NULL) {
+        /* Use cached references */
+        asyncio = loop->cached_asyncio;
+        run_and_send = loop->cached_run_and_send;
+    } else {
+        /* First call or cache invalidated - populate cache */
+        asyncio = PyImport_ImportModule("asyncio");
+        if (asyncio == NULL) {
+            PyGILState_Release(gstate);
+            return make_error(env, "asyncio_import_failed");
+        }
+
+        PyObject *erlang_loop_mod = PyImport_ImportModule("_erlang_impl._loop");
+        if (erlang_loop_mod == NULL) {
+            PyErr_Clear();
+            erlang_loop_mod = PyImport_ImportModule("erlang_loop");
+        }
+        if (erlang_loop_mod == NULL) {
+            Py_DECREF(asyncio);
+            PyGILState_Release(gstate);
+            return make_error(env, "erlang_loop_import_failed");
+        }
+
+        run_and_send = PyObject_GetAttrString(erlang_loop_mod, "_run_and_send");
+        Py_DECREF(erlang_loop_mod);
+        if (run_and_send == NULL) {
+            Py_DECREF(asyncio);
+            PyGILState_Release(gstate);
+            return make_error(env, "run_and_send_not_found");
+        }
+
+        /* Store in cache */
+        loop->cached_asyncio = asyncio;
+        loop->cached_run_and_send = run_and_send;
+        loop->py_cache_valid = true;
     }
 
     /* Lazy loop creation (uvloop-style): create Python loop on first use */
@@ -1902,7 +1960,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         PyObject *new_loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
         if (new_loop == NULL) {
             PyErr_Clear();
-            Py_DECREF(asyncio);
             PyGILState_Release(gstate);
             return make_error(env, "loop_creation_failed");
         }
@@ -1928,25 +1985,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     /* Process all pending tasks */
     ERL_NIF_TERM result = ATOM_OK;
     int coros_scheduled = 0;  /* Track if any coroutines were scheduled */
-
-    PyObject *erlang_loop = PyImport_ImportModule("_erlang_impl._loop");
-    if (erlang_loop == NULL) {
-        PyErr_Clear();
-        erlang_loop = PyImport_ImportModule("erlang_loop");
-    }
-    if (erlang_loop == NULL) {
-        Py_DECREF(asyncio);
-        PyGILState_Release(gstate);
-        return make_error(env, "erlang_loop_import_failed");
-    }
-
-    PyObject *run_and_send = PyObject_GetAttrString(erlang_loop, "_run_and_send");
-    Py_DECREF(erlang_loop);
-    if (run_and_send == NULL) {
-        Py_DECREF(asyncio);
-        PyGILState_Release(gstate);
-        return make_error(env, "run_and_send_not_found");
-    }
 
     /* Dequeue all tasks */
     pthread_mutex_lock(&loop->task_queue_mutex);
@@ -2191,8 +2229,8 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     pthread_mutex_unlock(&loop->task_queue_mutex);
 
-    Py_DECREF(run_and_send);
-    Py_DECREF(asyncio);
+    /* NOTE: We don't DECREF asyncio and run_and_send here because they're cached
+     * in the loop structure. They'll be freed when the loop is destroyed. */
 
     /* Run one iteration of the event loop only if coroutines were scheduled.
      * For sync functions (like math.sqrt), results are sent directly via enif_send
@@ -4987,6 +5025,11 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     atomic_store(&loop->task_count, 0);
     loop->py_loop = NULL;
     loop->py_loop_valid = false;
+
+    /* Initialize Python cache (uvloop-style optimization) */
+    loop->cached_asyncio = NULL;
+    loop->cached_run_and_send = NULL;
+    loop->py_cache_valid = false;
 
 #ifdef HAVE_SUBINTERPRETERS
     /* Detect if this is being called from a subinterpreter */
