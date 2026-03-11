@@ -1882,10 +1882,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         return make_error(env, "task_queue_not_initialized");
     }
 
-    if (!loop->py_loop_valid || loop->py_loop == NULL) {
-        return make_error(env, "py_loop_not_set");
-    }
-
     /* Check if Python runtime is running */
     if (!runtime_is_running()) {
         return make_error(env, "python_not_running");
@@ -1893,16 +1889,45 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    /* Process all pending tasks */
-    ERL_NIF_TERM result = ATOM_OK;
-    int tasks_processed = 0;
-
-    /* Import needed modules once */
+    /* Import asyncio early - needed for both lazy creation and task processing */
     PyObject *asyncio = PyImport_ImportModule("asyncio");
     if (asyncio == NULL) {
         PyGILState_Release(gstate);
         return make_error(env, "asyncio_import_failed");
     }
+
+    /* Lazy loop creation (uvloop-style): create Python loop on first use */
+    if (!loop->py_loop_valid || loop->py_loop == NULL) {
+        /* Create new event loop via asyncio policy (triggers ErlangEventLoop.__init__) */
+        PyObject *new_loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
+        if (new_loop == NULL) {
+            PyErr_Clear();
+            Py_DECREF(asyncio);
+            PyGILState_Release(gstate);
+            return make_error(env, "loop_creation_failed");
+        }
+
+        /* Set as current event loop */
+        PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", new_loop);
+        Py_XDECREF(set_result);
+
+        /* ErlangEventLoop.__init__ should have called _set_global_loop_ref,
+         * which sets loop->py_loop and loop->py_loop_valid = true */
+        if (!loop->py_loop_valid || loop->py_loop == NULL) {
+            /* Fallback: manually set the loop reference */
+            if (loop->py_loop != NULL) {
+                Py_DECREF(loop->py_loop);
+            }
+            loop->py_loop = new_loop;  /* Transfer ownership */
+            loop->py_loop_valid = true;
+        } else {
+            Py_DECREF(new_loop);
+        }
+    }
+
+    /* Process all pending tasks */
+    ERL_NIF_TERM result = ATOM_OK;
+    int coros_scheduled = 0;  /* Track if any coroutines were scheduled */
 
     PyObject *erlang_loop = PyImport_ImportModule("_erlang_impl._loop");
     if (erlang_loop == NULL) {
@@ -1930,7 +1955,8 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     int iovcnt;
     size_t size;
 
-    while ((size = enif_ioq_size(loop->task_queue)) > 0) {
+    size = enif_ioq_size(loop->task_queue);
+    while (size > 0) {
         iov = enif_ioq_peek(loop->task_queue, &iovcnt);
         if (iov == NULL || iovcnt == 0) {
             break;
@@ -1957,6 +1983,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             enif_free_env(term_env);
             /* Dequeue and skip this malformed task */
             enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -1973,6 +2000,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (!enif_get_tuple(term_env, task_term, &arity, &tuple_elems) || arity != 6) {
             enif_free_env(term_env);
             pthread_mutex_lock(&loop->task_queue_mutex);
+            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -1980,6 +2008,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (!enif_get_local_pid(term_env, tuple_elems[0], &caller_pid)) {
             enif_free_env(term_env);
             pthread_mutex_lock(&loop->task_queue_mutex);
+            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -1988,6 +2017,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             !enif_inspect_binary(term_env, tuple_elems[3], &func_bin)) {
             enif_free_env(term_env);
             pthread_mutex_lock(&loop->task_queue_mutex);
+            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2014,6 +2044,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             enif_free(func_name);
             enif_free_env(term_env);
             pthread_mutex_lock(&loop->task_queue_mutex);
+            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2026,6 +2057,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             PyErr_Clear();
             enif_free_env(term_env);
             pthread_mutex_lock(&loop->task_queue_mutex);
+            size = enif_ioq_size(loop->task_queue);
             continue;
         }
 
@@ -2117,25 +2149,33 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
                 PyObject *task = PyObject_CallMethod(loop->py_loop, "create_task", "O", wrapped_coro);
                 Py_DECREF(wrapped_coro);
                 Py_XDECREF(task);
+                coros_scheduled++;
             } else {
                 PyErr_Clear();
             }
         } else {
-            /* Not a coroutine - send result immediately */
-            PyObject *erlang_mod = PyImport_ImportModule("erlang");
-            if (erlang_mod != NULL) {
-                PyObject *ok_tuple = PyTuple_Pack(2, PyUnicode_FromString("ok"), coro);
-                PyObject *msg = PyTuple_Pack(3,
-                    PyUnicode_FromString("async_result"),
-                    py_ref,
+            /* Not a coroutine - send result immediately via enif_send */
+            /* Use enif_send directly so we can use proper Erlang atoms */
+            /* Use the original Erlang ref term (tuple_elems[1]), not the Python conversion */
+            ErlNifEnv *send_env = enif_alloc_env();
+            if (send_env != NULL) {
+                /* Convert Python result to Erlang term */
+                ERL_NIF_TERM result_term = py_to_term(send_env, coro);
+
+                /* Copy original ref from term_env to send_env */
+                ERL_NIF_TERM ref_copy = enif_make_copy(send_env, tuple_elems[1]);
+
+                /* Build message: {async_result, Ref, {ok, Result}} */
+                ERL_NIF_TERM ok_tuple = enif_make_tuple2(send_env,
+                    enif_make_atom(send_env, "ok"),
+                    result_term);
+                ERL_NIF_TERM msg = enif_make_tuple3(send_env,
+                    enif_make_atom(send_env, "async_result"),
+                    ref_copy,
                     ok_tuple);
 
-                PyObject *send_result = PyObject_CallMethod(erlang_mod, "send", "OO",
-                                                             (PyObject *)pid_obj, msg);
-                Py_XDECREF(send_result);
-                Py_DECREF(msg);
-                Py_DECREF(ok_tuple);
-                Py_DECREF(erlang_mod);
+                enif_send(NULL, &caller_pid, send_env, msg);
+                enif_free_env(send_env);
             }
             Py_DECREF(coro);
         }
@@ -2143,10 +2183,10 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         Py_DECREF(py_ref);
         Py_DECREF((PyObject *)pid_obj);
         enif_free_env(term_env);
-        tasks_processed++;
 
         /* Re-acquire mutex for next iteration */
         pthread_mutex_lock(&loop->task_queue_mutex);
+        size = enif_ioq_size(loop->task_queue);
     }
 
     pthread_mutex_unlock(&loop->task_queue_mutex);
@@ -2154,8 +2194,10 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     Py_DECREF(run_and_send);
     Py_DECREF(asyncio);
 
-    /* Run one iteration of the event loop to process scheduled tasks */
-    if (tasks_processed > 0) {
+    /* Run one iteration of the event loop only if coroutines were scheduled.
+     * For sync functions (like math.sqrt), results are sent directly via enif_send
+     * and we don't need to drive the Python event loop. */
+    if (coros_scheduled > 0) {
         PyObject *run_result = PyObject_CallMethod(loop->py_loop, "_run_once", NULL);
         if (run_result != NULL) {
             Py_DECREF(run_result);

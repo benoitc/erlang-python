@@ -90,10 +90,7 @@ handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
 handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
     case py_nif:process_ready_tasks(LoopRef) of
         ok -> ok;
-        {error, py_loop_not_set} ->
-            %% py_loop not yet set, ignore silently - tasks will be processed
-            %% when the loop is properly initialized
-            ok;
+        {error, py_loop_not_set} -> ok;
         {error, Reason} ->
             error_logger:warning_msg("py_event_worker: task processing failed: ~p~n", [Reason])
     end,
