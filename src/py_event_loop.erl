@@ -300,16 +300,10 @@ cb_dispatch_timer([LoopRef, CallbackId]) ->
 %% Suspends the current Erlang process for the specified duration,
 %% fully releasing the dirty NIF scheduler to handle other work.
 %% This is true cooperative yielding - the dirty scheduler thread is freed.
-%% Args: [Seconds] - float or integer seconds (converted to ms internally)
-cb_sleep([Seconds]) when is_float(Seconds), Seconds > 0 ->
-    Ms = round(Seconds * 1000),
-    receive after Ms -> ok end;
-cb_sleep([Seconds]) when is_integer(Seconds), Seconds > 0 ->
-    Ms = Seconds * 1000,
-    receive after Ms -> ok end;
+%% Args: [Seconds] - number of seconds (converted to non-negative ms internally)
 cb_sleep([Seconds]) when is_number(Seconds) ->
-    %% Zero or negative - return immediately
-    ok;
+    Ms = max(0, round(Seconds * 1000)),
+    receive after Ms -> ok end;
 cb_sleep(_Args) ->
     ok.
 
