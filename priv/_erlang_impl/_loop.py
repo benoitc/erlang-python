@@ -83,6 +83,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         '_signal_handlers',
         '_execution_mode',
         '_callback_id',
+        '_cached_time',  # uvloop-style time caching to avoid syscalls
     )
 
     def __init__(self):
@@ -150,6 +151,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Handle object pool for reduced allocations
         self._handle_pool = []
         self._handle_pool_max = 150
+
+        # Time caching (uvloop-style: avoids time.monotonic() syscalls)
+        self._cached_time = time.monotonic()
 
         # State
         self._running = False
@@ -321,9 +325,12 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # ========================================================================
 
     def call_soon(self, callback, *args, context=None):
-        """Schedule a callback to be called soon."""
+        """Schedule a callback to be called soon.
+
+        Uses handle pooling (uvloop-style) to reduce allocations.
+        """
         self._check_closed()
-        handle = events.Handle(callback, args, self, context)
+        handle = self._get_handle(callback, args, context)
         self._ready_append(handle)
         return handle
 
@@ -371,8 +378,16 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         return handle
 
     def time(self):
-        """Return the current time according to the event loop's clock."""
-        return time.monotonic()
+        """Return the current time according to the event loop's clock.
+
+        Uses cached time (uvloop-style) to avoid syscalls. The cache is
+        updated at the start of each _run_once iteration.
+        """
+        return self._cached_time
+
+    def _update_time(self):
+        """Update the cached time. Called at the start of each iteration."""
+        self._cached_time = time.monotonic()
 
     # ========================================================================
     # Creating Futures and Tasks
@@ -958,6 +973,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             timeout_hint: Optional timeout in ms. If 0, don't block waiting
                 for I/O. Used by C code when coroutines were just scheduled.
         """
+        # Update cached time at start of iteration (uvloop-style)
+        self._cached_time = time.monotonic()
+
         ready = self._ready
         popleft = self._ready_popleft
         return_handle = self._return_handle
@@ -1076,21 +1094,30 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # Handle pool for reduced allocations
     # ========================================================================
 
-    def _get_handle(self, callback, args):
-        """Get a Handle from the pool or create a new one."""
+    def _get_handle(self, callback, args, context=None):
+        """Get a Handle from the pool or create a new one.
+
+        This is a uvloop-style optimization to reduce allocations.
+        Pooled handles are reused instead of creating new objects.
+        """
         if self._handle_pool:
             handle = self._handle_pool.pop()
             handle._callback = callback
             handle._args = args
             handle._cancelled = False
+            handle._context = context
             return handle
-        return events.Handle(callback, args, self, None)
+        return events.Handle(callback, args, self, context)
 
     def _return_handle(self, handle):
-        """Return a Handle to the pool for reuse."""
+        """Return a Handle to the pool for reuse.
+
+        Clears all references to allow GC of callback/args/context.
+        """
         if len(self._handle_pool) < self._handle_pool_max:
             handle._callback = None
             handle._args = None
+            handle._context = None
             self._handle_pool.append(handle)
 
     # ========================================================================
