@@ -84,6 +84,21 @@ handle_info({timeout, TimerRef}, State) ->
     end;
 
 handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
+
+%% Handle task_ready wakeup from submit_task NIF.
+%% This is sent via enif_send when a new async task is submitted.
+handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
+    case py_nif:process_ready_tasks(LoopRef) of
+        ok -> ok;
+        {error, py_loop_not_set} ->
+            %% py_loop not yet set, ignore silently - tasks will be processed
+            %% when the loop is properly initialized
+            ok;
+        {error, Reason} ->
+            error_logger:warning_msg("py_event_worker: task processing failed: ~p~n", [Reason])
+    end,
+    {noreply, State};
+
 handle_info(_Info, State) -> {noreply, State}.
 
 terminate(_Reason, #state{timers = Timers}) ->

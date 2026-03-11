@@ -99,6 +99,10 @@
     event_loop_set_id/2,
     event_loop_wakeup/1,
     event_loop_run_async/7,
+    %% Async task queue NIFs (uvloop-inspired)
+    submit_task/7,
+    process_ready_tasks/1,
+    event_loop_set_py_loop/2,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -726,6 +730,40 @@ event_loop_wakeup(_LoopRef) ->
 -spec event_loop_run_async(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
     ok | {error, term()}.
 event_loop_run_async(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Async Task Queue NIFs (uvloop-inspired)
+%%% ============================================================================
+
+%% @doc Submit an async task to the event loop (thread-safe).
+%%
+%% This NIF can be called from any thread including dirty schedulers.
+%% It serializes the task info, enqueues to the task queue, and sends
+%% a 'task_ready' wakeup to the worker via enif_send.
+%%
+%% The result will be sent to CallerPid as:
+%%   {async_result, Ref, {ok, Result}} - on success
+%%   {async_result, Ref, {error, Reason}} - on failure
+-spec submit_task(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
+    ok | {error, term()}.
+submit_task(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Process all pending tasks from the task queue.
+%%
+%% Called by the event worker when it receives 'task_ready' message.
+%% Dequeues all tasks, creates coroutines, and schedules them on the loop.
+-spec process_ready_tasks(reference()) -> ok | {error, term()}.
+process_ready_tasks(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Store a Python event loop reference in the C struct.
+%%
+%% This avoids thread-local lookup issues when processing tasks.
+%% Called from Python after creating the ErlangEventLoop.
+-spec event_loop_set_py_loop(reference(), reference()) -> ok | {error, term()}.
+event_loop_set_py_loop(_LoopRef, _PyLoopRef) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.

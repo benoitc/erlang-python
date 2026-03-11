@@ -383,6 +383,30 @@ cleanup_native:
     loop->event_freelist = NULL;
     loop->freelist_count = 0;
 
+    /* Clean up async task queue (uvloop-inspired) */
+    if (loop->task_queue_initialized) {
+        pthread_mutex_destroy(&loop->task_queue_mutex);
+        loop->task_queue_initialized = false;
+    }
+    if (loop->task_queue != NULL) {
+        enif_ioq_destroy(loop->task_queue);
+        loop->task_queue = NULL;
+    }
+
+    /* Release Python loop reference if held */
+    if (loop->py_loop_valid && loop->py_loop != NULL) {
+        /* Only decref if Python runtime is still running and we can safely acquire GIL */
+        if (runtime_is_running() && loop->interp_id == 0 &&
+            PyGILState_GetThisThreadState() == NULL &&
+            !PyGILState_Check()) {
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Py_DECREF(loop->py_loop);
+            PyGILState_Release(gstate);
+        }
+        loop->py_loop = NULL;
+        loop->py_loop_valid = false;
+    }
+
     /* Free message environment */
     if (loop->msg_env != NULL) {
         enif_free_env(loop->msg_env);
@@ -629,6 +653,30 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     loop->has_router = false;
     loop->has_self = false;
     loop->interp_id = 0;  /* Main interpreter */
+
+    /* Initialize async task queue (uvloop-inspired) */
+    loop->task_queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
+    if (loop->task_queue == NULL) {
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        return make_error(env, "task_queue_alloc_failed");
+    }
+
+    if (pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
+        enif_ioq_destroy(loop->task_queue);
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        return make_error(env, "task_queue_mutex_init_failed");
+    }
+
+    loop->task_queue_initialized = true;
+    atomic_store(&loop->task_count, 0);
+    loop->py_loop = NULL;
+    loop->py_loop_valid = false;
 
     /* Create result */
     ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
@@ -1730,6 +1778,422 @@ cleanup:
     PyGILState_Release(gstate);
 
     return result;
+}
+
+/* ============================================================================
+ * Async Task Queue NIFs (uvloop-inspired)
+ * ============================================================================ */
+
+/** Atom for task_ready wakeup message */
+static ERL_NIF_TERM ATOM_TASK_READY;
+
+/**
+ * submit_task(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ *
+ * Thread-safe task submission. Serializes task info, enqueues to the task_queue,
+ * and sends 'task_ready' wakeup to the worker via enif_send.
+ *
+ * This works from any thread including dirty schedulers because:
+ * 1. enif_ioq operations are thread-safe
+ * 2. enif_send works without GIL and from any thread
+ * 3. No Python API calls are made
+ */
+ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
+                              const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!loop->task_queue_initialized) {
+        return make_error(env, "task_queue_not_initialized");
+    }
+
+    /* Validate caller_pid */
+    ErlNifPid caller_pid;
+    if (!enif_get_local_pid(env, argv[1], &caller_pid)) {
+        return make_error(env, "invalid_caller_pid");
+    }
+
+    /* Create task tuple: {CallerPid, Ref, Module, Func, Args, Kwargs} */
+    /* argv[1] = CallerPid, argv[2] = Ref, argv[3] = Module,
+     * argv[4] = Func, argv[5] = Args, argv[6] = Kwargs */
+    ERL_NIF_TERM task_tuple = enif_make_tuple6(env,
+        argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
+
+    /* Serialize to binary */
+    ErlNifBinary task_bin;
+    if (!enif_term_to_binary(env, task_tuple, &task_bin)) {
+        return make_error(env, "serialization_failed");
+    }
+
+    /* Thread-safe enqueue */
+    pthread_mutex_lock(&loop->task_queue_mutex);
+    int enq_result = enif_ioq_enq_binary(loop->task_queue, &task_bin, 0);
+    pthread_mutex_unlock(&loop->task_queue_mutex);
+
+    if (enq_result != 1) {
+        enif_release_binary(&task_bin);
+        return make_error(env, "enqueue_failed");
+    }
+
+    /* Increment task count */
+    atomic_fetch_add(&loop->task_count, 1);
+
+    /* Send wakeup to worker (thread-safe, works from dirty schedulers) */
+    if (loop->has_worker) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env != NULL) {
+            /* Initialize ATOM_TASK_READY if needed (safe to do multiple times) */
+            if (ATOM_TASK_READY == 0) {
+                ATOM_TASK_READY = enif_make_atom(msg_env, "task_ready");
+            }
+            ERL_NIF_TERM msg = enif_make_atom(msg_env, "task_ready");
+            enif_send(NULL, &loop->worker_pid, msg_env, msg);
+            enif_free_env(msg_env);
+        }
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * process_ready_tasks(LoopRef) -> ok | {error, Reason}
+ *
+ * Called by the event worker when it receives 'task_ready' message.
+ * Dequeues all pending tasks, creates coroutines, and schedules them on py_loop.
+ *
+ * Must be called from a scheduler thread (not dirty) so it can safely acquire GIL.
+ */
+ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!loop->task_queue_initialized) {
+        return make_error(env, "task_queue_not_initialized");
+    }
+
+    if (!loop->py_loop_valid || loop->py_loop == NULL) {
+        return make_error(env, "py_loop_not_set");
+    }
+
+    /* Check if Python runtime is running */
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Process all pending tasks */
+    ERL_NIF_TERM result = ATOM_OK;
+    int tasks_processed = 0;
+
+    /* Import needed modules once */
+    PyObject *asyncio = PyImport_ImportModule("asyncio");
+    if (asyncio == NULL) {
+        PyGILState_Release(gstate);
+        return make_error(env, "asyncio_import_failed");
+    }
+
+    PyObject *erlang_loop = PyImport_ImportModule("_erlang_impl._loop");
+    if (erlang_loop == NULL) {
+        PyErr_Clear();
+        erlang_loop = PyImport_ImportModule("erlang_loop");
+    }
+    if (erlang_loop == NULL) {
+        Py_DECREF(asyncio);
+        PyGILState_Release(gstate);
+        return make_error(env, "erlang_loop_import_failed");
+    }
+
+    PyObject *run_and_send = PyObject_GetAttrString(erlang_loop, "_run_and_send");
+    Py_DECREF(erlang_loop);
+    if (run_and_send == NULL) {
+        Py_DECREF(asyncio);
+        PyGILState_Release(gstate);
+        return make_error(env, "run_and_send_not_found");
+    }
+
+    /* Dequeue all tasks */
+    pthread_mutex_lock(&loop->task_queue_mutex);
+
+    SysIOVec *iov;
+    int iovcnt;
+    size_t size;
+
+    while ((size = enif_ioq_size(loop->task_queue)) > 0) {
+        iov = enif_ioq_peek(loop->task_queue, &iovcnt);
+        if (iov == NULL || iovcnt == 0) {
+            break;
+        }
+
+        /* Get the first IOVec element */
+        ErlNifBinary task_bin;
+        task_bin.data = iov[0].iov_base;
+        task_bin.size = iov[0].iov_len;
+
+        /* Deserialize task tuple */
+        ErlNifEnv *term_env = enif_alloc_env();
+        if (term_env == NULL) {
+            pthread_mutex_unlock(&loop->task_queue_mutex);
+            Py_DECREF(run_and_send);
+            Py_DECREF(asyncio);
+            PyGILState_Release(gstate);
+            return make_error(env, "term_env_alloc_failed");
+        }
+
+        ERL_NIF_TERM task_term;
+        if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
+                                &task_term, 0) == 0) {
+            enif_free_env(term_env);
+            /* Dequeue and skip this malformed task */
+            enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+            continue;
+        }
+
+        /* Dequeue before processing (we've copied the data) */
+        enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+        atomic_fetch_sub(&loop->task_count, 1);
+
+        /* Release mutex while processing (allows new tasks to be queued) */
+        pthread_mutex_unlock(&loop->task_queue_mutex);
+
+        /* Extract: {CallerPid, Ref, Module, Func, Args, Kwargs} */
+        int arity;
+        const ERL_NIF_TERM *tuple_elems;
+        if (!enif_get_tuple(term_env, task_term, &arity, &tuple_elems) || arity != 6) {
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        ErlNifPid caller_pid;
+        if (!enif_get_local_pid(term_env, tuple_elems[0], &caller_pid)) {
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        ErlNifBinary module_bin, func_bin;
+        if (!enif_inspect_binary(term_env, tuple_elems[2], &module_bin) ||
+            !enif_inspect_binary(term_env, tuple_elems[3], &func_bin)) {
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        /* Convert module/func to C strings */
+        char *module_name = enif_alloc(module_bin.size + 1);
+        char *func_name = enif_alloc(func_bin.size + 1);
+        if (module_name == NULL || func_name == NULL) {
+            enif_free(module_name);
+            enif_free(func_name);
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+        memcpy(module_name, module_bin.data, module_bin.size);
+        module_name[module_bin.size] = '\0';
+        memcpy(func_name, func_bin.data, func_bin.size);
+        func_name[func_bin.size] = '\0';
+
+        /* Import module and get function */
+        PyObject *module = PyImport_ImportModule(module_name);
+        if (module == NULL) {
+            PyErr_Clear();
+            enif_free(module_name);
+            enif_free(func_name);
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        PyObject *func = PyObject_GetAttrString(module, func_name);
+        Py_DECREF(module);
+        enif_free(module_name);
+        enif_free(func_name);
+
+        if (func == NULL) {
+            PyErr_Clear();
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        /* Convert args list to Python tuple */
+        unsigned int args_len;
+        if (!enif_get_list_length(term_env, tuple_elems[4], &args_len)) {
+            Py_DECREF(func);
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        PyObject *args = PyTuple_New(args_len);
+        ERL_NIF_TERM head, tail = tuple_elems[4];
+        bool args_ok = true;
+        for (unsigned int i = 0; i < args_len && args_ok; i++) {
+            enif_get_list_cell(term_env, tail, &head, &tail);
+            PyObject *arg = term_to_py(term_env, head);
+            if (arg == NULL) {
+                PyErr_Clear();
+                args_ok = false;
+            } else {
+                PyTuple_SET_ITEM(args, i, arg);
+            }
+        }
+
+        if (!args_ok) {
+            Py_DECREF(args);
+            Py_DECREF(func);
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        /* Convert kwargs */
+        PyObject *kwargs = NULL;
+        if (enif_is_map(term_env, tuple_elems[5])) {
+            kwargs = term_to_py(term_env, tuple_elems[5]);
+        }
+
+        /* Call the function to get coroutine */
+        PyObject *coro = PyObject_Call(func, args, kwargs);
+        Py_DECREF(func);
+        Py_DECREF(args);
+        Py_XDECREF(kwargs);
+
+        if (coro == NULL) {
+            PyErr_Clear();
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        /* Check if result is a coroutine */
+        PyObject *iscoroutine = PyObject_CallMethod(asyncio, "iscoroutine", "O", coro);
+        bool is_coro = iscoroutine != NULL && PyObject_IsTrue(iscoroutine);
+        Py_XDECREF(iscoroutine);
+
+        /* Create caller PID object */
+        extern PyTypeObject ErlangPidType;
+        ErlangPidObject *pid_obj = PyObject_New(ErlangPidObject, &ErlangPidType);
+        if (pid_obj == NULL) {
+            Py_DECREF(coro);
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+        pid_obj->pid = caller_pid;
+
+        /* Convert ref to Python */
+        PyObject *py_ref = term_to_py(term_env, tuple_elems[1]);
+        if (py_ref == NULL) {
+            PyErr_Clear();
+            Py_DECREF((PyObject *)pid_obj);
+            Py_DECREF(coro);
+            enif_free_env(term_env);
+            pthread_mutex_lock(&loop->task_queue_mutex);
+            continue;
+        }
+
+        if (is_coro) {
+            /* Wrap with _run_and_send and schedule */
+            PyObject *wrapped_coro = PyObject_CallFunction(run_and_send, "OOO",
+                                                            coro, (PyObject *)pid_obj, py_ref);
+            Py_DECREF(coro);
+
+            if (wrapped_coro != NULL) {
+                /* Schedule on py_loop */
+                PyObject *task = PyObject_CallMethod(loop->py_loop, "create_task", "O", wrapped_coro);
+                Py_DECREF(wrapped_coro);
+                Py_XDECREF(task);
+            } else {
+                PyErr_Clear();
+            }
+        } else {
+            /* Not a coroutine - send result immediately */
+            PyObject *erlang_mod = PyImport_ImportModule("erlang");
+            if (erlang_mod != NULL) {
+                PyObject *ok_tuple = PyTuple_Pack(2, PyUnicode_FromString("ok"), coro);
+                PyObject *msg = PyTuple_Pack(3,
+                    PyUnicode_FromString("async_result"),
+                    py_ref,
+                    ok_tuple);
+
+                PyObject *send_result = PyObject_CallMethod(erlang_mod, "send", "OO",
+                                                             (PyObject *)pid_obj, msg);
+                Py_XDECREF(send_result);
+                Py_DECREF(msg);
+                Py_DECREF(ok_tuple);
+                Py_DECREF(erlang_mod);
+            }
+            Py_DECREF(coro);
+        }
+
+        Py_DECREF(py_ref);
+        Py_DECREF((PyObject *)pid_obj);
+        enif_free_env(term_env);
+        tasks_processed++;
+
+        /* Re-acquire mutex for next iteration */
+        pthread_mutex_lock(&loop->task_queue_mutex);
+    }
+
+    pthread_mutex_unlock(&loop->task_queue_mutex);
+
+    Py_DECREF(run_and_send);
+    Py_DECREF(asyncio);
+
+    /* Run one iteration of the event loop to process scheduled tasks */
+    if (tasks_processed > 0) {
+        PyObject *run_result = PyObject_CallMethod(loop->py_loop, "_run_once", NULL);
+        if (run_result != NULL) {
+            Py_DECREF(run_result);
+        } else {
+            PyErr_Clear();
+        }
+    }
+
+    PyGILState_Release(gstate);
+    return result;
+}
+
+/**
+ * event_loop_set_py_loop(LoopRef, PyLoopRef) -> ok | {error, Reason}
+ *
+ * Store a reference to the Python ErlangEventLoop in the C struct.
+ * This avoids thread-local lookup issues when processing tasks.
+ *
+ * PyLoopRef should be the resource reference containing the Python loop.
+ * This NIF must be called from Python after creating the ErlangEventLoop.
+ */
+ERL_NIF_TERM nif_event_loop_set_py_loop(ErlNifEnv *env, int argc,
+                                         const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* argv[1] should be a PyCapsule containing the Python loop object */
+    /* For now, we'll store it via a different mechanism - from Python side */
+
+    /* This NIF is called from Python, so we're already in the right context.
+     * The actual py_loop is set via py_set_loop_ref() Python function */
+
+    return ATOM_OK;
 }
 
 /* ============================================================================
@@ -4453,6 +4917,32 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     loop->event_freelist = NULL;
     loop->freelist_count = 0;
 
+    /* Initialize async task queue (uvloop-inspired) */
+    loop->task_queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
+    if (loop->task_queue == NULL) {
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate task queue");
+        return NULL;
+    }
+
+    if (pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
+        enif_ioq_destroy(loop->task_queue);
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize task queue mutex");
+        return NULL;
+    }
+
+    loop->task_queue_initialized = true;
+    atomic_store(&loop->task_count, 0);
+    loop->py_loop = NULL;
+    loop->py_loop_valid = false;
+
 #ifdef HAVE_SUBINTERPRETERS
     /* Detect if this is being called from a subinterpreter */
     PyInterpreterState *current_interp = PyInterpreterState_Get();
@@ -4510,6 +5000,73 @@ static PyObject *py_loop_destroy(PyObject *self, PyObject *args) {
     pthread_mutex_lock(&loop->mutex);
     pthread_cond_broadcast(&loop->event_cond);
     pthread_mutex_unlock(&loop->mutex);
+
+    Py_RETURN_NONE;
+}
+
+/* Python function: _set_loop_ref(capsule, py_loop) -> None
+ *
+ * Store a reference to the Python ErlangEventLoop in the C struct.
+ * This enables direct access to the loop from process_ready_tasks
+ * without thread-local lookup issues.
+ */
+static PyObject *py_set_loop_ref(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    PyObject *py_loop;
+
+    if (!PyArg_ParseTuple(args, "OO", &capsule, &py_loop)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    /* Release old reference if any */
+    if (loop->py_loop_valid && loop->py_loop != NULL) {
+        Py_DECREF(loop->py_loop);
+    }
+
+    /* Store new reference */
+    Py_INCREF(py_loop);
+    loop->py_loop = py_loop;
+    loop->py_loop_valid = true;
+
+    Py_RETURN_NONE;
+}
+
+/* Python function: _set_global_loop_ref(py_loop) -> None
+ *
+ * Store a reference to the Python ErlangEventLoop in the global interpreter loop.
+ * This is used when ErlangEventLoop is created by Python's asyncio policy
+ * and needs to be associated with the global loop for process_ready_tasks.
+ */
+static PyObject *py_set_global_loop_ref(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *py_loop;
+
+    if (!PyArg_ParseTuple(args, "O", &py_loop)) {
+        return NULL;
+    }
+
+    /* Get the global interpreter event loop */
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "No global event loop initialized");
+        return NULL;
+    }
+
+    /* Release old reference if any */
+    if (loop->py_loop_valid && loop->py_loop != NULL) {
+        Py_DECREF(loop->py_loop);
+    }
+
+    /* Store new reference */
+    Py_INCREF(py_loop);
+    loop->py_loop = py_loop;
+    loop->py_loop_valid = true;
 
     Py_RETURN_NONE;
 }
@@ -5121,6 +5678,8 @@ static PyMethodDef PyEventLoopMethods[] = {
     /* Handle-based API (takes explicit loop capsule) */
     {"_loop_new", py_loop_new, METH_NOARGS, "Create a new event loop, returns capsule"},
     {"_loop_destroy", py_loop_destroy, METH_VARARGS, "Destroy an event loop"},
+    {"_set_loop_ref", py_set_loop_ref, METH_VARARGS, "Store Python loop reference in C struct"},
+    {"_set_global_loop_ref", py_set_global_loop_ref, METH_VARARGS, "Store Python loop reference in global loop"},
     {"_run_once_native_for", py_run_once_for, METH_VARARGS, "Combined poll + get_pending for specific loop"},
     {"_get_pending_for", py_get_pending_for, METH_VARARGS, "Get and clear pending events for specific loop"},
     {"_wakeup_for", py_wakeup_for, METH_VARARGS, "Wake up specific event loop"},

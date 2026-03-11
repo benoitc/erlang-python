@@ -211,8 +211,9 @@ def sleep(seconds):
         try:
             import erlang
             erlang.call('_py_sleep', seconds)
-        except (ImportError, AttributeError):
-            # Fallback when not in Erlang NIF environment
+        except Exception:
+            # Fallback when not in Erlang NIF environment or callback fails
+            # This handles ImportError, AttributeError, RuntimeError, etc.
             time.sleep(seconds)
 
 
@@ -297,6 +298,43 @@ def spawn_task(coro, *, name=None):
             pass
 
     return task
+
+
+def _run_async_from_erlang(module, func, args, kwargs):
+    """Helper function called from Erlang to run async code.
+
+    This is used by py_event_loop:run/3,4 to execute async Python
+    functions from Erlang in a blocking manner.
+
+    Args:
+        module: Module name (string or bytes)
+        func: Function name (string or bytes)
+        args: Positional arguments (list)
+        kwargs: Keyword arguments (dict)
+
+    Returns:
+        The result of the async function.
+    """
+    import importlib
+
+    # Convert module/func to strings if needed
+    if isinstance(module, bytes):
+        module = module.decode('utf-8')
+    if isinstance(func, bytes):
+        func = func.decode('utf-8')
+
+    # Import module and get function
+    mod = importlib.import_module(module)
+    fn = getattr(mod, func)
+
+    # Call function to get coroutine
+    if kwargs:
+        coro = fn(*args, **kwargs)
+    else:
+        coro = fn(*args)
+
+    # Run the coroutine using erlang.run()
+    return run(coro)
 
 
 def install():

@@ -3870,6 +3870,10 @@ static ErlNifFunc nif_funcs[] = {
     {"event_loop_set_id", 2, nif_event_loop_set_id, 0},
     {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
     {"event_loop_run_async", 7, nif_event_loop_run_async, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    /* Async task queue NIFs (uvloop-inspired) */
+    {"submit_task", 7, nif_submit_task, 0},  /* Thread-safe, no GIL needed */
+    {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"event_loop_set_py_loop", 2, nif_event_loop_set_py_loop, 0},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},

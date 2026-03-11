@@ -115,6 +115,21 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Create isolated loop capsule
         self._loop_capsule = self._pel._loop_new()
 
+        # Store reference to this Python loop in the C struct
+        # This enables process_ready_tasks to access the loop directly
+        # without thread-local lookup issues from dirty schedulers
+        if hasattr(self._pel, '_set_loop_ref'):
+            self._pel._set_loop_ref(self._loop_capsule, self)
+
+        # Also set reference on the global interpreter loop
+        # This is needed for py_nif:submit_task which uses the global loop
+        if hasattr(self._pel, '_set_global_loop_ref'):
+            try:
+                self._pel._set_global_loop_ref(self)
+            except RuntimeError:
+                # Global loop not yet initialized, ignore
+                pass
+
         # Callback management
         self._readers = {}  # fd -> (callback, args, callback_id)
         self._writers = {}  # fd -> (callback, args, callback_id)

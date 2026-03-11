@@ -248,6 +248,26 @@ typedef struct erlang_event_loop {
 
     /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
     uint32_t interp_id;
+
+    /* ========== Async Task Queue (uvloop-inspired) ========== */
+
+    /** @brief Python ErlangEventLoop instance (direct ref, no thread-local) */
+    PyObject *py_loop;
+
+    /** @brief Whether py_loop has been set */
+    bool py_loop_valid;
+
+    /** @brief Thread-safe task queue for async task submission */
+    ErlNifIOQueue *task_queue;
+
+    /** @brief Mutex protecting task_queue operations */
+    pthread_mutex_t task_queue_mutex;
+
+    /** @brief Whether task_queue has been initialized */
+    bool task_queue_initialized;
+
+    /** @brief Atomic counter for pending tasks */
+    _Atomic uint_fast64_t task_count;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -470,6 +490,40 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
                                           const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Submit an async task to the event loop (thread-safe)
+ *
+ * This is the uvloop-inspired pattern: serialize task info, enqueue to
+ * thread-safe queue, and send wakeup via enif_send. Works from any thread
+ * including dirty schedulers.
+ *
+ * NIF: submit_task(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
+                              const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Process all pending tasks from the task queue
+ *
+ * Called by the event worker when it receives 'task_ready' message.
+ * Dequeues all tasks, creates coroutines, and schedules them on the loop.
+ *
+ * NIF: process_ready_tasks(LoopRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Store a Python event loop reference in the C struct
+ *
+ * This avoids thread-local lookup issues when calling from dirty schedulers.
+ * The Python loop is stored directly in the erlang_event_loop_t struct.
+ *
+ * NIF: event_loop_set_py_loop(LoopRef, PyLoopCapsule) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_py_loop(ErlNifEnv *env, int argc,
+                                         const ERL_NIF_TERM argv[]);
 
 /* ============================================================================
  * Internal Helper Functions
