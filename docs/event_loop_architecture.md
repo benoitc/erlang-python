@@ -179,10 +179,28 @@ OPERATION                          GIL NEEDED?
 submit_task (enqueue)              NO  - uses ErlNifIOQueue
 enif_send (wakeup)                 NO  - Erlang message passing
 Check task_count (atomic)          NO  - atomic load
-Process tasks (Python calls)       YES - Python API calls
+Dequeue tasks (Phase 1)            NO  - NIF operations only
+  - enif_ioq_peek/deq             NO
+  - enif_binary_to_term           NO
+  - enif_alloc_env                NO
+Process tasks (Phase 2)            YES - Python API calls
 poll_events_wait                   NO  - releases GIL during wait
 Dispatch callbacks                 YES - Python code execution
 Send result (enif_send)            NO  - Erlang message passing
+```
+
+### Two-Phase Processing (New)
+
+```
+PHASE 1: Dequeue (NO GIL)          PHASE 2: Process (WITH GIL)
+========================           ============================
+pthread_mutex_lock                 PyGILState_Ensure
+while (tasks < 64):                for each task:
+  - peek queue                       - import module
+  - deserialize term                 - call function
+  - store in array                   - schedule coroutine
+  - dequeue                        _run_once(0)
+pthread_mutex_unlock               PyGILState_Release
 ```
 
 ## Data Flow
