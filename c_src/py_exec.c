@@ -204,7 +204,7 @@ static void process_request(py_request_t *req) {
         /* Set thread-local worker context for callbacks */
         tl_current_worker = worker;
         tl_callback_env = env;
-        tl_allow_suspension = true;  /* Allow suspension for direct calls */
+        tl_allow_suspension = false;  /* Blocking mode - code runs once, no replay */
 
         char *module_name = binary_to_string(&req->module_bin);
         char *func_name = binary_to_string(&req->func_bin);
@@ -329,6 +329,13 @@ static void process_request(py_request_t *req) {
                 req->result = enif_make_tuple2(env, ATOM_OK,
                     enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
             }
+        } else if (is_schedule_marker(py_result)) {
+            /* Schedule marker: release dirty scheduler, continue via callback */
+            ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+            ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+            ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+            Py_DECREF(py_result);
+            req->result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
         } else {
             ERL_NIF_TERM term_result = py_to_term(env, py_result);
             Py_DECREF(py_result);
@@ -417,6 +424,13 @@ static void process_request(py_request_t *req) {
                     req->result = enif_make_tuple2(env, ATOM_OK,
                         enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
                 }
+            } else if (is_schedule_marker(py_result)) {
+                /* Schedule marker: release dirty scheduler, continue via callback */
+                ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+                ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+                ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+                Py_DECREF(py_result);
+                req->result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
             } else {
                 ERL_NIF_TERM term_result = py_to_term(env, py_result);
                 Py_DECREF(py_result);

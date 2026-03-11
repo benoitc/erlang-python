@@ -84,6 +84,9 @@ register_callbacks() ->
     py_callback:register(py_event_loop_dispatch_timer, fun cb_dispatch_timer/1),
     %% Sleep callback - suspends Erlang process, fully releasing dirty scheduler
     py_callback:register(<<"_py_sleep">>, fun cb_sleep/1),
+    %% Execute Python callback - used by erlang.schedule_py() to call Python functions
+    %% Args: [Module, Func, Args, Kwargs]
+    py_callback:register(<<"_execute_py">>, fun cb_execute_py/1),
     ok.
 
 %% @doc Run an async coroutine on the event loop.
@@ -309,3 +312,32 @@ cb_sleep([Seconds]) when is_number(Seconds) ->
     ok;
 cb_sleep(_Args) ->
     ok.
+
+%% @doc Execute Python callback for erlang.schedule_py().
+%% Calls a Python function via the worker pool.
+%% Args: [Module, Func, Args, Kwargs]
+%% - Module: binary - Python module name
+%% - Func: binary - Python function name
+%% - Args: list | none - Positional arguments
+%% - Kwargs: map | none - Keyword arguments
+cb_execute_py([Module, Func, Args, Kwargs]) ->
+    CallArgs = case Args of
+        none -> [];
+        undefined -> [];
+        List when is_list(List) -> List;
+        Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
+        _ -> [Args]
+    end,
+    CallKwargs = case Kwargs of
+        none -> #{};
+        undefined -> #{};
+        Map when is_map(Map) -> Map;
+        _ -> #{}
+    end,
+    %% Use default pool via py:call
+    case py:call(Module, Func, CallArgs, CallKwargs) of
+        {ok, Result} -> Result;
+        {error, Reason} -> error(Reason)
+    end;
+cb_execute_py(_Args) ->
+    error({badarg, invalid_execute_py_args}).

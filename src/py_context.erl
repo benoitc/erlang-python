@@ -481,6 +481,10 @@ handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
             CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
             %% Resume and potentially get more suspensions
             resume_and_continue(Ref, StateRef, CallbackResult);
+        {schedule, CallbackName, CallbackArgs} ->
+            %% Schedule marker: Python returned erlang.schedule()
+            %% Execute the callback and return its result
+            handle_schedule(Ref, CallbackName, CallbackArgs);
         Result ->
             Result
     end.
@@ -494,9 +498,48 @@ handle_eval_with_suspension(Ref, Code, Locals) ->
             CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
             %% Resume and potentially get more suspensions
             resume_and_continue(Ref, StateRef, CallbackResult);
+        {schedule, CallbackName, CallbackArgs} ->
+            %% Schedule marker: Python returned erlang.schedule()
+            %% Execute the callback and return its result
+            handle_schedule(Ref, CallbackName, CallbackArgs);
         Result ->
             Result
     end.
+
+%% @private
+%% Handle schedule marker - Python returned erlang.schedule() or schedule_py()
+%% Execute the callback and return its result transparently to the caller.
+%%
+%% Special case for _execute_py: this callback is used by schedule_py() to
+%% call back into Python with a different function. We handle it directly
+%% using context_call to avoid recursion through py:call.
+handle_schedule(Ref, <<"_execute_py">>, {Module, Func, Args, Kwargs}) ->
+    %% schedule_py callback: call Python function via context
+    CallArgs = case Args of
+        none -> [];
+        undefined -> [];
+        List when is_list(List) -> List;
+        Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
+        _ -> [Args]
+    end,
+    CallKwargs = case Kwargs of
+        none -> #{};
+        undefined -> #{};
+        Map when is_map(Map) -> Map;
+        _ -> #{}
+    end,
+    handle_call_with_suspension(Ref, Module, Func, CallArgs, CallKwargs);
+handle_schedule(_Ref, CallbackName, CallbackArgs) when is_binary(CallbackName) ->
+    %% Regular callback: execute via py_callback:execute
+    ArgsList = tuple_to_list(CallbackArgs),
+    case py_callback:execute(CallbackName, ArgsList) of
+        {ok, Result} ->
+            {ok, Result};
+        {error, Reason} ->
+            {error, Reason}
+    end;
+handle_schedule(Ref, CallbackName, CallbackArgs) when is_atom(CallbackName) ->
+    handle_schedule(Ref, atom_to_binary(CallbackName), CallbackArgs).
 
 %% @private
 %% Handle callback, allowing nested py:eval/call to be processed.

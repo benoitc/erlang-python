@@ -157,6 +157,7 @@ ERL_NIF_TERM ATOM_ERLANG_CALLBACK;
 ERL_NIF_TERM ATOM_ASYNC_RESULT;
 ERL_NIF_TERM ATOM_ASYNC_ERROR;
 ERL_NIF_TERM ATOM_SUSPENDED;
+ERL_NIF_TERM ATOM_SCHEDULE;
 
 /* Logging atoms */
 ERL_NIF_TERM ATOM_PY_LOG;
@@ -171,6 +172,14 @@ ERL_NIF_TERM ATOM_SPAN_EVENT;
 /* From py_callback.c - needed by py_exec.c */
 static PyObject *build_pending_callback_exc_args(void);
 static ERL_NIF_TERM build_suspended_result(ErlNifEnv *env, suspended_state_t *suspended);
+
+/* Schedule marker type and helper - from py_callback.c, needed by py_exec.c */
+typedef struct {
+    PyObject_HEAD
+    PyObject *callback_name;  /* Registered callback name (string) */
+    PyObject *args;           /* Arguments (tuple) */
+} ScheduleMarkerObject;
+static int is_schedule_marker(PyObject *obj);
 
 /* ============================================================================
  * Include module implementations
@@ -2306,6 +2315,13 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
         } else {
             result = make_py_error(env);
         }
+    } else if (is_schedule_marker(py_result)) {
+        /* Schedule marker: release dirty scheduler, continue via callback */
+        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+        Py_DECREF(py_result);
+        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
     } else {
         ERL_NIF_TERM term_result = py_to_term(env, py_result);
         Py_DECREF(py_result);
@@ -2412,6 +2428,13 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
         } else {
             result = make_py_error(env);
         }
+    } else if (is_schedule_marker(py_result)) {
+        /* Schedule marker: release dirty scheduler, continue via callback */
+        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+        Py_DECREF(py_result);
+        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
     } else {
         ERL_NIF_TERM term_result = py_to_term(env, py_result);
         Py_DECREF(py_result);
@@ -3669,6 +3692,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ASYNC_RESULT = enif_make_atom(env, "async_result");
     ATOM_ASYNC_ERROR = enif_make_atom(env, "async_error");
     ATOM_SUSPENDED = enif_make_atom(env, "suspended");
+    ATOM_SCHEDULE = enif_make_atom(env, "schedule");
 
     /* Logging atoms */
     ATOM_PY_LOG = enif_make_atom(env, "py_log");
