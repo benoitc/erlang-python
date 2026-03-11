@@ -2196,9 +2196,12 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     /* Run one iteration of the event loop only if coroutines were scheduled.
      * For sync functions (like math.sqrt), results are sent directly via enif_send
-     * and we don't need to drive the Python event loop. */
+     * and we don't need to drive the Python event loop.
+     *
+     * Pass timeout_hint=0 so we don't block - we just added work that needs
+     * processing immediately. This is a uvloop-style optimization. */
     if (coros_scheduled > 0) {
-        PyObject *run_result = PyObject_CallMethod(loop->py_loop, "_run_once", NULL);
+        PyObject *run_result = PyObject_CallMethod(loop->py_loop, "_run_once", "i", 0);
         if (run_result != NULL) {
             Py_DECREF(run_result);
         } else {

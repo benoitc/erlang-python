@@ -951,8 +951,13 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # Internal methods
     # ========================================================================
 
-    def _run_once(self):
-        """Run one iteration of the event loop."""
+    def _run_once(self, timeout_hint=None):
+        """Run one iteration of the event loop.
+
+        Args:
+            timeout_hint: Optional timeout in ms. If 0, don't block waiting
+                for I/O. Used by C code when coroutines were just scheduled.
+        """
         ready = self._ready
         popleft = self._ready_popleft
         return_handle = self._return_handle
@@ -979,8 +984,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 self._current_handle = None
                 return_handle(handle)
 
-        # Calculate timeout based on next timer
-        if ready or self._stopping:
+        # Calculate timeout based on next timer or hint
+        if timeout_hint is not None:
+            # C code told us to use this timeout (e.g., 0 after scheduling coros)
+            timeout = timeout_hint
+        elif ready or self._stopping:
             timeout = 0
         elif self._timer_heap:
             # Lazy cleanup - pop stale/cancelled entries with iteration limit
