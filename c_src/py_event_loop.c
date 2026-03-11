@@ -220,6 +220,9 @@ static void cleanup_reactor_cache(py_event_loop_module_state_t *state) {
 static py_event_loop_module_state_t *get_module_state(void);
 static py_event_loop_module_state_t *get_module_state_from_module(PyObject *module);
 
+/* Forward declaration for callable cache cleanup */
+static void callable_cache_clear(erlang_event_loop_t *loop);
+
 /**
  * Try to acquire a router for the event loop.
  *
@@ -409,6 +412,8 @@ cleanup_native:
                 loop->cached_run_and_send = NULL;
                 loop->py_cache_valid = false;
             }
+            /* Clear callable cache */
+            callable_cache_clear(loop);
             PyGILState_Release(gstate);
         }
         loop->py_loop = NULL;
@@ -657,6 +662,7 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     atomic_store(&loop->pending_count, 0);
     loop->pending_head = NULL;
     loop->pending_tail = NULL;
+    loop->pending_capacity = INITIAL_PENDING_CAPACITY;
     loop->shutdown = false;
     loop->has_router = false;
     loop->has_self = false;
@@ -683,6 +689,7 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
 
     loop->task_queue_initialized = true;
     atomic_store(&loop->task_count, 0);
+    atomic_store(&loop->task_wake_pending, false);
     loop->py_loop = NULL;
     loop->py_loop_valid = false;
 
@@ -690,6 +697,10 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     loop->cached_asyncio = NULL;
     loop->cached_run_and_send = NULL;
     loop->py_cache_valid = false;
+
+    /* Initialize callable cache */
+    memset(loop->callable_cache, 0, sizeof(loop->callable_cache));
+    loop->callable_cache_count = 0;
 
     /* Create result */
     ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
@@ -1482,11 +1493,13 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
     event_type_t event_type = is_read ? EVENT_TYPE_READ : EVENT_TYPE_WRITE;
     event_loop_add_pending(loop, event_type, callback_id, fd_res->fd);
 
-    /* Immediately reselect for next event */
+    /* Immediately reselect for next event.
+     * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation.
+     * The ref is ignored by the worker anyway. */
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int select_flags = is_read ? ERL_NIF_SELECT_READ : ERL_NIF_SELECT_WRITE;
     enif_select(env, (ErlNifEvent)fd_res->fd, select_flags,
-                fd_res, target_pid, enif_make_ref(env));
+                fd_res, target_pid, ATOM_UNDEFINED);
 
     return ATOM_OK;
 }
@@ -1794,6 +1807,132 @@ cleanup:
 }
 
 /* ============================================================================
+ * Callable Cache (uvloop-style optimization)
+ * ============================================================================ */
+
+/**
+ * @brief Hash function for callable cache lookup
+ *
+ * Simple djb2-style hash combining module and function names.
+ */
+static inline uint32_t callable_cache_hash(const char *module, const char *func) {
+    uint32_t hash = 5381;
+    const char *c = module;
+    while (*c) {
+        hash = ((hash << 5) + hash) + (uint8_t)*c++;
+    }
+    c = func;
+    while (*c) {
+        hash = ((hash << 5) + hash) + (uint8_t)*c++;
+    }
+    return hash % CALLABLE_CACHE_SIZE;
+}
+
+/**
+ * @brief Look up a cached callable
+ *
+ * @param loop Event loop containing the cache
+ * @param module Module name
+ * @param func Function name
+ * @return Cached callable or NULL if not found
+ */
+static PyObject *callable_cache_lookup(erlang_event_loop_t *loop,
+                                        const char *module, const char *func) {
+    if (loop->callable_cache_count == 0) {
+        return NULL;
+    }
+
+    uint32_t idx = callable_cache_hash(module, func);
+
+    /* Linear probing with wraparound */
+    for (int i = 0; i < CALLABLE_CACHE_SIZE; i++) {
+        uint32_t probe = (idx + i) % CALLABLE_CACHE_SIZE;
+        cached_callable_t *entry = &loop->callable_cache[probe];
+
+        if (entry->callable == NULL) {
+            return NULL;  /* Empty slot, not found */
+        }
+
+        if (strcmp(entry->module_name, module) == 0 &&
+            strcmp(entry->func_name, func) == 0) {
+            entry->hits++;
+            return entry->callable;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * @brief Insert a callable into the cache
+ *
+ * @param loop Event loop containing the cache
+ * @param module Module name
+ * @param func Function name
+ * @param callable Python callable to cache (borrowed reference)
+ * @return true if inserted, false if cache full
+ */
+static bool callable_cache_insert(erlang_event_loop_t *loop,
+                                   const char *module, const char *func,
+                                   PyObject *callable) {
+    /* Don't insert if cache is full (load factor > 0.75) */
+    if (loop->callable_cache_count >= (CALLABLE_CACHE_SIZE * 3) / 4) {
+        return false;
+    }
+
+    /* Check name lengths */
+    if (strlen(module) >= CALLABLE_NAME_MAX || strlen(func) >= CALLABLE_NAME_MAX) {
+        return false;
+    }
+
+    uint32_t idx = callable_cache_hash(module, func);
+
+    /* Linear probing to find empty slot */
+    for (int i = 0; i < CALLABLE_CACHE_SIZE; i++) {
+        uint32_t probe = (idx + i) % CALLABLE_CACHE_SIZE;
+        cached_callable_t *entry = &loop->callable_cache[probe];
+
+        if (entry->callable == NULL) {
+            /* Found empty slot */
+            strncpy(entry->module_name, module, CALLABLE_NAME_MAX - 1);
+            entry->module_name[CALLABLE_NAME_MAX - 1] = '\0';
+            strncpy(entry->func_name, func, CALLABLE_NAME_MAX - 1);
+            entry->func_name[CALLABLE_NAME_MAX - 1] = '\0';
+            Py_INCREF(callable);
+            entry->callable = callable;
+            entry->hits = 0;
+            loop->callable_cache_count++;
+            return true;
+        }
+
+        /* Check if already cached (duplicate insert) */
+        if (strcmp(entry->module_name, module) == 0 &&
+            strcmp(entry->func_name, func) == 0) {
+            return true;  /* Already cached */
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Clear the callable cache
+ *
+ * Called during loop destruction to release cached references.
+ */
+static void callable_cache_clear(erlang_event_loop_t *loop) {
+    for (int i = 0; i < CALLABLE_CACHE_SIZE; i++) {
+        cached_callable_t *entry = &loop->callable_cache[i];
+        if (entry->callable != NULL) {
+            Py_DECREF(entry->callable);
+            entry->callable = NULL;
+        }
+        entry->module_name[0] = '\0';
+        entry->func_name[0] = '\0';
+        entry->hits = 0;
+    }
+    loop->callable_cache_count = 0;
+}
+
+/* ============================================================================
  * Async Task Queue NIFs (uvloop-inspired)
  * ============================================================================ */
 
@@ -1856,18 +1995,27 @@ ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
     /* Increment task count */
     atomic_fetch_add(&loop->task_count, 1);
 
-    /* Send wakeup to worker (thread-safe, works from dirty schedulers) */
+    /*
+     * Coalesced wakeup (uvloop-style): Only send task_ready if we're the
+     * first task since the last drain. This reduces message traffic under
+     * high task submission rates.
+     */
     if (loop->has_worker) {
-        ErlNifEnv *msg_env = enif_alloc_env();
-        if (msg_env != NULL) {
-            /* Initialize ATOM_TASK_READY if needed (safe to do multiple times) */
-            if (ATOM_TASK_READY == 0) {
-                ATOM_TASK_READY = enif_make_atom(msg_env, "task_ready");
+        if (!atomic_exchange(&loop->task_wake_pending, true)) {
+            /* We're the first since last drain - send wakeup */
+            ErlNifEnv *msg_env = enif_alloc_env();
+            if (msg_env != NULL) {
+                /* Initialize ATOM_TASK_READY if needed (safe to do multiple times) */
+                if (ATOM_TASK_READY == 0) {
+                    ATOM_TASK_READY = enif_make_atom(msg_env, "task_ready");
+                }
+                ERL_NIF_TERM msg = enif_make_atom(msg_env, "task_ready");
+                enif_send(NULL, &loop->worker_pid, msg_env, msg);
+                enif_free_env(msg_env);
             }
-            ERL_NIF_TERM msg = enif_make_atom(msg_env, "task_ready");
-            enif_send(NULL, &loop->worker_pid, msg_env, msg);
-            enif_free_env(msg_env);
         }
+        /* If wake_pending was already true, another task_ready message
+         * is already in flight, so no need to send another */
     }
 
     return ATOM_OK;
@@ -1919,6 +2067,13 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     if (task_count == 0) {
         return ATOM_OK;  /* Nothing to process, skip GIL entirely */
     }
+
+    /*
+     * Reset wake_pending flag at START of processing.
+     * This allows submit_task to send new wakeups for tasks submitted during
+     * our processing. The worker's drain-until-empty loop will catch them.
+     */
+    atomic_store(&loop->task_wake_pending, false);
 
     /* Check if Python runtime is running */
     if (!runtime_is_running()) {
@@ -2113,26 +2268,40 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         memcpy(func_name, func_bin.data, func_bin.size);
         func_name[func_bin.size] = '\0';
 
-        /* Import module and get function */
-        PyObject *module = PyImport_ImportModule(module_name);
-        if (module == NULL) {
-            PyErr_Clear();
-            enif_free(module_name);
-            enif_free(func_name);
-            enif_free_env(term_env);
-            continue;
-        }
-
-        PyObject *func = PyObject_GetAttrString(module, func_name);
-        Py_DECREF(module);
-        enif_free(module_name);
-        enif_free(func_name);
+        /* OPTIMIZATION: Try callable cache first (uvloop-style) */
+        PyObject *func = callable_cache_lookup(loop, module_name, func_name);
 
         if (func == NULL) {
-            PyErr_Clear();
-            enif_free_env(term_env);
-            continue;
+            /* Cache miss - import module and get function */
+            PyObject *module = PyImport_ImportModule(module_name);
+            if (module == NULL) {
+                PyErr_Clear();
+                enif_free(module_name);
+                enif_free(func_name);
+                enif_free_env(term_env);
+                continue;
+            }
+
+            func = PyObject_GetAttrString(module, func_name);
+            Py_DECREF(module);
+
+            if (func == NULL) {
+                PyErr_Clear();
+                enif_free(module_name);
+                enif_free(func_name);
+                enif_free_env(term_env);
+                continue;
+            }
+
+            /* Cache for next lookup */
+            callable_cache_insert(loop, module_name, func_name, func);
+        } else {
+            /* Cache hit - need to incref since cache holds the reference */
+            Py_INCREF(func);
         }
+
+        enif_free(module_name);
+        enif_free(func_name);
 
         /* Convert args list to Python tuple */
         unsigned int args_len;
@@ -2451,9 +2620,23 @@ static inline void pending_hash_clear(erlang_event_loop_t *loop) {
 
 bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
                             uint64_t callback_id, int fd) {
-    /* Backpressure: check pending count before acquiring lock (fast path) */
-    if (atomic_load(&loop->pending_count) >= MAX_PENDING_EVENTS) {
-        return false;  /* Queue full */
+    int current_count = atomic_load(&loop->pending_count);
+
+    /* Backpressure: check if we need to grow capacity */
+    if ((size_t)current_count >= loop->pending_capacity) {
+        /* Try to grow capacity (up to MAX_PENDING_CAPACITY) */
+        if (loop->pending_capacity < MAX_PENDING_CAPACITY) {
+            size_t new_capacity = loop->pending_capacity * 2;
+            if (new_capacity > MAX_PENDING_CAPACITY) {
+                new_capacity = MAX_PENDING_CAPACITY;
+            }
+            loop->pending_capacity = new_capacity;
+            /* Note: Linked list doesn't need realloc, just the capacity limit */
+        } else {
+            /* At hard cap - log warning but don't drop silently */
+            /* TODO: Add proper logging mechanism */
+            return false;  /* Queue at maximum capacity */
+        }
     }
 
     pthread_mutex_lock(&loop->mutex);
@@ -2588,11 +2771,11 @@ ERL_NIF_TERM nif_reselect_reader(ErlNifEnv *env, int argc,
         return ATOM_OK;
     }
 
-    /* Re-register with Erlang scheduler for read monitoring */
-    /* Use worker_pid when available for scalable I/O */
+    /* Re-register with Erlang scheduler for read monitoring.
+     * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
-                          fd_res, target_pid, enif_make_ref(env));
+                          fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -2630,11 +2813,11 @@ ERL_NIF_TERM nif_reselect_writer(ErlNifEnv *env, int argc,
         return ATOM_OK;
     }
 
-    /* Re-register with Erlang scheduler for write monitoring */
-    /* Use worker_pid when available for scalable I/O */
+    /* Re-register with Erlang scheduler for write monitoring.
+     * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, target_pid, enif_make_ref(env));
+                          fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -2673,11 +2856,11 @@ ERL_NIF_TERM nif_reselect_reader_fd(ErlNifEnv *env, int argc,
         return make_error(env, "no_loop");
     }
 
-    /* Re-register with Erlang scheduler for read monitoring */
-    /* Use worker_pid when available for scalable I/O */
+    /* Re-register with Erlang scheduler for read monitoring.
+     * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
-                          fd_res, target_pid, enif_make_ref(env));
+                          fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -2716,11 +2899,11 @@ ERL_NIF_TERM nif_reselect_writer_fd(ErlNifEnv *env, int argc,
         return make_error(env, "no_loop");
     }
 
-    /* Re-register with Erlang scheduler for write monitoring */
-    /* Use worker_pid when available for scalable I/O */
+    /* Re-register with Erlang scheduler for write monitoring.
+     * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
     ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, target_pid, enif_make_ref(env));
+                          fd_res, target_pid, ATOM_UNDEFINED);
 
     if (ret < 0) {
         return make_error(env, "reselect_failed");
@@ -4439,58 +4622,72 @@ static PyObject *py_get_pending(PyObject *self, PyObject *args) {
         return PyList_New(0);
     }
 
+    /*
+     * Phase 1: Snapshot-detach under lock (O(1) pointer swap)
+     * This minimizes lock contention by doing minimal work under the mutex.
+     */
     pthread_mutex_lock(&loop->mutex);
 
-    /* Count pending events */
-    int count = 0;
-    pending_event_t *current = loop->pending_head;
-    while (current != NULL) {
-        count++;
-        current = current->next;
-    }
-
-    PyObject *list = PyList_New(count);
-    if (list == NULL) {
-        pthread_mutex_unlock(&loop->mutex);
-        return NULL;
-    }
-
-    current = loop->pending_head;
-    int i = 0;
-    while (current != NULL) {
-        const char *type_str;
-        switch (current->type) {
-            case EVENT_TYPE_READ: type_str = "read"; break;
-            case EVENT_TYPE_WRITE: type_str = "write"; break;
-            case EVENT_TYPE_TIMER: type_str = "timer"; break;
-            default: type_str = "unknown";
-        }
-
-        PyObject *tuple = Py_BuildValue("(Ks)",
-            (unsigned long long)current->callback_id, type_str);
-        if (tuple == NULL) {
-            Py_DECREF(list);
-            pthread_mutex_unlock(&loop->mutex);
-            return NULL;
-        }
-        PyList_SET_ITEM(list, i++, tuple);
-
-        pending_event_t *next = current->next;
-        /* Return to freelist for reuse (Phase 7 optimization) */
-        return_pending_event(loop, current);
-        current = next;
-    }
+    pending_event_t *snapshot_head = loop->pending_head;
+    int count = atomic_load(&loop->pending_count);
 
     loop->pending_head = NULL;
     loop->pending_tail = NULL;
     atomic_store(&loop->pending_count, 0);
-
-    /* Clear the hash set since we're consuming all pending events */
     pending_hash_clear(loop);
 
     pthread_mutex_unlock(&loop->mutex);
 
-    return list;
+    /*
+     * Phase 2: Build PyList outside lock (no contention)
+     * All Python allocations and list building happen without the mutex.
+     */
+    if (count == 0 || snapshot_head == NULL) {
+        return PyList_New(0);
+    }
+
+    PyObject *list = PyList_New(count);
+    bool build_failed = (list == NULL);
+
+    if (!build_failed) {
+        pending_event_t *current = snapshot_head;
+        int i = 0;
+        while (current != NULL && i < count) {
+            const char *type_str;
+            switch (current->type) {
+                case EVENT_TYPE_READ: type_str = "read"; break;
+                case EVENT_TYPE_WRITE: type_str = "write"; break;
+                case EVENT_TYPE_TIMER: type_str = "timer"; break;
+                default: type_str = "unknown";
+            }
+
+            PyObject *tuple = Py_BuildValue("(Ks)",
+                (unsigned long long)current->callback_id, type_str);
+            if (tuple == NULL) {
+                Py_DECREF(list);
+                list = NULL;
+                build_failed = true;
+                break;
+            }
+            PyList_SET_ITEM(list, i++, tuple);
+            current = current->next;
+        }
+    }
+
+    /*
+     * Phase 3: Return ALL events to freelist (always, even on failure)
+     * This prevents memory leaks and keeps freelist populated.
+     */
+    pthread_mutex_lock(&loop->mutex);
+    pending_event_t *current = snapshot_head;
+    while (current != NULL) {
+        pending_event_t *next = current->next;
+        return_pending_event(loop, current);
+        current = next;
+    }
+    pthread_mutex_unlock(&loop->mutex);
+
+    return build_failed ? NULL : list;
 }
 
 /* Python function: _wakeup() -> None */
@@ -5207,51 +5404,14 @@ static PyObject *py_run_once_for(PyObject *self, PyObject *args) {
     poll_events_wait(loop, timeout_ms);
     Py_END_ALLOW_THREADS
 
-    /* Build pending list with GIL held */
+    /*
+     * Phase 1: Snapshot-detach under lock (O(1) pointer swap)
+     * This minimizes lock contention by doing minimal work under the mutex.
+     */
     pthread_mutex_lock(&loop->mutex);
 
+    pending_event_t *snapshot_head = loop->pending_head;
     int count = atomic_load(&loop->pending_count);
-    if (count == 0) {
-        pthread_mutex_unlock(&loop->mutex);
-        return PyList_New(0);
-    }
-
-    PyObject *list = PyList_New(count);
-    if (list == NULL) {
-        pthread_mutex_unlock(&loop->mutex);
-        return NULL;
-    }
-
-    pending_event_t *current = loop->pending_head;
-    int i = 0;
-    while (current != NULL && i < count) {
-        PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
-        if (tuple == NULL) {
-            Py_DECREF(list);
-            while (current != NULL) {
-                pending_event_t *next = current->next;
-                return_pending_event(loop, current);
-                current = next;
-            }
-            loop->pending_head = NULL;
-            loop->pending_tail = NULL;
-            atomic_store(&loop->pending_count, 0);
-            pending_hash_clear(loop);
-            pthread_mutex_unlock(&loop->mutex);
-            return NULL;
-        }
-        PyList_SET_ITEM(list, i++, tuple);
-
-        pending_event_t *next = current->next;
-        return_pending_event(loop, current);
-        current = next;
-    }
-
-    while (current != NULL) {
-        pending_event_t *next = current->next;
-        return_pending_event(loop, current);
-        current = next;
-    }
 
     loop->pending_head = NULL;
     loop->pending_tail = NULL;
@@ -5260,7 +5420,47 @@ static PyObject *py_run_once_for(PyObject *self, PyObject *args) {
 
     pthread_mutex_unlock(&loop->mutex);
 
-    return list;
+    /*
+     * Phase 2: Build PyList outside lock (no contention)
+     * All Python allocations and list building happen without the mutex.
+     */
+    if (count == 0 || snapshot_head == NULL) {
+        return PyList_New(0);
+    }
+
+    PyObject *list = PyList_New(count);
+    bool build_failed = (list == NULL);
+
+    if (!build_failed) {
+        pending_event_t *current = snapshot_head;
+        int i = 0;
+        while (current != NULL && i < count) {
+            PyObject *tuple = make_event_tuple(current->callback_id, (int)current->type);
+            if (tuple == NULL) {
+                Py_DECREF(list);
+                list = NULL;
+                build_failed = true;
+                break;
+            }
+            PyList_SET_ITEM(list, i++, tuple);
+            current = current->next;
+        }
+    }
+
+    /*
+     * Phase 3: Return ALL events to freelist (always, even on failure)
+     * This prevents memory leaks and keeps freelist populated.
+     */
+    pthread_mutex_lock(&loop->mutex);
+    pending_event_t *current = snapshot_head;
+    while (current != NULL) {
+        pending_event_t *next = current->next;
+        return_pending_event(loop, current);
+        current = next;
+    }
+    pthread_mutex_unlock(&loop->mutex);
+
+    return build_failed ? NULL : list;
 }
 
 /* Python function: _add_reader_for(capsule, fd, callback_id) -> fd_key */

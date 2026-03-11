@@ -46,15 +46,48 @@ typedef struct _object PyObject;
  * Constants
  * ============================================================================ */
 
-/** @brief Maximum pending events before processing */
-#define MAX_PENDING_EVENTS 256
+/** @brief Initial pending events capacity (soft limit for backpressure) */
+#define INITIAL_PENDING_CAPACITY 256
+
+/** @brief Maximum pending events capacity (hard safety cap) */
+#define MAX_PENDING_CAPACITY 16384
+
+/** @brief Legacy alias for initial capacity */
+#define MAX_PENDING_EVENTS INITIAL_PENDING_CAPACITY
 
 /** @brief Maximum events to keep in freelist (Phase 7 optimization) */
 #define EVENT_FREELIST_SIZE 256
 
+/** @brief Callable cache size for module/func lookups */
+#define CALLABLE_CACHE_SIZE 64
+
+/** @brief Maximum length for cached module/func names */
+#define CALLABLE_NAME_MAX 128
+
 /** @brief Size of pending event hash set for O(1) duplicate detection
  *  Note: Must be a power of 2 for efficient bitwise AND indexing */
 #define PENDING_HASH_SIZE 256
+
+/**
+ * @struct cached_callable_t
+ * @brief Cache entry for Python module/function lookups
+ *
+ * Caches PyImport_ImportModule + PyObject_GetAttrString results to avoid
+ * repeated module imports and attribute lookups per task.
+ */
+typedef struct {
+    /** @brief Module name for this cached callable */
+    char module_name[CALLABLE_NAME_MAX];
+
+    /** @brief Function name for this cached callable */
+    char func_name[CALLABLE_NAME_MAX];
+
+    /** @brief Cached callable (borrowed reference from module) */
+    PyObject *callable;
+
+    /** @brief Hit counter for cache statistics */
+    uint64_t hits;
+} cached_callable_t;
 
 /** @brief Event types for pending callbacks */
 typedef enum {
@@ -208,6 +241,9 @@ typedef struct erlang_event_loop {
     /** @brief Number of pending events */
     _Atomic int pending_count;
 
+    /** @brief Current pending capacity (starts at INITIAL_PENDING_CAPACITY) */
+    size_t pending_capacity;
+
     /** @brief Flag indicating shutdown requested */
     volatile bool shutdown;
 
@@ -272,6 +308,9 @@ typedef struct erlang_event_loop {
     /** @brief Atomic counter for pending tasks */
     _Atomic uint_fast64_t task_count;
 
+    /** @brief Flag indicating a task wakeup is pending (coalescing) */
+    _Atomic bool task_wake_pending;
+
     /* ========== Cached Python Objects (uvloop-style) ========== */
 
     /** @brief Cached asyncio module (avoids import on each call) */
@@ -282,6 +321,14 @@ typedef struct erlang_event_loop {
 
     /** @brief Whether Python caches have been initialized */
     bool py_cache_valid;
+
+    /* ========== Callable Cache (uvloop-style optimization) ========== */
+
+    /** @brief Cache for module/function lookups */
+    cached_callable_t callable_cache[CALLABLE_CACHE_SIZE];
+
+    /** @brief Number of entries in callable cache */
+    int callable_cache_count;
 } erlang_event_loop_t;
 
 /* ============================================================================
