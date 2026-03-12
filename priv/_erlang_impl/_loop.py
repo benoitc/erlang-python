@@ -27,6 +27,7 @@ Architecture:
 """
 
 import asyncio
+import contextvars
 import errno
 import os
 import socket
@@ -1084,6 +1085,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         This is a uvloop-style optimization to reduce allocations.
         Pooled handles are reused instead of creating new objects.
         """
+        # Match Handle.__init__ behavior: copy current context if None
+        if context is None:
+            context = contextvars.copy_context()
+
         if self._handle_pool:
             handle = self._handle_pool.pop()
             handle._callback = callback
@@ -1097,7 +1102,16 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         """Return a Handle to the pool for reuse.
 
         Clears all references to allow GC of callback/args/context.
+
+        IMPORTANT: TimerHandle objects must NOT be pooled because asyncio.sleep
+        keeps a reference to the timer handle and cancels it in a finally block.
+        If the TimerHandle is recycled and reused for another callback, the
+        cancel() call will incorrectly cancel the new callback.
         """
+        # Don't pool TimerHandle - asyncio.sleep holds a reference and cancels it
+        if isinstance(handle, events.TimerHandle):
+            return
+
         if len(self._handle_pool) < self._handle_pool_max:
             handle._callback = None
             handle._args = None
