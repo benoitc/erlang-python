@@ -140,59 +140,28 @@ end_per_suite(_Config) ->
     ok.
 
 test_submit_task(_Config) ->
-    %% Test low-level submit_task NIF
-    {ok, LoopRef} = py_event_loop:get_loop(),
-    Ref = make_ref(),
-    Caller = self(),
-
-    %% Submit a sync function
-    ok = py_nif:submit_task(LoopRef, Caller, Ref, <<"__main__">>, <<"sync_func">>, [], #{}),
-
-    %% Result should arrive (with timeout for CI)
-    receive
-        {async_result, Ref, Result} ->
-            ct:log("submit_task result: ~p", [Result]),
-            %% Result might be ok or error depending on implementation
-            true
-    after 5000 ->
-        %% Timeout is acceptable in initial implementation
-        ct:log("submit_task timed out - py_loop might not be set"),
-        true
-    end.
+    %% Test task submission using high-level API with stdlib function
+    Ref = py_event_loop:create_task(math, sqrt, [25.0]),
+    Result = py_event_loop:await(Ref, 1000),
+    ct:log("submit_task result: ~p", [Result]),
+    {ok, 5.0} = Result.
 
 test_create_task_await(_Config) ->
-    %% Test high-level create_task/await API
-    Ref = py_event_loop:create_task(<<"__main__">>, <<"sync_func">>, []),
-
-    %% Wait for result
-    timer:sleep(100),  % Give time for task to be processed
-    Result = py_event_loop:await(Ref, 5000),
+    %% Test high-level create_task/await API with stdlib function
+    Ref = py_event_loop:create_task(math, pow, [2.0, 10.0]),
+    Result = py_event_loop:await(Ref, 1000),
     ct:log("create_task/await result: ~p", [Result]),
-
-    %% Accept both success and timeout (timeout expected until py_loop is fully wired)
-    case Result of
-        {ok, _} -> true;
-        {error, timeout} -> true;
-        {error, py_loop_not_set} -> true;
-        _ -> ct:fail({unexpected_result, Result})
-    end.
+    {ok, 1024.0} = Result.
 
 test_run_sync(_Config) ->
-    %% Test blocking run API
-    Result = py_event_loop:run(<<"__main__">>, <<"sync_func">>, [], #{timeout => 5000}),
+    %% Test blocking run API with stdlib function
+    Result = py_event_loop:run(math, floor, [3.7], #{timeout => 1000}),
     ct:log("run result: ~p", [Result]),
-
-    %% Accept both success and timeout
-    case Result of
-        {ok, _} -> true;
-        {error, timeout} -> true;
-        {error, py_loop_not_set} -> true;
-        _ -> ct:fail({unexpected_result, Result})
-    end.
+    {ok, 3} = Result.
 
 test_spawn_task(_Config) ->
-    %% Test fire-and-forget spawn_task API
-    ok = py_event_loop:spawn_task(<<"__main__">>, <<"sync_func">>, []),
+    %% Test fire-and-forget spawn_task API with stdlib function
+    ok = py_event_loop:spawn_task(math, ceil, [2.3]),
 
     %% Just verify it doesn't crash
     timer:sleep(100),
