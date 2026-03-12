@@ -385,10 +385,12 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     def time(self):
         """Return the current time according to the event loop's clock.
 
-        Uses cached time (uvloop-style) to avoid syscalls. The cache is
-        updated at the start of each _run_once iteration.
+        When the loop is running, uses cached time (uvloop-style) to avoid
+        syscalls. When the loop is not running, returns fresh monotonic time.
         """
-        return self._cached_time
+        if self._running:
+            return self._cached_time
+        return time.monotonic()
 
     def _update_time(self):
         """Update the cached time. Called at the start of each iteration."""
