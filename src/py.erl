@@ -763,24 +763,24 @@ ensure_venv(Path, RequirementsFile, Opts) ->
     PathStr = to_string(Path),
     ReqFileStr = to_string(RequirementsFile),
     Force = proplists:get_bool(force, Opts),
-    case venv_exists(PathStr) of
+    %% Create venv if needed
+    VenvReady = case venv_exists(PathStr) of
         true when not Force ->
-            %% Venv exists, just activate
-            activate_venv(PathStr);
+            ok;
         _ ->
-            %% Create venv
-            case create_venv(PathStr, Opts) of
+            create_venv(PathStr, Opts)
+    end,
+    case VenvReady of
+        ok ->
+            %% Always install/update dependencies (pip/uv skip existing)
+            case install_deps(PathStr, ReqFileStr, Opts) of
                 ok ->
-                    %% Install dependencies
-                    case install_deps(PathStr, ReqFileStr, Opts) of
-                        ok ->
-                            activate_venv(PathStr);
-                        {error, _} = Err ->
-                            Err
-                    end;
+                    activate_venv(PathStr);
                 {error, _} = Err ->
                     Err
-            end
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% @private Check if venv exists by looking for pyvenv.cfg

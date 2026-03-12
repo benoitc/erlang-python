@@ -32,6 +32,7 @@
     test_ensure_venv_creates_venv/1,
     test_ensure_venv_activates_existing/1,
     test_ensure_venv_with_requirements/1,
+    test_ensure_venv_installs_new_deps/1,
     test_ensure_venv_force_recreate/1,
     test_activate_venv/1,
     test_deactivate_venv/1,
@@ -46,6 +47,7 @@ groups() ->
         test_ensure_venv_creates_venv,
         test_ensure_venv_activates_existing,
         test_ensure_venv_with_requirements,
+        test_ensure_venv_installs_new_deps,
         test_ensure_venv_force_recreate,
         test_activate_venv,
         test_deactivate_venv,
@@ -159,6 +161,35 @@ test_ensure_venv_with_requirements(Config) ->
     %% Verify six is importable
     {ok, Version} = py:eval(<<"__import__('six').__version__">>),
     true = is_binary(Version),
+    ok.
+
+test_ensure_venv_installs_new_deps(Config) ->
+    TempDir = ?config(temp_dir, Config),
+    VenvPath = filename:join(TempDir, "venv"),
+    ReqFile = filename:join(TempDir, "requirements.txt"),
+
+    %% Create requirements with only six
+    ok = file:write_file(ReqFile, <<"six\n">>),
+
+    %% Create venv with six
+    ok = py:ensure_venv(VenvPath, ReqFile, [{installer, pip}]),
+
+    %% Verify six is installed
+    {ok, _} = py:eval(<<"__import__('six').__version__">>),
+
+    %% Verify toml is NOT installed yet (uncommon package)
+    {error, _} = py:eval(<<"__import__('toml').__version__">>),
+
+    %% Now update requirements to add toml
+    ok = file:write_file(ReqFile, <<"six\ntoml\n">>),
+
+    %% Deactivate and re-ensure - should install new deps without recreating venv
+    ok = py:deactivate_venv(),
+    ok = py:ensure_venv(VenvPath, ReqFile, [{installer, pip}]),
+
+    %% Verify both packages are now installed
+    {ok, _} = py:eval(<<"__import__('six').__version__">>),
+    {ok, _} = py:eval(<<"__import__('toml').__version__">>),
     ok.
 
 test_ensure_venv_force_recreate(Config) ->
