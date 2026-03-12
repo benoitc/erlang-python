@@ -39,19 +39,55 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
+/* Forward declaration for Python object (avoids including Python.h in header) */
+typedef struct _object PyObject;
+
 /* ============================================================================
  * Constants
  * ============================================================================ */
 
-/** @brief Maximum pending events before processing */
-#define MAX_PENDING_EVENTS 256
+/** @brief Initial pending events capacity (soft limit for backpressure) */
+#define INITIAL_PENDING_CAPACITY 256
+
+/** @brief Maximum pending events capacity (hard safety cap) */
+#define MAX_PENDING_CAPACITY 16384
+
+/** @brief Legacy alias for initial capacity */
+#define MAX_PENDING_EVENTS INITIAL_PENDING_CAPACITY
 
 /** @brief Maximum events to keep in freelist (Phase 7 optimization) */
 #define EVENT_FREELIST_SIZE 256
 
+/** @brief Callable cache size for module/func lookups */
+#define CALLABLE_CACHE_SIZE 64
+
+/** @brief Maximum length for cached module/func names */
+#define CALLABLE_NAME_MAX 128
+
 /** @brief Size of pending event hash set for O(1) duplicate detection
  *  Note: Must be a power of 2 for efficient bitwise AND indexing */
 #define PENDING_HASH_SIZE 256
+
+/**
+ * @struct cached_callable_t
+ * @brief Cache entry for Python module/function lookups
+ *
+ * Caches PyImport_ImportModule + PyObject_GetAttrString results to avoid
+ * repeated module imports and attribute lookups per task.
+ */
+typedef struct {
+    /** @brief Module name for this cached callable */
+    char module_name[CALLABLE_NAME_MAX];
+
+    /** @brief Function name for this cached callable */
+    char func_name[CALLABLE_NAME_MAX];
+
+    /** @brief Cached callable (borrowed reference from module) */
+    PyObject *callable;
+
+    /** @brief Hit counter for cache statistics */
+    uint64_t hits;
+} cached_callable_t;
 
 /** @brief Event types for pending callbacks */
 typedef enum {
@@ -205,6 +241,9 @@ typedef struct erlang_event_loop {
     /** @brief Number of pending events */
     _Atomic int pending_count;
 
+    /** @brief Current pending capacity (starts at INITIAL_PENDING_CAPACITY) */
+    size_t pending_capacity;
+
     /** @brief Flag indicating shutdown requested */
     volatile bool shutdown;
 
@@ -248,6 +287,48 @@ typedef struct erlang_event_loop {
 
     /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
     uint32_t interp_id;
+
+    /* ========== Async Task Queue (uvloop-inspired) ========== */
+
+    /** @brief Python ErlangEventLoop instance (direct ref, no thread-local) */
+    PyObject *py_loop;
+
+    /** @brief Whether py_loop has been set */
+    bool py_loop_valid;
+
+    /** @brief Thread-safe task queue for async task submission */
+    ErlNifIOQueue *task_queue;
+
+    /** @brief Mutex protecting task_queue operations */
+    pthread_mutex_t task_queue_mutex;
+
+    /** @brief Whether task_queue has been initialized */
+    bool task_queue_initialized;
+
+    /** @brief Atomic counter for pending tasks */
+    _Atomic uint_fast64_t task_count;
+
+    /** @brief Flag indicating a task wakeup is pending (coalescing) */
+    _Atomic bool task_wake_pending;
+
+    /* ========== Cached Python Objects (uvloop-style) ========== */
+
+    /** @brief Cached asyncio module (avoids import on each call) */
+    PyObject *cached_asyncio;
+
+    /** @brief Cached _run_and_send function */
+    PyObject *cached_run_and_send;
+
+    /** @brief Whether Python caches have been initialized */
+    bool py_cache_valid;
+
+    /* ========== Callable Cache (uvloop-style optimization) ========== */
+
+    /** @brief Cache for module/function lookups */
+    cached_callable_t callable_cache[CALLABLE_CACHE_SIZE];
+
+    /** @brief Number of entries in callable cache */
+    int callable_cache_count;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -302,6 +383,14 @@ void event_loop_cleanup(void);
 /* ============================================================================
  * Event Loop NIF Functions
  * ============================================================================ */
+
+/**
+ * @brief Set the priv_dir path for module imports in subinterpreters
+ *
+ * NIF: set_event_loop_priv_dir(Path) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_set_event_loop_priv_dir(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Create a new event loop resource
@@ -470,6 +559,40 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
                                           const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Submit an async task to the event loop (thread-safe)
+ *
+ * This is the uvloop-inspired pattern: serialize task info, enqueue to
+ * thread-safe queue, and send wakeup via enif_send. Works from any thread
+ * including dirty schedulers.
+ *
+ * NIF: submit_task(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
+                              const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Process all pending tasks from the task queue
+ *
+ * Called by the event worker when it receives 'task_ready' message.
+ * Dequeues all tasks, creates coroutines, and schedules them on the loop.
+ *
+ * NIF: process_ready_tasks(LoopRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
+                                      const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Store a Python event loop reference in the C struct
+ *
+ * This avoids thread-local lookup issues when calling from dirty schedulers.
+ * The Python loop is stored directly in the erlang_event_loop_t struct.
+ *
+ * NIF: event_loop_set_py_loop(LoopRef, PyLoopCapsule) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_event_loop_set_py_loop(ErlNifEnv *env, int argc,
+                                         const ERL_NIF_TERM argv[]);
 
 /* ============================================================================
  * Internal Helper Functions

@@ -28,7 +28,12 @@
     stop/0,
     get_loop/0,
     register_callbacks/0,
-    run_async/2
+    run_async/2,
+    %% High-level async task API (uvloop-inspired)
+    run/3, run/4,
+    create_task/3, create_task/4,
+    await/1, await/2,
+    spawn_task/3, spawn_task/4
 ]).
 
 %% gen_server callbacks
@@ -84,6 +89,9 @@ register_callbacks() ->
     py_callback:register(py_event_loop_dispatch_timer, fun cb_dispatch_timer/1),
     %% Sleep callback - suspends Erlang process, fully releasing dirty scheduler
     py_callback:register(<<"_py_sleep">>, fun cb_sleep/1),
+    %% Execute Python callback - used by erlang.schedule_py() to call Python functions
+    %% Args: [Module, Func, Args, Kwargs]
+    py_callback:register(<<"_execute_py">>, fun cb_execute_py/1),
     ok.
 
 %% @doc Run an async coroutine on the event loop.
@@ -109,12 +117,118 @@ run_async(LoopRef, #{ref := Ref, caller := Caller, module := Module,
     py_nif:event_loop_run_async(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs).
 
 %% ============================================================================
+%% High-level Async Task API (uvloop-inspired)
+%% ============================================================================
+
+%% @doc Blocking run of an async Python function.
+%%
+%% Submits the task and waits for the result. Returns when the task completes
+%% or when the timeout is reached.
+%%
+%% Example:
+%%   {ok, Result} = py_event_loop:run(my_module, my_async_func, [arg1, arg2])
+-spec run(Module :: atom() | binary(), Func :: atom() | binary(), Args :: list()) ->
+    {ok, term()} | {error, term()}.
+run(Module, Func, Args) ->
+    run(Module, Func, Args, #{}).
+
+-spec run(Module :: atom() | binary(), Func :: atom() | binary(),
+          Args :: list(), Opts :: map()) -> {ok, term()} | {error, term()}.
+run(Module, Func, Args, Opts) ->
+    Timeout = maps:get(timeout, Opts, 5000),
+    Kwargs = maps:get(kwargs, Opts, #{}),
+    Ref = create_task(Module, Func, Args, Kwargs),
+    await(Ref, Timeout).
+
+%% @doc Submit an async task and return a reference to await the result.
+%%
+%% Non-blocking: returns immediately with a reference that can be used
+%% to await the result later. Uses the uvloop-inspired task queue for
+%% thread-safe submission from any dirty scheduler.
+%%
+%% Example:
+%%   Ref = py_event_loop:create_task(my_module, my_async_func, [arg1]),
+%%   %% ... do other work ...
+%%   {ok, Result} = py_event_loop:await(Ref)
+-spec create_task(Module :: atom() | binary(), Func :: atom() | binary(),
+                  Args :: list()) -> reference().
+create_task(Module, Func, Args) ->
+    create_task(Module, Func, Args, #{}).
+
+-spec create_task(Module :: atom() | binary(), Func :: atom() | binary(),
+                  Args :: list(), Kwargs :: map()) -> reference().
+create_task(Module, Func, Args, Kwargs) ->
+    {ok, LoopRef} = get_loop(),
+    Ref = make_ref(),
+    Caller = self(),
+    ModuleBin = py_util:to_binary(Module),
+    FuncBin = py_util:to_binary(Func),
+    ok = py_nif:submit_task(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs),
+    Ref.
+
+%% @doc Wait for an async task result.
+%%
+%% Blocks until the result is received or timeout is reached.
+%%
+%% Returns:
+%%   {ok, Result} - Task completed successfully
+%%   {error, Reason} - Task failed with error
+%%   {error, timeout} - Timeout waiting for result
+-spec await(Ref :: reference()) -> {ok, term()} | {error, term()}.
+await(Ref) ->
+    await(Ref, 5000).
+
+-spec await(Ref :: reference(), Timeout :: non_neg_integer() | infinity) ->
+    {ok, term()} | {error, term()}.
+await(Ref, Timeout) ->
+    receive
+        {async_result, Ref, Result} -> Result
+    after Timeout ->
+        {error, timeout}
+    end.
+
+%% @doc Fire-and-forget task execution.
+%%
+%% Submits the task but does not wait for or return the result.
+%% Useful for background tasks where you don't care about the outcome.
+%%
+%% Example:
+%%   ok = py_event_loop:spawn_task(logger, log_event, [event_data])
+-spec spawn_task(Module :: atom() | binary(), Func :: atom() | binary(),
+                 Args :: list()) -> ok.
+spawn_task(Module, Func, Args) ->
+    spawn_task(Module, Func, Args, #{}).
+
+-spec spawn_task(Module :: atom() | binary(), Func :: atom() | binary(),
+                 Args :: list(), Kwargs :: map()) -> ok.
+spawn_task(Module, Func, Args, Kwargs) ->
+    {ok, LoopRef} = get_loop(),
+    Ref = make_ref(),
+    %% Spawn a process that will receive and discard the result
+    Receiver = erlang:spawn(fun() ->
+        receive
+            {async_result, _, _} -> ok
+        after 30000 ->
+            %% Cleanup after 30 seconds if no response
+            ok
+        end
+    end),
+    ModuleBin = py_util:to_binary(Module),
+    FuncBin = py_util:to_binary(Func),
+    ok = py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs),
+    ok.
+
+%% ============================================================================
 %% gen_server callbacks
 %% ============================================================================
 
 init([]) ->
     %% Register callbacks on startup
     register_callbacks(),
+
+    %% Set priv_dir for module imports in subinterpreters
+    PrivDir = code:priv_dir(erlang_python),
+    ok = py_nif:set_event_loop_priv_dir(PrivDir),
 
     %% Create and initialize the event loop immediately
     case py_nif:event_loop_new() of
@@ -297,15 +411,38 @@ cb_dispatch_timer([LoopRef, CallbackId]) ->
 %% Suspends the current Erlang process for the specified duration,
 %% fully releasing the dirty NIF scheduler to handle other work.
 %% This is true cooperative yielding - the dirty scheduler thread is freed.
-%% Args: [Seconds] - float or integer seconds (converted to ms internally)
-cb_sleep([Seconds]) when is_float(Seconds), Seconds > 0 ->
-    Ms = round(Seconds * 1000),
-    receive after Ms -> ok end;
-cb_sleep([Seconds]) when is_integer(Seconds), Seconds > 0 ->
-    Ms = Seconds * 1000,
-    receive after Ms -> ok end;
+%% Args: [Seconds] - number of seconds (converted to non-negative ms internally)
 cb_sleep([Seconds]) when is_number(Seconds) ->
-    %% Zero or negative - return immediately
-    ok;
+    Ms = max(0, round(Seconds * 1000)),
+    receive after Ms -> ok end;
 cb_sleep(_Args) ->
     ok.
+
+%% @doc Execute Python callback for erlang.schedule_py().
+%% Calls a Python function via the worker pool.
+%% Args: [Module, Func, Args, Kwargs]
+%% - Module: binary - Python module name
+%% - Func: binary - Python function name
+%% - Args: list | none - Positional arguments
+%% - Kwargs: map | none - Keyword arguments
+cb_execute_py([Module, Func, Args, Kwargs]) ->
+    CallArgs = case Args of
+        none -> [];
+        undefined -> [];
+        List when is_list(List) -> List;
+        Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
+        _ -> [Args]
+    end,
+    CallKwargs = case Kwargs of
+        none -> #{};
+        undefined -> #{};
+        Map when is_map(Map) -> Map;
+        _ -> #{}
+    end,
+    %% Use default pool via py:call
+    case py:call(Module, Func, CallArgs, CallKwargs) of
+        {ok, Result} -> Result;
+        {error, Reason} -> error(Reason)
+    end;
+cb_execute_py(_Args) ->
+    error({badarg, invalid_execute_py_args}).

@@ -84,6 +84,14 @@ handle_info({timeout, TimerRef}, State) ->
     end;
 
 handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
+
+%% Handle task_ready wakeup from submit_task NIF.
+%% This is sent via enif_send when a new async task is submitted.
+%% Uses a drain-until-empty loop to handle tasks submitted during processing.
+handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
+    drain_tasks_loop(LoopRef),
+    {noreply, State};
+
 handle_info(_Info, State) -> {noreply, State}.
 
 terminate(_Reason, #state{timers = Timers}) ->
@@ -93,3 +101,33 @@ terminate(_Reason, #state{timers = Timers}) ->
     ok.
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
+
+%% @doc Drain tasks until no more task_ready messages are pending.
+%% This handles tasks that were submitted during processing.
+%%
+%% The NIF returns:
+%% - ok: all tasks processed, check mailbox for new task_ready messages
+%% - more: hit MAX_TASK_BATCH limit, more tasks pending
+%% - {error, Reason}: processing failed
+drain_tasks_loop(LoopRef) ->
+    case py_nif:process_ready_tasks(LoopRef) of
+        ok ->
+            %% Check if more task_ready messages arrived during processing
+            receive
+                task_ready -> drain_tasks_loop(LoopRef)
+            after 0 ->
+                ok
+            end;
+        more ->
+            %% Hit batch limit, more tasks pending.
+            %% Send task_ready to self and return, allowing the gen_server
+            %% to process other messages (select, timers) before continuing.
+            %% This prevents starvation under sustained task traffic.
+            self() ! task_ready,
+            ok;
+        {error, py_loop_not_set} ->
+            ok;
+        {error, Reason} ->
+            error_logger:warning_msg("py_event_worker: task processing failed: ~p~n", [Reason]),
+            ok
+    end.

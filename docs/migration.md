@@ -1,6 +1,6 @@
-# Migration Guide: v1.8.x to v2.0
+# Migration Guide: v1.8.x to v2.0+
 
-This guide covers breaking changes and migration steps when upgrading from erlang_python v1.8.x to v2.0.
+This guide covers breaking changes and migration steps when upgrading from erlang_python v1.8.x to v2.0 and later.
 
 ## Quick Checklist
 
@@ -13,6 +13,24 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 - [ ] Move signal handlers to Erlang level
 - [ ] Review any `os.fork`/`os.exec` usage
 - [ ] Update code relying on shared state between contexts (now isolated)
+
+## Python Version Compatibility
+
+| Python Version | GIL Mode | Notes |
+|---------------|----------|-------|
+| 3.9 - 3.11 | Shared GIL | Multi-executor mode, `py:execution_mode()` returns `multi_executor` |
+| 3.12 - 3.13 | OWN_GIL subinterpreters | True parallelism, `py:execution_mode()` returns `subinterp` |
+| 3.13t | Free-threaded | No GIL, `py:execution_mode()` returns `free_threaded` |
+| 3.14+ | SHARED_GIL subinterpreters | Subinterpreters with shared GIL for C extension compatibility |
+
+**Python 3.14 Support**: Full support for Python 3.14 including:
+- SHARED_GIL subinterpreter mode for C extension compatibility
+- Proper `sys.path` initialization in subinterpreters
+- All asyncio features work correctly
+
+**FreeBSD Support**: Improved fd handling on FreeBSD/kqueue platforms:
+- Automatic fd duplication in `py_reactor_context` to prevent fd stealing errors
+- `py:dup_fd/1` for explicit fd duplication when needed
 
 ## Architecture Changes
 
@@ -379,6 +397,155 @@ erlang.send(("my_server", "node@host"), {"event": "user_login", "user": 123})
 erlang.send(pid, "hello")
 ```
 
+### `erlang.sleep()` with Dirty Scheduler Release
+
+Synchronous sleep that releases the Erlang dirty scheduler thread:
+
+```python
+import erlang
+
+def slow_handler():
+    # Sleep without blocking Erlang scheduler
+    erlang.sleep(1.0)  # Releases dirty scheduler during sleep
+    return "done"
+```
+
+Unlike `time.sleep()`, `erlang.sleep()` releases the dirty NIF thread while waiting, allowing other Python calls to use the scheduler slot.
+
+### `erlang.call()` Blocking with Explicit Scheduling
+
+The `erlang.call()` function now supports explicit scheduling for long-running operations:
+
+```python
+import erlang
+
+def handler():
+    # Blocking call to Erlang
+    result = erlang.call('my_callback', arg1, arg2)
+
+    # For async contexts, use schedule to yield control
+    erlang.schedule()  # Yield to event loop
+
+    return result
+```
+
+### `channel.receive()` Blocking Receive
+
+Channels now support blocking receive that suspends Python and yields to Erlang:
+
+```python
+from erlang.channel import Channel
+
+def processor(channel):
+    # Blocking receive - suspends Python, releases scheduler
+    msg = channel.receive()
+
+    # Non-blocking alternative
+    msg = channel.try_receive()  # Returns None if empty
+
+    # Async alternative
+    # msg = await channel.async_receive()
+```
+
+### `erlang.spawn_task()` for Async Task Spawning
+
+Spawn async tasks from both sync and async contexts:
+
+```python
+import erlang
+import asyncio
+
+async def background_work():
+    await asyncio.sleep(1)
+    print("Background done")
+
+def sync_handler():
+    # Works even without running event loop
+    task = erlang.spawn_task(background_work())
+    # Fire-and-forget, task runs in background
+    return "submitted"
+
+async def async_handler():
+    # Also works in async context
+    task = erlang.spawn_task(background_work())
+    # Optionally await
+    await task
+```
+
+### Async Task API (Erlang Side)
+
+Submit and manage async Python tasks from Erlang:
+
+```erlang
+%% Blocking run
+{ok, Result} = py_event_loop:run(Ctx, my_module, my_async_func, [Arg1]).
+
+%% Non-blocking with reference
+Ref = py_event_loop:create_task(Ctx, my_module, my_async_func, [Arg1]),
+{ok, Result} = py_event_loop:await(Ref, 5000).
+
+%% Fire-and-forget
+py_event_loop:spawn_task(Ctx, my_module, my_async_func, [Arg1]).
+
+%% Message-based result delivery
+Ref = py_event_loop:create_task(Ctx, my_module, my_async_func, [Arg1]),
+receive
+    {async_result, Ref, {ok, Result}} -> handle(Result);
+    {async_result, Ref, {error, Reason}} -> handle_error(Reason)
+end.
+```
+
+### Virtual Environment Management
+
+Automatic venv creation and activation with dependency installation:
+
+```erlang
+%% Create venv if missing, install deps, activate
+ok = py:ensure_venv("/path/to/venv", "/path/to/requirements.txt").
+
+%% With options
+ok = py:ensure_venv("/path/to/venv", "/path/to/requirements.txt", [
+    {installer, pip},  % or uv
+    force              % Recreate even if exists
+]).
+
+%% Manual activation
+ok = py:activate_venv("/path/to/venv").
+
+%% Deactivation
+ok = py:deactivate_venv().
+
+%% Check venv status
+{ok, #{<<"active">> := true, <<"venv_path">> := Path}} = py:venv_info().
+```
+
+### Dual Pool Support
+
+Separate pools for CPU-bound and I/O-bound operations:
+
+```erlang
+%% Default pool - CPU-bound operations (sized to schedulers)
+{ok, Result} = py:call(math, sqrt, [16]).
+
+%% IO pool - I/O-bound operations (larger pool, default 10)
+{ok, Response} = py:call(io, requests, get, [Url]).
+
+%% Registration-based routing (no call site changes)
+py:register_pool(io, requests),              % Route all requests.* to io pool
+py:register_pool(io, {aiohttp, get}),        % Route specific function
+
+%% After registration, calls auto-route
+{ok, Response} = py:call(requests, get, [Url]).  % Goes to io pool
+```
+
+Configuration in `sys.config`:
+```erlang
+{erlang_python, [
+    {io_pool_size, 10},     % Size of io pool (default: 10)
+    {io_pool_mode, worker}  % Mode for io pool (default: auto)
+]}.
+```
+
 ## Performance Improvements
 
 The v2.0 release includes significant performance improvements:
@@ -451,6 +618,30 @@ Options:
 1. Use Python < 3.12 (falls back to multi_executor mode)
 2. Check if the library has a subinterpreter-compatible version
 3. Isolate the library usage to a single context
+
+### Python 3.14: `erlang_loop_import_failed`
+
+If you see `erlang_loop_import_failed` errors with Python 3.14:
+
+```erlang
+{error, {erlang_loop_import_failed, ...}}
+```
+
+This indicates the `priv` directory is not in `sys.path` for the subinterpreter. Ensure:
+1. Application is fully started: `application:ensure_all_started(erlang_python)`
+2. You're using the latest version with the Python 3.14 fixes
+
+### FreeBSD: fd stealing error
+
+If you see `driver_select(...) stealing control of fd=N` on FreeBSD:
+
+```
+driver_select(py_reactor_context) stealing control of fd=61 from resource py_nif:fd_resource
+```
+
+This occurs when both Erlang's tcp_inet driver and py_reactor try to register the same fd with kqueue. Solutions:
+1. Use `py:dup_fd/1` to duplicate the fd before handoff
+2. Update to the latest version where `py_reactor_context` auto-duplicates fds
 
 ## Configuration
 

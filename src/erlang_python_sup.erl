@@ -53,8 +53,11 @@ init([]) ->
     %% Initialize shared state ETS table (owned by supervisor for resilience)
     ok = py_state:init_tab(),
 
-    %% Register state functions as callbacks for Python access
+    %% Register ALL system callbacks early, before any gen_server starts.
+    %% This ensures callbacks like _py_sleep are available immediately.
     ok = py_state:register_callbacks(),
+    ok = py_event_loop:register_callbacks(),
+    ok = py_channel:register_callbacks(),
 
     %% Callback registry - must start before contexts
     CallbackSpec = #{

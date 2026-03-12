@@ -691,28 +691,28 @@ When using `erlang.run()` or the Erlang event loop, all standard asyncio functio
 
 #### erlang.sleep(seconds)
 
-Sleep for the specified duration. Works in both async and sync contexts, and **always releases the dirty NIF scheduler**.
+Sleep for the specified duration. Works in both async and sync contexts.
 
 ```python
 import erlang
 
-# Async context - releases dirty scheduler via event loop yield
+# Async context - yields to event loop
 async def async_handler():
     await erlang.sleep(0.1)  # Uses asyncio.sleep() internally
     return "done"
 
-# Sync context - releases dirty scheduler via Erlang process suspension
+# Sync context - blocks Python, releases dirty scheduler
 def sync_handler():
-    erlang.sleep(0.1)  # Uses receive/after, true cooperative yield
+    erlang.sleep(0.1)  # Suspends Erlang process via receive/after
     return "done"
 ```
 
-**Dirty Scheduler Release:**
+**Behavior by Context:**
 
-| Context | Mechanism | Dirty Scheduler |
-|---------|-----------|-----------------|
-| Async (`await erlang.sleep()`) | `asyncio.sleep()` via `call_later()` | Released (yields to event loop) |
-| Sync (`erlang.sleep()`) | `erlang.call('_py_sleep')` with `receive/after` | Released (Erlang process suspends) |
+| Context | Mechanism | Effect |
+|---------|-----------|--------|
+| Async (`await erlang.sleep()`) | `asyncio.sleep()` via `call_later()` | Yields to event loop, dirty scheduler released |
+| Sync (`erlang.sleep()`) | `erlang.call('_py_sleep')` with `receive/after` | Blocks Python, Erlang process suspends, dirty scheduler released |
 
 Both modes allow other Erlang processes and Python contexts to run during the sleep.
 
@@ -994,6 +994,165 @@ The `py:async_call/3,4` and `py:await/1,2` APIs use an event-driven backend base
 The event-driven model eliminates the polling overhead of the previous pthread+usleep
 implementation, resulting in significantly lower latency for async operations.
 
+## Erlang Callbacks from Python
+
+Python code can call registered Erlang functions using `erlang.call()`. This enables Python handlers to leverage Erlang's concurrency and I/O capabilities.
+
+### erlang.call() - Blocking Callbacks
+
+`erlang.call(name, *args)` calls a registered Erlang function and blocks until it returns.
+
+```python
+import erlang
+
+def handler():
+    # Call Erlang function - blocks until complete
+    result = erlang.call('my_callback', arg1, arg2)
+    return process(result)
+```
+
+**Behavior:**
+- Blocks the current Python execution until the Erlang callback completes
+- Code executes exactly once (no replay)
+- The callback can release the dirty scheduler by using Erlang's `receive` (e.g., `erlang.sleep()`, `channel.receive()`)
+- Quick callbacks hold the dirty scheduler; callbacks that wait via `receive` release it
+
+### Explicit Scheduling API
+
+For long-running operations or when you need to release the dirty scheduler, use the explicit scheduling functions. These return `ScheduleMarker` objects that **must be returned from your handler** to take effect.
+
+#### erlang.schedule(callback_name, *args)
+
+Release the dirty scheduler and continue via an Erlang callback.
+
+```python
+import erlang
+
+# Register callback in Erlang:
+# py_callback:register(<<"compute">>, fun([X]) -> X * 2 end).
+
+def handler(x):
+    # Returns ScheduleMarker - MUST be returned from handler
+    return erlang.schedule('compute', x)
+    # Nothing after this executes - Erlang callback continues
+```
+
+The result is transparent to the caller:
+```erlang
+%% Caller just gets the callback result
+{ok, 10} = py:call('__main__', 'handler', [5]).
+```
+
+#### erlang.schedule_py(module, func, args=None, kwargs=None)
+
+Release the dirty scheduler and continue by calling a Python function.
+
+```python
+import erlang
+
+def compute(x, multiplier=2):
+    return x * multiplier
+
+def handler(x):
+    # Schedule Python function - releases dirty scheduler
+    return erlang.schedule_py('__main__', 'compute', [x], {'multiplier': 3})
+```
+
+This is useful for:
+- Breaking up long computations
+- Allowing other Erlang processes to run
+- Cooperative multitasking
+
+#### erlang.consume_time_slice(percent)
+
+Check if the NIF time slice is exhausted. Returns `True` if you should yield, `False` if more time remains.
+
+```python
+import erlang
+
+def long_computation(items, start_idx=0):
+    results = []
+    for i in range(start_idx, len(items)):
+        results.append(process(items[i]))
+
+        # Check if we should yield (1% of time slice per iteration)
+        if erlang.consume_time_slice(1):
+            # Time slice exhausted - save progress and reschedule
+            return erlang.schedule_py(
+                '__main__', 'long_computation',
+                [items], {'start_idx': i + 1}
+            )
+
+    return results
+```
+
+**Parameters:**
+- `percent` (1-100): How much of the time slice was consumed by recent work
+
+**Returns:**
+- `True`: Time slice exhausted, you should yield
+- `False`: More time remains, continue processing
+
+### When to Use Each Pattern
+
+| Pattern | Use When | Dirty Scheduler |
+|---------|----------|-----------------|
+| `erlang.call()` | Quick operations or callbacks that use `receive` | Held (unless callback suspends via `receive`) |
+| `erlang.schedule()` | Need to call Erlang callback and always release scheduler | Released |
+| `erlang.schedule_py()` | Long Python computation, cooperative scheduling | Released |
+| `consume_time_slice()` | Fine-grained control over yielding | N/A (checks time slice) |
+
+### Example: Cooperative Long-Running Task
+
+```python
+import erlang
+
+def process_batch(items, batch_size=100, offset=0):
+    """Process items in batches, yielding between batches."""
+    end = min(offset + batch_size, len(items))
+
+    # Process this batch
+    for i in range(offset, end):
+        expensive_operation(items[i])
+
+    if end < len(items):
+        # More work to do - yield and continue
+        return erlang.schedule_py(
+            '__main__', 'process_batch',
+            [items], {'batch_size': batch_size, 'offset': end}
+        )
+
+    return 'done'
+```
+
+### Important Notes
+
+1. **Must return the marker**: `schedule()` and `schedule_py()` return `ScheduleMarker` objects that must be returned from your handler function. Calling them without returning has no effect:
+
+```python
+def wrong():
+    erlang.schedule('callback', arg)  # No effect!
+    return "oops"  # This is returned instead
+
+def correct():
+    return erlang.schedule('callback', arg)  # Works
+```
+
+2. **Cannot be nested**: The schedule marker must be the direct return value. You cannot return it from a nested function:
+
+```python
+def outer():
+    def inner():
+        return erlang.schedule('callback', arg)
+    return inner()  # Works - marker propagates up
+
+def broken():
+    def inner():
+        erlang.schedule('callback', arg)  # Wrong - not returned
+    inner()
+    return "oops"
+```
+
 ## Limitations
 
 ### Subprocess Operations Not Supported
@@ -1031,6 +1190,184 @@ loop.remove_signal_handler(signal.SIGTERM)
 ## Protocol-Based I/O
 
 For building custom servers with low-level protocol handling, see the [Reactor](reactor.md) module. The reactor provides FD-based protocol handling where Erlang manages I/O scheduling via `enif_select` and Python implements protocol logic.
+
+## Async Task API (Erlang)
+
+The `py_event_loop` module provides a high-level API for submitting async Python tasks from Erlang. This API is inspired by uvloop and uses a thread-safe task queue, allowing task submission from any dirty scheduler without blocking.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Async Task Submission                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Erlang Process           C NIF Layer              py_event_worker         │
+│   ───────────────          ─────────────            ─────────────────        │
+│                                                                              │
+│   py_event_loop:           nif_submit_task          handle_info(task_ready) │
+│   create_task(M,F,A)       │                        │                       │
+│         │                  │ Thread-safe enqueue    │                       │
+│         │──────────────────▶ (pthread_mutex)        │                       │
+│         │                  │                        │                       │
+│         │                  │ enif_send(task_ready)──▶                       │
+│         │                  │                        │                       │
+│         │                  │                        │ py_nif:process_ready  │
+│         │                  │                        │       │               │
+│         │                  │                        │       ▼               │
+│         │                  │                        │ Run Python coro       │
+│         │                  │                        │       │               │
+│         │◀─────────────────────────────────────────────────┘               │
+│         │    {async_result, Ref, {ok, Result}}      │                       │
+│         │                                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Features:**
+- Thread-safe submission from any dirty scheduler via `enif_send`
+- Non-blocking task creation
+- Message-based result delivery
+- Fire-and-forget support
+
+### API Reference
+
+#### py_event_loop:run/3,4
+
+Blocking execution of an async Python function. Submits the task and waits for the result.
+
+```erlang
+%% Basic usage
+{ok, Result} = py_event_loop:run(my_module, my_async_func, [arg1, arg2]).
+
+%% With options (timeout, kwargs)
+{ok, Result} = py_event_loop:run(aiohttp, get, [Url], #{
+    timeout => 10000,
+    kwargs => #{headers => #{}}
+}).
+```
+
+**Parameters:**
+- `Module` - Python module name (atom or binary)
+- `Func` - Python function name (atom or binary)
+- `Args` - List of positional arguments
+- `Opts` - Options map (optional):
+  - `timeout` - Timeout in milliseconds (default: 5000)
+  - `kwargs` - Keyword arguments map (default: #{})
+
+**Returns:**
+- `{ok, Result}` - Task completed successfully
+- `{error, Reason}` - Task failed or timed out
+
+#### py_event_loop:create_task/3,4
+
+Non-blocking task submission. Returns immediately with a reference for awaiting the result later.
+
+```erlang
+%% Submit task
+Ref = py_event_loop:create_task(my_module, my_async_func, [arg1]).
+
+%% Do other work while task runs...
+do_other_work(),
+
+%% Await result when needed
+{ok, Result} = py_event_loop:await(Ref).
+```
+
+**Parameters:**
+- `Module` - Python module name (atom or binary)
+- `Func` - Python function name (atom or binary)
+- `Args` - List of positional arguments
+- `Kwargs` - Keyword arguments map (optional, default: #{})
+
+**Returns:**
+- `reference()` - Task reference for awaiting
+
+#### py_event_loop:await/1,2
+
+Wait for an async task result.
+
+```erlang
+%% Default timeout (5 seconds)
+{ok, Result} = py_event_loop:await(Ref).
+
+%% Custom timeout
+{ok, Result} = py_event_loop:await(Ref, 10000).
+
+%% Infinite timeout
+{ok, Result} = py_event_loop:await(Ref, infinity).
+```
+
+**Parameters:**
+- `Ref` - Task reference from `create_task`
+- `Timeout` - Timeout in milliseconds or `infinity` (optional, default: 5000)
+
+**Returns:**
+- `{ok, Result}` - Task completed successfully
+- `{error, Reason}` - Task failed with error
+- `{error, timeout}` - Timeout waiting for result
+
+#### py_event_loop:spawn_task/3,4
+
+Fire-and-forget task execution. Submits the task but does not wait for or return the result.
+
+```erlang
+%% Background logging
+ok = py_event_loop:spawn_task(logger, log_event, [EventData]).
+
+%% With kwargs
+ok = py_event_loop:spawn_task(metrics, record, [Name, Value], #{tags => Tags}).
+```
+
+**Parameters:**
+- `Module` - Python module name (atom or binary)
+- `Func` - Python function name (atom or binary)
+- `Args` - List of positional arguments
+- `Kwargs` - Keyword arguments map (optional, default: #{})
+
+**Returns:**
+- `ok` - Task submitted (result is discarded)
+
+### Example: Concurrent HTTP Requests
+
+```erlang
+%% Submit multiple requests concurrently
+Refs = [
+    py_event_loop:create_task(aiohttp, get, [<<"https://api.example.com/users">>]),
+    py_event_loop:create_task(aiohttp, get, [<<"https://api.example.com/posts">>]),
+    py_event_loop:create_task(aiohttp, get, [<<"https://api.example.com/comments">>])
+],
+
+%% Await all results
+Results = [py_event_loop:await(Ref, 10000) || Ref <- Refs].
+```
+
+### Example: Background Processing
+
+```erlang
+%% Fire-and-forget analytics
+handle_request(Request) ->
+    %% Process request...
+    Response = process(Request),
+
+    %% Log analytics in background (don't wait)
+    ok = py_event_loop:spawn_task(analytics, track_event, [
+        <<"page_view">>,
+        #{path => Request#request.path, user_id => Request#request.user_id}
+    ]),
+
+    Response.
+```
+
+### Thread Safety
+
+The async task API is fully thread-safe:
+
+- `create_task` and `spawn_task` can be called from any Erlang process, including processes running on dirty schedulers
+- Task submission uses `enif_send` which is safe to call from any thread
+- The task queue uses mutex protection for thread-safe enqueueing
+- Results are delivered via standard Erlang message passing
+
+This means you can safely call `py_event_loop:create_task` from within a callback that's already running on a dirty NIF scheduler.
 
 ## See Also
 

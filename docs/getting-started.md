@@ -229,19 +229,21 @@ See [Context Affinity](context-affinity.md) for explicit contexts and advanced u
 Use `py:ensure_venv/2,3` to automatically create and activate a virtual environment:
 
 ```erlang
-%% Create venv if missing, then activate
-{ok, activated} = py:ensure_venv(<<"/path/to/myapp/venv">>, []).
+%% Create venv and install from requirements.txt
+ok = py:ensure_venv("/path/to/myapp/venv", "requirements.txt").
 
-%% With pip dependencies
-{ok, activated} = py:ensure_venv(<<"/path/to/venv">>, [
-    {pip_install, [<<"numpy">>, <<"pandas">>]}
+%% Install from pyproject.toml (editable install)
+ok = py:ensure_venv("/path/to/venv", "pyproject.toml").
+
+%% With options: extras, custom installer, or force recreate
+ok = py:ensure_venv("/path/to/venv", "pyproject.toml", [
+    {extras, ["dev", "test"]},   %% Install optional dependencies
+    {installer, uv},             %% Use uv instead of pip (faster)
+    {python, "/usr/bin/python3.12"}  %% Specific Python version
 ]).
 
-%% With custom Python executable
-{ok, activated} = py:ensure_venv(<<"/path/to/venv">>, [
-    {python, <<"/usr/bin/python3.12">>},
-    {pip_install, [<<"sentence-transformers">>]}
-]).
+%% Force recreate even if venv exists
+ok = py:ensure_venv("/path/to/venv", "requirements.txt", [force]).
 ```
 
 ### Manual Virtual Environment Activation
@@ -251,7 +253,7 @@ Use `py:ensure_venv/2,3` to automatically create and activate a virtual environm
 ok = py:activate_venv(<<"/path/to/venv">>).
 
 %% Check current venv
-{ok, #{path := Path, active := true}} = py:venv_info().
+{ok, #{<<"active">> := true, <<"venv_path">> := Path}} = py:venv_info().
 
 %% Deactivate when done
 ok = py:deactivate_venv().

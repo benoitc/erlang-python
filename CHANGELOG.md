@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Async Task API** - uvloop-inspired task submission from Erlang
+  - `py_event_loop:run/3,4` - Blocking run of async Python functions
+  - `py_event_loop:create_task/3,4` - Non-blocking task submission with reference
+  - `py_event_loop:await/1,2` - Wait for task result with timeout
+  - `py_event_loop:spawn_task/3,4` - Fire-and-forget task execution
+  - Thread-safe submission via `enif_send` (works from dirty schedulers)
+  - Message-based result delivery via `{async_result, Ref, Result}`
+  - See [Async Task API docs](docs/asyncio.md#async-task-api-erlang) for details
+
 - **`erlang.spawn_task(coro)`** - Spawn async tasks from both sync and async contexts
   - Works in sync code called by Erlang (where `asyncio.get_running_loop()` fails)
   - Returns `asyncio.Task` for optional await/cancel (fire-and-forget pattern)

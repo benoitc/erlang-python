@@ -92,6 +92,7 @@
     set_trace_receiver/1,
     clear_trace_receiver/0,
     %% Erlang-native event loop (for asyncio integration)
+    set_event_loop_priv_dir/1,
     event_loop_new/0,
     event_loop_destroy/1,
     event_loop_set_router/2,
@@ -99,6 +100,10 @@
     event_loop_set_id/2,
     event_loop_wakeup/1,
     event_loop_run_async/7,
+    %% Async task queue NIFs (uvloop-inspired)
+    submit_task/7,
+    process_ready_tasks/1,
+    event_loop_set_py_loop/2,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -687,6 +692,12 @@ clear_trace_receiver() ->
 %%% Erlang-native Event Loop (asyncio integration)
 %%% ============================================================================
 
+%% @doc Set the priv_dir path for module imports in subinterpreters.
+%% Must be called during application startup before creating event loops.
+-spec set_event_loop_priv_dir(binary() | string()) -> ok | {error, term()}.
+set_event_loop_priv_dir(_Path) ->
+    ?NIF_STUB.
+
 %% @doc Create a new Erlang-backed asyncio event loop.
 %% Returns an opaque reference to be used with event loop functions.
 -spec event_loop_new() -> {ok, reference()} | {error, term()}.
@@ -726,6 +737,41 @@ event_loop_wakeup(_LoopRef) ->
 -spec event_loop_run_async(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
     ok | {error, term()}.
 event_loop_run_async(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Async Task Queue NIFs (uvloop-inspired)
+%%% ============================================================================
+
+%% @doc Submit an async task to the event loop (thread-safe).
+%%
+%% This NIF can be called from any thread including dirty schedulers.
+%% It serializes the task info, enqueues to the task queue, and sends
+%% a 'task_ready' wakeup to the worker via enif_send.
+%%
+%% The result will be sent to CallerPid as:
+%%   {async_result, Ref, {ok, Result}} - on success
+%%   {async_result, Ref, {error, Reason}} - on failure
+-spec submit_task(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
+    ok | {error, term()}.
+submit_task(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Process all pending tasks from the task queue.
+%%
+%% Called by the event worker when it receives 'task_ready' message.
+%% Dequeues all tasks, creates coroutines, and schedules them on the loop.
+%% Returns 'more' if batch limit was hit and more tasks remain.
+-spec process_ready_tasks(reference()) -> ok | more | {error, term()}.
+process_ready_tasks(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Store a Python event loop reference in the C struct.
+%%
+%% This avoids thread-local lookup issues when processing tasks.
+%% Called from Python after creating the ErlangEventLoop.
+-spec event_loop_set_py_loop(reference(), reference()) -> ok | {error, term()}.
+event_loop_set_py_loop(_LoopRef, _PyLoopRef) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.
@@ -1217,10 +1263,11 @@ context_destroy(_ContextRef) ->
 %% @param Func Function name
 %% @param Args List of arguments
 %% @param Kwargs Map of keyword arguments
-%% @returns {ok, Result} | {error, Reason} | {suspended, ...}
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_call(reference(), binary(), binary(), list(), map()) ->
     {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}}.
+    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
+    {schedule, binary(), tuple()}.
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
@@ -1231,10 +1278,11 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
 %% @param ContextRef Context reference
 %% @param Code Python code to evaluate
 %% @param Locals Map of local variables
-%% @returns {ok, Result} | {error, Reason} | {suspended, ...}
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_eval(reference(), binary(), map()) ->
     {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}}.
+    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
+    {schedule, binary(), tuple()}.
 context_eval(_ContextRef, _Code, _Locals) ->
     ?NIF_STUB.
 

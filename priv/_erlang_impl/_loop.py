@@ -27,8 +27,8 @@ Architecture:
 """
 
 import asyncio
+import contextvars
 import errno
-import heapq
 import os
 import socket
 import ssl
@@ -71,10 +71,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # Use __slots__ for faster attribute access and reduced memory
     __slots__ = (
         '_pel', '_loop_capsule',
-        '_readers', '_writers', '_readers_by_cid', '_writers_by_cid',
+        '_readers', '_writers',
         '_callbacks_by_cid',  # callback_id -> (callback, args, event_type) for O(1) dispatch
         '_fd_resources',  # fd -> fd_key (shared fd_resource_t per fd)
-        '_timers', '_timer_refs', '_timer_heap', '_handle_to_callback_id',
+        '_timers', '_timer_refs', '_handle_to_callback_id',
         '_ready',
         '_handle_pool', '_handle_pool_max', '_running', '_stopping', '_closed',
         '_thread_id', '_clock_resolution', '_exception_handler', '_current_handle',
@@ -83,6 +83,8 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         '_signal_handlers',
         '_execution_mode',
         '_callback_id',
+        '_cached_time',  # uvloop-style time caching to avoid syscalls
+        '_wake_pending',  # coalesced wakeup flag for call_soon_threadsafe
     )
 
     def __init__(self):
@@ -115,16 +117,29 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Create isolated loop capsule
         self._loop_capsule = self._pel._loop_new()
 
+        # Store reference to this Python loop in the C struct
+        # This enables process_ready_tasks to access the loop directly
+        # without thread-local lookup issues from dirty schedulers
+        if hasattr(self._pel, '_set_loop_ref'):
+            self._pel._set_loop_ref(self._loop_capsule, self)
+
+        # Also set reference on the global interpreter loop
+        # This is needed for py_nif:submit_task which uses the global loop
+        if hasattr(self._pel, '_set_global_loop_ref'):
+            try:
+                self._pel._set_global_loop_ref(self)
+            except RuntimeError:
+                # Global loop not yet initialized, ignore
+                pass
+
         # Callback management
         self._readers = {}  # fd -> (callback, args, callback_id)
         self._writers = {}  # fd -> (callback, args, callback_id)
-        self._readers_by_cid = {}  # callback_id -> fd (reverse map for O(1) lookup)
-        self._writers_by_cid = {}  # callback_id -> fd (reverse map for O(1) lookup)
         self._callbacks_by_cid = {}  # callback_id -> (callback, args) for O(1) dispatch
         self._fd_resources = {}  # fd -> fd_key (shared fd_resource_t per fd)
         self._timers = {}   # callback_id -> handle
         self._timer_refs = {}  # callback_id -> timer_ref (for cancellation)
-        self._timer_heap = []  # min-heap of (when, callback_id)
+        # Note: No timer heap - Erlang handles timer expiry via send_after
         self._handle_to_callback_id = {}  # handle -> callback_id
         self._ready = deque()  # Callbacks ready to run
 
@@ -135,6 +150,12 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Handle object pool for reduced allocations
         self._handle_pool = []
         self._handle_pool_max = 150
+
+        # Time caching (uvloop-style: avoids time.monotonic() syscalls)
+        self._cached_time = time.monotonic()
+
+        # Wakeup coalescing flag
+        self._wake_pending = False
 
         # State
         self._running = False
@@ -260,7 +281,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                     pass
         self._timers.clear()
         self._timer_refs.clear()
-        self._timer_heap.clear()
         self._handle_to_callback_id.clear()
 
         # Remove all readers/writers
@@ -306,19 +326,28 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # ========================================================================
 
     def call_soon(self, callback, *args, context=None):
-        """Schedule a callback to be called soon."""
+        """Schedule a callback to be called soon.
+
+        Uses handle pooling (uvloop-style) to reduce allocations.
+        """
         self._check_closed()
-        handle = events.Handle(callback, args, self, context)
+        handle = self._get_handle(callback, args, context)
         self._ready_append(handle)
         return handle
 
     def call_soon_threadsafe(self, callback, *args, context=None):
-        """Thread-safe version of call_soon."""
+        """Thread-safe version of call_soon.
+
+        Uses coalesced wakeup to reduce wakeup overhead under high call rates.
+        """
         handle = self.call_soon(callback, *args, context=context)
-        try:
-            self._pel._wakeup_for(self._loop_capsule)
-        except Exception:
-            pass
+        # Coalesced wakeup: only wake if not already pending
+        if not self._wake_pending:
+            self._wake_pending = True
+            try:
+                self._pel._wakeup_for(self._loop_capsule)
+            except Exception:
+                pass
         return handle
 
     def call_later(self, delay, callback, *args, context=None):
@@ -341,10 +370,8 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._timers[callback_id] = handle
         self._handle_to_callback_id[id(handle)] = callback_id
 
-        # Push to timer heap
-        heapq.heappush(self._timer_heap, (when, callback_id))
-
-        # Schedule with Erlang's native timer system
+        # Schedule with Erlang's native timer system.
+        # No Python-side timer heap needed - Erlang handles expiry via send_after.
         try:
             timer_ref = self._pel._schedule_timer_for(self._loop_capsule, delay_ms, callback_id)
             self._timer_refs[callback_id] = timer_ref
@@ -356,8 +383,18 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         return handle
 
     def time(self):
-        """Return the current time according to the event loop's clock."""
+        """Return the current time according to the event loop's clock.
+
+        When the loop is running, uses cached time (uvloop-style) to avoid
+        syscalls. When the loop is not running, returns fresh monotonic time.
+        """
+        if self._running:
+            return self._cached_time
         return time.monotonic()
+
+    def _update_time(self):
+        """Update the cached time. Called at the start of each iteration."""
+        self._cached_time = time.monotonic()
 
     # ========================================================================
     # Creating Futures and Tasks
@@ -408,7 +445,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if fd in self._readers:
             old_entry = self._readers[fd]
             old_cid = old_entry[2]
-            self._readers_by_cid.pop(old_cid, None)
             self._callbacks_by_cid.pop(old_cid, None)
 
         callback_id = self._next_id()
@@ -424,7 +460,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 self._fd_resources[fd] = fd_key
 
             self._readers[fd] = (callback, args, callback_id)
-            self._readers_by_cid[callback_id] = fd
             self._callbacks_by_cid[callback_id] = (callback, args)
         except Exception as e:
             raise RuntimeError(f"Failed to add reader: {e}")
@@ -436,7 +471,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         entry = self._readers.pop(fd)
         callback_id = entry[2]
-        self._readers_by_cid.pop(callback_id, None)
         self._callbacks_by_cid.pop(callback_id, None)
 
         if fd in self._fd_resources:
@@ -465,7 +499,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if fd in self._writers:
             old_entry = self._writers[fd]
             old_cid = old_entry[2]
-            self._writers_by_cid.pop(old_cid, None)
             self._callbacks_by_cid.pop(old_cid, None)
 
         callback_id = self._next_id()
@@ -481,7 +514,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 self._fd_resources[fd] = fd_key
 
             self._writers[fd] = (callback, args, callback_id)
-            self._writers_by_cid[callback_id] = fd
             self._callbacks_by_cid[callback_id] = (callback, args)
         except Exception as e:
             raise RuntimeError(f"Failed to add writer: {e}")
@@ -493,7 +525,6 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         entry = self._writers.pop(fd)
         callback_id = entry[2]
-        self._writers_by_cid.pop(callback_id, None)
         self._callbacks_by_cid.pop(callback_id, None)
 
         if fd in self._fd_resources:
@@ -936,8 +967,19 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # Internal methods
     # ========================================================================
 
-    def _run_once(self):
-        """Run one iteration of the event loop."""
+    def _run_once(self, timeout_hint=None):
+        """Run one iteration of the event loop.
+
+        Args:
+            timeout_hint: Optional timeout in ms. If 0, don't block waiting
+                for I/O. Used by C code when coroutines were just scheduled.
+        """
+        # Update cached time at start of iteration (uvloop-style)
+        self._cached_time = time.monotonic()
+
+        # Reset wakeup coalescing flag so next call_soon_threadsafe will wake us
+        self._wake_pending = False
+
         ready = self._ready
         popleft = self._ready_popleft
         return_handle = self._return_handle
@@ -964,33 +1006,19 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 self._current_handle = None
                 return_handle(handle)
 
-        # Calculate timeout based on next timer
-        if ready or self._stopping:
+        # Calculate timeout based on hint or pending work.
+        # Note: No timer heap - Erlang handles timer expiry via send_after.
+        # We use a fixed poll timeout when waiting for events.
+        if timeout_hint is not None:
+            # C code told us to use this timeout (e.g., 0 after scheduling coros)
+            timeout = timeout_hint
+        elif ready or self._stopping:
             timeout = 0
-        elif self._timer_heap:
-            # Lazy cleanup - pop stale/cancelled entries with iteration limit
-            # to avoid O(n log n) cleanup under heavy cancellation load
-            timer_heap = self._timer_heap
-            timers = self._timers
-            cleanup_count = 0
-            while timer_heap and cleanup_count < 10:
-                when, cid = timer_heap[0]
-                handle = timers.get(cid)
-                if handle is None or handle._cancelled:
-                    heapq.heappop(timer_heap)
-                    cleanup_count += 1
-                    continue
-                break
-
-            if timer_heap:
-                when, _ = timer_heap[0]
-                timeout = max(0, int((when - self.time()) * 1000))
-                timeout = max(1, min(timeout, 1000))
-            else:
-                timers.clear()
-                self._timer_refs.clear()
-                timeout = 1000
+        elif self._timers:
+            # Timers pending - use moderate timeout (Erlang dispatches timer events)
+            timeout = 100
         else:
+            # No timers - use longer poll timeout
             timeout = 1000
 
         # Poll for events
@@ -1053,21 +1081,43 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
     # Handle pool for reduced allocations
     # ========================================================================
 
-    def _get_handle(self, callback, args):
-        """Get a Handle from the pool or create a new one."""
+    def _get_handle(self, callback, args, context=None):
+        """Get a Handle from the pool or create a new one.
+
+        This is a uvloop-style optimization to reduce allocations.
+        Pooled handles are reused instead of creating new objects.
+        """
+        # Match Handle.__init__ behavior: copy current context if None
+        if context is None:
+            context = contextvars.copy_context()
+
         if self._handle_pool:
             handle = self._handle_pool.pop()
             handle._callback = callback
             handle._args = args
             handle._cancelled = False
+            handle._context = context
             return handle
-        return events.Handle(callback, args, self, None)
+        return events.Handle(callback, args, self, context)
 
     def _return_handle(self, handle):
-        """Return a Handle to the pool for reuse."""
+        """Return a Handle to the pool for reuse.
+
+        Clears all references to allow GC of callback/args/context.
+
+        IMPORTANT: TimerHandle objects must NOT be pooled because asyncio.sleep
+        keeps a reference to the timer handle and cancels it in a finally block.
+        If the TimerHandle is recycled and reused for another callback, the
+        cancel() call will incorrectly cancel the new callback.
+        """
+        # Don't pool TimerHandle - asyncio.sleep holds a reference and cancels it
+        if isinstance(handle, events.TimerHandle):
+            return
+
         if len(self._handle_pool) < self._handle_pool_max:
             handle._callback = None
             handle._args = None
+            handle._context = None
             self._handle_pool.append(handle)
 
     # ========================================================================

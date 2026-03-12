@@ -134,11 +134,16 @@ ch = Channel(channel_ref)
 
 #### `receive()`
 
-Blocking receive. Suspends Python execution if empty, yielding to Erlang.
+Blocking receive. Blocks Python execution until a message is available.
 
 ```python
 msg = ch.receive()  # Blocks until message available
 ```
+
+**Behavior:**
+- If the channel has data, returns immediately
+- If empty, suspends the Erlang process via `receive`, releasing the dirty scheduler
+- Other Erlang processes can run while waiting for data
 
 **Raises:** `ChannelClosed` when the channel is closed.
 

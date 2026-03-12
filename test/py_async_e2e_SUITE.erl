@@ -30,6 +30,9 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
     %% Ensure contexts are running
     {ok, _} = py:start_contexts(),
+    %% Install Erlang event loop policy for asyncio.run()
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"import erlang; erlang.install()">>),
     Config.
 
 end_per_suite(_Config) ->

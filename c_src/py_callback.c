@@ -1276,6 +1276,197 @@ PyTypeObject ErlangPidType = {
     .tp_doc = "Opaque Erlang process identifier",
 };
 
+/* ============================================================================
+ * ScheduleMarker - marker type for explicit scheduler release
+ *
+ * When a Python handler returns a ScheduleMarker, the NIF detects it and
+ * uses the callback system to continue execution in Erlang, releasing the
+ * dirty scheduler.
+ *
+ * Note: ScheduleMarkerObject typedef is forward declared in py_nif.c
+ * ============================================================================ */
+
+static void ScheduleMarker_dealloc(ScheduleMarkerObject *self) {
+    Py_XDECREF(self->callback_name);
+    Py_XDECREF(self->args);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *ScheduleMarker_repr(ScheduleMarkerObject *self) {
+    return PyUnicode_FromFormat("<erlang.ScheduleMarker callback='%U'>", self->callback_name);
+}
+
+static PyTypeObject ScheduleMarkerType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang.ScheduleMarker",
+    .tp_doc = "Marker for explicit dirty scheduler release (must be returned from handler)",
+    .tp_basicsize = sizeof(ScheduleMarkerObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)ScheduleMarker_dealloc,
+    .tp_repr = (reprfunc)ScheduleMarker_repr,
+};
+
+/**
+ * Check if a Python object is a ScheduleMarker
+ */
+static int is_schedule_marker(PyObject *obj) {
+    return Py_IS_TYPE(obj, &ScheduleMarkerType);
+}
+
+/**
+ * @brief Python: erlang.schedule(callback_name, *args) -> ScheduleMarker
+ *
+ * Creates a ScheduleMarker that, when returned from a handler function,
+ * causes the dirty scheduler to be released and the named Erlang callback
+ * to be invoked with the provided arguments.
+ *
+ * IMPORTANT: Must be returned directly from the handler. Calling without
+ * returning has no effect.
+ *
+ * @param self Module reference (unused)
+ * @param args Tuple: (callback_name, arg1, arg2, ...)
+ * @return ScheduleMarker object or NULL with exception
+ */
+static PyObject *py_schedule(PyObject *self, PyObject *args) {
+    (void)self;
+
+    Py_ssize_t nargs = PyTuple_Size(args);
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "schedule() requires at least a callback name");
+        return NULL;
+    }
+
+    PyObject *name_obj = PyTuple_GetItem(args, 0);
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Callback name must be a string");
+        return NULL;
+    }
+
+    ScheduleMarkerObject *marker = PyObject_New(ScheduleMarkerObject, &ScheduleMarkerType);
+    if (marker == NULL) {
+        return NULL;
+    }
+
+    Py_INCREF(name_obj);
+    marker->callback_name = name_obj;
+    marker->args = PyTuple_GetSlice(args, 1, nargs);  /* Rest are args */
+    if (marker->args == NULL) {
+        Py_DECREF(marker);
+        return NULL;
+    }
+
+    return (PyObject *)marker;
+}
+
+/**
+ * @brief Python: erlang.schedule_py(module, func, args=None, kwargs=None) -> ScheduleMarker
+ *
+ * Syntactic sugar for: schedule('_execute_py', [module, func, args, kwargs])
+ *
+ * Creates a ScheduleMarker that, when returned from a handler function,
+ * causes the dirty scheduler to be released and the specified Python
+ * function to be called via the _execute_py callback.
+ *
+ * @param self Module reference (unused)
+ * @param args Positional args: (module, func)
+ * @param kwargs Keyword args: args=list, kwargs=dict
+ * @return ScheduleMarker object or NULL with exception
+ */
+static PyObject *py_schedule_py(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+
+    static char *kwlist[] = {"module", "func", "args", "kwargs", NULL};
+    PyObject *module_name = NULL;
+    PyObject *func_name = NULL;
+    PyObject *call_args = Py_None;
+    PyObject *call_kwargs = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OO", kwlist,
+            &module_name, &func_name, &call_args, &call_kwargs)) {
+        return NULL;
+    }
+
+    /* Validate module and func are strings */
+    if (!PyUnicode_Check(module_name)) {
+        PyErr_SetString(PyExc_TypeError, "module must be a string");
+        return NULL;
+    }
+    if (!PyUnicode_Check(func_name)) {
+        PyErr_SetString(PyExc_TypeError, "func must be a string");
+        return NULL;
+    }
+
+    /* Create schedule marker for _execute_py callback */
+    ScheduleMarkerObject *marker = PyObject_New(ScheduleMarkerObject, &ScheduleMarkerType);
+    if (marker == NULL) {
+        return NULL;
+    }
+
+    /* callback_name = '_execute_py' */
+    marker->callback_name = PyUnicode_FromString("_execute_py");
+    if (marker->callback_name == NULL) {
+        Py_DECREF(marker);
+        return NULL;
+    }
+
+    /* args = (module, func, call_args, call_kwargs) */
+    marker->args = PyTuple_Pack(4, module_name, func_name, call_args, call_kwargs);
+    if (marker->args == NULL) {
+        Py_DECREF(marker);
+        return NULL;
+    }
+
+    return (PyObject *)marker;
+}
+
+/**
+ * @brief Python: erlang.consume_time_slice(percent) -> bool
+ *
+ * Check and consume a percentage of the NIF time slice. Returns True if
+ * the time slice is exhausted (caller should yield), False if more time
+ * remains.
+ *
+ * Use this for cooperative scheduling in long-running handlers:
+ *
+ *   def long_handler(start=0):
+ *       for i in range(start, 1000000):
+ *           process(i)
+ *           if erlang.consume_time_slice(1):  # Used 1% of slice
+ *               return erlang.schedule_py('mymodule', 'long_handler', [i + 1])
+ *       return "done"
+ *
+ * @param self Module reference (unused)
+ * @param args Tuple: (percent,) where percent is 1-100
+ * @return True if time slice exhausted, False if more time remains
+ */
+static PyObject *py_consume_time_slice(PyObject *self, PyObject *args) {
+    (void)self;
+
+    int percent;
+    if (!PyArg_ParseTuple(args, "i", &percent)) {
+        return NULL;
+    }
+
+    if (percent < 1 || percent > 100) {
+        PyErr_SetString(PyExc_ValueError, "percent must be 1-100");
+        return NULL;
+    }
+
+    /* Need access to ErlNifEnv - use thread-local callback env */
+    if (tl_callback_env == NULL) {
+        /* Not in NIF context, return False (can continue) */
+        Py_RETURN_FALSE;
+    }
+
+    int exhausted = enif_consume_timeslice(tl_callback_env, percent);
+    if (exhausted) {
+        Py_RETURN_TRUE;
+    } else {
+        Py_RETURN_FALSE;
+    }
+}
+
 /**
  * Python implementation of erlang.call(name, *args)
  *
@@ -2034,6 +2225,18 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Send a message to an Erlang process (fire-and-forget).\n\n"
      "Usage: erlang.send(pid, term)\n"
      "The pid must be an erlang.Pid object."},
+    {"schedule", py_schedule, METH_VARARGS,
+     "Schedule Erlang callback continuation (must be returned from handler).\n\n"
+     "Usage: return erlang.schedule('callback_name', arg1, arg2, ...)\n"
+     "Releases dirty scheduler and continues via Erlang callback."},
+    {"schedule_py", (PyCFunction)py_schedule_py, METH_VARARGS | METH_KEYWORDS,
+     "Schedule Python function continuation (must be returned from handler).\n\n"
+     "Usage: return erlang.schedule_py('module', 'func', [args], {'kwargs'})\n"
+     "Releases dirty scheduler and continues via _execute_py callback."},
+    {"consume_time_slice", py_consume_time_slice, METH_VARARGS,
+     "Check/consume NIF time slice for cooperative scheduling.\n\n"
+     "Usage: if erlang.consume_time_slice(percent): return erlang.schedule_py(...)\n"
+     "Returns True if time slice exhausted (should yield), False if more time remains."},
     {"_get_async_callback_fd", get_async_callback_fd, METH_NOARGS,
      "Get the file descriptor for async callback responses.\n"
      "Used internally by async_call() to register with asyncio."},
@@ -2111,6 +2314,11 @@ static int create_erlang_module(void) {
         return -1;
     }
 
+    /* Initialize ScheduleMarker type */
+    if (PyType_Ready(&ScheduleMarkerType) < 0) {
+        return -1;
+    }
+
     PyObject *module = PyModule_Create(&ErlangModuleDef);
     if (module == NULL) {
         return -1;
@@ -2158,6 +2366,14 @@ static int create_erlang_module(void) {
     Py_INCREF(&ErlangPidType);
     if (PyModule_AddObject(module, "Pid", (PyObject *)&ErlangPidType) < 0) {
         Py_DECREF(&ErlangPidType);
+        Py_DECREF(module);
+        return -1;
+    }
+
+    /* Add ScheduleMarker type to module */
+    Py_INCREF(&ScheduleMarkerType);
+    if (PyModule_AddObject(module, "ScheduleMarker", (PyObject *)&ScheduleMarkerType) < 0) {
+        Py_DECREF(&ScheduleMarkerType);
         Py_DECREF(module);
         return -1;
     }

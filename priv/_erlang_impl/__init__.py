@@ -166,14 +166,11 @@ def run(main, *, debug=None, **run_kwargs):
 
 
 def sleep(seconds):
-    """Sleep for the given duration, releasing the dirty scheduler.
-
-    Both sync and async modes release the dirty NIF scheduler thread,
-    allowing other Erlang processes to run during the sleep.
+    """Sleep for the given duration.
 
     Works in both async and sync contexts:
     - Async context: Returns an awaitable (use with await)
-    - Sync context: Blocks synchronously via Erlang callback
+    - Sync context: Blocks synchronously
 
     **Dirty Scheduler Release:**
 
@@ -181,10 +178,11 @@ def sleep(seconds):
     timer system via erlang:send_after. The dirty scheduler is released
     because the Python code yields back to the event loop.
 
-    In sync context, calls into Erlang via erlang.call('_py_sleep', seconds)
-    which uses receive/after to suspend the Erlang process. This fully
-    releases the dirty NIF scheduler thread so other Erlang processes and
-    Python contexts can run. This is true cooperative yielding.
+    In sync context (when called from py:exec or py:eval), the sleep uses
+    Erlang's receive/after via erlang.call('_py_sleep', seconds), which
+    releases the dirty NIF scheduler thread. When called from py:call
+    contexts, falls back to Python's time.sleep() which blocks the dirty
+    scheduler but ensures correct time measurement behavior.
 
     Args:
         seconds: Duration to sleep in seconds (float or int).
@@ -198,9 +196,9 @@ def sleep(seconds):
         async def main():
             await erlang.sleep(0.5)  # Uses Erlang timer system
 
-        # Sync context - releases dirty scheduler via Erlang suspension
+        # Sync context
         def handler():
-            erlang.sleep(0.5)  # Suspends Erlang process, frees dirty scheduler
+            erlang.sleep(0.5)  # Blocks for 0.5 seconds
     """
     try:
         asyncio.get_running_loop()
@@ -211,8 +209,16 @@ def sleep(seconds):
         try:
             import erlang
             erlang.call('_py_sleep', seconds)
-        except (ImportError, AttributeError):
-            # Fallback when not in Erlang NIF environment
+        except BaseException as e:
+            # SuspensionRequiredException inherits from BaseException (not Exception).
+            # When suspension is triggered, the NIF would replay the entire Python
+            # function from the beginning after the callback completes. This causes
+            # issues with time measurement since time.time() is called again during
+            # replay. For sync sleep, we fall back to time.sleep() which blocks
+            # correctly from the caller's perspective.
+            # Note: This means the dirty scheduler is NOT freed during sync sleep
+            # when running in context_call mode. For proper dirty scheduler release
+            # in sync contexts, use py:exec/py:eval instead of py:call.
             time.sleep(seconds)
 
 
@@ -297,6 +303,43 @@ def spawn_task(coro, *, name=None):
             pass
 
     return task
+
+
+def _run_async_from_erlang(module, func, args, kwargs):
+    """Helper function called from Erlang to run async code.
+
+    This is used by py_event_loop:run/3,4 to execute async Python
+    functions from Erlang in a blocking manner.
+
+    Args:
+        module: Module name (string or bytes)
+        func: Function name (string or bytes)
+        args: Positional arguments (list)
+        kwargs: Keyword arguments (dict)
+
+    Returns:
+        The result of the async function.
+    """
+    import importlib
+
+    # Convert module/func to strings if needed
+    if isinstance(module, bytes):
+        module = module.decode('utf-8')
+    if isinstance(func, bytes):
+        func = func.decode('utf-8')
+
+    # Import module and get function
+    mod = importlib.import_module(module)
+    fn = getattr(mod, func)
+
+    # Call function to get coroutine
+    if kwargs:
+        coro = fn(*args, **kwargs)
+    else:
+        coro = fn(*args)
+
+    # Run the coroutine using erlang.run()
+    return run(coro)
 
 
 def install():
