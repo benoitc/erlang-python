@@ -8,7 +8,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {erlang_python, "2.0.0"}
+    {erlang_python, "2.1.0"}
 ]}.
 ```
 
@@ -469,3 +469,4 @@ This prevents slow HTTP requests from blocking quick math operations. See [Dual 
 - See [Reactor](reactor.md) for FD-based protocol handling
 - See [Security](security.md) for sandbox and blocked operations
 - See [Web Frameworks](web-frameworks.md) for ASGI/WSGI integration
+- See [Distributed Execution](distributed.md) for running Python across Erlang nodes

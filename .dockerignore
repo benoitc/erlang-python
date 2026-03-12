@@ -1,0 +1,30 @@
+# Build artifacts - IMPORTANT: exclude to avoid cmake cache conflicts
+_build/
+*.beam
+*.o
+*.so
+erl_crash.dump
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+logs/
+ct_logs/
+cover/
+benchmark_results/
+
+# Git
+.git/
+.gitignore
+
+# Keep docker scripts but not Dockerfiles
+docker/Dockerfile.*
+docker/docker-compose*.yml

@@ -1,0 +1,43 @@
+# Dockerfile for distributed Python testing
+# Lightweight image for running multiple Erlang nodes with Python
+FROM erlang:27-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.12 and build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install numpy for the examples
+RUN pip3 install --break-system-packages numpy
+
+# Set environment
+ENV PYTHON_CONFIG=/usr/bin/python3-config
+
+# Create working directory
+WORKDIR /app
+
+# Copy source
+COPY . /app
+
+# Ensure demo script is executable
+RUN chmod +x /app/start-distributed-demo.sh || true
+
+# Remove ex_doc plugin (not needed for runtime)
+RUN sed -i '/rebar3_ex_doc/d' rebar.config || true
+
+# Build the project
+RUN rebar3 compile
+
+# Compile the distributed example module (strip escript header, add module declaration)
+RUN (echo '-module(distributed_python).' && sed '1d;/-mode(compile)./d' examples/distributed_python.erl) > /tmp/distributed_python.erl && \
+    erlc -W0 -o _build/default/lib/erlang_python/ebin /tmp/distributed_python.erl
+
+# Default command - start Erlang with distribution enabled
+CMD ["erl", "-pa", "_build/default/lib/erlang_python/ebin", "-eval", "application:ensure_all_started(erlang_python)"]

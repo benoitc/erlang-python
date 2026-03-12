@@ -1,0 +1,66 @@
+# Docker Compose for distributed Python execution demo
+#
+# This creates a 3-node Erlang cluster:
+#   - coordinator: orchestrates work
+#   - worker1: Python execution node
+#   - worker2: Python execution node
+#
+# Usage:
+#   docker compose -f docker/docker-compose.distributed.yml up --build
+#   docker compose -f docker/docker-compose.distributed.yml run coordinator
+#
+# Then in the coordinator shell:
+#   distributed_python:demo().
+
+services:
+  # Coordinator node - runs the demo
+  coordinator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.distributed
+    hostname: coordinator
+    command: ["erl", "-sname", "coordinator", "-setcookie", "distributed_demo", "-pa", "_build/default/lib/erlang_python/ebin", "-eval", "application:ensure_all_started(erlang_python), net_adm:ping(worker1@worker1), net_adm:ping(worker2@worker2)"]
+    networks:
+      - erlang_cluster
+    depends_on:
+      - worker1
+      - worker2
+    stdin_open: true
+    tty: true
+
+  # Worker node 1
+  worker1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.distributed
+    hostname: worker1
+    command: ["erl", "-sname", "worker1", "-setcookie", "distributed_demo", "-pa", "_build/default/lib/erlang_python/ebin", "-eval", "application:ensure_all_started(erlang_python)", "-noshell"]
+    networks:
+      - erlang_cluster
+
+  # Worker node 2
+  worker2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.distributed
+    hostname: worker2
+    command: ["erl", "-sname", "worker2", "-setcookie", "distributed_demo", "-pa", "_build/default/lib/erlang_python/ebin", "-eval", "application:ensure_all_started(erlang_python)", "-noshell"]
+    networks:
+      - erlang_cluster
+
+  # Run the demo automatically
+  demo:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.distributed
+    hostname: demo
+    command: ["/app/start-distributed-demo.sh"]
+    networks:
+      - erlang_cluster
+    depends_on:
+      - worker1
+      - worker2
+
+networks:
+  erlang_cluster:
+    driver: bridge
