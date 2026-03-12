@@ -38,6 +38,10 @@ all() ->
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
     {ok, _} = py:start_contexts(),
+    %% Bind to a specific context to ensure exec/eval use the same namespace
+    %% (scheduler-based routing may use different contexts on some platforms)
+    Ctx = py_context_router:get_context(1),
+    py_context_router:bind_context(Ctx),
     %% Register a test callback for schedule() tests
     py_callback:register(<<"_test_add">>, fun([A, B]) -> A + B end),
     py_callback:register(<<"_test_mul">>, fun([A, B]) -> A * B end),
@@ -46,6 +50,7 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
+    py_context_router:unbind_context(),
     py_callback:unregister(<<"_test_add">>),
     py_callback:unregister(<<"_test_mul">>),
     py_callback:unregister(<<"_test_echo">>),
