@@ -92,6 +92,7 @@
     set_trace_receiver/1,
     clear_trace_receiver/0,
     %% Erlang-native event loop (for asyncio integration)
+    set_event_loop_priv_dir/1,
     event_loop_new/0,
     event_loop_destroy/1,
     event_loop_set_router/2,
@@ -690,6 +691,12 @@ clear_trace_receiver() ->
 %%% ============================================================================
 %%% Erlang-native Event Loop (asyncio integration)
 %%% ============================================================================
+
+%% @doc Set the priv_dir path for module imports in subinterpreters.
+%% Must be called during application startup before creating event loops.
+-spec set_event_loop_priv_dir(binary() | string()) -> ok | {error, term()}.
+set_event_loop_priv_dir(_Path) ->
+    ?NIF_STUB.
 
 %% @doc Create a new Erlang-backed asyncio event loop.
 %% Returns an opaque reference to be used with event loop functions.

@@ -51,6 +51,10 @@ ErlNifResourceType *FD_RESOURCE_TYPE = NULL;
 /** Resource type for timers */
 ErlNifResourceType *TIMER_RESOURCE_TYPE = NULL;
 
+/** @brief Global priv_dir path for module imports in subinterpreters */
+static char g_priv_dir[1024] = {0};
+static bool g_priv_dir_set = false;
+
 /** Atoms for event loop messages */
 ERL_NIF_TERM ATOM_SELECT;
 ERL_NIF_TERM ATOM_READY_INPUT;
@@ -614,6 +618,90 @@ int event_loop_init(ErlNifEnv *env) {
 
 void event_loop_cleanup(void) {
     /* Resource types are cleaned up by the runtime */
+}
+
+/**
+ * set_event_loop_priv_dir(Path) -> ok
+ *
+ * Store the priv_dir path for use when importing modules in subinterpreters.
+ * Called from Erlang during application startup.
+ */
+ERL_NIF_TERM nif_set_event_loop_priv_dir(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    ErlNifBinary path_bin;
+    if (!enif_inspect_binary(env, argv[0], &path_bin) &&
+        !enif_inspect_iolist_as_binary(env, argv[0], &path_bin)) {
+        return make_error(env, "invalid_path");
+    }
+
+    size_t len = path_bin.size;
+    if (len >= sizeof(g_priv_dir)) {
+        return make_error(env, "path_too_long");
+    }
+
+    memcpy(g_priv_dir, path_bin.data, len);
+    g_priv_dir[len] = '\0';
+    g_priv_dir_set = true;
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief Ensure sys.path includes priv_dir before importing modules.
+ *
+ * This is needed for subinterpreters in shared GIL mode where each
+ * interpreter has its own sys.path that doesn't inherit from main.
+ *
+ * @return true if priv_dir was added or already present, false on error
+ */
+static bool ensure_priv_dir_in_sys_path(void) {
+    if (!g_priv_dir_set || g_priv_dir[0] == '\0') {
+        return true;  /* No priv_dir set, skip (will try import anyway) */
+    }
+
+    PyObject *sys = PyImport_ImportModule("sys");
+    if (sys == NULL) {
+        PyErr_Clear();
+        return false;
+    }
+
+    PyObject *path = PyObject_GetAttrString(sys, "path");
+    Py_DECREF(sys);
+    if (path == NULL || !PyList_Check(path)) {
+        PyErr_Clear();
+        Py_XDECREF(path);
+        return false;
+    }
+
+    /* Check if priv_dir is already in sys.path */
+    PyObject *priv_dir_str = PyUnicode_FromString(g_priv_dir);
+    if (priv_dir_str == NULL) {
+        PyErr_Clear();
+        Py_DECREF(path);
+        return false;
+    }
+
+    int contains = PySequence_Contains(path, priv_dir_str);
+    if (contains == 1) {
+        /* Already in path */
+        Py_DECREF(priv_dir_str);
+        Py_DECREF(path);
+        return true;
+    }
+
+    /* Insert at front of sys.path */
+    if (PyList_Insert(path, 0, priv_dir_str) < 0) {
+        PyErr_Clear();
+        Py_DECREF(priv_dir_str);
+        Py_DECREF(path);
+        return false;
+    }
+
+    Py_DECREF(priv_dir_str);
+    Py_DECREF(path);
+    return true;
 }
 
 /* ============================================================================
@@ -1709,6 +1797,9 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
     }
 
     /* Import erlang_loop to get _run_and_send */
+    /* Ensure priv_dir is in sys.path for subinterpreter contexts */
+    ensure_priv_dir_in_sys_path();
+
     PyObject *erlang_loop = PyImport_ImportModule("erlang_loop");
     if (erlang_loop == NULL) {
         /* Try _erlang_impl._loop as fallback */
@@ -2169,6 +2260,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             PyGILState_Release(gstate);
             return make_error(env, "asyncio_import_failed");
         }
+
+        /* Ensure priv_dir is in sys.path for subinterpreter contexts */
+        ensure_priv_dir_in_sys_path();
 
         PyObject *erlang_loop_mod = PyImport_ImportModule("_erlang_impl._loop");
         if (erlang_loop_mod == NULL) {

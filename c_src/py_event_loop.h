@@ -385,6 +385,14 @@ void event_loop_cleanup(void);
  * ============================================================================ */
 
 /**
+ * @brief Set the priv_dir path for module imports in subinterpreters
+ *
+ * NIF: set_event_loop_priv_dir(Path) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_set_event_loop_priv_dir(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
+
+/**
  * @brief Create a new event loop resource
  *
  * NIF: event_loop_new() -> {ok, LoopRef} | {error, Reason}

@@ -302,11 +302,8 @@ loop(State) ->
 %% @private
 handle_fd_handoff(Fd, ClientInfo, State) ->
     #state{
-        ref = Ref,
-        connections = Conns,
         active_connections = Active,
-        max_connections = MaxConns,
-        total_connections = TotalConns
+        max_connections = MaxConns
     } = State,
 
     %% Check connection limit
@@ -318,38 +315,58 @@ handle_fd_handoff(Fd, ClientInfo, State) ->
             loop(State);
 
         false ->
-            %% Register FD for monitoring
-            case py_nif:reactor_register_fd(Ref, Fd, self()) of
-                {ok, FdRef} ->
-                    %% Inject reactor_pid into client_info for async signaling
-                    ClientInfoWithPid = ClientInfo#{reactor_pid => self()},
+            %% Duplicate the fd before registering to avoid conflicts with
+            %% the tcp_inet driver on platforms like FreeBSD where kqueue
+            %% enforces exclusive fd ownership in enif_select/driver_select.
+            case py_nif:dup_fd(Fd) of
+                {ok, DupFd} ->
+                    register_fd(DupFd, ClientInfo, State);
+                {error, _Reason} ->
+                    %% dup failed, try with original fd (may fail on FreeBSD)
+                    register_fd(Fd, ClientInfo, State)
+            end
+    end.
 
-                    %% Initialize Python protocol handler
-                    case py_nif:reactor_init_connection(Ref, Fd, ClientInfoWithPid) of
-                        ok ->
-                            %% Store connection info
-                            ConnInfo = #{
-                                fd_ref => FdRef,
-                                client_info => ClientInfo
-                            },
-                            NewConns = maps:put(Fd, ConnInfo, Conns),
-                            NewState = State#state{
-                                connections = NewConns,
-                                active_connections = Active + 1,
-                                total_connections = TotalConns + 1
-                            },
-                            loop(NewState);
+%% @private
+register_fd(Fd, ClientInfo, State) ->
+    #state{
+        ref = Ref,
+        connections = Conns,
+        active_connections = Active,
+        total_connections = TotalConns
+    } = State,
 
-                        {error, _Reason} ->
-                            %% Failed to init connection, close
-                            py_nif:reactor_close_fd(Ref, FdRef),
-                            loop(State)
-                    end;
+    %% Register FD for monitoring
+    case py_nif:reactor_register_fd(Ref, Fd, self()) of
+        {ok, FdRef} ->
+            %% Inject reactor_pid into client_info for async signaling
+            ClientInfoWithPid = ClientInfo#{reactor_pid => self()},
+
+            %% Initialize Python protocol handler
+            case py_nif:reactor_init_connection(Ref, Fd, ClientInfoWithPid) of
+                ok ->
+                    %% Store connection info
+                    ConnInfo = #{
+                        fd_ref => FdRef,
+                        client_info => ClientInfo
+                    },
+                    NewConns = maps:put(Fd, ConnInfo, Conns),
+                    NewState = State#state{
+                        connections = NewConns,
+                        active_connections = Active + 1,
+                        total_connections = TotalConns + 1
+                    },
+                    loop(NewState);
 
                 {error, _Reason} ->
-                    %% Failed to register FD
+                    %% Failed to init connection, close
+                    py_nif:reactor_close_fd(Ref, FdRef),
                     loop(State)
-            end
+            end;
+
+        {error, _Reason} ->
+            %% Failed to register FD
+            loop(State)
     end.
 
 %% ============================================================================

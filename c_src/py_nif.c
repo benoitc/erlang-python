@@ -3865,6 +3865,7 @@ static ErlNifFunc nif_funcs[] = {
     {"clear_trace_receiver", 0, nif_clear_trace_receiver, 0},
 
     /* Erlang-native event loop NIFs */
+    {"set_event_loop_priv_dir", 1, nif_set_event_loop_priv_dir, 0},
     {"event_loop_new", 0, nif_event_loop_new, 0},
     {"event_loop_destroy", 1, nif_event_loop_destroy, 0},
     {"event_loop_set_router", 2, nif_event_loop_set_router, 0},

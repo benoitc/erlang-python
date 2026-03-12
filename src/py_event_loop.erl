@@ -226,6 +226,10 @@ init([]) ->
     %% Register callbacks on startup
     register_callbacks(),
 
+    %% Set priv_dir for module imports in subinterpreters
+    PrivDir = code:priv_dir(erlang_python),
+    ok = py_nif:set_event_loop_priv_dir(PrivDir),
+
     %% Create and initialize the event loop immediately
     case py_nif:event_loop_new() of
         {ok, LoopRef} ->
