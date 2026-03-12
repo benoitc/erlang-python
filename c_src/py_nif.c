@@ -158,6 +158,7 @@ ERL_NIF_TERM ATOM_ASYNC_RESULT;
 ERL_NIF_TERM ATOM_ASYNC_ERROR;
 ERL_NIF_TERM ATOM_SUSPENDED;
 ERL_NIF_TERM ATOM_SCHEDULE;
+ERL_NIF_TERM ATOM_MORE;
 
 /* Logging atoms */
 ERL_NIF_TERM ATOM_PY_LOG;
@@ -3693,6 +3694,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_ASYNC_ERROR = enif_make_atom(env, "async_error");
     ATOM_SUSPENDED = enif_make_atom(env, "suspended");
     ATOM_SCHEDULE = enif_make_atom(env, "schedule");
+    ATOM_MORE = enif_make_atom(env, "more");
 
     /* Logging atoms */
     ATOM_PY_LOG = enif_make_atom(env, "py_log");

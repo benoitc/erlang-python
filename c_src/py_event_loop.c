@@ -2061,19 +2061,26 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         return make_error(env, "task_queue_not_initialized");
     }
 
+    /*
+     * Reset wake_pending flag at START of processing.
+     * This allows submit_task to send new wakeups for tasks submitted during
+     * our processing. The worker's drain-until-empty loop will catch them.
+     *
+     * IMPORTANT: Must be cleared BEFORE the task_count check to avoid a race:
+     * - Worker receives task_ready, calls process_ready_tasks
+     * - Tasks processed, wake_pending cleared, new tasks submitted (wake sent)
+     * - Worker receives task_ready in drain loop, calls process_ready_tasks
+     * - task_count == 0 (already processed), but wake_pending still true!
+     * - Early return leaves wake_pending true, blocking future wakeups
+     */
+    atomic_store(&loop->task_wake_pending, false);
+
     /* OPTIMIZATION: Check task count BEFORE acquiring GIL
      * This avoids expensive GIL acquisition when there's nothing to do */
     uint_fast64_t task_count = atomic_load(&loop->task_count);
     if (task_count == 0) {
         return ATOM_OK;  /* Nothing to process, skip GIL entirely */
     }
-
-    /*
-     * Reset wake_pending flag at START of processing.
-     * This allows submit_task to send new wakeups for tasks submitted during
-     * our processing. The worker's drain-until-empty loop will catch them.
-     */
-    atomic_store(&loop->task_wake_pending, false);
 
     /* Check if Python runtime is running */
     if (!runtime_is_running()) {
@@ -2441,6 +2448,16 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     }
 
     PyGILState_Release(gstate);
+
+    /*
+     * Check if there are more tasks remaining (we hit MAX_TASK_BATCH limit).
+     * Return 'more' so the Erlang side can loop immediately without waiting
+     * for a new task_ready message.
+     */
+    if (atomic_load(&loop->task_count) > 0) {
+        return ATOM_MORE;
+    }
+
     return result;
 }
 

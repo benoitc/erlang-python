@@ -1286,6 +1286,7 @@ extern ERL_NIF_TERM ATOM_ASYNC_RESULT;   /**< @brief `async_result` atom */
 extern ERL_NIF_TERM ATOM_ASYNC_ERROR;    /**< @brief `async_error` atom */
 extern ERL_NIF_TERM ATOM_SUSPENDED;      /**< @brief `suspended` atom */
 extern ERL_NIF_TERM ATOM_SCHEDULE;       /**< @brief `schedule` atom */
+extern ERL_NIF_TERM ATOM_MORE;           /**< @brief `more` atom (more tasks pending) */
 
 /* Logging atoms */
 extern ERL_NIF_TERM ATOM_PY_LOG;         /**< @brief `py_log` atom */
