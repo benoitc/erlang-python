@@ -17,7 +17,35 @@
   - Works in sync code called by Erlang (where `asyncio.get_running_loop()` fails)
   - Returns `asyncio.Task` for optional await/cancel (fire-and-forget pattern)
   - Automatically wakes up the event loop in sync context
-  - Works with both ErlangEventLoop and standard asyncio loops
+
+- **Explicit Scheduling API** - Control dirty scheduler release from Python
+  - `erlang.schedule(callback, *args)` - Release scheduler, continue via Erlang callback
+  - `erlang.schedule_py(module, func, args, kwargs)` - Release scheduler, continue in Python
+  - `erlang.consume_time_slice(percent)` - Check if NIF time slice exhausted
+  - `ScheduleMarker` type for cooperative long-running tasks
+  - See [Scheduling API docs](docs/asyncio.md#explicit-scheduling-api)
+
+- **Distributed Python Execution** - Documentation and Docker demo
+  - Run Python across Erlang nodes using `rpc:call`
+  - Docker Compose setup for testing distributed patterns
+  - See [Distributed Execution docs](docs/distributed.md)
+
+### Changed
+
+- **Event Loop Performance Optimizations**
+  - Growable pending queue with capacity doubling (256 to 16384)
+  - Snapshot-detach pattern to reduce mutex contention
+  - Callable cache (64 slots) avoids PyImport/GetAttr per task
+  - Task wakeup coalescing with atomic flag
+  - Drain-until-empty loop for faster task processing
+
+### Fixed
+
+- `ensure_venv` now always installs dependencies, even if venv exists
+- `erlang.sleep()` timing in sync context
+- `time()` returns fresh value when loop not running
+- Handle pooling bugs in ErlangEventLoop
+- Task wakeup race causing batch task stalls
 
 ## 2.0.0 (2026-03-09)
 
