@@ -19,13 +19,7 @@ Similarly, `exec()` replaces the current process image entirely, terminating the
 
 ## Audit Hook Mechanism
 
-The sandbox uses Python's audit hook system (PEP 578) to intercept dangerous operations at a low level, before they can execute:
-
-```python
-# Automatically installed when running inside Erlang
-import sys
-sys.addaudithook(sandbox_hook)  # Cannot be removed once installed
-```
+The sandbox uses Python's audit hook system (PEP 578) to intercept dangerous operations at a low level, before they can execute. The hook is installed automatically when `erlang_python` starts and cannot be removed once installed.
 
 This provides defense-in-depth - even if Python code tries to import `os` or `subprocess` directly, the operations are blocked.
 
@@ -142,7 +136,7 @@ erlang.send(supervisor_pid, ('spawn_worker', worker_args))
 From Python, you can check if the sandbox is active:
 
 ```python
-from erlang._sandbox import is_sandboxed
+from _erlang_impl._sandbox import is_sandboxed
 
 if is_sandboxed():
     print("Running inside Erlang VM - subprocess operations blocked")
