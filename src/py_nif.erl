@@ -761,7 +761,8 @@ submit_task(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
 %%
 %% Called by the event worker when it receives 'task_ready' message.
 %% Dequeues all tasks, creates coroutines, and schedules them on the loop.
--spec process_ready_tasks(reference()) -> ok | {error, term()}.
+%% Returns 'more' if batch limit was hit and more tasks remain.
+-spec process_ready_tasks(reference()) -> ok | more | {error, term()}.
 process_ready_tasks(_LoopRef) ->
     ?NIF_STUB.
 
@@ -1262,10 +1263,11 @@ context_destroy(_ContextRef) ->
 %% @param Func Function name
 %% @param Args List of arguments
 %% @param Kwargs Map of keyword arguments
-%% @returns {ok, Result} | {error, Reason} | {suspended, ...}
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_call(reference(), binary(), binary(), list(), map()) ->
     {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}}.
+    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
+    {schedule, binary(), tuple()}.
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
@@ -1276,10 +1278,11 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
 %% @param ContextRef Context reference
 %% @param Code Python code to evaluate
 %% @param Locals Map of local variables
-%% @returns {ok, Result} | {error, Reason} | {suspended, ...}
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_eval(reference(), binary(), map()) ->
     {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}}.
+    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
+    {schedule, binary(), tuple()}.
 context_eval(_ContextRef, _Code, _Locals) ->
     ?NIF_STUB.
 

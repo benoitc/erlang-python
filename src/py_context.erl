@@ -537,9 +537,7 @@ handle_schedule(_Ref, CallbackName, CallbackArgs) when is_binary(CallbackName) -
             {ok, Result};
         {error, Reason} ->
             {error, Reason}
-    end;
-handle_schedule(Ref, CallbackName, CallbackArgs) when is_atom(CallbackName) ->
-    handle_schedule(Ref, atom_to_binary(CallbackName), CallbackArgs).
+    end.
 
 %% @private
 %% Handle callback, allowing nested py:eval/call to be processed.
