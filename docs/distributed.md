@@ -172,38 +172,41 @@ setup_worker(Node) ->
     %% Ensure application is started
     ok = rpc:call(Node, application, ensure_all_started, [erlang_python]),
 
-    %% Setup virtual environment with dependencies
+    %% Setup virtual environment with requirements file
     {ok, VenvPath} = rpc:call(Node, py, ensure_venv, [
         <<"/opt/app/venv">>,
-        [<<"numpy">>, <<"pandas">>, <<"scikit-learn">>]
+        <<"/opt/app/requirements.txt">>
     ]),
 
     %% Verify setup
-    {ok, true} = rpc:call(Node, py, eval, [<<"'numpy' in dir()">>]),
+    {ok, _} = rpc:call(Node, py, eval, [<<"__import__('numpy')">>]),
     ok.
 ```
 
 ### Reproducible Environments
 
-Create identical environments across all nodes:
+Create identical environments across all nodes using a shared requirements file:
 
 ```erlang
-%% Define environment specification
--define(PYTHON_DEPS, [
-    <<"numpy==1.26.0">>,
-    <<"pandas==2.1.0">>,
-    <<"scikit-learn==1.3.0">>,
-    <<"torch==2.1.0">>
-]).
-
-%% Setup all worker nodes
-setup_cluster(Nodes) ->
+%% Setup all worker nodes with same requirements.txt
+setup_cluster(Nodes, RequirementsFile) ->
     lists:foreach(fun(Node) ->
         {ok, _} = rpc:call(Node, py, ensure_venv, [
             <<"/opt/app/venv">>,
-            ?PYTHON_DEPS
+            RequirementsFile
         ])
     end, Nodes).
+
+%% Usage:
+%% setup_cluster(Nodes, <<"/shared/requirements.txt">>).
+```
+
+Where `requirements.txt` contains:
+```
+numpy==1.26.0
+pandas==2.1.0
+scikit-learn==1.3.0
+torch==2.1.0
 ```
 
 ## Parallel Execution Patterns
