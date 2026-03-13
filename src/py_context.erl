@@ -684,10 +684,7 @@ handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
 %% @private
 %% Check if a context is a subinterpreter (has interp_id > 0)
 is_context_subinterp(Ref) ->
-    case py_nif:context_interp_id(Ref) of
-        {ok, InterpId} when InterpId > 0 -> true;
-        _ -> false
-    end.
+    py_nif:context_interp_id(Ref) > 0.
 
 %% @private
 %% Handle schedule marker - Python returned erlang.schedule() or schedule_py()
