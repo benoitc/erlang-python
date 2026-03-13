@@ -160,9 +160,8 @@ class Channel:
             msg = await channel.async_receive()
         """
         import asyncio
-        import erlang
 
-        # Try non-blocking first
+        # Try non-blocking first (direct NIF - fast)
         result = self.try_receive()
         if result is not None:
             return result
@@ -171,78 +170,14 @@ class Channel:
         if self._is_closed():
             raise ChannelClosed("Channel has been closed")
 
-        # Get the running event loop
-        loop = asyncio.get_running_loop()
-        future = loop.create_future()
-
-        # Get callback_id from the event loop
-        callback_id = loop._next_id()
-
-        # Get the loop capsule for registration with Erlang
-        loop_capsule = loop._loop_capsule
-
-        # Track this channel receive in the timers dict (reuses timer dispatch)
-        # We store a tuple (channel, future) so we can resolve it
-        self._pending_async = (callback_id, future)
-
-        # Create a handle that will resolve the future when dispatched
-        from asyncio import events
-
-        def _resolve_callback():
-            if not future.done():
-                # Data should be available now, fetch it
-                try:
-                    result = self.try_receive()
-                    if result is not None:
-                        future.set_result(result)
-                    elif self._is_closed():
-                        future.set_exception(ChannelClosed("Channel has been closed"))
-                    else:
-                        # Rare edge case: woken but no data. Re-register.
-                        future.set_exception(ChannelClosed("Channel state error"))
-                except Exception as e:
-                    future.set_exception(e)
-
-        handle = events.Handle(_resolve_callback, (), loop)
-        loop._timers[callback_id] = handle
-        loop._handle_to_callback_id[id(handle)] = callback_id
-
-        # Tell Erlang to dispatch callback_id when data arrives
-        try:
-            wait_result = erlang.call('_py_channel_wait', self._ref, callback_id, loop_capsule)
-
-            # If data was immediately available, Erlang returns {ok, Data}
-            if isinstance(wait_result, tuple) and len(wait_result) == 2:
-                status, value = wait_result
-                if status == 'ok':
-                    # Data returned immediately - cancel the waiter and return
-                    loop._timers.pop(callback_id, None)
-                    loop._handle_to_callback_id.pop(id(handle), None)
-                    return value
-                elif status == 'error':
-                    loop._timers.pop(callback_id, None)
-                    loop._handle_to_callback_id.pop(id(handle), None)
-                    if value == 'closed':
-                        raise ChannelClosed("Channel has been closed")
-                    else:
-                        raise RuntimeError(f"Channel wait error: {value}")
-        except Exception as e:
-            # Cleanup on error
-            loop._timers.pop(callback_id, None)
-            loop._handle_to_callback_id.pop(id(handle), None)
-            raise
-
-        try:
-            return await future
-        finally:
-            # Cleanup on cancel or completion
-            loop._timers.pop(callback_id, None)
-            loop._handle_to_callback_id.pop(id(handle), None)
-            # Cancel the waiter in Erlang if still registered
-            try:
-                erlang.call('_py_channel_cancel_wait', self._ref, callback_id)
-            except Exception:
-                pass
+        # Poll with short sleeps, yielding to other coroutines
+        while True:
+            await asyncio.sleep(0.0001)  # 100µs yield to event loop
+            result = self.try_receive()
+            if result is not None:
+                return result
+            if self._is_closed():
+                raise ChannelClosed("Channel has been closed")
 
     def __aiter__(self):
         """Return async iterator for the channel.
