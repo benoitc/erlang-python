@@ -2887,6 +2887,13 @@ static ERL_NIF_TERM nif_context_eval_with_env(ErlNifEnv *env, int argc, const ER
         } else {
             result = make_py_error(env);
         }
+    } else if (is_schedule_marker(py_result)) {
+        /* Schedule marker: release dirty scheduler, continue via callback */
+        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+        Py_DECREF(py_result);
+        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
     } else {
         ERL_NIF_TERM term_result = py_to_term(env, py_result);
         Py_DECREF(py_result);

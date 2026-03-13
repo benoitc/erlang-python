@@ -761,15 +761,33 @@ wait_for_callback(Ref, CallbackPid) ->
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
 
-        %% Handle nested py:eval while waiting for callback
+        %% Handle nested py:call while waiting for callback (with EnvRef)
+        {call, From, MRef, Module, Func, Args, Kwargs, EnvRef} ->
+            NestedResult = handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef),
+            From ! {MRef, NestedResult},
+            wait_for_callback(Ref, CallbackPid);
+
+        %% Handle nested py:eval while waiting for callback (without EnvRef)
         {eval, From, MRef, Code, Locals} ->
             NestedResult = handle_eval_with_suspension(Ref, Code, Locals),
+            From ! {MRef, NestedResult},
+            wait_for_callback(Ref, CallbackPid);
+
+        %% Handle nested py:eval while waiting for callback (with EnvRef)
+        {eval, From, MRef, Code, Locals, EnvRef} ->
+            NestedResult = handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
 
         %% Handle nested py:exec while waiting for callback
         {exec, From, MRef, Code} ->
             NestedResult = py_nif:context_exec(Ref, Code),
+            From ! {MRef, NestedResult},
+            wait_for_callback(Ref, CallbackPid);
+
+        %% Handle nested py:exec while waiting for callback (with EnvRef)
+        {exec, From, MRef, Code, EnvRef} ->
+            NestedResult = py_nif:context_exec(Ref, Code, EnvRef),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
 
@@ -781,9 +799,14 @@ wait_for_callback(Ref, CallbackPid) ->
 
         %% Handle get_interp_id while waiting
         {get_interp_id, From, MRef} ->
-            %% We can't get InterpId here, but we can query the NIF
-            InterpIdResult = py_nif:context_interp_id(Ref),
-            From ! {MRef, InterpIdResult},
+            InterpId = py_nif:context_interp_id(Ref),
+            From ! {MRef, {ok, InterpId}},
+            wait_for_callback(Ref, CallbackPid);
+
+        %% Handle create_local_env while waiting
+        {create_local_env, From, MRef} ->
+            Result = py_nif:create_local_env(Ref),
+            From ! {MRef, Result},
             wait_for_callback(Ref, CallbackPid)
     end.
 
