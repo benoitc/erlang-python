@@ -1,0 +1,75 @@
+# Dockerfile for testing with Python ASAN (Address Sanitizer)
+FROM erlang:27-slim
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    wget \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libncurses5-dev \
+    libncursesw5-dev \
+    xz-utils \
+    tk-dev \
+    libffi-dev \
+    liblzma-dev \
+    clang \
+    llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build Python 3.13 with ASAN enabled
+ARG PYTHON_VERSION=3.13.12
+RUN cd /tmp && \
+    wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz && \
+    tar xf Python-${PYTHON_VERSION}.tar.xz && \
+    cd Python-${PYTHON_VERSION} && \
+    CC=clang CXX=clang++ \
+    CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
+    LDFLAGS="-fsanitize=address" \
+    ./configure --prefix=/usr/local \
+        --with-pydebug \
+        --with-address-sanitizer \
+        --enable-shared \
+        LDFLAGS="-Wl,-rpath,/usr/local/lib -fsanitize=address" && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && rm -rf /tmp/Python-*
+
+# Verify Python installation
+RUN python3 --version
+
+# Set environment for rebar3 and ASAN
+ENV PYTHON_CONFIG=/usr/local/bin/python3-config
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+ENV ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:print_stats=1
+
+# Set compiler to clang with ASAN for NIF compilation via CMake variables
+ENV CC=clang
+ENV CXX=clang++
+ENV CMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1"
+ENV CMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1"
+ENV CMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+ENV CMAKE_SHARED_LINKER_FLAGS="-fsanitize=address"
+
+# Create working directory
+WORKDIR /app
+
+# Copy source
+COPY . /app
+
+# Remove problematic plugin
+RUN sed -i '/rebar3_ex_doc/d' rebar.config || true
+
+# Set ASAN_BUILD for the build hooks
+ENV ASAN_BUILD=1
+
+# Run tests - do_cmake.sh will use ASAN flags via ASAN_BUILD env var
+# Preload ASAN runtime to ensure symbol compatibility with ASAN-built Python
+CMD export LD_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so) && \
+    rm -rf _build && rebar3 ct --readable=compact

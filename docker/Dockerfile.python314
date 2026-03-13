@@ -1,0 +1,60 @@
+# Dockerfile for testing with Python 3.14 (free-threading support)
+FROM erlang:27-slim
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    wget \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libncurses5-dev \
+    libncursesw5-dev \
+    xz-utils \
+    tk-dev \
+    libffi-dev \
+    liblzma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build Python 3.14 with free-threading enabled
+ARG PYTHON_VERSION=3.14.3
+RUN cd /tmp && \
+    wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz && \
+    tar xf Python-${PYTHON_VERSION}.tar.xz && \
+    cd Python-${PYTHON_VERSION} && \
+    ./configure --prefix=/usr/local \
+        --enable-optimizations \
+        --with-lto \
+        --disable-gil \
+        --enable-shared \
+        LDFLAGS="-Wl,-rpath,/usr/local/lib" && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && rm -rf /tmp/Python-*
+
+# Verify Python installation
+RUN python3 --version && \
+    python3 -c "import sys; print('Free-threading:', hasattr(sys, '_is_gil_enabled') and not sys._is_gil_enabled())"
+
+# Set environment for rebar3
+ENV PYTHON_CONFIG=/usr/local/bin/python3-config
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# Create working directory
+WORKDIR /app
+
+# Copy source
+COPY . /app
+
+# Remove problematic plugin and build
+RUN sed -i '/rebar3_ex_doc/d' rebar.config || true && \
+    rm -rf _build && \
+    rebar3 compile
+
+# Run tests
+CMD ["rebar3", "ct", "--readable=compact"]

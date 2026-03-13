@@ -166,9 +166,13 @@
     context_create/1,
     context_destroy/1,
     context_call/5,
+    context_call/6,
     context_eval/3,
+    context_eval/4,
     context_exec/2,
+    context_exec/3,
     context_call_method/4,
+    create_local_env/1,
     context_to_term/1,
     context_interp_id/1,
     context_set_callback_handler/2,
@@ -1271,6 +1275,22 @@ context_destroy(_ContextRef) ->
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
+%% @doc Call a Python function in a context with a process-local environment.
+%%
+%% @param ContextRef Context reference
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @param Kwargs Map of keyword arguments
+%% @param EnvRef Process-local environment reference
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
+-spec context_call(reference(), binary(), binary(), list(), map(), reference()) ->
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
+    {schedule, binary(), tuple()}.
+context_call(_ContextRef, _Module, _Func, _Args, _Kwargs, _EnvRef) ->
+    ?NIF_STUB.
+
 %% @doc Evaluate a Python expression in a context.
 %%
 %% NO MUTEX - caller must ensure exclusive access (process ownership).
@@ -1286,6 +1306,20 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
 context_eval(_ContextRef, _Code, _Locals) ->
     ?NIF_STUB.
 
+%% @doc Evaluate a Python expression in a context with a process-local environment.
+%%
+%% @param ContextRef Context reference
+%% @param Code Python code to evaluate
+%% @param Locals Map of local variables
+%% @param EnvRef Process-local environment reference
+%% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
+-spec context_eval(reference(), binary(), map(), reference()) ->
+    {ok, term()} | {error, term()} |
+    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
+    {schedule, binary(), tuple()}.
+context_eval(_ContextRef, _Code, _Locals, _EnvRef) ->
+    ?NIF_STUB.
+
 %% @doc Execute Python statements in a context.
 %%
 %% NO MUTEX - caller must ensure exclusive access (process ownership).
@@ -1295,6 +1329,16 @@ context_eval(_ContextRef, _Code, _Locals) ->
 %% @returns ok | {error, Reason}
 -spec context_exec(reference(), binary()) -> ok | {error, term()}.
 context_exec(_ContextRef, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Execute Python code in a context with a process-local environment.
+%%
+%% @param ContextRef Context reference
+%% @param Code Python code to execute
+%% @param EnvRef Process-local environment reference
+%% @returns ok | {error, Reason}
+-spec context_exec(reference(), binary(), reference()) -> ok | {error, term()}.
+context_exec(_ContextRef, _Code, _EnvRef) ->
     ?NIF_STUB.
 
 %% @doc Call a method on a Python object in a context.
@@ -1313,6 +1357,22 @@ context_exec(_ContextRef, _Code) ->
 -spec context_call_method(reference(), reference(), binary(), list()) ->
     {ok, term()} | {error, term()} | {error, not_supported_in_thread_model}.
 context_call_method(_ContextRef, _ObjRef, _Method, _Args) ->
+    ?NIF_STUB.
+
+%% @doc Create a new process-local Python environment.
+%%
+%% Creates a new Python globals/locals dict pair for use as a process-local
+%% environment. The dicts are created inside the context's interpreter to
+%% ensure the correct memory allocator is used.
+%%
+%% The returned resource should be stored in the process dictionary, keyed
+%% by the interpreter ID.
+%% When the process exits, the resource destructor frees the Python dicts.
+%%
+%% @param CtxRef Context reference (from context_create/1)
+%% @returns {ok, EnvRef} | {error, Reason}
+-spec create_local_env(reference()) -> {ok, reference()} | {error, term()}.
+create_local_env(_CtxRef) ->
     ?NIF_STUB.
 
 %% @doc Convert a Python object reference to an Erlang term.

@@ -1,0 +1,83 @@
+# Dockerfile for testing with Python 3.12 (subinterpreter support)
+# Supports ASAN builds when ASAN_BUILD=1
+FROM erlang:27-slim
+
+# Prevent tzdata from asking for input
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build arg for ASAN
+ARG ASAN_BUILD=0
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    wget \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libncurses5-dev \
+    libncursesw5-dev \
+    xz-utils \
+    tk-dev \
+    libffi-dev \
+    liblzma-dev \
+    clang \
+    llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build Python 3.12 from source (with ASAN if requested)
+ARG PYTHON_VERSION=3.12.8
+RUN cd /tmp && \
+    wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz && \
+    tar xf Python-${PYTHON_VERSION}.tar.xz && \
+    cd Python-${PYTHON_VERSION} && \
+    if [ "$ASAN_BUILD" = "1" ]; then \
+        CC=clang CXX=clang++ \
+        CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
+        LDFLAGS="-fsanitize=address" \
+        ./configure --prefix=/usr/local \
+            --with-pydebug \
+            --with-address-sanitizer \
+            --enable-shared \
+            LDFLAGS="-Wl,-rpath,/usr/local/lib -fsanitize=address"; \
+    else \
+        ./configure --prefix=/usr/local \
+            --enable-optimizations \
+            --with-lto \
+            --enable-shared \
+            LDFLAGS="-Wl,-rpath,/usr/local/lib"; \
+    fi && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && rm -rf /tmp/Python-*
+
+# Verify Python installation
+RUN python3 --version && \
+    python3 -c "import sys; print('Python version:', sys.version)"
+
+# Set environment for rebar3
+ENV PYTHON_CONFIG=/usr/local/bin/python3-config
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-}
+
+# Set ASAN options
+ENV ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:print_stats=1
+
+# Create working directory
+WORKDIR /app
+
+# Copy source
+COPY . /app
+
+# Remove problematic plugin
+RUN sed -i '/rebar3_ex_doc/d' rebar.config || true
+
+# Persist ASAN_BUILD from build arg to env for runtime
+ENV ASAN_BUILD=${ASAN_BUILD}
+
+# Run tests - do_cmake.sh will use ASAN flags via ASAN_BUILD env var
+CMD rm -rf _build && rebar3 ct --readable=compact

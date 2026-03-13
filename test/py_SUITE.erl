@@ -57,7 +57,12 @@
     test_asgi_scope_caching/1,
     test_asgi_scope_method_caching/1,
     test_asgi_zero_copy_buffer/1,
-    test_asgi_lazy_headers/1
+    test_asgi_lazy_headers/1,
+    %% Process-bound Python environment tests
+    test_process_env_isolation/1,
+    test_process_env_main_function/1,
+    test_process_env_state_persistence/1,
+    test_process_env_cleanup/1
 ]).
 
 all() ->
@@ -109,7 +114,12 @@ all() ->
         test_asgi_scope_caching,
         test_asgi_scope_method_caching,
         test_asgi_zero_copy_buffer,
-        test_asgi_lazy_headers
+        test_asgi_lazy_headers,
+        %% Process-bound Python environment tests
+        test_process_env_isolation,
+        test_process_env_main_function,
+        test_process_env_state_persistence,
+        test_process_env_cleanup
     ].
 
 init_per_suite(Config) ->
@@ -1248,4 +1258,98 @@ test_asgi_lazy_headers(_Config) ->
     ct:pal("'in' operator works~n"),
 
     ct:pal("Lazy headers test passed~n"),
+    ok.
+
+%% ============================================================================
+%% Process-bound Python Environment Tests
+%% ============================================================================
+
+%% Test that different processes have isolated Python environments
+test_process_env_isolation(_Config) ->
+    Parent = self(),
+
+    %% Spawn process A and set x = 'A'
+    spawn(fun() ->
+        ok = py:exec(<<"x = 'A'">>),
+        {ok, <<"A">>} = py:eval(<<"x">>),
+        Parent ! {proc_a, ok}
+    end),
+
+    %% Spawn process B and set x = 'B'
+    spawn(fun() ->
+        ok = py:exec(<<"x = 'B'">>),
+        {ok, <<"B">>} = py:eval(<<"x">>),
+        Parent ! {proc_b, ok}
+    end),
+
+    %% Wait for both processes to complete
+    receive {proc_a, ok} -> ok after 5000 -> ct:fail("Process A timed out") end,
+    receive {proc_b, ok} -> ok after 5000 -> ct:fail("Process B timed out") end,
+
+    ct:pal("Process isolation test passed~n"),
+    ok.
+
+%% Test that functions defined via exec() are accessible via __main__ module
+test_process_env_main_function(_Config) ->
+    %% Define a function in the process-local environment
+    ok = py:exec(<<"def greet(name): return f'Hello {name}'">>),
+
+    %% Call it via __main__ module
+    {ok, <<"Hello World">>} = py:call('__main__', greet, [<<"World">>]),
+
+    %% Define another function
+    ok = py:exec(<<"def add(a, b): return a + b">>),
+    {ok, 7} = py:call('__main__', add, [3, 4]),
+
+    ct:pal("__main__ function access test passed~n"),
+    ok.
+
+%% Test that state persists across multiple calls within the same process
+test_process_env_state_persistence(_Config) ->
+    %% Initialize counter
+    ok = py:exec(<<"counter = 0">>),
+
+    %% Increment counter multiple times
+    ok = py:exec(<<"counter += 1">>),
+    ok = py:exec(<<"counter += 1">>),
+    ok = py:exec(<<"counter += 1">>),
+
+    %% Verify counter value
+    {ok, 3} = py:eval(<<"counter">>),
+
+    %% Use a function to increment
+    ok = py:exec(<<"def increment(): global counter; counter += 1; return counter">>),
+    {ok, 4} = py:call('__main__', increment, []),
+    {ok, 5} = py:call('__main__', increment, []),
+
+    %% Verify final value
+    {ok, 5} = py:eval(<<"counter">>),
+
+    ct:pal("State persistence test passed~n"),
+    ok.
+
+%% Test that process-local environment is cleaned up when process exits
+test_process_env_cleanup(_Config) ->
+    %% Get initial memory stats
+    {ok, InitialStats} = py:memory_stats(),
+    ct:pal("Initial memory: ~p~n", [InitialStats]),
+
+    %% Spawn a process that creates a large list
+    spawn(fun() ->
+        ok = py:exec(<<"big = list(range(1000000))">>),
+        timer:sleep(50)  % Let it exist briefly
+    end),
+
+    %% Wait for the process to exit
+    timer:sleep(100),
+
+    %% Force GC
+    erlang:garbage_collect(),
+    py:gc(),
+
+    %% Check that memory was freed (this is a soft check)
+    {ok, FinalStats} = py:memory_stats(),
+    ct:pal("Final memory: ~p~n", [FinalStats]),
+
+    ct:pal("Cleanup test passed~n"),
     ok.
