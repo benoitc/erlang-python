@@ -66,9 +66,12 @@ application:ensure_all_started(erlang_python).
 %% Evaluate with local variables
 {ok, 25} = py:eval(<<"x * y">>, #{x => 5, y => 5}).
 
-%% Async calls
-Ref = py:cast(math, factorial, [100]),
+%% Async calls with await
+Ref = py:spawn_call(math, factorial, [100]),
 {ok, Result} = py:await(Ref).
+
+%% Fire-and-forget (no result)
+ok = py:cast(erlang, send, [self(), {done, <<"task1">>}]).
 
 %% Streaming from generators
 {ok, [0,1,4,9,16]} = py:stream_eval(<<"(x**2 for x in range(5))">>).
@@ -443,10 +446,13 @@ escript examples/logging_example.erl
 {ok, Result} = py:call(Module, Function, Args, KwArgs).
 {ok, Result} = py:call(Module, Function, Args, KwArgs, Timeout).
 
-%% Async
-Ref = py:cast(Module, Function, Args).
+%% Async with result
+Ref = py:spawn_call(Module, Function, Args).
 {ok, Result} = py:await(Ref).
 {ok, Result} = py:await(Ref, Timeout).
+
+%% Fire-and-forget (no result returned)
+ok = py:cast(Module, Function, Args).
 ```
 
 ### Expression Evaluation

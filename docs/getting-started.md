@@ -94,13 +94,16 @@ All operations support optional timeouts:
 For non-blocking operations:
 
 ```erlang
-%% Start async call
-Ref = py:cast(math, factorial, [1000]).
+%% Start async call (returns ref for await)
+Ref = py:spawn_call(math, factorial, [1000]).
 
 %% Do other work...
 
 %% Wait for result
 {ok, HugeNumber} = py:await(Ref).
+
+%% Fire-and-forget (no result)
+ok = py:cast(some_module, log_event, [EventData]).
 ```
 
 ## Streaming from Generators
