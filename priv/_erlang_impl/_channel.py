@@ -79,39 +79,31 @@ class Channel:
         """
         self._ref = channel_ref
 
-    def receive(self):
+    def receive(self, timeout_ms=-1):
         """Receive the next message from the channel.
 
-        This operation may suspend Python execution if the channel is empty,
-        yielding control back to Erlang until a message arrives.
+        This is a blocking receive that waits for data. The GIL is released
+        while waiting, allowing other Python threads to run.
+
+        Args:
+            timeout_ms: Timeout in milliseconds (-1 = infinite, default)
 
         Returns:
             The received Erlang term, converted to Python.
 
         Raises:
             ChannelClosed: If the channel has been closed.
+            TimeoutError: If timeout expires before data arrives.
         """
         import erlang
 
-        # Use erlang.call to properly suspend if channel is empty
-        # The Erlang side handles waiting for data
-        result = erlang.call('_py_channel_receive', self._ref)
-
-        if isinstance(result, tuple) and len(result) == 2:
-            status, value = result
-            if status == 'ok':
-                return value
-            elif status == 'error':
-                if value == 'closed':
-                    raise ChannelClosed("Channel has been closed")
-                elif value == 'empty':
-                    # This shouldn't happen in blocking mode,
-                    # but handle it gracefully
-                    raise ChannelClosed("Channel is empty (unexpected)")
-                else:
-                    raise RuntimeError(f"Channel receive error: {value}")
-
-        return result
+        # Direct NIF call - no erlang.call() roundtrip
+        try:
+            return erlang._channel_receive(self._ref, timeout_ms)
+        except RuntimeError as e:
+            if "closed" in str(e):
+                raise ChannelClosed("Channel has been closed")
+            raise
 
     def try_receive(self):
         """Try to receive a message without blocking.
@@ -124,22 +116,13 @@ class Channel:
         """
         import erlang
 
-        # Non-blocking receive via erlang.call
-        result = erlang.call('_py_channel_try_receive', self._ref)
-
-        if isinstance(result, tuple) and len(result) == 2:
-            status, value = result
-            if status == 'ok':
-                return value
-            elif status == 'error':
-                if value == 'closed':
-                    raise ChannelClosed("Channel has been closed")
-                elif value == 'empty':
-                    return None
-                else:
-                    raise RuntimeError(f"Channel receive error: {value}")
-
-        return result
+        # Direct NIF call - no erlang.call() roundtrip
+        try:
+            return erlang._channel_try_receive(self._ref)
+        except RuntimeError as e:
+            if "closed" in str(e):
+                raise ChannelClosed("Channel has been closed")
+            raise
 
     def __iter__(self):
         """Iterate over messages until the channel is closed.
@@ -285,10 +268,7 @@ class Channel:
         """Check if the channel is closed."""
         import erlang
         try:
-            info = erlang.call('_py_channel_info', self._ref)
-            if isinstance(info, dict):
-                return info.get('closed', False)
-            return False
+            return erlang._channel_is_closed(self._ref)
         except Exception:
             return True
 

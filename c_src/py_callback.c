@@ -2215,6 +2215,259 @@ static PyObject *erlang_module_getattr(PyObject *module, PyObject *name) {
     return ErlangFunction_New(name);
 }
 
+/* ============================================================================
+ * Direct Channel NIF Methods (bypass erlang.call() for performance)
+ * ============================================================================ */
+
+#define CHANNEL_CAPSULE_NAME "erlang.channel_ref"
+
+/**
+ * @brief Direct channel try_receive - non-blocking
+ *
+ * Usage: erlang._channel_try_receive(channel_ref)
+ * Returns: Python object if data available, None if empty
+ * Raises: RuntimeError if channel closed
+ */
+static PyObject *erlang_channel_try_receive_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+
+    int result = channel_try_receive(channel, &data, &size);
+
+    if (result == 0) {
+        /* Success - decode from Erlang external term format to Python */
+        ErlNifEnv *tmp_env = enif_alloc_env();
+        if (tmp_env == NULL) {
+            enif_free(data);
+            PyErr_SetString(PyExc_MemoryError, "failed to allocate environment");
+            return NULL;
+        }
+
+        ERL_NIF_TERM term;
+        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+            enif_free(data);
+            enif_free_env(tmp_env);
+            PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
+            return NULL;
+        }
+        enif_free(data);
+
+        /* Convert Erlang term to Python object */
+        PyObject *py_obj = term_to_py(tmp_env, term);
+        enif_free_env(tmp_env);
+
+        return py_obj;  /* May be NULL if conversion failed */
+    } else if (result == 1) {
+        /* Empty */
+        Py_RETURN_NONE;
+    } else {
+        /* Closed */
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+}
+
+/**
+ * @brief Direct channel receive - blocking with GIL release
+ *
+ * Usage: erlang._channel_receive(channel_ref, timeout_ms)
+ * Returns: Python object when data available
+ * Raises: RuntimeError if channel closed, TimeoutError if timeout
+ *
+ * This function releases the GIL while waiting, allowing other Python
+ * threads to run. Uses polling with short sleeps.
+ */
+static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    long timeout_ms = -1;  /* -1 = infinite */
+
+    if (!PyArg_ParseTuple(args, "O|l", &capsule, &timeout_ms)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+    int result;
+
+    /* First try without blocking */
+    result = channel_try_receive(channel, &data, &size);
+    if (result == 0) {
+        goto decode_and_return;
+    } else if (result == -1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+
+    /* Need to wait - release GIL and poll */
+    {
+        long elapsed_ms = 0;
+        const long poll_interval_us = 100;  /* 100 microseconds */
+
+        Py_BEGIN_ALLOW_THREADS
+
+        while (1) {
+            result = channel_try_receive(channel, &data, &size);
+            if (result != 1) {
+                break;  /* Got data or closed */
+            }
+
+            /* Check timeout */
+            if (timeout_ms >= 0 && elapsed_ms >= timeout_ms) {
+                result = 2;  /* Timeout */
+                break;
+            }
+
+            /* Sleep briefly */
+            usleep(poll_interval_us);
+            elapsed_ms += poll_interval_us / 1000;
+            if (poll_interval_us < 1000) {
+                elapsed_ms = (elapsed_ms == 0 && poll_interval_us > 0) ? 1 : elapsed_ms;
+            }
+        }
+
+        Py_END_ALLOW_THREADS
+    }
+
+    if (result == 2) {
+        PyErr_SetString(PyExc_TimeoutError, "channel receive timeout");
+        return NULL;
+    } else if (result == -1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+
+decode_and_return:
+    /* Decode from Erlang external term format to Python */
+    {
+        ErlNifEnv *tmp_env = enif_alloc_env();
+        if (tmp_env == NULL) {
+            enif_free(data);
+            PyErr_SetString(PyExc_MemoryError, "failed to allocate environment");
+            return NULL;
+        }
+
+        ERL_NIF_TERM term;
+        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+            enif_free(data);
+            enif_free_env(tmp_env);
+            PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
+            return NULL;
+        }
+        enif_free(data);
+
+        /* Convert Erlang term to Python object */
+        PyObject *py_obj = term_to_py(tmp_env, term);
+        enif_free_env(tmp_env);
+
+        return py_obj;  /* May be NULL if conversion failed */
+    }
+}
+
+/**
+ * @brief Direct channel send - send data to channel
+ *
+ * Usage: erlang._channel_send(channel_ref, data)
+ * Returns: True on success
+ * Raises: RuntimeError if channel closed or busy
+ */
+static PyObject *erlang_channel_send_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    Py_buffer buffer;
+
+    if (!PyArg_ParseTuple(args, "Oy*", &capsule, &buffer)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyBuffer_Release(&buffer);
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyBuffer_Release(&buffer);
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    int result = channel_send(channel, (unsigned char *)buffer.buf, buffer.len);
+    PyBuffer_Release(&buffer);
+
+    if (result == 0) {
+        Py_RETURN_TRUE;
+    } else if (result == 1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel busy (backpressure)");
+        return NULL;
+    } else {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+}
+
+/**
+ * @brief Check if channel is closed
+ *
+ * Usage: erlang._channel_is_closed(channel_ref)
+ * Returns: True if closed, False otherwise
+ */
+static PyObject *erlang_channel_is_closed_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    if (channel->closed) {
+        Py_RETURN_TRUE;
+    } else {
+        Py_RETURN_FALSE;
+    }
+}
+
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
     {"call", erlang_call_impl, METH_VARARGS,
@@ -2262,6 +2515,23 @@ static PyMethodDef ErlangModuleMethods[] = {
     {"_trace_event", erlang_trace_event_impl, METH_VARARGS,
      "Add event to a span.\n"
      "Usage: erlang._trace_event(span_id, name, attrs)"},
+    /* Direct channel methods (bypass erlang.call for performance) */
+    {"_channel_try_receive", erlang_channel_try_receive_impl, METH_VARARGS,
+     "Direct channel receive (non-blocking).\n"
+     "Usage: erlang._channel_try_receive(channel_ref)\n"
+     "Returns: bytes if data, None if empty. Raises RuntimeError if closed."},
+    {"_channel_receive", erlang_channel_receive_impl, METH_VARARGS,
+     "Direct channel receive (blocking with GIL release).\n"
+     "Usage: erlang._channel_receive(channel_ref, timeout_ms=-1)\n"
+     "Returns: bytes. Raises RuntimeError if closed, TimeoutError if timeout."},
+    {"_channel_send", erlang_channel_send_impl, METH_VARARGS,
+     "Direct channel send.\n"
+     "Usage: erlang._channel_send(channel_ref, data)\n"
+     "Returns: True. Raises RuntimeError if closed or busy."},
+    {"_channel_is_closed", erlang_channel_is_closed_impl, METH_VARARGS,
+     "Check if channel is closed.\n"
+     "Usage: erlang._channel_is_closed(channel_ref)\n"
+     "Returns: True if closed, False otherwise."},
     {NULL, NULL, 0, NULL}
 };
 
