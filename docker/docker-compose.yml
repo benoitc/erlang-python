@@ -1,0 +1,31 @@
+services:
+  # Python 3.14 with free-threading (no GIL)
+  python314:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.python314
+    environment:
+      - PYTHON_CONFIG=/usr/local/bin/python3-config
+    command: rebar3 ct --readable=compact
+
+  # Python 3.13 with Address Sanitizer
+  asan:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.asan
+    environment:
+      - PYTHON_CONFIG=/usr/local/bin/python3-config
+      - ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:print_stats=1
+      - ASAN_BUILD=1
+
+  # Python 3.12 with Address Sanitizer
+  asan312:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.python312
+      args:
+        - ASAN_BUILD=1
+    environment:
+      - PYTHON_CONFIG=/usr/local/bin/python3-config
+      - ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:print_stats=1
+      - ASAN_BUILD=1

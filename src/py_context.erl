@@ -38,12 +38,16 @@
     stop/1,
     call/5,
     call/6,
+    call/7,
     eval/3,
     eval/4,
+    eval/5,
     exec/2,
+    exec/3,
     call_method/4,
     to_term/1,
-    get_interp_id/1
+    get_interp_id/1,
+    is_subinterp/1
 ]).
 
 %% Internal exports
@@ -142,6 +146,34 @@ call(Ctx, Module, Func, Args, Kwargs, Timeout) when is_pid(Ctx) ->
         {error, timeout}
     end.
 
+%% @doc Call a Python function with a process-local environment.
+%%
+%% @param Ctx Context process
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @param Kwargs Map of keyword arguments
+%% @param Timeout Timeout in milliseconds
+%% @param EnvRef Process-local environment reference
+%% @returns {ok, Result} | {error, Reason}
+-spec call(context(), atom() | binary(), atom() | binary(), list(), map(),
+           timeout(), reference()) -> {ok, term()} | {error, term()}.
+call(Ctx, Module, Func, Args, Kwargs, Timeout, EnvRef) when is_pid(Ctx), is_reference(EnvRef) ->
+    MRef = erlang:monitor(process, Ctx),
+    ModuleBin = to_binary(Module),
+    FuncBin = to_binary(Func),
+    Ctx ! {call, self(), MRef, ModuleBin, FuncBin, Args, Kwargs, EnvRef},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    after Timeout ->
+        erlang:demonitor(MRef, [flush]),
+        {error, timeout}
+    end.
+
 %% @doc Evaluate a Python expression.
 %%
 %% @param Ctx Context process
@@ -171,6 +203,31 @@ eval(Ctx, Code, Locals, Timeout) when is_pid(Ctx) ->
         {error, timeout}
     end.
 
+%% @doc Evaluate a Python expression with a process-local environment.
+%%
+%% @param Ctx Context process
+%% @param Code Python code to evaluate
+%% @param Locals Map of local variables
+%% @param Timeout Timeout in milliseconds
+%% @param EnvRef Process-local environment reference
+%% @returns {ok, Result} | {error, Reason}
+-spec eval(context(), binary() | string(), map(), timeout(), reference()) ->
+    {ok, term()} | {error, term()}.
+eval(Ctx, Code, Locals, Timeout, EnvRef) when is_pid(Ctx), is_reference(EnvRef) ->
+    MRef = erlang:monitor(process, Ctx),
+    CodeBin = to_binary(Code),
+    Ctx ! {eval, self(), MRef, CodeBin, Locals, EnvRef},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    after Timeout ->
+        erlang:demonitor(MRef, [flush]),
+        {error, timeout}
+    end.
+
 %% @doc Execute Python statements.
 %%
 %% @param Ctx Context process
@@ -181,6 +238,28 @@ exec(Ctx, Code) when is_pid(Ctx) ->
     MRef = erlang:monitor(process, Ctx),
     CodeBin = to_binary(Code),
     Ctx ! {exec, self(), MRef, CodeBin},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    after infinity ->
+        erlang:demonitor(MRef, [flush]),
+        {error, timeout}
+    end.
+
+%% @doc Execute Python statements with a process-local environment.
+%%
+%% @param Ctx Context process
+%% @param Code Python code to execute
+%% @param EnvRef Process-local environment reference
+%% @returns ok | {error, Reason}
+-spec exec(context(), binary() | string(), reference()) -> ok | {error, term()}.
+exec(Ctx, Code, EnvRef) when is_pid(Ctx), is_reference(EnvRef) ->
+    MRef = erlang:monitor(process, Ctx),
+    CodeBin = to_binary(Code),
+    Ctx ! {exec, self(), MRef, CodeBin, EnvRef},
     receive
         {MRef, Result} ->
             erlang:demonitor(MRef, [flush]),
@@ -224,6 +303,23 @@ get_interp_id(Ctx) when is_pid(Ctx) ->
             Result;
         {'DOWN', MRef, process, Ctx, Reason} ->
             {error, {context_died, Reason}}
+    end.
+
+%% @doc Check if this context is a subinterpreter.
+%%
+%% Returns true for subinterpreter mode, false for worker mode.
+%% In worker mode, process-local environments are used.
+%% In subinterpreter mode, each context has its own isolated namespace.
+-spec is_subinterp(context()) -> boolean().
+is_subinterp(Ctx) when is_pid(Ctx) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {is_subinterp, self(), MRef},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, _Reason} ->
+            false
     end.
 
 %% ============================================================================
@@ -332,13 +428,31 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
             From ! {MRef, Result},
             loop(State);
 
+        %% Call with process-local environment (worker mode)
+        {call, From, MRef, Module, Func, Args, Kwargs, EnvRef} ->
+            Result = handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef),
+            From ! {MRef, Result},
+            loop(State);
+
         {eval, From, MRef, Code, Locals} ->
             Result = handle_eval_with_suspension(Ref, Code, Locals),
             From ! {MRef, Result},
             loop(State);
 
+        %% Eval with process-local environment (worker mode)
+        {eval, From, MRef, Code, Locals, EnvRef} ->
+            Result = handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef),
+            From ! {MRef, Result},
+            loop(State);
+
         {exec, From, MRef, Code} ->
             Result = py_nif:context_exec(Ref, Code),
+            From ! {MRef, Result},
+            loop(State);
+
+        %% Exec with process-local environment (worker mode)
+        {exec, From, MRef, Code, EnvRef} ->
+            Result = py_nif:context_exec(Ref, Code, EnvRef),
             From ! {MRef, Result},
             loop(State);
 
@@ -349,6 +463,14 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
 
         {get_interp_id, From, MRef} ->
             From ! {MRef, {ok, InterpId}},
+            loop(State);
+
+        {is_subinterp, From, MRef} ->
+            %% Check the interp_id to determine if this is a subinterpreter
+            %% Subinterpreters have interp_id > 0 (main interpreter is 0)
+            %% But actually we need to check the mode, not just interp_id
+            IsSubinterp = is_context_subinterp(Ref),
+            From ! {MRef, IsSubinterp},
             loop(State);
 
         {stop, From, MRef} ->
@@ -504,6 +626,40 @@ handle_eval_with_suspension(Ref, Code, Locals) ->
             handle_schedule(Ref, CallbackName, CallbackArgs);
         Result ->
             Result
+    end.
+
+%% @private
+%% Handle call with process-local environment
+handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
+    case py_nif:context_call(Ref, Module, Func, Args, Kwargs, EnvRef) of
+        {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
+            CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
+            resume_and_continue(Ref, StateRef, CallbackResult);
+        {schedule, CallbackName, CallbackArgs} ->
+            handle_schedule(Ref, CallbackName, CallbackArgs);
+        Result ->
+            Result
+    end.
+
+%% @private
+%% Handle eval with process-local environment
+handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
+    case py_nif:context_eval(Ref, Code, Locals, EnvRef) of
+        {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
+            CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
+            resume_and_continue(Ref, StateRef, CallbackResult);
+        {schedule, CallbackName, CallbackArgs} ->
+            handle_schedule(Ref, CallbackName, CallbackArgs);
+        Result ->
+            Result
+    end.
+
+%% @private
+%% Check if a context is a subinterpreter (has interp_id > 0)
+is_context_subinterp(Ref) ->
+    case py_nif:context_interp_id(Ref) of
+        {ok, InterpId} when InterpId > 0 -> true;
+        _ -> false
     end.
 
 %% @private

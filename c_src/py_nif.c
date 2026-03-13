@@ -63,7 +63,53 @@ ErlNifResourceType *PY_REF_RESOURCE_TYPE = NULL;
 /* suspended_context_state_t resource type (context suspension for callbacks) */
 ErlNifResourceType *PY_CONTEXT_SUSPENDED_RESOURCE_TYPE = NULL;
 
+/* Process-local Python environment resource type */
+ErlNifResourceType *PY_ENV_RESOURCE_TYPE = NULL;
+
 _Atomic uint32_t g_context_id_counter = 1;
+
+/* ============================================================================
+ * Process-local Python Environment
+ * ============================================================================
+ * Each Erlang process can have its own Python globals/locals dict via a NIF
+ * resource stored in the process dictionary. When the process exits, the
+ * resource destructor frees the Python dicts.
+ */
+
+/**
+ * @struct py_env_resource_t
+ * @brief Process-local Python environment (globals/locals)
+ *
+ * Stored in process dictionary as py_local_env. When the process exits,
+ * Erlang GC drops the reference, triggering the destructor which frees
+ * the Python dicts.
+ */
+typedef struct {
+    /** @brief Global namespace dictionary */
+    PyObject *globals;
+    /** @brief Local namespace dictionary (same as globals for module-level execution) */
+    PyObject *locals;
+} py_env_resource_t;
+
+/**
+ * @brief Destructor for py_env_resource_t
+ *
+ * Called when the resource reference is garbage collected (process exits).
+ * Acquires GIL and decrefs the Python dicts.
+ */
+static void py_env_resource_dtor(ErlNifEnv *env, void *obj) {
+    (void)env;
+    py_env_resource_t *res = (py_env_resource_t *)obj;
+
+    if (runtime_is_running()) {
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        Py_XDECREF(res->globals);
+        Py_XDECREF(res->locals);
+        PyGILState_Release(gstate);
+    }
+    res->globals = NULL;
+    res->locals = NULL;
+}
 
 /* Invariant counters for debugging and leak detection */
 py_invariant_counters_t g_counters = {0};
@@ -2525,6 +2571,447 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
     return result;
 }
 
+/* ============================================================================
+ * Process-local Environment NIFs
+ * ============================================================================ */
+
+/* Thread-local variable to track current local env during reentrant calls */
+__thread py_env_resource_t *tl_current_local_env = NULL;
+
+/**
+ * @brief Create a new process-local Python environment
+ *
+ * nif_create_local_env() -> {ok, EnvRef} | {error, Reason}
+ *
+ * Creates a new Python globals/locals dict pair for use as a process-local
+ * environment. The returned resource should be stored in the process dictionary.
+ */
+static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    py_env_resource_t *res = enif_alloc_resource(PY_ENV_RESOURCE_TYPE,
+                                                  sizeof(py_env_resource_t));
+    if (res == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    res->globals = NULL;
+    res->locals = NULL;
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Create globals dict with builtins and erlang module */
+    res->globals = PyDict_New();
+    if (res->globals == NULL) {
+        PyGILState_Release(gstate);
+        enif_release_resource(res);
+        return make_error(env, "globals_failed");
+    }
+
+    /* Add __builtins__ */
+    PyObject *builtins = PyEval_GetBuiltins();
+    if (builtins != NULL) {
+        PyDict_SetItemString(res->globals, "__builtins__", builtins);
+    }
+
+    /* Add __name__ = '__main__' so defined functions are accessible via __main__ */
+    PyObject *main_name = PyUnicode_FromString("__main__");
+    if (main_name != NULL) {
+        PyDict_SetItemString(res->globals, "__name__", main_name);
+        Py_DECREF(main_name);
+    }
+
+    /* Add erlang module */
+    PyObject *erlang = PyImport_ImportModule("erlang");
+    if (erlang != NULL) {
+        PyDict_SetItemString(res->globals, "erlang", erlang);
+        Py_DECREF(erlang);
+    }
+
+    /* Use the same dict for locals (module-level execution) */
+    res->locals = res->globals;
+    Py_INCREF(res->locals);
+
+    PyGILState_Release(gstate);
+
+    ERL_NIF_TERM ref = enif_make_resource(env, res);
+    enif_release_resource(res);  /* Ref now owns it */
+
+    return enif_make_tuple2(env, ATOM_OK, ref);
+}
+
+/**
+ * @brief Execute Python statements using a process-local environment
+ *
+ * nif_context_exec_with_env(ContextRef, Code, EnvRef) -> ok | {error, Reason}
+ *
+ * In worker mode, uses the process-local environment's globals/locals.
+ * In subinterpreter mode, the EnvRef is ignored (each subinterp is isolated).
+ *
+ * The tl_current_local_env thread-local is set during execution to support
+ * reentrant calls - when Python calls erlang.call() which calls back to Python,
+ * the same environment is used.
+ */
+static ERL_NIF_TERM nif_context_exec_with_env(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+    py_env_resource_t *penv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(env, argv[1], &code_bin)) {
+        return make_error(env, "invalid_code");
+    }
+
+    /* Get process-local environment */
+    if (!enif_get_resource(env, argv[2], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
+        return make_error(env, "invalid_env");
+    }
+
+    char *code = binary_to_string(&code_bin);
+    if (code == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    ERL_NIF_TERM result;
+
+    /* Acquire thread state */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        enif_free(code);
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Set thread-local context and env for callback/reentrant support */
+    py_context_t *prev_context = tl_current_context;
+    tl_current_context = ctx;
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
+
+    /* Always use process-local environment */
+    PyObject *exec_globals = penv->globals;
+    PyObject *exec_locals = penv->globals;
+
+    /* Execute statements */
+    PyObject *py_result = PyRun_String(code, Py_file_input, exec_globals, exec_locals);
+
+    if (py_result == NULL) {
+        result = make_py_error(env);
+    } else {
+        Py_DECREF(py_result);
+        result = ATOM_OK;
+    }
+
+    /* Restore thread-local state */
+    tl_current_context = prev_context;
+    tl_current_local_env = prev_local_env;
+
+    enif_free(code);
+    py_context_release(&guard);
+
+    return result;
+}
+
+/**
+ * @brief Evaluate a Python expression using a process-local environment
+ *
+ * nif_context_eval_with_env(ContextRef, Code, Locals, EnvRef) -> {ok, Result} | {error, Reason}
+ *
+ * In worker mode, uses the process-local environment's globals/locals.
+ * In subinterpreter mode, the EnvRef is ignored (each subinterp is isolated).
+ */
+static ERL_NIF_TERM nif_context_eval_with_env(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+    py_env_resource_t *penv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(env, argv[1], &code_bin)) {
+        return make_error(env, "invalid_code");
+    }
+
+    /* Get process-local environment (argv[3]) */
+    if (!enif_get_resource(env, argv[3], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
+        return make_error(env, "invalid_env");
+    }
+
+    char *code = binary_to_string(&code_bin);
+    if (code == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+
+    ERL_NIF_TERM result;
+
+    /* Acquire thread state */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        enif_free(code);
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Set thread-local context and env for callback/reentrant support */
+    py_context_t *prev_context = tl_current_context;
+    tl_current_context = ctx;
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
+
+    /* Enable suspension for callback support */
+    bool prev_allow_suspension = tl_allow_suspension;
+    tl_allow_suspension = true;
+
+    /* Always use process-local environment */
+    PyObject *eval_globals = penv->globals;
+
+    /* Build locals dict from Erlang map (if provided) */
+    PyObject *eval_locals = PyDict_Copy(eval_globals);
+    if (enif_is_map(env, argv[2])) {
+        ErlNifMapIterator iter;
+        ERL_NIF_TERM key, value;
+
+        enif_map_iterator_create(env, argv[2], &iter, ERL_NIF_MAP_ITERATOR_FIRST);
+        while (enif_map_iterator_get_pair(env, &iter, &key, &value)) {
+            PyObject *py_key = term_to_py(env, key);
+            PyObject *py_value = term_to_py(env, value);
+            if (py_key != NULL && py_value != NULL) {
+                PyDict_SetItem(eval_locals, py_key, py_value);
+            }
+            Py_XDECREF(py_key);
+            Py_XDECREF(py_value);
+            enif_map_iterator_next(env, &iter);
+        }
+        enif_map_iterator_destroy(env, &iter);
+    }
+
+    /* Evaluate expression */
+    PyObject *py_result = PyRun_String(code, Py_eval_input, eval_globals, eval_locals);
+    Py_DECREF(eval_locals);
+
+    if (py_result == NULL) {
+        /* Check for pending callback (flag-based detection) */
+        if (tl_pending_callback) {
+            PyErr_Clear();
+            /* Create suspended state for callback handling */
+            suspended_context_state_t *suspended = create_suspended_context_state_for_eval(
+                env, ctx, &code_bin, argv[2]);
+            if (suspended == NULL) {
+                tl_pending_callback = false;
+                Py_CLEAR(tl_pending_args);
+                result = make_error(env, "create_suspended_state_failed");
+            } else {
+                result = build_suspended_context_result(env, suspended);
+            }
+        } else {
+            result = make_py_error(env);
+        }
+    } else {
+        ERL_NIF_TERM term_result = py_to_term(env, py_result);
+        Py_DECREF(py_result);
+        result = enif_make_tuple2(env, ATOM_OK, term_result);
+    }
+
+    /* Restore thread-local state */
+    tl_allow_suspension = prev_allow_suspension;
+    tl_current_context = prev_context;
+    tl_current_local_env = prev_local_env;
+
+    clear_pending_callback_tls();
+    enif_free(code);
+    py_context_release(&guard);
+
+    return result;
+}
+
+/**
+ * @brief Call a Python function using a process-local environment
+ *
+ * nif_context_call_with_env(ContextRef, Module, Func, Args, Kwargs, EnvRef) -> {ok, Result} | {error, Reason}
+ *
+ * In worker mode, uses the process-local environment's globals for module lookup.
+ * In subinterpreter mode, the EnvRef is ignored (each subinterp is isolated).
+ *
+ * For __main__ module, functions defined via exec() in the process-local env
+ * are accessible.
+ */
+static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    py_context_t *ctx;
+    py_env_resource_t *penv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    ErlNifBinary module_bin, func_bin;
+    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
+        return make_error(env, "invalid_module");
+    }
+    if (!enif_inspect_binary(env, argv[2], &func_bin)) {
+        return make_error(env, "invalid_func");
+    }
+
+    /* Get process-local environment (argv[5]) */
+    if (!enif_get_resource(env, argv[5], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
+        return make_error(env, "invalid_env");
+    }
+
+    char *module_name = binary_to_string(&module_bin);
+    char *func_name = binary_to_string(&func_bin);
+    if (module_name == NULL || func_name == NULL) {
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "alloc_failed");
+    }
+
+    ERL_NIF_TERM result;
+
+    /* Acquire thread state */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Set thread-local context and env for callback/reentrant support */
+    py_context_t *prev_context = tl_current_context;
+    tl_current_context = ctx;
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
+
+    /* Enable suspension for callback support */
+    bool prev_allow_suspension = tl_allow_suspension;
+    tl_allow_suspension = true;
+
+    /* Always use process-local environment */
+    PyObject *lookup_globals = penv->globals;
+
+    PyObject *module = NULL;
+    PyObject *func = NULL;
+
+    /* Special handling for __main__ module - look up in process-local globals */
+    if (strcmp(module_name, "__main__") == 0) {
+        func = PyDict_GetItemString(lookup_globals, func_name);  /* Borrowed ref */
+        if (func != NULL) {
+            Py_INCREF(func);
+        }
+    }
+
+    if (func == NULL) {
+        /* Get or import module from context cache */
+        module = context_get_module(ctx, module_name);
+        if (module == NULL) {
+            result = make_py_error(env);
+            goto cleanup;
+        }
+
+        /* Get function */
+        func = PyObject_GetAttrString(module, func_name);
+        if (func == NULL) {
+            result = make_py_error(env);
+            goto cleanup;
+        }
+    }
+
+    /* Convert args */
+    unsigned int args_len;
+    if (!enif_get_list_length(env, argv[3], &args_len)) {
+        Py_DECREF(func);
+        result = make_error(env, "invalid_args");
+        goto cleanup;
+    }
+
+    PyObject *args = PyTuple_New(args_len);
+    ERL_NIF_TERM head, tail = argv[3];
+    for (unsigned int i = 0; i < args_len; i++) {
+        enif_get_list_cell(env, tail, &head, &tail);
+        PyObject *arg = term_to_py(env, head);
+        if (arg == NULL) {
+            Py_DECREF(args);
+            Py_DECREF(func);
+            result = make_error(env, "arg_conversion_failed");
+            goto cleanup;
+        }
+        PyTuple_SET_ITEM(args, i, arg);
+    }
+
+    /* Convert kwargs */
+    PyObject *kwargs = NULL;
+    if (argc > 4 && enif_is_map(env, argv[4])) {
+        kwargs = term_to_py(env, argv[4]);
+    }
+
+    /* Call the function */
+    PyObject *py_result = PyObject_Call(func, args, kwargs);
+    Py_DECREF(func);
+    Py_DECREF(args);
+    Py_XDECREF(kwargs);
+
+    if (py_result == NULL) {
+        /* Check for pending callback */
+        if (tl_pending_callback) {
+            PyErr_Clear();
+            suspended_context_state_t *suspended = create_suspended_context_state_for_call(
+                env, ctx, &module_bin, &func_bin, argv[3],
+                argc > 4 ? argv[4] : enif_make_new_map(env));
+            if (suspended == NULL) {
+                tl_pending_callback = false;
+                Py_CLEAR(tl_pending_args);
+                result = make_error(env, "create_suspended_state_failed");
+            } else {
+                result = build_suspended_context_result(env, suspended);
+            }
+        } else {
+            result = make_py_error(env);
+        }
+    } else if (is_schedule_marker(py_result)) {
+        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+        Py_DECREF(py_result);
+        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
+    } else {
+        ERL_NIF_TERM term_result = py_to_term(env, py_result);
+        Py_DECREF(py_result);
+        result = enif_make_tuple2(env, ATOM_OK, term_result);
+    }
+
+cleanup:
+    /* Restore thread-local state */
+    tl_allow_suspension = prev_allow_suspension;
+    tl_current_context = prev_context;
+    tl_current_local_env = prev_local_env;
+
+    clear_pending_callback_tls();
+    enif_free(module_name);
+    enif_free(func_name);
+    py_context_release(&guard);
+
+    return result;
+}
+
 /**
  * @brief Call a method on a Python object in a context
  *
@@ -3661,10 +4148,16 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         env, NULL, "py_context_suspended", suspended_context_state_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
+    /* Process-local environment resource type */
+    PY_ENV_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "py_env", py_env_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
     if (WORKER_RESOURCE_TYPE == NULL || PYOBJ_RESOURCE_TYPE == NULL ||
         SUSPENDED_STATE_RESOURCE_TYPE == NULL ||
         PY_CONTEXT_RESOURCE_TYPE == NULL || PY_REF_RESOURCE_TYPE == NULL ||
-        PY_CONTEXT_SUSPENDED_RESOURCE_TYPE == NULL) {
+        PY_CONTEXT_SUSPENDED_RESOURCE_TYPE == NULL ||
+        PY_ENV_RESOURCE_TYPE == NULL) {
         return -1;
     }
 #ifdef HAVE_SUBINTERPRETERS
@@ -3945,6 +4438,10 @@ static ErlNifFunc nif_funcs[] = {
     {"context_call", 5, nif_context_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_eval", 3, nif_context_eval, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_exec", 2, nif_context_exec, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"context_exec", 3, nif_context_exec_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"context_eval", 4, nif_context_eval_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"context_call", 6, nif_context_call_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"create_local_env", 0, nif_create_local_env, 0},
     {"context_call_method", 4, nif_context_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_to_term", 1, nif_context_to_term, 0},
     {"context_interp_id", 1, nif_context_interp_id, 0},
