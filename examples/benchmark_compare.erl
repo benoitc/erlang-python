@@ -101,7 +101,7 @@ bench_sync_eval() ->
 %% ============================================================================
 
 bench_cast_single() ->
-    Name = "Cast py:cast single",
+    Name = "Cast py:spawn_call single",
     N = 1000,
 
     io:format("▶ ~s~n", [Name]),
@@ -109,7 +109,7 @@ bench_cast_single() ->
 
     {Time, _} = timer:tc(fun() ->
         lists:foreach(fun(I) ->
-            Ref = py:cast(math, sqrt, [I]),
+            Ref = py:spawn_call(math, sqrt, [I]),
             {ok, _} = py:await(Ref, 5000)
         end, lists:seq(1, N))
     end),
@@ -125,7 +125,7 @@ bench_cast_single() ->
     {Name, PerCall, Throughput}.
 
 bench_cast_multiple() ->
-    Name = "Cast py:cast batch (10 calls)",
+    Name = "Cast py:spawn_call batch (10 calls)",
     N = 100,
 
     io:format("▶ ~s~n", [Name]),
@@ -134,7 +134,7 @@ bench_cast_multiple() ->
     {Time, _} = timer:tc(fun() ->
         lists:foreach(fun(Batch) ->
             %% Start 10 cast calls
-            Refs = [py:cast(math, sqrt, [Batch * 10 + I])
+            Refs = [py:spawn_call(math, sqrt, [Batch * 10 + I])
                     || I <- lists:seq(1, 10)],
             %% Await all
             [{ok, _} = py:await(Ref, 5000) || Ref <- Refs]
@@ -153,7 +153,7 @@ bench_cast_multiple() ->
     {Name, PerBatch, Throughput}.
 
 bench_cast_parallel() ->
-    Name = "Cast py:cast parallel (10 concurrent)",
+    Name = "Cast py:spawn_call parallel (10 concurrent)",
     N = 100,
 
     io:format("▶ ~s~n", [Name]),
@@ -162,7 +162,7 @@ bench_cast_parallel() ->
     {Time, _} = timer:tc(fun() ->
         lists:foreach(fun(Batch) ->
             %% Start 10 cast calls in parallel
-            Refs = [py:cast(math, factorial, [20 + (Batch rem 10)])
+            Refs = [py:spawn_call(math, factorial, [20 + (Batch rem 10)])
                     || _ <- lists:seq(1, 10)],
             %% Await all results
             [py:await(Ref, 5000) || Ref <- Refs]
@@ -230,7 +230,7 @@ bench_concurrent_cast() ->
     {Time, _} = timer:tc(fun() ->
         Pids = [spawn_link(fun() ->
             lists:foreach(fun(I) ->
-                Ref = py:cast(math, factorial, [20 + I]),
+                Ref = py:spawn_call(math, factorial, [20 + I]),
                 {ok, _} = py:await(Ref, 5000)
             end, lists:seq(1, CallsPerProc)),
             Parent ! {done, self()}

@@ -17,6 +17,7 @@
     test_eval_complex_locals/1,
     test_exec/1,
     test_cast/1,
+    test_spawn_call/1,
     test_type_conversions/1,
     test_nested_types/1,
     test_timeout/1,
@@ -68,6 +69,7 @@ all() ->
         test_eval_complex_locals,
         test_exec,
         test_cast,
+        test_spawn_call,
         test_type_conversions,
         test_nested_types,
         test_timeout,
@@ -204,9 +206,20 @@ def my_func():
     ok.
 
 test_cast(_Config) ->
-    Ref1 = py:cast(math, sqrt, [100]),
-    Ref2 = py:cast(math, sqrt, [144]),
+    %% Test fire-and-forget cast with erlang.send
+    Self = erlang:self(),
+    ok = py:cast(erlang, send, [Self, {<<"result">>, <<"msg1">>}]),
+    ok = py:cast(erlang, send, [Self, {<<"result">>, <<"msg2">>}]),
+    %% Wait for results (order may vary)
+    R1 = receive {<<"result">>, V1} -> V1 after 5000 -> ct:fail(timeout1) end,
+    R2 = receive {<<"result">>, V2} -> V2 after 5000 -> ct:fail(timeout2) end,
+    true = lists:sort([R1, R2]) =:= [<<"msg1">>, <<"msg2">>],
+    ok.
 
+test_spawn_call(_Config) ->
+    %% Test spawn_call with await
+    Ref1 = py:spawn_call(math, sqrt, [100]),
+    Ref2 = py:spawn_call(math, sqrt, [144]),
     {ok, 10.0} = py:await(Ref1),
     {ok, 12.0} = py:await(Ref2),
     ok.

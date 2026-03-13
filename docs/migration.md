@@ -4,7 +4,7 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 
 ## Quick Checklist
 
-- [ ] Rename `py:call_async` → `py:cast`
+- [ ] Rename `py:call_async` → `py:spawn_call` (with await) or `py:cast` (fire-and-forget)
 - [ ] Replace `py:bind`/`py:unbind` with `py_context_router`
 - [ ] Replace `py:ctx_*` functions with `py_context:*`
 - [ ] Replace `erlang_asyncio` imports with `erlang`
@@ -148,7 +148,7 @@ N = py_context_router:num_contexts().
 
 ## API Changes
 
-### `py:call_async` renamed to `py:cast`
+### `py:call_async` renamed to `py:spawn_call`
 
 The function for non-blocking Python calls has been renamed to follow gen_server conventions:
 
@@ -160,11 +160,13 @@ Ref = py:call_async(math, factorial, [100]),
 
 **After (v2.0):**
 ```erlang
-Ref = py:cast(math, factorial, [100]),
+Ref = py:spawn_call(math, factorial, [100]),
 {ok, Result} = py:await(Ref).
 ```
 
-The semantics are identical - only the name changed.
+The semantics are identical - `spawn_call` replaces `async_call`.
+
+Note: `py:cast/3,4` is now fire-and-forget (returns `ok`, no await).
 
 ### `erlang_asyncio` module removed
 

@@ -221,7 +221,7 @@ py:register_pool(io, requests),      %% API calls
 
 process_batch(Items) ->
     %% Parallel fetch from S3 (io pool)
-    Futures = [py:cast(boto3, download_file, [Key]) || Key <- Items],
+    Futures = [py:spawn_call(boto3, download_file, [Key]) || Key <- Items],
     Files = [py:await(F) || F <- Futures],
 
     %% Process with ML model (default pool - doesn't block I/O)

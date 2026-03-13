@@ -41,6 +41,10 @@
     call/5,
     cast/3,
     cast/4,
+    cast/5,
+    spawn_call/3,
+    spawn_call/4,
+    spawn_call/5,
     await/1,
     await/2,
     eval/1,
@@ -270,20 +274,57 @@ exec(Ctx, Code) when is_pid(Ctx) ->
 %%% Asynchronous API
 %%% ============================================================================
 
-%% @doc Cast a Python function call, returns immediately with a ref.
-%% The call executes in a spawned process. Use await/1,2 to get the result.
--spec cast(py_module(), py_func(), py_args()) -> py_ref().
+%% @doc Fire-and-forget Python function call.
+-spec cast(py_module(), py_func(), py_args()) -> ok.
 cast(Module, Func, Args) ->
     cast(Module, Func, Args, #{}).
 
-%% @doc Cast a Python function call with kwargs.
--spec cast(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
+%% @doc Fire-and-forget Python function call with context or kwargs.
+-spec cast(pid(), py_module(), py_func(), py_args()) -> ok;
+          (py_module(), py_func(), py_args(), py_kwargs()) -> ok.
+cast(Ctx, Module, Func, Args) when is_pid(Ctx) ->
+    cast(Ctx, Module, Func, Args, #{});
 cast(Module, Func, Args, Kwargs) ->
-    %% Spawn a process to execute the call and return a ref
+    spawn(fun() ->
+        Ctx = py_context_router:get_context(),
+        _ = py_context:call(Ctx, Module, Func, Args, Kwargs)
+    end),
+    ok.
+
+%% @doc Fire-and-forget Python function call with context and kwargs.
+-spec cast(pid(), py_module(), py_func(), py_args(), py_kwargs()) -> ok.
+cast(Ctx, Module, Func, Args, Kwargs) when is_pid(Ctx) ->
+    spawn(fun() ->
+        _ = py_context:call(Ctx, Module, Func, Args, Kwargs)
+    end),
+    ok.
+
+%% @doc Spawn a Python function call, returns immediately with a ref.
+-spec spawn_call(py_module(), py_func(), py_args()) -> py_ref().
+spawn_call(Module, Func, Args) ->
+    spawn_call(Module, Func, Args, #{}).
+
+%% @doc Spawn a Python function call with context or kwargs.
+-spec spawn_call(pid(), py_module(), py_func(), py_args()) -> py_ref();
+                (py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
+spawn_call(Ctx, Module, Func, Args) when is_pid(Ctx) ->
+    spawn_call(Ctx, Module, Func, Args, #{});
+spawn_call(Module, Func, Args, Kwargs) ->
     Ref = make_ref(),
     Parent = self(),
     spawn(fun() ->
         Ctx = py_context_router:get_context(),
+        Result = py_context:call(Ctx, Module, Func, Args, Kwargs),
+        Parent ! {py_response, Ref, Result}
+    end),
+    Ref.
+
+%% @doc Spawn a Python function call with context and kwargs.
+-spec spawn_call(pid(), py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
+spawn_call(Ctx, Module, Func, Args, Kwargs) when is_pid(Ctx) ->
+    Ref = make_ref(),
+    Parent = self(),
+    spawn(fun() ->
         Result = py_context:call(Ctx, Module, Func, Args, Kwargs),
         Parent ! {py_response, Ref, Result}
     end),
