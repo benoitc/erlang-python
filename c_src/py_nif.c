@@ -83,12 +83,19 @@ _Atomic uint32_t g_context_id_counter = 1;
  * Stored in process dictionary as py_local_env. When the process exits,
  * Erlang GC drops the reference, triggering the destructor which frees
  * the Python dicts.
+ *
+ * Each env is bound to a specific interpreter (identified by interp_id).
+ * The dicts must be freed in the same interpreter that created them.
  */
 typedef struct {
     /** @brief Global namespace dictionary */
     PyObject *globals;
     /** @brief Local namespace dictionary (same as globals for module-level execution) */
     PyObject *locals;
+    /** @brief Interpreter ID that owns these dicts (0 = main interpreter) */
+    int64_t interp_id;
+    /** @brief Pool slot index (-1 for main interpreter) */
+    int pool_slot;
 } py_env_resource_t;
 
 /**
@@ -96,17 +103,50 @@ typedef struct {
  *
  * Called when the resource reference is garbage collected (process exits).
  * Acquires GIL and decrefs the Python dicts.
+ *
+ * For subinterpreters, we must DECREF in the correct interpreter context.
+ * If the interpreter was destroyed (context freed), we skip DECREF since
+ * the objects were already freed with the interpreter.
  */
 static void py_env_resource_dtor(ErlNifEnv *env, void *obj) {
     (void)env;
     py_env_resource_t *res = (py_env_resource_t *)obj;
 
-    if (runtime_is_running()) {
-        PyGILState_STATE gstate = PyGILState_Ensure();
+    if (!runtime_is_running()) {
+        res->globals = NULL;
+        res->locals = NULL;
+        return;
+    }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (res->pool_slot >= 0) {
+        /* Created in a subinterpreter - must DECREF in correct interpreter */
+        subinterp_slot_t *slot = subinterp_pool_get(res->pool_slot);
+
+        /* Verify slot is still valid and has same interpreter */
+        if (slot != NULL && slot->initialized && slot->interp != NULL) {
+            int64_t slot_interp_id = PyInterpreterState_GetID(slot->interp);
+            if (slot_interp_id == res->interp_id) {
+                /* Same interpreter, safe to DECREF */
+                PyThreadState *saved = PyThreadState_Swap(slot->tstate);
+                Py_XDECREF(res->globals);
+                Py_XDECREF(res->locals);
+                PyThreadState_Swap(saved);
+            }
+            /* If interp_id mismatch, slot was reused - skip DECREF */
+        }
+        /* If slot invalid/not initialized, interpreter destroyed - skip DECREF */
+    } else
+#endif
+    {
+        /* Main interpreter */
         Py_XDECREF(res->globals);
         Py_XDECREF(res->locals);
-        PyGILState_Release(gstate);
     }
+
+    PyGILState_Release(gstate);
     res->globals = NULL;
     res->locals = NULL;
 }
@@ -2581,17 +2621,25 @@ __thread py_env_resource_t *tl_current_local_env = NULL;
 /**
  * @brief Create a new process-local Python environment
  *
- * nif_create_local_env() -> {ok, EnvRef} | {error, Reason}
+ * nif_create_local_env(ContextRef) -> {ok, EnvRef} | {error, Reason}
  *
  * Creates a new Python globals/locals dict pair for use as a process-local
- * environment. The returned resource should be stored in the process dictionary.
+ * environment. The dicts are created inside the context's interpreter to
+ * ensure correct memory allocator is used.
+ *
+ * The returned resource should be stored in the process dictionary, keyed
+ * by the interpreter ID.
  */
 static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
-    (void)argv;
+    py_context_t *ctx;
 
     if (!runtime_is_running()) {
         return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
     }
 
     py_env_resource_t *res = enif_alloc_resource(PY_ENV_RESOURCE_TYPE,
@@ -2602,13 +2650,29 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
 
     res->globals = NULL;
     res->locals = NULL;
+    res->interp_id = 0;
+    res->pool_slot = -1;
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    /* Acquire context to switch to correct interpreter */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        enif_release_resource(res);
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Store interpreter info for destructor */
+#ifdef HAVE_SUBINTERPRETERS
+    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
+        res->pool_slot = ctx->pool_slot;
+        PyInterpreterState *interp = PyInterpreterState_Get();
+        res->interp_id = PyInterpreterState_GetID(interp);
+    }
+#endif
 
     /* Create globals dict with builtins and erlang module */
     res->globals = PyDict_New();
     if (res->globals == NULL) {
-        PyGILState_Release(gstate);
+        py_context_release(&guard);
         enif_release_resource(res);
         return make_error(env, "globals_failed");
     }
@@ -2637,7 +2701,7 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     res->locals = res->globals;
     Py_INCREF(res->locals);
 
-    PyGILState_Release(gstate);
+    py_context_release(&guard);
 
     ERL_NIF_TERM ref = enif_make_resource(env, res);
     enif_release_resource(res);  /* Ref now owns it */
@@ -4441,7 +4505,7 @@ static ErlNifFunc nif_funcs[] = {
     {"context_exec", 3, nif_context_exec_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_eval", 4, nif_context_eval_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_call", 6, nif_context_call_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"create_local_env", 0, nif_create_local_env, 0},
+    {"create_local_env", 1, nif_create_local_env, 0},
     {"context_call_method", 4, nif_context_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_to_term", 1, nif_context_to_term, 0},
     {"context_interp_id", 1, nif_context_interp_id, 0},

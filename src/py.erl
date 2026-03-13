@@ -99,7 +99,7 @@
     ensure_venv/3,
     activate_venv/1,
     %% Process-local Python environment
-    get_local_env/0,
+    get_local_env/1,
     deactivate_venv/0,
     venv_info/0,
     %% Execution info
@@ -158,23 +158,31 @@
 %% Process dictionary key for local Python environment
 -define(LOCAL_ENV_KEY, py_local_env).
 
-%% @doc Get or create a process-local Python environment.
+%% @doc Get or create a process-local Python environment for a context.
 %%
-%% Each Erlang process can have its own Python globals/locals dict.
-%% The environment is stored in the process dictionary and is automatically
-%% freed when the process exits.
+%% Each Erlang process can have Python environments per interpreter.
+%% The environments are stored in the process dictionary keyed by interpreter ID
+%% and are automatically freed when the process exits.
 %%
-%% In worker mode, this environment is used for py:exec/eval/call so that
-%% state persists across calls within the same process.
-%% In subinterpreter mode, this is ignored since each subinterp is isolated.
+%% The environment is created inside the context's interpreter to ensure
+%% the correct memory allocator is used. This is critical for subinterpreters
+%% where each interpreter has its own memory allocator.
 %%
+%% @param Ctx Context pid
 %% @returns EnvRef - NIF resource reference to the Python environment
--spec get_local_env() -> reference().
-get_local_env() ->
-    case get(?LOCAL_ENV_KEY) of
+-spec get_local_env(pid()) -> reference().
+get_local_env(Ctx) when is_pid(Ctx) ->
+    {ok, InterpId} = py_context:get_interp_id(Ctx),
+    Envs = case get(?LOCAL_ENV_KEY) of
+        undefined -> #{};
+        M when is_map(M) -> M;
+        %% Handle legacy single-ref format (shouldn't happen but be safe)
+        _OldRef -> #{}
+    end,
+    case maps:get(InterpId, Envs, undefined) of
         undefined ->
-            {ok, Ref} = py_nif:create_local_env(),
-            put(?LOCAL_ENV_KEY, Ref),
+            {ok, Ref} = py_context:create_local_env(Ctx),
+            put(?LOCAL_ENV_KEY, Envs#{InterpId => Ref}),
             Ref;
         Ref ->
             Ref
@@ -209,7 +217,7 @@ call(Module, Func, Args) ->
     ; (py_context_router:pool_name(), py_module(), py_func(), py_args()) -> py_result()
     ; (py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
 call(Ctx, Module, Func, Args) when is_pid(Ctx) ->
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:call(Ctx, Module, Func, Args, #{}, infinity, EnvRef);
 call(Pool, Module, Func, Args) when is_atom(Pool), is_atom(Func) ->
     %% Pool-based call (e.g., py:call(io, math, sqrt, [16]))
@@ -232,7 +240,7 @@ call(Module, Func, Args, Kwargs) ->
 call(Ctx, Module, Func, Args, Opts) when is_pid(Ctx), is_map(Opts) ->
     Kwargs = maps:get(kwargs, Opts, #{}),
     Timeout = maps:get(timeout, Opts, infinity),
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout, EnvRef);
 call(Pool, Module, Func, Args, Kwargs) when is_atom(Pool), is_atom(Func), is_map(Kwargs) ->
     %% Pool-based call with kwargs (e.g., py:call(io, math, pow, [2, 3], #{round => true}))
@@ -250,7 +258,7 @@ do_pool_call(Pool, Module, Func, Args, Kwargs, Timeout) ->
         ok ->
             try
                 Ctx = py_context_router:get_context(Pool),
-                EnvRef = get_local_env(),
+                EnvRef = get_local_env(Ctx),
                 py_context:call(Ctx, Module, Func, Args, Kwargs, Timeout, EnvRef)
             after
                 py_semaphore:release()
@@ -274,7 +282,7 @@ eval(Code) ->
 -spec eval(pid(), string() | binary()) -> py_result()
     ; (string() | binary(), map()) -> py_result().
 eval(Ctx, Code) when is_pid(Ctx) ->
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:eval(Ctx, Code, #{}, infinity, EnvRef);
 eval(Code, Locals) ->
     eval(Code, Locals, ?DEFAULT_TIMEOUT).
@@ -288,13 +296,13 @@ eval(Code, Locals) ->
 -spec eval(pid(), string() | binary(), map()) -> py_result()
     ; (string() | binary(), map(), timeout()) -> py_result().
 eval(Ctx, Code, Locals) when is_pid(Ctx), is_map(Locals) ->
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:eval(Ctx, Code, Locals, infinity, EnvRef);
 eval(Code, Locals, Timeout) ->
     %% Always route through context process - it handles callbacks inline using
     %% suspension-based approach (no separate callback handler, no blocking)
     Ctx = py_context_router:get_context(),
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:eval(Ctx, Code, Locals, Timeout, EnvRef).
 
 %% @doc Execute Python statements (no return value expected).
@@ -307,7 +315,7 @@ exec(Code) ->
     %% Always route through context process - it handles callbacks inline using
     %% suspension-based approach (no separate callback handler, no blocking)
     Ctx = py_context_router:get_context(),
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:exec(Ctx, Code, EnvRef).
 
 %% @doc Execute Python statements using a specific context.
@@ -316,7 +324,7 @@ exec(Code) ->
 %% Uses the process-local environment for the calling process.
 -spec exec(pid(), string() | binary()) -> ok | {error, term()}.
 exec(Ctx, Code) when is_pid(Ctx) ->
-    EnvRef = get_local_env(),
+    EnvRef = get_local_env(Ctx),
     py_context:exec(Ctx, Code, EnvRef).
 
 %%% ============================================================================

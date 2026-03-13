@@ -172,7 +172,7 @@
     context_exec/2,
     context_exec/3,
     context_call_method/4,
-    create_local_env/0,
+    create_local_env/1,
     context_to_term/1,
     context_interp_id/1,
     context_set_callback_handler/2,
@@ -1362,12 +1362,17 @@ context_call_method(_ContextRef, _ObjRef, _Method, _Args) ->
 %% @doc Create a new process-local Python environment.
 %%
 %% Creates a new Python globals/locals dict pair for use as a process-local
-%% environment. The returned resource should be stored in the process dictionary.
+%% environment. The dicts are created inside the context's interpreter to
+%% ensure the correct memory allocator is used.
+%%
+%% The returned resource should be stored in the process dictionary, keyed
+%% by the interpreter ID.
 %% When the process exits, the resource destructor frees the Python dicts.
 %%
+%% @param CtxRef Context reference (from context_create/1)
 %% @returns {ok, EnvRef} | {error, Reason}
--spec create_local_env() -> {ok, reference()} | {error, term()}.
-create_local_env() ->
+-spec create_local_env(reference()) -> {ok, reference()} | {error, term()}.
+create_local_env(_CtxRef) ->
     ?NIF_STUB.
 
 %% @doc Convert a Python object reference to an Erlang term.

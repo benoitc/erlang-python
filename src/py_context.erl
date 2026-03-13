@@ -47,7 +47,8 @@
     call_method/4,
     to_term/1,
     get_interp_id/1,
-    is_subinterp/1
+    is_subinterp/1,
+    create_local_env/1
 ]).
 
 %% Internal exports
@@ -322,6 +323,26 @@ is_subinterp(Ctx) when is_pid(Ctx) ->
             false
     end.
 
+%% @doc Create a process-local Python environment for this context.
+%%
+%% The environment is created inside the context's interpreter to ensure
+%% the correct memory allocator is used. This is critical for subinterpreters
+%% where each interpreter has its own memory allocator.
+%%
+%% The returned EnvRef should be stored in the calling process's dictionary,
+%% keyed by interpreter ID.
+-spec create_local_env(context()) -> {ok, reference()} | {error, term()}.
+create_local_env(Ctx) when is_pid(Ctx) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {create_local_env, self(), MRef},
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    end.
+
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
@@ -471,6 +492,12 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
             %% But actually we need to check the mode, not just interp_id
             IsSubinterp = is_context_subinterp(Ref),
             From ! {MRef, IsSubinterp},
+            loop(State);
+
+        {create_local_env, From, MRef} ->
+            %% Create env inside this context's interpreter
+            Result = py_nif:create_local_env(Ref),
+            From ! {MRef, Result},
             loop(State);
 
         {stop, From, MRef} ->
