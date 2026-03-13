@@ -2330,8 +2330,9 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
 
     /* Need to wait - release GIL and poll */
     {
-        long elapsed_ms = 0;
+        long elapsed_us = 0;
         const long poll_interval_us = 100;  /* 100 microseconds */
+        const long timeout_us = timeout_ms >= 0 ? timeout_ms * 1000 : -1;
 
         Py_BEGIN_ALLOW_THREADS
 
@@ -2342,17 +2343,14 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
             }
 
             /* Check timeout */
-            if (timeout_ms >= 0 && elapsed_ms >= timeout_ms) {
+            if (timeout_us >= 0 && elapsed_us >= timeout_us) {
                 result = 2;  /* Timeout */
                 break;
             }
 
             /* Sleep briefly */
             usleep(poll_interval_us);
-            elapsed_ms += poll_interval_us / 1000;
-            if (poll_interval_us < 1000) {
-                elapsed_ms = (elapsed_ms == 0 && poll_interval_us > 0) ? 1 : elapsed_ms;
-            }
+            elapsed_us += poll_interval_us;
         }
 
         Py_END_ALLOW_THREADS
