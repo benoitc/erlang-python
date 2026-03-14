@@ -206,6 +206,18 @@ result = erlang.run(handler())  # Run with Erlang event loop
 | `erlang_asyncio.create_task(coro)` | `asyncio.create_task(coro)` inside `erlang.run()` |
 | `erlang_asyncio.new_event_loop()` | `erlang.new_event_loop()` |
 
+## Deprecated APIs
+
+### ASGI/WSGI Modules
+
+The `py_asgi` and `py_wsgi` modules are deprecated and will be removed in a future release.
+
+**Deprecated:**
+- `py_asgi:run/4,5` - ASGI application runner
+- `py_wsgi:run/3,4` - WSGI application runner
+
+For web framework integration, use the [Channel API](channel.md) or [Reactor API](reactor.md) instead.
+
 ## Removed Features
 
 ### Context Affinity Functions (`bind`/`unbind`)
