@@ -21,6 +21,7 @@ schedulers.
 - **BEAM processes** - Fan out work across lightweight Erlang processes
 
 Key features:
+- **Process-bound environments** - Each Erlang process gets isolated Python state, enabling OTP-supervised Python actors
 - **Async/await** - Call Python async functions, gather results, stream from async generators
 - **Dirty NIF execution** - Python runs on dirty schedulers, never blocking the BEAM
 - **Elixir support** - Works seamlessly from Elixir via the `:py` module
@@ -243,6 +244,52 @@ py:state_clear().
 ```
 
 This is backed by ETS with `{write_concurrency, true}`, so counters are atomic and fast.
+
+## Process-Bound Python Environments
+
+Each Erlang process gets its own isolated Python namespace. Variables, imports, and objects defined in one process are invisible to others, even when using the same interpreter.
+
+```erlang
+%% Process A defines state
+spawn(fun() ->
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"counter = 0">>),
+    {ok, 0} = py:eval(Ctx, <<"counter">>)
+end).
+
+%% Process B - same context, but isolated namespace
+spawn(fun() ->
+    Ctx = py:context(1),
+    %% 'counter' is undefined here - different process
+    {error, _} = py:eval(Ctx, <<"counter">>)
+end).
+```
+
+This enables OTP-style patterns for Python:
+
+```erlang
+-module(py_counter).
+-behaviour(gen_server).
+
+init([]) ->
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
+class Counter:
+    def __init__(self): self.value = 0
+    def incr(self): self.value += 1; return self.value
+
+counter = Counter()
+">>),
+    {ok, #{ctx => Ctx}}.
+
+handle_call(incr, _From, #{ctx := Ctx} = State) ->
+    {ok, Value} = py:eval(Ctx, <<"counter.incr()">>),
+    {reply, Value, State}.
+```
+
+Resetting Python state is simple: terminate the process. Supervisors can restart it with a fresh environment. No need for manual cleanup.
+
+See [Process-Bound Environments](docs/process-bound-envs.md) for patterns like ML pipelines, stateful actors, and supervision strategies.
 
 ## Async/Await Support
 
@@ -572,6 +619,7 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 ## Documentation
 
 - [Getting Started](docs/getting-started.md)
+- [Process-Bound Environments](docs/process-bound-envs.md) - Isolated Python state per Erlang process
 - [AI Integration Guide](docs/ai-integration.md)
 - [Type Conversion](docs/type-conversion.md)
 - [Context Affinity](docs/context-affinity.md)
@@ -582,7 +630,6 @@ py:execution_mode().  %% => free_threaded | subinterp | multi_executor
 - [Asyncio Event Loop](docs/asyncio.md) - Erlang-native asyncio with TCP/UDP support
 - [Reactor](docs/reactor.md) - FD-based protocol handling
 - [Security](docs/security.md) - Sandbox and blocked operations
-- [Web Frameworks](docs/web-frameworks.md) - ASGI/WSGI integration
 - [Changelog](https://github.com/benoitc/erlang-python/releases)
 
 ## License
