@@ -429,6 +429,15 @@ static void *worker_thread_main(void *arg) {
                     PyObject *result = NULL;
                     PyObject *globals = ns ? ns->globals : PyDict_New();
                     PyObject *locals = ns ? ns->locals : PyDict_New();
+                    bool owns_globals = (ns == NULL);
+                    bool owns_locals = (ns == NULL);
+
+                    /* Check allocation if we own the dicts */
+                    if ((owns_globals && globals == NULL) || (owns_locals && locals == NULL)) {
+                        if (owns_globals) Py_XDECREF(globals);
+                        if (owns_locals) Py_XDECREF(locals);
+                        break;
+                    }
 
                     switch (header.req_type) {
                         case REQ_CALL:
@@ -447,6 +456,8 @@ static void *worker_thread_main(void *arg) {
                                 } else if (enif_get_atom(tmp_env, elements[0], mod_str, 256, ERL_NIF_LATIN1)) {
                                     /* Already filled */
                                 } else {
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
                                     break;
                                 }
 
@@ -458,6 +469,8 @@ static void *worker_thread_main(void *arg) {
                                 } else if (enif_get_atom(tmp_env, elements[1], func_str, 256, ERL_NIF_LATIN1)) {
                                     /* Already filled */
                                 } else {
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
                                     break;
                                 }
 
@@ -481,6 +494,8 @@ static void *worker_thread_main(void *arg) {
 
                                 if (module == NULL) {
                                     PyErr_Clear();
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
                                     break;
                                 }
 
@@ -490,6 +505,8 @@ static void *worker_thread_main(void *arg) {
 
                                 if (func == NULL) {
                                     PyErr_Clear();
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
                                     break;
                                 }
 
@@ -591,6 +608,10 @@ static void *worker_thread_main(void *arg) {
                         default:
                             break;
                     }
+
+                    /* Clean up owned dicts after switch completes */
+                    if (owns_globals) Py_DECREF(globals);
+                    if (owns_locals) Py_DECREF(locals);
 
                     /* Serialize result */
                     if (success && result != NULL) {
