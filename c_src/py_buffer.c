@@ -37,6 +37,8 @@
 #include "py_buffer.h"
 #include <string.h>
 #include <errno.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 /* Portable memmem fallback for systems that don't have it.
  * memmem is available on: Linux (glibc), macOS, FreeBSD >= 13
@@ -137,6 +139,12 @@ int py_buffer_write(py_buffer_resource_t *buf, const unsigned char *data, size_t
     pthread_mutex_lock(&buf->mutex);
 
     if (buf->closed) {
+        pthread_mutex_unlock(&buf->mutex);
+        return -1;
+    }
+
+    /* Check for overflow */
+    if (size > SIZE_MAX - buf->write_pos) {
         pthread_mutex_unlock(&buf->mutex);
         return -1;
     }
@@ -310,13 +318,17 @@ static PyObject *PyBuffer_read(PyBufferObject *self, PyObject *args) {
         /* Read all available (or wait for EOF if not all data yet) */
         if (!buf->eof && buf->content_length > 0 &&
             buf->write_pos < (size_t)buf->content_length) {
-            /* Wait for all data */
+            /* Wait for all data - release mutex before reacquiring GIL to avoid deadlock */
+            pthread_mutex_unlock(&buf->mutex);
+
             Py_BEGIN_ALLOW_THREADS
+            pthread_mutex_lock(&buf->mutex);
             while (buf->write_pos < (size_t)buf->content_length &&
                    !buf->eof && !buf->closed) {
                 pthread_cond_wait(&buf->data_ready, &buf->mutex);
             }
             Py_END_ALLOW_THREADS
+
             available = buf->write_pos - buf->read_pos;
         }
         to_read = available;
@@ -324,13 +336,29 @@ static PyObject *PyBuffer_read(PyBufferObject *self, PyObject *args) {
         to_read = (available < (size_t)size) ? available : (size_t)size;
     }
 
-    /* Zero-copy: create bytes directly from buffer data */
-    PyObject *result = PyBytes_FromStringAndSize(
-        (char *)buf->data + buf->read_pos, to_read);
-
-    buf->read_pos += to_read;
+    /* Copy data while holding mutex, then release before creating PyBytes */
+    unsigned char *local_copy = NULL;
+    if (to_read > 0) {
+        local_copy = (unsigned char *)malloc(to_read);
+        if (local_copy == NULL) {
+            pthread_mutex_unlock(&buf->mutex);
+            PyErr_NoMemory();
+            return NULL;
+        }
+        memcpy(local_copy, buf->data + buf->read_pos, to_read);
+        buf->read_pos += to_read;
+    }
 
     pthread_mutex_unlock(&buf->mutex);
+
+    /* Create PyBytes without holding mutex */
+    PyObject *result;
+    if (to_read > 0) {
+        result = PyBytes_FromStringAndSize((char *)local_copy, to_read);
+        free(local_copy);
+    } else {
+        result = PyBytes_FromStringAndSize("", 0);
+    }
 
     return result;
 }
@@ -352,6 +380,8 @@ static PyObject *PyBuffer_read_nonblock(PyBufferObject *self, PyObject *args) {
     }
 
     py_buffer_resource_t *buf = self->resource;
+    unsigned char *local_copy = NULL;
+    size_t to_read = 0;
 
     pthread_mutex_lock(&buf->mutex);
 
@@ -359,20 +389,36 @@ static PyObject *PyBuffer_read_nonblock(PyBufferObject *self, PyObject *args) {
     size_t available = buf->write_pos - buf->read_pos;
 
     /* Determine how much to read */
-    size_t to_read;
     if (size < 0) {
         to_read = available;
     } else {
         to_read = (available < (size_t)size) ? available : (size_t)size;
     }
 
-    /* Create result bytes */
-    PyObject *result = PyBytes_FromStringAndSize(
-        (char *)buf->data + buf->read_pos, to_read);
-
-    buf->read_pos += to_read;
+    /* Copy data while holding mutex */
+    if (to_read > 0) {
+        local_copy = (unsigned char *)malloc(to_read);
+        if (local_copy != NULL) {
+            memcpy(local_copy, buf->data + buf->read_pos, to_read);
+            buf->read_pos += to_read;
+        }
+    }
 
     pthread_mutex_unlock(&buf->mutex);
+
+    /* Create PyBytes without holding mutex */
+    if (local_copy == NULL && to_read > 0) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    PyObject *result;
+    if (to_read > 0) {
+        result = PyBytes_FromStringAndSize((char *)local_copy, to_read);
+        free(local_copy);
+    } else {
+        result = PyBytes_FromStringAndSize("", 0);
+    }
 
     return result;
 }
@@ -430,10 +476,11 @@ static PyObject *PyBuffer_readline(PyBufferObject *self, PyObject *args) {
     }
 
     py_buffer_resource_t *buf = self->resource;
+    unsigned char *local_copy = NULL;
+    size_t copy_len = 0;
 
     Py_BEGIN_ALLOW_THREADS
     pthread_mutex_lock(&buf->mutex);
-    Py_END_ALLOW_THREADS
 
     /* Search for newline in available data */
     while (true) {
@@ -452,34 +499,54 @@ static PyObject *PyBuffer_readline(PyBufferObject *self, PyObject *args) {
             const unsigned char *newline = find_newline(start, search_len);
 
             if (newline != NULL) {
-                /* Found newline - return line including newline */
-                size_t line_len = (newline - start) + 1;
-                PyObject *result = PyBytes_FromStringAndSize((char *)start, line_len);
-                buf->read_pos += line_len;
-                pthread_mutex_unlock(&buf->mutex);
-                return result;
+                /* Found newline - copy line including newline */
+                copy_len = (newline - start) + 1;
+                local_copy = (unsigned char *)malloc(copy_len);
+                if (local_copy != NULL) {
+                    memcpy(local_copy, start, copy_len);
+                    buf->read_pos += copy_len;
+                }
+                break;
             }
 
             /* No newline found - check if we should return what we have */
             if (buf->eof || (size > 0 && available >= (size_t)size)) {
-                size_t to_read = (size > 0 && (size_t)size < available)
-                                 ? (size_t)size : available;
-                PyObject *result = PyBytes_FromStringAndSize((char *)start, to_read);
-                buf->read_pos += to_read;
-                pthread_mutex_unlock(&buf->mutex);
-                return result;
+                copy_len = (size > 0 && (size_t)size < available)
+                           ? (size_t)size : available;
+                local_copy = (unsigned char *)malloc(copy_len);
+                if (local_copy != NULL) {
+                    memcpy(local_copy, start, copy_len);
+                    buf->read_pos += copy_len;
+                }
+                break;
             }
         } else if (buf->eof || buf->closed) {
             /* No more data coming */
-            pthread_mutex_unlock(&buf->mutex);
-            return PyBytes_FromStringAndSize("", 0);
+            break;
         }
 
         /* Wait for more data */
-        Py_BEGIN_ALLOW_THREADS
         pthread_cond_wait(&buf->data_ready, &buf->mutex);
-        Py_END_ALLOW_THREADS
     }
+
+    pthread_mutex_unlock(&buf->mutex);
+    Py_END_ALLOW_THREADS
+
+    /* Create PyBytes without holding mutex */
+    if (local_copy == NULL && copy_len > 0) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    PyObject *result;
+    if (copy_len > 0) {
+        result = PyBytes_FromStringAndSize((char *)local_copy, copy_len);
+        free(local_copy);
+    } else {
+        result = PyBytes_FromStringAndSize("", 0);
+    }
+
+    return result;
 }
 
 /**
@@ -496,9 +563,16 @@ static PyObject *PyBuffer_readlines(PyBufferObject *self, PyObject *args) {
 
     Py_ssize_t total_size = 0;
 
+    PyObject *empty_args = PyTuple_New(0);
+    if (empty_args == NULL) {
+        Py_DECREF(lines);
+        return NULL;
+    }
+
     while (true) {
-        PyObject *line = PyBuffer_readline(self, Py_BuildValue("()"));
+        PyObject *line = PyBuffer_readline(self, empty_args);
         if (line == NULL) {
+            Py_DECREF(empty_args);
             Py_DECREF(lines);
             return NULL;
         }
@@ -511,6 +585,7 @@ static PyObject *PyBuffer_readlines(PyBufferObject *self, PyObject *args) {
 
         if (PyList_Append(lines, line) < 0) {
             Py_DECREF(line);
+            Py_DECREF(empty_args);
             Py_DECREF(lines);
             return NULL;
         }
@@ -524,6 +599,7 @@ static PyObject *PyBuffer_readlines(PyBufferObject *self, PyObject *args) {
         }
     }
 
+    Py_DECREF(empty_args);
     return lines;
 }
 
@@ -710,7 +786,14 @@ static PyObject *PyBuffer_iter(PyObject *self) {
 }
 
 static PyObject *PyBuffer_iternext(PyBufferObject *self) {
-    PyObject *line = PyBuffer_readline(self, Py_BuildValue("()"));
+    PyObject *empty_args = PyTuple_New(0);
+    if (empty_args == NULL) {
+        return NULL;
+    }
+
+    PyObject *line = PyBuffer_readline(self, empty_args);
+    Py_DECREF(empty_args);
+
     if (line == NULL) {
         return NULL;
     }
