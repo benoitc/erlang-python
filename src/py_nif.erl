@@ -215,7 +215,11 @@
     channel_info/1,
     channel_wait/3,
     channel_cancel_wait/2,
-    channel_register_sync_waiter/1
+    channel_register_sync_waiter/1,
+    %% PyBuffer API - zero-copy WSGI input
+    py_buffer_create/1,
+    py_buffer_write/2,
+    py_buffer_close/1
 ]).
 
 -on_load(load_nif/0).
@@ -1825,4 +1829,40 @@ channel_cancel_wait(_ChannelRef, _CallbackId) ->
 %% @returns ok | has_data | {error, closed} | {error, waiter_exists}
 -spec channel_register_sync_waiter(reference()) -> ok | has_data | {error, term()}.
 channel_register_sync_waiter(_ChannelRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% PyBuffer API - Zero-copy WSGI Input
+%%% ============================================================================
+
+%% @doc Create a new PyBuffer resource.
+%%
+%% Creates a buffer that can be written by Erlang and read by Python
+%% with zero-copy semantics. The buffer is suitable for use as wsgi.input.
+%%
+%% @param ContentLength Expected size in bytes, or `undefined' for chunked
+%% @returns {ok, BufferRef} | {error, Reason}
+-spec py_buffer_create(non_neg_integer() | undefined) -> {ok, reference()} | {error, term()}.
+py_buffer_create(_ContentLength) ->
+    ?NIF_STUB.
+
+%% @doc Write binary data to the buffer.
+%%
+%% Appends data to the buffer and signals any waiting Python readers.
+%%
+%% @param BufferRef Buffer reference from py_buffer_create/1
+%% @param Data Binary data to append
+%% @returns ok | {error, Reason}
+-spec py_buffer_write(reference(), binary()) -> ok | {error, term()}.
+py_buffer_write(_BufferRef, _Data) ->
+    ?NIF_STUB.
+
+%% @doc Close the buffer (signal EOF).
+%%
+%% Sets the EOF flag and wakes up any Python threads waiting for data.
+%%
+%% @param BufferRef Buffer reference
+%% @returns ok
+-spec py_buffer_close(reference()) -> ok.
+py_buffer_close(_BufferRef) ->
     ?NIF_STUB.

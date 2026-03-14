@@ -595,6 +595,14 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return capsule;
     }
 
+    /* Check for py_buffer resource - wrap in PyBufferObject for WSGI input */
+    py_buffer_resource_t *pybuf;
+    if (enif_get_resource(env, term, PY_BUFFER_RESOURCE_TYPE, (void **)&pybuf)) {
+        /* Wrap the buffer resource in a PyBufferObject.
+         * PyBuffer_from_resource increments the resource refcount. */
+        return PyBuffer_from_resource(pybuf, pybuf);
+    }
+
     /* Fallback: return None for unknown types */
     Py_RETURN_NONE;
 }

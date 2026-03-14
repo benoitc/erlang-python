@@ -41,6 +41,7 @@
 #include "py_wsgi.h"
 #include "py_event_loop.h"
 #include "py_channel.h"
+#include "py_buffer.h"
 
 /* ============================================================================
  * Global state definitions
@@ -301,6 +302,7 @@ static int is_inline_schedule_marker(PyObject *obj);
 #include "py_subinterp_thread.c"
 #include "py_reactor_buffer.c"
 #include "py_channel.c"
+#include "py_buffer.c"
 
 /* ============================================================================
  * Resource callbacks
@@ -1168,6 +1170,20 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         Py_Finalize();
         atomic_store(&g_runtime_state, PY_STATE_STOPPED);
         return make_error(env, "reactor_buffer_register_failed");
+    }
+
+    /* Initialize PyBuffer Python type for zero-copy WSGI input */
+    if (PyBuffer_init_type() < 0) {
+        Py_Finalize();
+        atomic_store(&g_runtime_state, PY_STATE_STOPPED);
+        return make_error(env, "py_buffer_init_failed");
+    }
+
+    /* Register PyBuffer type with erlang module */
+    if (PyBuffer_register_with_module() < 0) {
+        Py_Finalize();
+        atomic_store(&g_runtime_state, PY_STATE_STOPPED);
+        return make_error(env, "py_buffer_register_failed");
     }
 
     /* Create a default event loop so Python asyncio always has one available */
@@ -4797,6 +4813,16 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         return -1;
     }
 
+    /* PyBuffer resource type for zero-copy WSGI input */
+    PY_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "py_buffer",
+        py_buffer_resource_dtor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
+    if (PY_BUFFER_RESOURCE_TYPE == NULL) {
+        return -1;
+    }
+
     /* Initialize channel module atoms */
     if (channel_init(env) < 0) {
         return -1;
@@ -5059,7 +5085,12 @@ static ErlNifFunc nif_funcs[] = {
     {"channel_info", 1, nif_channel_info, 0},
     {"channel_wait", 3, nif_channel_wait, 0},
     {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0},
-    {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0}
+    {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0},
+
+    /* PyBuffer API - zero-copy WSGI input */
+    {"py_buffer_create", 1, nif_py_buffer_create, 0},
+    {"py_buffer_write", 2, nif_py_buffer_write, 0},
+    {"py_buffer_close", 1, nif_py_buffer_close, 0}
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)
