@@ -1403,7 +1403,7 @@ extern ERL_NIF_TERM ATOM_SPAN_EVENT;     /**< @brief `span_event` atom */
  * @note Does not consume a reference to obj
  * @note May return ATOM_ERROR on allocation failure
  */
-static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj);
+extern ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj);
 
 /**
  * @brief Convert an Erlang term to a Python object

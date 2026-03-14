@@ -24,6 +24,7 @@
  */
 
 #include "py_subinterp_thread.h"
+#include "py_nif.h"
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -613,59 +614,9 @@ static void *worker_thread_main(void *arg) {
                     if (owns_globals) Py_DECREF(globals);
                     if (owns_locals) Py_DECREF(locals);
 
-                    /* Serialize result */
+                    /* Serialize result using py_to_term for full type support */
                     if (success && result != NULL) {
-                        /* For now, just return ok atom */
-                        /* TODO: Proper py_to_term conversion and ETF serialization */
-                        ERL_NIF_TERM result_term;
-                        if (result == Py_None) {
-                            result_term = enif_make_atom(tmp_env, "none");
-                        } else if (PyLong_Check(result)) {
-                            long val = PyLong_AsLong(result);
-                            result_term = enif_make_long(tmp_env, val);
-                        } else if (PyFloat_Check(result)) {
-                            double val = PyFloat_AsDouble(result);
-                            result_term = enif_make_double(tmp_env, val);
-                        } else if (PyUnicode_Check(result)) {
-                            Py_ssize_t size;
-                            const char *str = PyUnicode_AsUTF8AndSize(result, &size);
-                            if (str) {
-                                ErlNifBinary bin;
-                                if (enif_alloc_binary(size, &bin)) {
-                                    memcpy(bin.data, str, size);
-                                    result_term = enif_make_binary(tmp_env, &bin);
-                                } else {
-                                    result_term = enif_make_atom(tmp_env, "conversion_error");
-                                }
-                            } else {
-                                result_term = enif_make_atom(tmp_env, "conversion_error");
-                            }
-                        } else if (PyBool_Check(result)) {
-                            result_term = result == Py_True ?
-                                enif_make_atom(tmp_env, "true") :
-                                enif_make_atom(tmp_env, "false");
-                        } else {
-                            /* Fallback: convert to string representation */
-                            PyObject *str = PyObject_Str(result);
-                            if (str) {
-                                Py_ssize_t size;
-                                const char *s = PyUnicode_AsUTF8AndSize(str, &size);
-                                if (s) {
-                                    ErlNifBinary bin;
-                                    if (enif_alloc_binary(size, &bin)) {
-                                        memcpy(bin.data, s, size);
-                                        result_term = enif_make_binary(tmp_env, &bin);
-                                    } else {
-                                        result_term = enif_make_atom(tmp_env, "conversion_error");
-                                    }
-                                } else {
-                                    result_term = enif_make_atom(tmp_env, "conversion_error");
-                                }
-                                Py_DECREF(str);
-                            } else {
-                                result_term = enif_make_atom(tmp_env, "pyobject");
-                            }
-                        }
+                        ERL_NIF_TERM result_term = py_to_term(tmp_env, result);
                         Py_XDECREF(result);
 
                         /* Wrap in {ok, Result} */
