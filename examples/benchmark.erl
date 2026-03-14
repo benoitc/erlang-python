@@ -82,7 +82,8 @@ run_benchmarks(quick) ->
     bench_simple_call(100),
     bench_eval(100),
     bench_concurrent(10, 10),
-    bench_streaming(100);
+    bench_streaming(100),
+    bench_schedule_inline(20);
 
 run_benchmarks(full) ->
     io:format("Running full benchmarks...~n~n"),
@@ -92,7 +93,8 @@ run_benchmarks(full) ->
     bench_concurrent(1000, 10),
     bench_streaming(1000),
     bench_type_conversion(1000),
-    bench_semaphore(10000);
+    bench_semaphore(10000),
+    bench_schedule_inline(500);
 
 run_benchmarks(concurrent) ->
     io:format("Running concurrency benchmarks...~n~n"),
@@ -110,7 +112,8 @@ run_benchmarks(standard) ->
     bench_concurrent(50, 50),
     bench_streaming(500),
     bench_type_conversion(500),
-    bench_semaphore(5000).
+    bench_semaphore(5000),
+    bench_schedule_inline(100).
 
 %% Simple call benchmark
 bench_simple_call(N) ->
@@ -239,3 +242,74 @@ bench_semaphore(N) ->
     io:format("  Total time: ~.2f ms~n", [TimeMs]),
     io:format("  Per acquire/release: ~.4f ms~n", [PerOp]),
     io:format("  Throughput: ~p ops/sec~n~n", [round(OpsPerSec)]).
+
+%% Schedule inline vs schedule_py benchmark
+bench_schedule_inline(N) ->
+    io:format("Benchmark: schedule_inline vs schedule_py (chained calls)~n"),
+    io:format("  Iterations: ~p~n", [N]),
+
+    %% Set up test functions
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
+import __main__
+import erlang
+
+def increment(x):
+    return x + 1
+
+__main__.increment = increment
+
+# Chain using schedule_py (messaging overhead)
+def chain_schedule_py(x, count):
+    if count <= 0:
+        return x
+    x = erlang.schedule_py('__main__', 'increment', [x])
+    return erlang.schedule_py('__main__', 'chain_schedule_py', [x, count - 1])
+
+__main__.chain_schedule_py = chain_schedule_py
+
+# Chain using schedule_inline (no messaging)
+def chain_schedule_inline(x, count):
+    if count <= 0:
+        return x
+    x = increment(x)
+    return erlang.schedule_inline('__main__', 'chain_schedule_inline', [x, count - 1])
+
+__main__.chain_schedule_inline = chain_schedule_inline
+">>),
+
+    ChainLen = 10,
+
+    %% Benchmark schedule_py
+    {TimePy, _} = timer:tc(fun() ->
+        lists:foreach(fun(_) ->
+            {ok, _} = py:call(Ctx, '__main__', chain_schedule_py, [0, ChainLen])
+        end, lists:seq(1, N))
+    end),
+
+    %% Benchmark schedule_inline
+    {TimeInline, _} = timer:tc(fun() ->
+        lists:foreach(fun(_) ->
+            {ok, _} = py:call(Ctx, '__main__', chain_schedule_inline, [0, ChainLen])
+        end, lists:seq(1, N))
+    end),
+
+    TotalCalls = N * ChainLen,
+    PyMs = TimePy / 1000,
+    InlineMs = TimeInline / 1000,
+    Speedup = PyMs / InlineMs,
+
+    io:format("  Chain length: ~p~n", [ChainLen]),
+    io:format("  Total chained calls: ~p~n", [TotalCalls]),
+    io:format("~n"),
+    io:format("  schedule_py:~n"),
+    io:format("    Total: ~.2f ms~n", [PyMs]),
+    io:format("    Per chain: ~.3f ms~n", [PyMs / N]),
+    io:format("    Throughput: ~p chains/sec~n", [round(N / (PyMs / 1000))]),
+    io:format("~n"),
+    io:format("  schedule_inline:~n"),
+    io:format("    Total: ~.2f ms~n", [InlineMs]),
+    io:format("    Per chain: ~.3f ms~n", [InlineMs / N]),
+    io:format("    Throughput: ~p chains/sec~n", [round(N / (InlineMs / 1000))]),
+    io:format("~n"),
+    io:format("  Speedup: ~.2fx~n~n", [Speedup]).

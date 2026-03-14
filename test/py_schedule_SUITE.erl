@@ -328,7 +328,9 @@ def call_inline_greet(name, prefix):
 %% Test schedule_inline transitioning to schedule_py (mixed schedule types)
 test_schedule_inline_to_schedule_py(_Config) ->
     %% Start with schedule_inline, then transition to schedule_py
-    ok = py:exec(<<"
+    %% Use explicit context to ensure consistent namespace
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def step1(x):
@@ -350,7 +352,7 @@ __main__.step2 = step2
 __main__.step3 = step3
 ">>),
     %% (5 * 2 + 10) * 3 = 60
-    {ok, Result} = py:eval(<<"step1(5)">>),
+    {ok, Result} = py:eval(Ctx, <<"step1(5)">>),
     ct:pal("schedule_inline to schedule_py result: ~p", [Result]),
     60 = Result,
     ok.
