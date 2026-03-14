@@ -4,6 +4,23 @@
 
 ### Added
 
+- **PyBuffer API** - Zero-copy WSGI input buffer for streaming HTTP bodies
+  - `py_buffer:new/0,1` - Create buffer (chunked or with content_length)
+  - `py_buffer:write/2` - Append data, signals waiting Python readers
+  - `py_buffer:close/1` - Signal EOF, wake all readers
+  - Python `PyBuffer` type with file-like interface:
+    - `read(size)`, `readline()`, `readlines()` - Blocking reads with GIL released
+    - `read_nonblock(size)` - Non-blocking read for async I/O
+    - `readable_amount()` - Bytes available without blocking
+    - `at_eof()` - Check if at EOF with no more data
+    - `seek(offset, whence)`, `tell()` - Position tracking
+    - `find(sub)` - Fast substring search via memmem/memchr
+    - `memoryview(buf)` - Zero-copy buffer protocol
+    - `for line in buf:` - Line iteration
+  - Auto-conversion: Passing buffer ref to `py:call`/`py:eval` wraps as `PyBuffer`
+  - Suitable for `wsgi.input` in WSGI applications
+  - See [Buffer API docs](docs/buffer.md)
+
 - **Inline Continuation API** - High-performance scheduling without Erlang messaging
   - `erlang.schedule_inline(module, func, args, kwargs)` - Chain Python calls via `enif_schedule_nif()`
   - ~3x faster than `schedule_py` for tight loops (bypasses gen_server messaging)
