@@ -25,6 +25,7 @@
 
 #include "py_subinterp_thread.h"
 #include "py_nif.h"
+#include "py_buffer.h"
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -315,6 +316,12 @@ static void *worker_thread_main(void *arg) {
         fprintf(stderr, "worker %d: failed to create erlang module\n", w->worker_id);
         PyErr_Clear();
         /* Continue without erlang module - callbacks won't work */
+    } else {
+        /* Register PyBuffer with erlang module in this subinterpreter */
+        if (PyBuffer_register_with_module() < 0) {
+            PyErr_Clear();
+            /* Non-fatal - PyBuffer just won't be available */
+        }
     }
 
     /* Release the subinterpreter's GIL (we'll acquire it per-request) */
