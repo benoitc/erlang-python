@@ -1420,6 +1420,167 @@ static PyObject *py_schedule_py(PyObject *self, PyObject *args, PyObject *kwargs
     return (PyObject *)marker;
 }
 
+/* ============================================================================
+ * InlineScheduleMarker - marker type for inline continuation without messaging
+ *
+ * When a Python handler returns an InlineScheduleMarker, the NIF detects it
+ * and uses enif_schedule_nif() to continue execution directly, bypassing
+ * the Erlang messaging layer for better performance in tight loops.
+ *
+ * Note: InlineScheduleMarkerObject is forward declared in py_nif.c
+ * ============================================================================ */
+
+static void InlineScheduleMarker_dealloc(InlineScheduleMarkerObject *self) {
+    Py_XDECREF(self->module);
+    Py_XDECREF(self->func);
+    Py_XDECREF(self->args);
+    Py_XDECREF(self->kwargs);
+    Py_XDECREF(self->globals);
+    Py_XDECREF(self->locals);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *InlineScheduleMarker_repr(InlineScheduleMarkerObject *self) {
+    return PyUnicode_FromFormat("<erlang.InlineScheduleMarker module='%U' func='%U'>",
+                                 self->module, self->func);
+}
+
+static PyTypeObject InlineScheduleMarkerType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang.InlineScheduleMarker",
+    .tp_doc = "Marker for inline continuation via enif_schedule_nif (no Erlang messaging)",
+    .tp_basicsize = sizeof(InlineScheduleMarkerObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)InlineScheduleMarker_dealloc,
+    .tp_repr = (reprfunc)InlineScheduleMarker_repr,
+};
+
+/**
+ * Check if a Python object is an InlineScheduleMarker
+ */
+static int is_inline_schedule_marker(PyObject *obj) {
+    return Py_IS_TYPE(obj, &InlineScheduleMarkerType);
+}
+
+/**
+ * @brief Python: erlang.schedule_inline(module, func, args=None, kwargs=None) -> InlineScheduleMarker
+ *
+ * Creates an InlineScheduleMarker that, when returned from a handler function,
+ * causes the NIF to use enif_schedule_nif() to continue execution directly
+ * without going through Erlang messaging.
+ *
+ * This is more efficient than schedule_py() for tight loops that need to yield
+ * to the scheduler but don't need to interact with Erlang between calls.
+ *
+ * Flow comparison:
+ *   schedule_py: Python -> NIF -> Erlang message -> NIF -> Python
+ *   schedule_inline: Python -> NIF -> enif_schedule_nif -> NIF -> Python
+ *
+ * Usage:
+ *   def process_batch(data, offset=0, results=None):
+ *       if results is None:
+ *           results = []
+ *       chunk_end = min(offset + 100, len(data))
+ *       for i in range(offset, chunk_end):
+ *           results.append(transform(data[i]))
+ *       if chunk_end < len(data):
+ *           if erlang.consume_time_slice(25):
+ *               return erlang.schedule_inline('__main__', 'process_batch',
+ *                                             args=[data, chunk_end, results])
+ *           return process_batch(data, chunk_end, results)
+ *       return results
+ *
+ * @param self Module reference (unused)
+ * @param args Positional args: (module, func)
+ * @param kwargs Keyword args: args=list/tuple, kwargs=dict
+ * @return InlineScheduleMarker object or NULL with exception
+ */
+static PyObject *py_schedule_inline(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+
+    static char *kwlist[] = {"module", "func", "args", "kwargs", NULL};
+    PyObject *module_name = NULL;
+    PyObject *func_name = NULL;
+    PyObject *call_args = Py_None;
+    PyObject *call_kwargs = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OO", kwlist,
+            &module_name, &func_name, &call_args, &call_kwargs)) {
+        return NULL;
+    }
+
+    /* Validate module and func are strings */
+    if (!PyUnicode_Check(module_name)) {
+        PyErr_SetString(PyExc_TypeError, "module must be a string");
+        return NULL;
+    }
+    if (!PyUnicode_Check(func_name)) {
+        PyErr_SetString(PyExc_TypeError, "func must be a string");
+        return NULL;
+    }
+
+    /* Validate args is None or a sequence */
+    if (call_args != Py_None && !PyTuple_Check(call_args) && !PyList_Check(call_args)) {
+        PyErr_SetString(PyExc_TypeError, "args must be None, a tuple, or a list");
+        return NULL;
+    }
+
+    /* Validate kwargs is None or a dict */
+    if (call_kwargs != Py_None && !PyDict_Check(call_kwargs)) {
+        PyErr_SetString(PyExc_TypeError, "kwargs must be None or a dict");
+        return NULL;
+    }
+
+    /* Create the marker */
+    InlineScheduleMarkerObject *marker = PyObject_New(InlineScheduleMarkerObject, &InlineScheduleMarkerType);
+    if (marker == NULL) {
+        return NULL;
+    }
+
+    Py_INCREF(module_name);
+    marker->module = module_name;
+
+    Py_INCREF(func_name);
+    marker->func = func_name;
+
+    /* Convert args to tuple if it's a list */
+    if (call_args == Py_None) {
+        Py_INCREF(Py_None);
+        marker->args = Py_None;
+    } else if (PyList_Check(call_args)) {
+        marker->args = PyList_AsTuple(call_args);
+        if (marker->args == NULL) {
+            Py_DECREF(marker);
+            return NULL;
+        }
+    } else {
+        Py_INCREF(call_args);
+        marker->args = call_args;
+    }
+
+    Py_INCREF(call_kwargs);
+    marker->kwargs = call_kwargs;
+
+    /* Capture globals and locals from caller's frame */
+    PyObject *frame_globals = PyEval_GetGlobals();  /* Borrowed reference */
+    PyObject *frame_locals = PyEval_GetLocals();    /* Borrowed reference */
+    if (frame_globals != NULL) {
+        Py_INCREF(frame_globals);
+        marker->globals = frame_globals;
+    } else {
+        marker->globals = NULL;
+    }
+    if (frame_locals != NULL) {
+        Py_INCREF(frame_locals);
+        marker->locals = frame_locals;
+    } else {
+        marker->locals = NULL;
+    }
+
+    return (PyObject *)marker;
+}
+
 /**
  * @brief Python: erlang.consume_time_slice(percent) -> bool
  *
@@ -2484,6 +2645,10 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Schedule Python function continuation (must be returned from handler).\n\n"
      "Usage: return erlang.schedule_py('module', 'func', [args], {'kwargs'})\n"
      "Releases dirty scheduler and continues via _execute_py callback."},
+    {"schedule_inline", (PyCFunction)py_schedule_inline, METH_VARARGS | METH_KEYWORDS,
+     "Schedule inline Python continuation via enif_schedule_nif (no Erlang messaging).\n\n"
+     "Usage: return erlang.schedule_inline('module', 'func', args=[...], kwargs={...})\n"
+     "More efficient than schedule_py for tight loops that don't need Erlang interaction."},
     {"consume_time_slice", py_consume_time_slice, METH_VARARGS,
      "Check/consume NIF time slice for cooperative scheduling.\n\n"
      "Usage: if erlang.consume_time_slice(percent): return erlang.schedule_py(...)\n"
@@ -2587,6 +2752,11 @@ static int create_erlang_module(void) {
         return -1;
     }
 
+    /* Initialize InlineScheduleMarker type */
+    if (PyType_Ready(&InlineScheduleMarkerType) < 0) {
+        return -1;
+    }
+
     PyObject *module = PyModule_Create(&ErlangModuleDef);
     if (module == NULL) {
         return -1;
@@ -2642,6 +2812,14 @@ static int create_erlang_module(void) {
     Py_INCREF(&ScheduleMarkerType);
     if (PyModule_AddObject(module, "ScheduleMarker", (PyObject *)&ScheduleMarkerType) < 0) {
         Py_DECREF(&ScheduleMarkerType);
+        Py_DECREF(module);
+        return -1;
+    }
+
+    /* Add InlineScheduleMarker type to module */
+    Py_INCREF(&InlineScheduleMarkerType);
+    if (PyModule_AddObject(module, "InlineScheduleMarker", (PyObject *)&InlineScheduleMarkerType) < 0) {
+        Py_DECREF(&InlineScheduleMarkerType);
         Py_DECREF(module);
         return -1;
     }

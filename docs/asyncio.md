@@ -1063,6 +1063,43 @@ This is useful for:
 - Allowing other Erlang processes to run
 - Cooperative multitasking
 
+#### erlang.schedule_inline(module, func, args=None, kwargs=None)
+
+Release the dirty scheduler and continue by calling a Python function via `enif_schedule_nif()` - bypassing Erlang messaging entirely.
+
+```python
+import erlang
+
+def process_chunk(data, offset=0, results=None):
+    """Process data in chunks with inline continuations."""
+    if results is None:
+        results = []
+
+    chunk_end = min(offset + 100, len(data))
+    for i in range(offset, chunk_end):
+        results.append(transform(data[i]))
+
+    if chunk_end < len(data):
+        # Continue inline - no Erlang messaging overhead
+        return erlang.schedule_inline(
+            '__main__', 'process_chunk',
+            args=[data, chunk_end, results]
+        )
+
+    return results
+```
+
+**When to use `schedule_inline` vs `schedule_py`:**
+
+| Aspect | `schedule_inline` | `schedule_py` |
+|--------|-------------------|---------------|
+| Flow | Python -> NIF -> enif_schedule_nif -> Python | Python -> NIF -> Erlang message -> Python |
+| Speed | ~3x faster for tight loops | Slower due to messaging |
+| Use case | Pure Python chains, no Erlang interaction | When you need Erlang messaging between steps |
+| Overhead | Minimal (direct NIF continuation) | Higher (gen_server call) |
+
+**Important:** `schedule_inline` captures the caller's globals/locals, ensuring correct namespace resolution even with subinterpreters.
+
 #### erlang.consume_time_slice(percent)
 
 Check if the NIF time slice is exhausted. Returns `True` if you should yield, `False` if more time remains.
@@ -1099,7 +1136,8 @@ def long_computation(items, start_idx=0):
 |---------|----------|-----------------|
 | `erlang.call()` | Quick operations or callbacks that use `receive` | Held (unless callback suspends via `receive`) |
 | `erlang.schedule()` | Need to call Erlang callback and always release scheduler | Released |
-| `erlang.schedule_py()` | Long Python computation, cooperative scheduling | Released |
+| `erlang.schedule_py()` | Long Python computation, need Erlang interaction between steps | Released |
+| `erlang.schedule_inline()` | Tight Python loops, no Erlang interaction needed (~3x faster) | Released |
 | `consume_time_slice()` | Fine-grained control over yielding | N/A (checks time slice) |
 
 ### Example: Cooperative Long-Running Task

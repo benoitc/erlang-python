@@ -1051,6 +1051,74 @@ typedef struct {
     } *callback_results;
 } suspended_context_state_t;
 
+/* ============================================================================
+ * Inline Continuation Support
+ * ============================================================================
+ *
+ * Inline continuations allow Python functions to chain directly via
+ * enif_schedule_nif() without returning to Erlang messaging. This provides
+ * significant performance improvements for tight loops that need to yield
+ * to the scheduler.
+ *
+ * Flow comparison:
+ *   schedule_py: Python -> ScheduleMarker -> NIF -> Erlang -> message -> NIF -> Python
+ *   schedule_inline: Python -> InlineScheduleMarker -> NIF -> enif_schedule_nif -> NIF -> Python
+ */
+
+/**
+ * @def MAX_INLINE_CONTINUATION_DEPTH
+ * @brief Maximum depth for chained inline continuations
+ *
+ * Prevents stack overflow from unbounded recursion. When this depth is
+ * exceeded, an error is returned to Erlang.
+ */
+#define MAX_INLINE_CONTINUATION_DEPTH 1000
+
+/**
+ * @struct inline_continuation_t
+ * @brief State for an inline scheduled continuation
+ *
+ * Captures all state needed to continue Python execution via
+ * enif_schedule_nif() without returning to Erlang messaging.
+ */
+typedef struct {
+    /** @brief Context for execution */
+    py_context_t *ctx;
+
+    /** @brief Process-local environment (may be NULL) */
+    void *local_env;  /* py_env_resource_t* - forward declared */
+
+    /** @brief Module name to call */
+    char *module_name;
+
+    /** @brief Length of module_name */
+    size_t module_len;
+
+    /** @brief Function name to call */
+    char *func_name;
+
+    /** @brief Length of func_name */
+    size_t func_len;
+
+    /** @brief Arguments (Python tuple, owned reference) */
+    PyObject *args;
+
+    /** @brief Keyword arguments (Python dict or NULL, owned reference) */
+    PyObject *kwargs;
+
+    /** @brief Captured globals from caller's frame (owned reference) */
+    PyObject *globals;
+
+    /** @brief Captured locals from caller's frame (owned reference) */
+    PyObject *locals;
+
+    /** @brief Continuation depth (overflow protection) */
+    uint32_t depth;
+
+    /** @brief Interpreter ID (subinterpreter support) */
+    uint32_t interp_id;
+} inline_continuation_t;
+
 /** @} */
 
 /* ============================================================================
@@ -1144,6 +1212,9 @@ extern ErlNifResourceType *PY_REF_RESOURCE_TYPE;
 
 /** @brief Resource type for suspended_context_state_t (context suspension) */
 extern ErlNifResourceType *PY_CONTEXT_SUSPENDED_RESOURCE_TYPE;
+
+/** @brief Resource type for inline_continuation_t (inline scheduler continuation) */
+extern ErlNifResourceType *INLINE_CONTINUATION_RESOURCE_TYPE;
 
 /** @brief Atomic counter for unique interpreter IDs */
 extern _Atomic uint32_t g_context_id_counter;
