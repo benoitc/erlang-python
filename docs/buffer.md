@@ -136,6 +136,48 @@ chunk = buf.read(1024) # Read up to 1024 bytes
 - If empty, blocks until data arrives (GIL released during wait)
 - Returns empty bytes at EOF
 
+#### `read_nonblock(size=-1)`
+
+Read available bytes without blocking. For async I/O.
+
+```python
+chunk = buf.read_nonblock(1024)  # Read up to 1024 available bytes
+data = buf.read_nonblock()       # Read all available bytes
+```
+
+**Behavior:**
+- Returns immediately with whatever data is available
+- Never blocks, even if no data available
+- Returns empty bytes if nothing available (check `readable_amount()` first)
+- Use with `readable_amount()` and `at_eof()` for async I/O loops
+
+#### `readable_amount()`
+
+Return number of bytes available without blocking.
+
+```python
+available = buf.readable_amount()
+if available > 0:
+    data = buf.read_nonblock(available)
+```
+
+**Returns:** Number of bytes that can be read immediately.
+
+#### `at_eof()`
+
+Check if buffer is at EOF with no more data.
+
+```python
+while not buf.at_eof():
+    if buf.readable_amount() > 0:
+        chunk = buf.read_nonblock(4096)
+        process(chunk)
+    else:
+        await asyncio.sleep(0.001)  # Yield to event loop
+```
+
+**Returns:** `True` if EOF signaled AND all data has been read.
+
 #### `readline(size=-1)`
 
 Read one line, blocking if needed.
@@ -375,6 +417,58 @@ def parse_multipart(buf, boundary):
         parts.append({'headers': headers, 'data': data})
 
     return parts
+```
+
+### Async I/O Integration
+
+For asyncio applications, use the non-blocking methods to avoid blocking the event loop:
+
+```python
+import asyncio
+from erlang import PyBuffer
+
+async def read_buffer_async(buf):
+    """Read from buffer without blocking the event loop."""
+    chunks = []
+
+    while not buf.at_eof():
+        available = buf.readable_amount()
+        if available > 0:
+            # Read available data
+            chunk = buf.read_nonblock(4096)
+            chunks.append(chunk)
+        else:
+            # Yield to event loop, check again soon
+            await asyncio.sleep(0.001)
+
+    return b''.join(chunks)
+
+async def process_wsgi_body_async(environ):
+    """Process WSGI body in async context."""
+    buf = environ['wsgi.input']
+
+    # Read body without blocking
+    body = await read_buffer_async(buf)
+    return json.loads(body)
+```
+
+For production use, consider integrating with Erlang's event notification:
+
+```python
+async def read_with_notification(buf, notify_channel):
+    """Read using Erlang channel for data-ready notifications."""
+    chunks = []
+
+    while not buf.at_eof():
+        available = buf.readable_amount()
+        if available > 0:
+            chunk = buf.read_nonblock(available)
+            chunks.append(chunk)
+        else:
+            # Wait for Erlang to signal data is ready
+            await notify_channel.async_receive()
+
+    return b''.join(chunks)
 ```
 
 ## See Also

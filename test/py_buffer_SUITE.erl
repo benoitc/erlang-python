@@ -26,7 +26,9 @@
     closed_buffer_test/1,
     empty_buffer_test/1,
     pass_to_python_test/1,
-    gc_refcount_test/1
+    gc_refcount_test/1,
+    nonblock_read_test/1,
+    asyncio_read_test/1
 ]).
 
 all() -> [
@@ -42,7 +44,9 @@ all() -> [
     closed_buffer_test,
     empty_buffer_test,
     pass_to_python_test,
-    gc_refcount_test
+    gc_refcount_test,
+    nonblock_read_test,
+    asyncio_read_test
 ].
 
 init_per_suite(Config) ->
@@ -379,5 +383,126 @@ def test_multiple_views():
 
     %% Test 5: Verify no crashes after GC
     {ok, true} = py:eval(Ctx, <<"True">>),
+
+    ok.
+
+%% @doc Test non-blocking read methods for async I/O
+nonblock_read_test(_Config) ->
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
+
+    %% Test read_nonblock returns available data immediately
+    ok = py:exec(Ctx, <<"
+buf = PyBuffer._test_create(b'hello world')
+">>),
+
+    %% readable_amount should return 11 (length of 'hello world')
+    {ok, 11} = py:eval(Ctx, <<"buf.readable_amount()">>),
+
+    %% at_eof should be False (buffer not closed yet)
+    {ok, false} = py:eval(Ctx, <<"buf.at_eof()">>),
+
+    %% read_nonblock should return available data
+    {ok, <<"hello">>} = py:eval(Ctx, <<"buf.read_nonblock(5)">>),
+
+    %% readable_amount should now be 6
+    {ok, 6} = py:eval(Ctx, <<"buf.readable_amount()">>),
+
+    %% read_nonblock with no size returns all remaining
+    {ok, <<" world">>} = py:eval(Ctx, <<"buf.read_nonblock()">>),
+
+    %% readable_amount should be 0 now
+    {ok, 0} = py:eval(Ctx, <<"buf.readable_amount()">>),
+
+    %% read_nonblock on empty buffer returns empty bytes (not blocking)
+    {ok, <<>>} = py:eval(Ctx, <<"buf.read_nonblock()">>),
+
+    %% Close buffer and check at_eof
+    ok = py:exec(Ctx, <<"buf.close()">>),
+    {ok, true} = py:eval(Ctx, <<"buf.at_eof()">>),
+
+    %% Test async I/O pattern simulation
+    ok = py:exec(Ctx, <<"
+def async_read_simulation():
+    '''Simulate async I/O read pattern.'''
+    buf = PyBuffer._test_create(b'chunk1chunk2chunk3')
+    buf.close()  # EOF
+
+    chunks = []
+    while not buf.at_eof():
+        available = buf.readable_amount()
+        if available > 0:
+            # Read in chunks of 6
+            chunk = buf.read_nonblock(6)
+            chunks.append(chunk)
+        else:
+            # Would yield to event loop here in real async code
+            break
+
+    return chunks
+">>),
+
+    {ok, [<<"chunk1">>, <<"chunk2">>, <<"chunk3">>]} =
+        py:eval(Ctx, <<"async_read_simulation()">>),
+
+    ok.
+
+%% @doc Test PyBuffer with asyncio - Erlang fills buffer while Python reads
+asyncio_read_test(_Config) ->
+    %% Create a buffer that Erlang will fill
+    {ok, Buf} = py_buffer:new(),
+
+    Ctx = py:context(1),
+    Self = self(),
+
+    %% Define async reader in Python
+    ok = py:exec(Ctx, <<"
+import asyncio
+
+async def async_buffer_reader(buf):
+    '''Read from buffer asynchronously as Erlang fills it.'''
+    chunks = []
+
+    while not buf.at_eof():
+        available = buf.readable_amount()
+        if available > 0:
+            chunk = buf.read_nonblock(available)
+            chunks.append(chunk)
+        else:
+            # Yield to event loop - Erlang is still writing
+            await asyncio.sleep(0.005)
+
+    return b''.join(chunks)
+
+def run_async_reader(buf):
+    '''Run async reader.'''
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(async_buffer_reader(buf))
+    finally:
+        loop.close()
+">>),
+
+    %% Spawn a process to write data with delays (simulating streaming)
+    spawn_link(fun() ->
+        timer:sleep(10),
+        ok = py_buffer:write(Buf, <<"chunk1:">>),
+        timer:sleep(20),
+        ok = py_buffer:write(Buf, <<"chunk2:">>),
+        timer:sleep(20),
+        ok = py_buffer:write(Buf, <<"chunk3">>),
+        timer:sleep(10),
+        ok = py_buffer:close(Buf),
+        Self ! writer_done
+    end),
+
+    %% Read asynchronously while Erlang writes
+    {ok, Result} = py:eval(Ctx, <<"run_async_reader(buf)">>, #{<<"buf">> => Buf}),
+
+    %% Wait for writer to finish
+    receive writer_done -> ok after 1000 -> ok end,
+
+    %% Verify we got all the data
+    <<"chunk1:chunk2:chunk3">> = Result,
 
     ok.

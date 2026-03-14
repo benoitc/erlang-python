@@ -35,6 +35,9 @@ main(_) ->
     %% Demo 5: Line iteration
     line_iteration_demo(),
 
+    %% Demo 6: Async I/O
+    asyncio_demo(),
+
     io:format("=== Done ===~n~n"),
     ok.
 
@@ -253,4 +256,71 @@ def process_csv(buf):
 
     {ok, Records} = py:eval(Ctx, <<"process_csv(buf)">>, #{<<"buf">> => Buf}),
     io:format("Parsed ~p records~n~n", [length(Records)]),
+    ok.
+
+asyncio_demo() ->
+    io:format("--- Async I/O Demo (Erlang streaming to Python) ---~n~n"),
+
+    %% Create buffer that Erlang will fill
+    {ok, Buf} = py_buffer:new(),
+    Self = self(),
+
+    Ctx = py:context(1),
+
+    ok = py:exec(Ctx, <<"
+import asyncio
+
+async def async_buffer_reader(buf):
+    '''Read from buffer asynchronously as Erlang streams data.'''
+    chunks = []
+    read_count = 0
+
+    while not buf.at_eof():
+        available = buf.readable_amount()
+        if available > 0:
+            chunk = buf.read_nonblock(available)
+            chunks.append(chunk)
+            read_count += 1
+            print(f'    [Python] Read chunk {read_count}: {len(chunk)} bytes')
+        else:
+            # Yield to event loop while waiting for Erlang to write more
+            await asyncio.sleep(0.005)
+
+    return b''.join(chunks)
+
+def run_async_reader(buf):
+    '''Run async reader.'''
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(async_buffer_reader(buf))
+    finally:
+        loop.close()
+">>),
+
+    %% Spawn a process to stream data from Erlang
+    spawn_link(fun() ->
+        Chunks = [
+            <<"Hello from Erlang!">>,
+            <<" Streaming chunk 2.">>,
+            <<" Final chunk 3.">>
+        ],
+        lists:foreach(fun(Chunk) ->
+            timer:sleep(30),  %% Simulate network delay
+            io:format("  [Erlang] Writing: ~p~n", [Chunk]),
+            ok = py_buffer:write(Buf, Chunk)
+        end, Chunks),
+        timer:sleep(10),
+        io:format("  [Erlang] Closing buffer (EOF)~n"),
+        ok = py_buffer:close(Buf),
+        Self ! writer_done
+    end),
+
+    %% Python reads asynchronously while Erlang writes
+    io:format("  Starting async read while Erlang streams...~n"),
+    {ok, Result} = py:eval(Ctx, <<"run_async_reader(buf)">>, #{<<"buf">> => Buf}),
+
+    %% Wait for writer
+    receive writer_done -> ok after 2000 -> ok end,
+
+    io:format("  Final result: ~p~n~n", [Result]),
     ok.

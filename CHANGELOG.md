@@ -10,6 +10,9 @@
   - `py_buffer:close/1` - Signal EOF, wake all readers
   - Python `PyBuffer` type with file-like interface:
     - `read(size)`, `readline()`, `readlines()` - Blocking reads with GIL released
+    - `read_nonblock(size)` - Non-blocking read for async I/O
+    - `readable_amount()` - Bytes available without blocking
+    - `at_eof()` - Check if at EOF with no more data
     - `seek(offset, whence)`, `tell()` - Position tracking
     - `find(sub)` - Fast substring search via memmem/memchr
     - `memoryview(buf)` - Zero-copy buffer protocol
