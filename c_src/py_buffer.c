@@ -281,6 +281,9 @@ static void PyBuffer_dealloc(PyBufferObject *self) {
  *
  * If size is -1, read all available data (until EOF).
  * Returns bytes object. Returns empty bytes at EOF.
+ *
+ * GIL Optimization: All blocking waits and data copying happen in a single
+ * GIL-released block to avoid unnecessary GIL roundtrips.
  */
 static PyObject *PyBuffer_read(PyBufferObject *self, PyObject *args) {
     Py_ssize_t size = -1;
@@ -293,73 +296,72 @@ static PyObject *PyBuffer_read(PyBufferObject *self, PyObject *args) {
 
     py_buffer_resource_t *buf = self->resource;
 
-    /* Release GIL during blocking wait */
+    /* Local variables for results - set inside GIL-released block */
+    unsigned char *local_copy = NULL;
+    size_t to_read = 0;
+    int closed_empty = 0;
+    int oom_error = 0;
+
+    /* Release GIL for all blocking waits and data copying */
     Py_BEGIN_ALLOW_THREADS
     pthread_mutex_lock(&buf->mutex);
 
-    /* Wait for data if buffer is empty */
-    while (buf->read_pos >= buf->write_pos && !buf->eof && !buf->closed) {
-        pthread_cond_wait(&buf->data_ready, &buf->mutex);
-    }
-
-    Py_END_ALLOW_THREADS
-
-    /* Check if buffer was closed during wait */
-    if (buf->closed && buf->read_pos >= buf->write_pos) {
-        pthread_mutex_unlock(&buf->mutex);
-        return PyBytes_FromStringAndSize("", 0);
-    }
-
-    /* Calculate how much to read */
-    size_t available = buf->write_pos - buf->read_pos;
-    size_t to_read;
-
     if (size < 0) {
-        /* Read all available (or wait for EOF if not all data yet) */
-        if (!buf->eof && buf->content_length > 0 &&
-            buf->write_pos < (size_t)buf->content_length) {
-            /* Wait for all data - release mutex before reacquiring GIL to avoid deadlock */
-            pthread_mutex_unlock(&buf->mutex);
-
-            Py_BEGIN_ALLOW_THREADS
-            pthread_mutex_lock(&buf->mutex);
+        /* Read all: wait for all content or EOF */
+        if (buf->content_length > 0) {
+            /* Known content length - wait for complete data */
             while (buf->write_pos < (size_t)buf->content_length &&
                    !buf->eof && !buf->closed) {
                 pthread_cond_wait(&buf->data_ready, &buf->mutex);
             }
-            Py_END_ALLOW_THREADS
-
-            available = buf->write_pos - buf->read_pos;
+        } else {
+            /* Unknown length - wait for any data or EOF */
+            while (buf->read_pos >= buf->write_pos && !buf->eof && !buf->closed) {
+                pthread_cond_wait(&buf->data_ready, &buf->mutex);
+            }
         }
-        to_read = available;
     } else {
-        to_read = (available < (size_t)size) ? available : (size_t)size;
+        /* Read specific amount: wait for any data */
+        while (buf->read_pos >= buf->write_pos && !buf->eof && !buf->closed) {
+            pthread_cond_wait(&buf->data_ready, &buf->mutex);
+        }
     }
 
-    /* Copy data while holding mutex, then release before creating PyBytes */
-    unsigned char *local_copy = NULL;
-    if (to_read > 0) {
-        local_copy = (unsigned char *)malloc(to_read);
-        if (local_copy == NULL) {
-            pthread_mutex_unlock(&buf->mutex);
-            PyErr_NoMemory();
-            return NULL;
+    /* Calculate result while holding mutex */
+    if (buf->closed && buf->read_pos >= buf->write_pos) {
+        closed_empty = 1;
+    } else {
+        size_t available = buf->write_pos - buf->read_pos;
+        to_read = (size < 0) ? available :
+                  ((available < (size_t)size) ? available : (size_t)size);
+
+        /* Copy data while holding mutex */
+        if (to_read > 0) {
+            local_copy = (unsigned char *)malloc(to_read);
+            if (local_copy == NULL) {
+                oom_error = 1;
+            } else {
+                memcpy(local_copy, buf->data + buf->read_pos, to_read);
+                buf->read_pos += to_read;
+            }
         }
-        memcpy(local_copy, buf->data + buf->read_pos, to_read);
-        buf->read_pos += to_read;
     }
 
     pthread_mutex_unlock(&buf->mutex);
+    Py_END_ALLOW_THREADS
 
-    /* Create PyBytes without holding mutex */
-    PyObject *result;
-    if (to_read > 0) {
-        result = PyBytes_FromStringAndSize((char *)local_copy, to_read);
-        free(local_copy);
-    } else {
-        result = PyBytes_FromStringAndSize("", 0);
+    /* Create Python objects with GIL held */
+    if (oom_error) {
+        PyErr_NoMemory();
+        return NULL;
     }
 
+    if (closed_empty || to_read == 0) {
+        return PyBytes_FromStringAndSize("", 0);
+    }
+
+    PyObject *result = PyBytes_FromStringAndSize((char *)local_copy, to_read);
+    free(local_copy);
     return result;
 }
 
