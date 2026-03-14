@@ -133,22 +133,24 @@ assert isinstance(result, bool), f'Expected bool, got {type(result)}'
 
 %% Test schedule() with a registered Erlang callback
 test_schedule_with_callback(_Config) ->
+    Ctx = py:context(),
     %% Define the function
-    ok = py:exec(<<"
+    ok = py:exec(Ctx, <<"
 def schedule_add(a, b):
     import erlang
     return erlang.schedule('_test_add', a, b)
 ">>),
     %% Call it - the schedule marker should be detected and callback executed
-    {ok, Result} = py:eval(<<"schedule_add(5, 7)">>),
+    {ok, Result} = py:eval(Ctx, <<"schedule_add(5, 7)">>),
     ct:pal("schedule() result: ~p", [Result]),
     12 = Result,
     ok.
 
 %% Test schedule_py() basic functionality
 test_schedule_py_basic(_Config) ->
+    Ctx = py:context(),
     %% Define the target function in __main__ so it's accessible via py:call
-    ok = py:exec(<<"
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def double(x):
@@ -162,14 +164,15 @@ def schedule_double(x):
     return erlang.schedule_py('__main__', 'double', [x])
 ">>),
     %% Call the scheduling function
-    {ok, Result} = py:eval(<<"schedule_double(5)">>),
+    {ok, Result} = py:eval(Ctx, <<"schedule_double(5)">>),
     ct:pal("schedule_py() result: ~p", [Result]),
     10 = Result,
     ok.
 
 %% Test schedule_py() with multiple args
 test_schedule_py_with_args(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def add_three(a, b, c):
@@ -181,14 +184,15 @@ def schedule_add_three(a, b, c):
     import erlang
     return erlang.schedule_py('__main__', 'add_three', [a, b, c])
 ">>),
-    {ok, Result} = py:eval(<<"schedule_add_three(1, 2, 3)">>),
+    {ok, Result} = py:eval(Ctx, <<"schedule_add_three(1, 2, 3)">>),
     ct:pal("schedule_py() with args result: ~p", [Result]),
     6 = Result,
     ok.
 
 %% Test schedule_py() with kwargs
 test_schedule_py_with_kwargs(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def greet(name, prefix='Hello'):
@@ -200,7 +204,7 @@ def schedule_greet(name, prefix):
     import erlang
     return erlang.schedule_py('__main__', 'greet', [name], {'prefix': prefix})
 ">>),
-    {ok, Result} = py:eval(<<"schedule_greet('World', 'Hi')">>),
+    {ok, Result} = py:eval(Ctx, <<"schedule_greet('World', 'Hi')">>),
     ct:pal("schedule_py() with kwargs result: ~p", [Result]),
     <<"Hi, World!">> = Result,
     ok.
@@ -252,7 +256,8 @@ assert isinstance(marker, erlang.InlineScheduleMarker), f'Expected InlineSchedul
 
 %% Test schedule_inline() basic functionality - single continuation
 test_schedule_inline_basic(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def inline_double(x):
@@ -264,14 +269,15 @@ def call_inline_double(x):
     import erlang
     return erlang.schedule_inline('__main__', 'inline_double', args=[x])
 ">>),
-    {ok, Result} = py:eval(<<"call_inline_double(21)">>),
+    {ok, Result} = py:eval(Ctx, <<"call_inline_double(21)">>),
     ct:pal("schedule_inline() basic result: ~p", [Result]),
     42 = Result,
     ok.
 
 %% Test schedule_inline() with chained continuations
 test_schedule_inline_chain(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def chain_step(n, acc):
@@ -284,14 +290,15 @@ def chain_step(n, acc):
 __main__.chain_step = chain_step
 ">>),
     %% Sum of 1 to 10 = 55
-    {ok, Result} = py:eval(<<"chain_step(10, 0)">>),
+    {ok, Result} = py:eval(Ctx, <<"chain_step(10, 0)">>),
     ct:pal("schedule_inline() chain result: ~p", [Result]),
     55 = Result,
     ok.
 
 %% Test schedule_inline() with multiple args
 test_schedule_inline_with_args(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def inline_add(a, b, c):
@@ -303,14 +310,15 @@ def call_inline_add(a, b, c):
     import erlang
     return erlang.schedule_inline('__main__', 'inline_add', args=[a, b, c])
 ">>),
-    {ok, Result} = py:eval(<<"call_inline_add(10, 20, 30)">>),
+    {ok, Result} = py:eval(Ctx, <<"call_inline_add(10, 20, 30)">>),
     ct:pal("schedule_inline() with args result: ~p", [Result]),
     60 = Result,
     ok.
 
 %% Test schedule_inline() with kwargs
 test_schedule_inline_with_kwargs(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 import __main__
 
 def inline_greet(name, prefix='Hello'):
@@ -322,7 +330,7 @@ def call_inline_greet(name, prefix):
     import erlang
     return erlang.schedule_inline('__main__', 'inline_greet', args=[name], kwargs={'prefix': prefix})
 ">>),
-    {ok, Result} = py:eval(<<"call_inline_greet('Erlang', 'Greetings')">>),
+    {ok, Result} = py:eval(Ctx, <<"call_inline_greet('Erlang', 'Greetings')">>),
     ct:pal("schedule_inline() with kwargs result: ~p", [Result]),
     <<"Greetings, Erlang!">> = Result,
     ok.
@@ -361,12 +369,13 @@ __main__.step3 = step3
 
 %% Test schedule_inline error handling (function not found)
 test_schedule_inline_error(_Config) ->
-    ok = py:exec(<<"
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
 def call_nonexistent():
     import erlang
     return erlang.schedule_inline('__main__', 'nonexistent_function_xyz', args=[])
 ">>),
-    {error, Reason} = py:eval(<<"call_nonexistent()">>),
+    {error, Reason} = py:eval(Ctx, <<"call_nonexistent()">>),
     ct:pal("schedule_inline error: ~p", [Reason]),
     %% Should get a NameError - error comes as {ErrorType, Message} tuple or binary
     case Reason of
