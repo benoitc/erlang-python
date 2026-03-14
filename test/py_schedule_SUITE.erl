@@ -1,4 +1,4 @@
-%% @doc Tests for erlang.schedule(), schedule_py(), and consume_time_slice().
+%% @doc Tests for erlang.schedule(), schedule_py(), schedule_inline() and consume_time_slice().
 %%
 %% Tests explicit scheduling API for cooperative dirty scheduler release.
 -module(py_schedule_SUITE).
@@ -9,14 +9,22 @@
 -export([
     test_schedule_available/1,
     test_schedule_py_available/1,
+    test_schedule_inline_available/1,
     test_consume_time_slice_available/1,
     test_schedule_returns_marker/1,
     test_schedule_py_returns_marker/1,
+    test_schedule_inline_returns_marker/1,
     test_consume_time_slice_returns_bool/1,
     test_schedule_with_callback/1,
     test_schedule_py_basic/1,
     test_schedule_py_with_args/1,
     test_schedule_py_with_kwargs/1,
+    test_schedule_inline_basic/1,
+    test_schedule_inline_chain/1,
+    test_schedule_inline_with_args/1,
+    test_schedule_inline_with_kwargs/1,
+    test_schedule_inline_to_schedule_py/1,
+    test_schedule_inline_error/1,
     test_call_is_blocking/1
 ]).
 
@@ -24,14 +32,22 @@ all() ->
     [
         test_schedule_available,
         test_schedule_py_available,
+        test_schedule_inline_available,
         test_consume_time_slice_available,
         test_schedule_returns_marker,
         test_schedule_py_returns_marker,
+        test_schedule_inline_returns_marker,
         test_consume_time_slice_returns_bool,
         test_schedule_with_callback,
         test_schedule_py_basic,
         test_schedule_py_with_args,
         test_schedule_py_with_kwargs,
+        test_schedule_inline_basic,
+        test_schedule_inline_chain,
+        test_schedule_inline_with_args,
+        test_schedule_inline_with_kwargs,
+        test_schedule_inline_to_schedule_py,
+        test_schedule_inline_error,
         test_call_is_blocking
     ].
 
@@ -207,4 +223,152 @@ result = test_call_once()
 assert result == 1, f'Expected 1, got {result} - call may have replayed'
 ">>),
     ct:pal("erlang.call() is blocking (no replay)"),
+    ok.
+
+%% ============================================================================
+%% schedule_inline tests
+%% ============================================================================
+
+%% Test that erlang.schedule_inline is available
+test_schedule_inline_available(_Config) ->
+    ok = py:exec(<<"
+import erlang
+assert hasattr(erlang, 'schedule_inline'), 'erlang.schedule_inline not found'
+">>),
+    ct:pal("erlang.schedule_inline is available"),
+    ok.
+
+%% Test that schedule_inline() returns an InlineScheduleMarker
+test_schedule_inline_returns_marker(_Config) ->
+    ok = py:exec(<<"
+import erlang
+marker = erlang.schedule_inline('math', 'sqrt', args=[16.0])
+assert isinstance(marker, erlang.InlineScheduleMarker), f'Expected InlineScheduleMarker, got {type(marker)}'
+">>),
+    ct:pal("schedule_inline() returns InlineScheduleMarker"),
+    ok.
+
+%% Test schedule_inline() basic functionality - single continuation
+test_schedule_inline_basic(_Config) ->
+    ok = py:exec(<<"
+import __main__
+
+def inline_double(x):
+    return x * 2
+
+__main__.inline_double = inline_double
+
+def call_inline_double(x):
+    import erlang
+    return erlang.schedule_inline('__main__', 'inline_double', args=[x])
+">>),
+    {ok, Result} = py:eval(<<"call_inline_double(21)">>),
+    ct:pal("schedule_inline() basic result: ~p", [Result]),
+    42 = Result,
+    ok.
+
+%% Test schedule_inline() with chained continuations
+test_schedule_inline_chain(_Config) ->
+    ok = py:exec(<<"
+import __main__
+
+def chain_step(n, acc):
+    import erlang
+    if n <= 0:
+        return acc
+    # Chain to next step via inline continuation
+    return erlang.schedule_inline('__main__', 'chain_step', args=[n - 1, acc + n])
+
+__main__.chain_step = chain_step
+">>),
+    %% Sum of 1 to 10 = 55
+    {ok, Result} = py:eval(<<"chain_step(10, 0)">>),
+    ct:pal("schedule_inline() chain result: ~p", [Result]),
+    55 = Result,
+    ok.
+
+%% Test schedule_inline() with multiple args
+test_schedule_inline_with_args(_Config) ->
+    ok = py:exec(<<"
+import __main__
+
+def inline_add(a, b, c):
+    return a + b + c
+
+__main__.inline_add = inline_add
+
+def call_inline_add(a, b, c):
+    import erlang
+    return erlang.schedule_inline('__main__', 'inline_add', args=[a, b, c])
+">>),
+    {ok, Result} = py:eval(<<"call_inline_add(10, 20, 30)">>),
+    ct:pal("schedule_inline() with args result: ~p", [Result]),
+    60 = Result,
+    ok.
+
+%% Test schedule_inline() with kwargs
+test_schedule_inline_with_kwargs(_Config) ->
+    ok = py:exec(<<"
+import __main__
+
+def inline_greet(name, prefix='Hello'):
+    return f'{prefix}, {name}!'
+
+__main__.inline_greet = inline_greet
+
+def call_inline_greet(name, prefix):
+    import erlang
+    return erlang.schedule_inline('__main__', 'inline_greet', args=[name], kwargs={'prefix': prefix})
+">>),
+    {ok, Result} = py:eval(<<"call_inline_greet('Erlang', 'Greetings')">>),
+    ct:pal("schedule_inline() with kwargs result: ~p", [Result]),
+    <<"Greetings, Erlang!">> = Result,
+    ok.
+
+%% Test schedule_inline transitioning to schedule_py (mixed schedule types)
+test_schedule_inline_to_schedule_py(_Config) ->
+    %% Start with schedule_inline, then transition to schedule_py
+    ok = py:exec(<<"
+import __main__
+
+def step1(x):
+    import erlang
+    # First step uses inline continuation
+    return erlang.schedule_inline('__main__', 'step2', args=[x * 2])
+
+def step2(x):
+    import erlang
+    # Second step switches to schedule_py (goes through Erlang messaging)
+    return erlang.schedule_py('__main__', 'step3', [x + 10])
+
+def step3(x):
+    # Final step returns result
+    return x * 3
+
+__main__.step1 = step1
+__main__.step2 = step2
+__main__.step3 = step3
+">>),
+    %% (5 * 2 + 10) * 3 = 60
+    {ok, Result} = py:eval(<<"step1(5)">>),
+    ct:pal("schedule_inline to schedule_py result: ~p", [Result]),
+    60 = Result,
+    ok.
+
+%% Test schedule_inline error handling (function not found)
+test_schedule_inline_error(_Config) ->
+    ok = py:exec(<<"
+def call_nonexistent():
+    import erlang
+    return erlang.schedule_inline('__main__', 'nonexistent_function_xyz', args=[])
+">>),
+    {error, Reason} = py:eval(<<"call_nonexistent()">>),
+    ct:pal("schedule_inline error: ~p", [Reason]),
+    %% Should get a NameError - error comes as {ErrorType, Message} tuple or binary
+    case Reason of
+        {'NameError', _Msg} -> ok;
+        _ when is_binary(Reason) -> ok;
+        _ when is_list(Reason) -> ok;
+        _ -> ct:fail("Unexpected error format: ~p", [Reason])
+    end,
     ok.

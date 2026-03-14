@@ -329,6 +329,13 @@ static void process_request(py_request_t *req) {
                 req->result = enif_make_tuple2(env, ATOM_OK,
                     enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
             }
+        } else if (is_inline_schedule_marker(py_result)) {
+            /* Inline schedule marker not supported in legacy worker NIFs.
+             * Note: py:call() uses the context API (nif_context_call), which
+             * does support schedule_inline. This code path is only hit by
+             * direct py_nif:worker_call usage, which is rare. */
+            Py_DECREF(py_result);
+            req->result = make_error(env, "schedule_inline_not_supported_in_worker_mode");
         } else if (is_schedule_marker(py_result)) {
             /* Schedule marker: release dirty scheduler, continue via callback */
             ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
@@ -424,6 +431,11 @@ static void process_request(py_request_t *req) {
                     req->result = enif_make_tuple2(env, ATOM_OK,
                         enif_make_tuple2(env, ATOM_GENERATOR, gen_ref));
                 }
+            } else if (is_inline_schedule_marker(py_result)) {
+                /* Inline schedule marker not supported in legacy worker NIFs.
+                 * Note: py:call() uses the context API, which supports schedule_inline. */
+                Py_DECREF(py_result);
+                req->result = make_error(env, "schedule_inline_not_supported_in_worker_mode");
             } else if (is_schedule_marker(py_result)) {
                 /* Schedule marker: release dirty scheduler, continue via callback */
                 ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;

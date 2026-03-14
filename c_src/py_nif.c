@@ -63,6 +63,9 @@ ErlNifResourceType *PY_REF_RESOURCE_TYPE = NULL;
 /* suspended_context_state_t resource type (context suspension for callbacks) */
 ErlNifResourceType *PY_CONTEXT_SUSPENDED_RESOURCE_TYPE = NULL;
 
+/* inline_continuation_t resource type (inline scheduler continuation) */
+ErlNifResourceType *INLINE_CONTINUATION_RESOURCE_TYPE = NULL;
+
 /* Process-local Python environment resource type */
 ErlNifResourceType *PY_ENV_RESOURCE_TYPE = NULL;
 
@@ -267,6 +270,16 @@ typedef struct {
     PyObject *args;           /* Arguments (tuple) */
 } ScheduleMarkerObject;
 static int is_schedule_marker(PyObject *obj);
+
+/* Inline schedule marker type and helper - from py_callback.c, needed by py_exec.c */
+typedef struct {
+    PyObject_HEAD
+    PyObject *module;      /* Module name (string) */
+    PyObject *func;        /* Function name (string) */
+    PyObject *args;        /* Arguments (tuple or None) */
+    PyObject *kwargs;      /* Keyword arguments (dict or None) */
+} InlineScheduleMarkerObject;
+static int is_inline_schedule_marker(PyObject *obj);
 
 /* ============================================================================
  * Include module implementations
@@ -628,6 +641,355 @@ static void suspended_state_destructor(ErlNifEnv *env, void *obj) {
     pthread_cond_destroy(&state->cond);
 
     atomic_fetch_add(&g_counters.suspended_destroyed, 1);
+}
+
+/* ============================================================================
+ * Inline Continuation Support
+ * ============================================================================
+ *
+ * Inline continuations allow Python functions to chain directly via
+ * enif_schedule_nif() without returning to Erlang messaging.
+ */
+
+/**
+ * @brief Destructor for inline_continuation_t resource
+ *
+ * Frees all resources associated with an inline continuation.
+ */
+static void inline_continuation_destructor(ErlNifEnv *env, void *obj) {
+    (void)env;
+    inline_continuation_t *cont = (inline_continuation_t *)obj;
+
+    /* Free string allocations */
+    if (cont->module_name != NULL) {
+        enif_free(cont->module_name);
+        cont->module_name = NULL;
+    }
+    if (cont->func_name != NULL) {
+        enif_free(cont->func_name);
+        cont->func_name = NULL;
+    }
+
+    /* Clean up Python objects if Python is still initialized */
+    if (runtime_is_running() && (cont->args != NULL || cont->kwargs != NULL)) {
+        /* For subinterpreter contexts: defer cleanup to Py_EndInterpreter */
+#ifdef HAVE_SUBINTERPRETERS
+        if (cont->ctx != NULL && cont->ctx->is_subinterp) {
+            cont->args = NULL;
+            cont->kwargs = NULL;
+        } else
+#endif
+        {
+            /* Main interpreter: safe to use PyGILState_Ensure */
+            if (PyGILState_GetThisThreadState() == NULL && !PyGILState_Check()) {
+                PyGILState_STATE gstate = PyGILState_Ensure();
+                Py_XDECREF(cont->args);
+                Py_XDECREF(cont->kwargs);
+                cont->args = NULL;
+                cont->kwargs = NULL;
+                PyGILState_Release(gstate);
+            } else {
+                cont->args = NULL;
+                cont->kwargs = NULL;
+            }
+        }
+    }
+
+    /* Release the context resource if held */
+    if (cont->ctx != NULL) {
+        enif_release_resource(cont->ctx);
+        cont->ctx = NULL;
+    }
+
+    /* Release the local_env resource if held */
+    if (cont->local_env != NULL) {
+        enif_release_resource(cont->local_env);
+        cont->local_env = NULL;
+    }
+}
+
+/**
+ * @brief Create an inline continuation resource
+ *
+ * @param ctx Context for execution (will be kept)
+ * @param local_env Optional process-local environment (will be kept if non-NULL)
+ * @param marker The InlineScheduleMarker containing call info
+ * @param depth Current continuation depth
+ * @return inline_continuation_t* or NULL on failure
+ *
+ * @note Caller must release the resource when done
+ */
+static inline_continuation_t *create_inline_continuation(
+    py_context_t *ctx,
+    void *local_env,  /* py_env_resource_t* */
+    PyObject *marker_obj,
+    uint32_t depth) {
+
+    InlineScheduleMarkerObject *marker = (InlineScheduleMarkerObject *)marker_obj;
+
+    inline_continuation_t *cont = enif_alloc_resource(
+        INLINE_CONTINUATION_RESOURCE_TYPE, sizeof(inline_continuation_t));
+    if (cont == NULL) {
+        return NULL;
+    }
+
+    memset(cont, 0, sizeof(inline_continuation_t));
+
+    /* Copy module name */
+    Py_ssize_t module_len;
+    const char *module_str = PyUnicode_AsUTF8AndSize(marker->module, &module_len);
+    if (module_str == NULL) {
+        enif_release_resource(cont);
+        return NULL;
+    }
+    cont->module_name = enif_alloc(module_len + 1);
+    if (cont->module_name == NULL) {
+        enif_release_resource(cont);
+        return NULL;
+    }
+    memcpy(cont->module_name, module_str, module_len);
+    cont->module_name[module_len] = '\0';
+    cont->module_len = module_len;
+
+    /* Copy func name */
+    Py_ssize_t func_len;
+    const char *func_str = PyUnicode_AsUTF8AndSize(marker->func, &func_len);
+    if (func_str == NULL) {
+        enif_release_resource(cont);
+        return NULL;
+    }
+    cont->func_name = enif_alloc(func_len + 1);
+    if (cont->func_name == NULL) {
+        enif_release_resource(cont);
+        return NULL;
+    }
+    memcpy(cont->func_name, func_str, func_len);
+    cont->func_name[func_len] = '\0';
+    cont->func_len = func_len;
+
+    /* INCREF args and kwargs */
+    if (marker->args != Py_None) {
+        Py_INCREF(marker->args);
+        cont->args = marker->args;
+    } else {
+        cont->args = NULL;
+    }
+    if (marker->kwargs != Py_None) {
+        Py_INCREF(marker->kwargs);
+        cont->kwargs = marker->kwargs;
+    } else {
+        cont->kwargs = NULL;
+    }
+
+    /* Store context (keep resource reference) */
+    cont->ctx = ctx;
+    enif_keep_resource(ctx);
+
+    /* Store local_env if provided */
+    if (local_env != NULL) {
+        cont->local_env = local_env;
+        enif_keep_resource(local_env);
+    }
+
+    cont->depth = depth;
+    cont->interp_id = ctx->interp_id;
+
+    return cont;
+}
+
+/**
+ * @brief NIF: Execute inline continuation
+ *
+ * This is the continuation function called by enif_schedule_nif().
+ * It executes the Python function and handles the result:
+ * - InlineScheduleMarker: chain via another enif_schedule_nif
+ * - ScheduleMarker: return {schedule, ...} to Erlang
+ * - Suspension: return {suspended, ...} to Erlang
+ * - Normal result: return {ok, Result}
+ */
+static ERL_NIF_TERM nif_inline_continuation(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    inline_continuation_t *cont;
+    if (!enif_get_resource(env, argv[0], INLINE_CONTINUATION_RESOURCE_TYPE, (void **)&cont)) {
+        return make_error(env, "invalid_continuation");
+    }
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    /* Check depth limit */
+    if (cont->depth >= MAX_INLINE_CONTINUATION_DEPTH) {
+        return make_error(env, "inline_continuation_depth_exceeded");
+    }
+
+    py_context_t *ctx = cont->ctx;
+    if (ctx == NULL || ctx->destroyed) {
+        return make_error(env, "context_destroyed");
+    }
+
+    /* Acquire thread state */
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Set thread-local context for callback support */
+    py_context_t *prev_context = tl_current_context;
+    tl_current_context = ctx;
+
+    /* Enable suspension for callback support */
+    bool prev_allow_suspension = tl_allow_suspension;
+    tl_allow_suspension = true;
+
+    /* Set callback env for consume_time_slice */
+    ErlNifEnv *prev_callback_env = tl_callback_env;
+    tl_callback_env = env;
+
+    ERL_NIF_TERM result;
+
+    /* Import module and get function */
+    PyObject *func = NULL;
+    PyObject *module = NULL;
+
+    /* Use local_env globals if available for __main__, otherwise standard import */
+    py_env_resource_t *local_env = (py_env_resource_t *)cont->local_env;
+
+    if (strcmp(cont->module_name, "__main__") == 0) {
+        PyObject *globals = (local_env != NULL) ? local_env->globals : ctx->globals;
+        func = PyDict_GetItemString(globals, cont->func_name);
+        if (func == NULL) {
+            func = PyDict_GetItemString(ctx->locals, cont->func_name);
+        }
+        if (func != NULL) {
+            Py_INCREF(func);
+        } else {
+            PyErr_Format(PyExc_NameError, "name '%s' is not defined", cont->func_name);
+        }
+    } else {
+        module = PyImport_ImportModule(cont->module_name);
+        if (module != NULL) {
+            func = PyObject_GetAttrString(module, cont->func_name);
+            Py_DECREF(module);
+        }
+    }
+
+    if (func == NULL) {
+        result = make_py_error(env);
+        goto cleanup;
+    }
+
+    /* Build args tuple */
+    PyObject *args = cont->args;
+    if (args == NULL) {
+        args = PyTuple_New(0);
+        if (args == NULL) {
+            Py_DECREF(func);
+            result = make_py_error(env);
+            goto cleanup;
+        }
+    } else {
+        Py_INCREF(args);
+    }
+
+    /* Get kwargs */
+    PyObject *kwargs = cont->kwargs;
+
+    /* Call the function */
+    PyObject *py_result = PyObject_Call(func, args, kwargs);
+    Py_DECREF(func);
+    Py_DECREF(args);
+
+    if (py_result == NULL) {
+        /* Check for pending callback */
+        if (tl_pending_callback) {
+            PyErr_Clear();
+
+            /* Create suspended context state for callback handling */
+            ErlNifBinary module_bin, func_bin;
+            enif_alloc_binary(cont->module_len, &module_bin);
+            memcpy(module_bin.data, cont->module_name, cont->module_len);
+            enif_alloc_binary(cont->func_len, &func_bin);
+            memcpy(func_bin.data, cont->func_name, cont->func_len);
+
+            /* Convert args to Erlang term for replay */
+            ERL_NIF_TERM args_term = enif_make_list(env, 0);
+            if (cont->args != NULL) {
+                args_term = py_to_term(env, cont->args);
+            }
+
+            ERL_NIF_TERM kwargs_term = enif_make_new_map(env);
+            if (cont->kwargs != NULL) {
+                kwargs_term = py_to_term(env, cont->kwargs);
+            }
+
+            suspended_context_state_t *suspended = create_suspended_context_state_for_call(
+                env, ctx, &module_bin, &func_bin, args_term, kwargs_term);
+
+            enif_release_binary(&module_bin);
+            enif_release_binary(&func_bin);
+
+            if (suspended == NULL) {
+                tl_pending_callback = false;
+                Py_CLEAR(tl_pending_args);
+                result = make_error(env, "create_suspended_state_failed");
+            } else {
+                result = build_suspended_context_result(env, suspended);
+            }
+        } else {
+            result = make_py_error(env);
+        }
+    } else if (is_inline_schedule_marker(py_result)) {
+        /* Chain via another enif_schedule_nif */
+        inline_continuation_t *next_cont = create_inline_continuation(
+            ctx, cont->local_env, py_result, cont->depth + 1);
+        Py_DECREF(py_result);
+
+        if (next_cont == NULL) {
+            result = make_error(env, "create_continuation_failed");
+        } else {
+            ERL_NIF_TERM cont_ref = enif_make_resource(env, next_cont);
+            enif_release_resource(next_cont);
+
+            /* Restore thread-local state before scheduling */
+            tl_allow_suspension = prev_allow_suspension;
+            tl_current_context = prev_context;
+            tl_callback_env = prev_callback_env;
+            clear_pending_callback_tls();
+
+            py_context_release(&guard);
+
+            return enif_schedule_nif(env, "inline_continuation",
+                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
+        }
+    } else if (is_schedule_marker(py_result)) {
+        /* Switch to schedule_py path */
+        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
+        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
+        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
+        Py_DECREF(py_result);
+        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
+    } else {
+        /* Normal result */
+        ERL_NIF_TERM term_result = py_to_term(env, py_result);
+        Py_DECREF(py_result);
+        result = enif_make_tuple2(env, ATOM_OK, term_result);
+    }
+
+cleanup:
+    /* Restore thread-local state */
+    tl_allow_suspension = prev_allow_suspension;
+    tl_current_context = prev_context;
+    tl_callback_env = prev_callback_env;
+
+    /* Clear pending callback TLS */
+    clear_pending_callback_tls();
+
+    /* Release thread state */
+    py_context_release(&guard);
+
+    return result;
 }
 
 /* ============================================================================
@@ -2402,6 +2764,28 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
         } else {
             result = make_py_error(env);
         }
+    } else if (is_inline_schedule_marker(py_result)) {
+        /* Inline schedule marker: chain via enif_schedule_nif without Erlang messaging */
+        inline_continuation_t *cont = create_inline_continuation(ctx, NULL, py_result, 0);
+        Py_DECREF(py_result);
+
+        if (cont == NULL) {
+            result = make_error(env, "create_continuation_failed");
+        } else {
+            ERL_NIF_TERM cont_ref = enif_make_resource(env, cont);
+            enif_release_resource(cont);
+
+            /* Restore thread-local state before scheduling */
+            tl_allow_suspension = prev_allow_suspension;
+            tl_current_context = prev_context;
+            clear_pending_callback_tls();
+            enif_free(module_name);
+            enif_free(func_name);
+            py_context_release(&guard);
+
+            return enif_schedule_nif(env, "inline_continuation",
+                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
+        }
     } else if (is_schedule_marker(py_result)) {
         /* Schedule marker: release dirty scheduler, continue via callback */
         ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
@@ -2514,6 +2898,27 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
             }
         } else {
             result = make_py_error(env);
+        }
+    } else if (is_inline_schedule_marker(py_result)) {
+        /* Inline schedule marker: chain via enif_schedule_nif without Erlang messaging */
+        inline_continuation_t *cont = create_inline_continuation(ctx, NULL, py_result, 0);
+        Py_DECREF(py_result);
+
+        if (cont == NULL) {
+            result = make_error(env, "create_continuation_failed");
+        } else {
+            ERL_NIF_TERM cont_ref = enif_make_resource(env, cont);
+            enif_release_resource(cont);
+
+            /* Restore thread-local state before scheduling */
+            tl_allow_suspension = prev_allow_suspension;
+            tl_current_context = prev_context;
+            clear_pending_callback_tls();
+            enif_free(code);
+            py_context_release(&guard);
+
+            return enif_schedule_nif(env, "inline_continuation",
+                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
         }
     } else if (is_schedule_marker(py_result)) {
         /* Schedule marker: release dirty scheduler, continue via callback */
@@ -2887,6 +3292,28 @@ static ERL_NIF_TERM nif_context_eval_with_env(ErlNifEnv *env, int argc, const ER
         } else {
             result = make_py_error(env);
         }
+    } else if (is_inline_schedule_marker(py_result)) {
+        /* Inline schedule marker: chain via enif_schedule_nif with local_env */
+        inline_continuation_t *cont = create_inline_continuation(ctx, penv, py_result, 0);
+        Py_DECREF(py_result);
+
+        if (cont == NULL) {
+            result = make_error(env, "create_continuation_failed");
+        } else {
+            ERL_NIF_TERM cont_ref = enif_make_resource(env, cont);
+            enif_release_resource(cont);
+
+            /* Restore thread-local state before scheduling */
+            tl_allow_suspension = prev_allow_suspension;
+            tl_current_context = prev_context;
+            tl_current_local_env = prev_local_env;
+            clear_pending_callback_tls();
+            enif_free(code);
+            py_context_release(&guard);
+
+            return enif_schedule_nif(env, "inline_continuation",
+                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
+        }
     } else if (is_schedule_marker(py_result)) {
         /* Schedule marker: release dirty scheduler, continue via callback */
         ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
@@ -3056,6 +3483,29 @@ static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ER
             }
         } else {
             result = make_py_error(env);
+        }
+    } else if (is_inline_schedule_marker(py_result)) {
+        /* Inline schedule marker: chain via enif_schedule_nif with local_env */
+        inline_continuation_t *cont = create_inline_continuation(ctx, penv, py_result, 0);
+        Py_DECREF(py_result);
+
+        if (cont == NULL) {
+            result = make_error(env, "create_continuation_failed");
+        } else {
+            ERL_NIF_TERM cont_ref = enif_make_resource(env, cont);
+            enif_release_resource(cont);
+
+            /* Restore thread-local state before scheduling */
+            tl_allow_suspension = prev_allow_suspension;
+            tl_current_context = prev_context;
+            tl_current_local_env = prev_local_env;
+            clear_pending_callback_tls();
+            enif_free(module_name);
+            enif_free(func_name);
+            py_context_release(&guard);
+
+            return enif_schedule_nif(env, "inline_continuation",
+                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
         }
     } else if (is_schedule_marker(py_result)) {
         ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
@@ -4224,11 +4674,17 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         env, NULL, "py_env", py_env_resource_dtor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
+    /* Inline continuation resource type */
+    INLINE_CONTINUATION_RESOURCE_TYPE = enif_open_resource_type(
+        env, NULL, "inline_continuation", inline_continuation_destructor,
+        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
+
     if (WORKER_RESOURCE_TYPE == NULL || PYOBJ_RESOURCE_TYPE == NULL ||
         SUSPENDED_STATE_RESOURCE_TYPE == NULL ||
         PY_CONTEXT_RESOURCE_TYPE == NULL || PY_REF_RESOURCE_TYPE == NULL ||
         PY_CONTEXT_SUSPENDED_RESOURCE_TYPE == NULL ||
-        PY_ENV_RESOURCE_TYPE == NULL) {
+        PY_ENV_RESOURCE_TYPE == NULL ||
+        INLINE_CONTINUATION_RESOURCE_TYPE == NULL) {
         return -1;
     }
 #ifdef HAVE_SUBINTERPRETERS
