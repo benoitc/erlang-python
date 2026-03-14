@@ -16,14 +16,13 @@
   - Compares `schedule_inline` vs `schedule_py` throughput
 
 - **Process-Bound Python Environments** - Each Erlang process gets an isolated Python namespace
-  - `py:get_local_env/1` - Get or create a process-local Python environment
   - Variables defined via `py:exec()` persist across calls within the same Erlang process
   - Automatic cleanup when the Erlang process exits (no manual deallocation needed)
-  - Environments are stored in process dictionary, keyed by interpreter ID
+  - Resetting Python state = terminating the Erlang process (follows Erlang's "let it crash")
+  - Enables "Python actors" - gen_server processes with encapsulated Python state
   - Works with both subinterpreter and worker modes
-  - Critical for process affinity: each process maintains independent Python state
   - Memory-safe: environments created inside the correct interpreter's allocator
-  - See [Process-Bound Environments](docs/context-affinity.md#process-bound-environments) for details
+  - See [Process-Bound Environments](docs/process-bound-envs.md) for patterns and examples
 
 - **Docker Test Configs** - Containerized test environment
   - `docker/Dockerfile.python312` - Python 3.12 test image

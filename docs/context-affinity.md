@@ -242,6 +242,8 @@ end.
 
 ## Process-Bound Environments
 
+> **Note:** For a detailed guide on building "Python actors" and the Erlang philosophy behind process-bound environments, see [Process-Bound Environments](process-bound-envs.md).
+
 Process-bound environments provide true process-level isolation for Python state. Each Erlang process automatically gets its own Python namespace that persists across calls.
 
 ### How It Works
