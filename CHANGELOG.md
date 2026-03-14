@@ -1,8 +1,19 @@
 # Changelog
 
-## 2.2.0 (2026-03-13)
+## 2.2.0 (unreleased)
 
 ### Added
+
+- **Inline Continuation API** - High-performance scheduling without Erlang messaging
+  - `erlang.schedule_inline(module, func, args, kwargs)` - Chain Python calls via `enif_schedule_nif()`
+  - ~3x faster than `schedule_py` for tight loops (bypasses gen_server messaging)
+  - Captures caller's globals/locals for correct namespace resolution with subinterpreters
+  - `InlineScheduleMarker` type returned, must be returned from handler
+  - See [Scheduling API docs](docs/asyncio.md#explicit-scheduling-api)
+
+- **Inline Continuation Benchmark** - Performance comparison
+  - `bench_schedule_inline` in `examples/benchmark.erl`
+  - Compares `schedule_inline` vs `schedule_py` throughput
 
 - **Process-Bound Python Environments** - Each Erlang process gets an isolated Python namespace
   - `py:get_local_env/1` - Get or create a process-local Python environment
