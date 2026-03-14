@@ -240,6 +240,121 @@ case py:contexts_started() of
 end.
 ```
 
+## Process-Bound Environments
+
+Process-bound environments provide true process-level isolation for Python state. Each Erlang process automatically gets its own Python namespace that persists across calls.
+
+### How It Works
+
+When you call `py:call()`, `py:eval()`, or `py:exec()`, the library automatically:
+
+1. Looks up or creates a process-local Python environment for your Erlang process
+2. Executes the Python code using that environment
+3. Stores variables, imports, and objects in that environment
+4. Cleans up automatically when your Erlang process exits
+
+This happens transparently - no explicit binding required.
+
+### Basic Usage
+
+```erlang
+%% Get a context
+Ctx = py:context(1),
+
+%% Define a variable - it persists for THIS Erlang process
+ok = py:exec(Ctx, <<"counter = 0">>),
+ok = py:exec(Ctx, <<"counter += 1">>),
+{ok, 1} = py:eval(Ctx, <<"counter">>).
+
+%% In a different Erlang process, counter is independent:
+spawn(fun() ->
+    ok = py:exec(Ctx, <<"counter = 100">>),
+    {ok, 100} = py:eval(Ctx, <<"counter">>)
+end).
+
+%% Back in original process, still 1
+{ok, 1} = py:eval(Ctx, <<"counter">>).
+```
+
+### Process Affinity for AI Workloads
+
+Process-bound environments are ideal for scenarios where each Erlang process needs isolated Python state:
+
+```erlang
+%% Each user session gets its own chat history
+handle_user_session(UserId) ->
+    Ctx = py:context(),
+    %% Initialize conversation for this process
+    ok = py:exec(Ctx, <<"
+conversation_history = []
+def add_message(role, content):
+    conversation_history.append({'role': role, 'content': content})
+def get_history():
+    return conversation_history
+">>),
+    session_loop(Ctx).
+
+session_loop(Ctx) ->
+    receive
+        {user_message, Msg} ->
+            py:call(Ctx, '__main__', add_message, [<<"user">>, Msg]),
+            %% Process with AI...
+            session_loop(Ctx);
+        get_history ->
+            {ok, History} = py:call(Ctx, '__main__', get_history, []),
+            History
+    end.
+```
+
+### Isolation Between Processes
+
+```erlang
+%% Process A
+spawn(fun() ->
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"x = 'from process A'">>)
+end),
+
+%% Process B - same context, but isolated environment
+spawn(fun() ->
+    Ctx = py:context(1),  %% Same context!
+    ok = py:exec(Ctx, <<"x = 'from process B'">>),
+    {ok, <<"from process B">>} = py:eval(Ctx, <<"x">>)  %% Own value
+end).
+```
+
+### Memory Management
+
+Environments are automatically freed when:
+- The Erlang process exits (normal, abnormal, or killed)
+- The NIF resource destructor runs during garbage collection
+
+No manual cleanup is needed. The environments use the correct memory allocator for each interpreter (critical for subinterpreters which have isolated allocators).
+
+### When to Use Process-Bound Environments
+
+**Good use cases:**
+- Stateful sessions (chat, game state, user preferences)
+- Long-running workers that accumulate state
+- Process-per-request patterns with state
+- AI pipelines with per-request context
+
+**Consider alternatives when:**
+- State must be shared between Erlang processes (use shared state API instead)
+- State needs to outlive the Erlang process (use explicit storage)
+- You need multiple independent namespaces per process (use explicit contexts)
+
+### Technical Details
+
+Process-bound environments work by:
+
+1. Storing a `reference()` in the calling process's dictionary under `py_local_env`
+2. The reference points to a Python dict created inside the interpreter
+3. Each interpreter ID maps to a separate environment (for subinterpreter support)
+4. The NIF uses this dict as `locals` for `exec()` and `eval()` operations
+
+For subinterpreters, environments are created inside the target interpreter to ensure memory safety - Python's subinterpreters have isolated memory allocators.
+
 ## Best Practices
 
 1. **Use explicit contexts for stateful operations**: `Ctx = py:context(1)` ensures state persists
@@ -247,3 +362,4 @@ end.
 3. **Always unbind in finally blocks**: Prevent context leaks
 4. **Minimize binding time**: Don't hold contexts longer than necessary
 5. **Monitor pool size**: Check `py_context_router:num_contexts()` to understand capacity
+6. **Leverage process-bound environments**: For per-process state, rely on automatic environment isolation rather than manual binding

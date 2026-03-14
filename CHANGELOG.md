@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.2.0 (2026-03-13)
+
+### Added
+
+- **Process-Bound Python Environments** - Each Erlang process gets an isolated Python namespace
+  - `py:get_local_env/1` - Get or create a process-local Python environment
+  - Variables defined via `py:exec()` persist across calls within the same Erlang process
+  - Automatic cleanup when the Erlang process exits (no manual deallocation needed)
+  - Environments are stored in process dictionary, keyed by interpreter ID
+  - Works with both subinterpreter and worker modes
+  - Critical for process affinity: each process maintains independent Python state
+  - Memory-safe: environments created inside the correct interpreter's allocator
+  - See [Process-Bound Environments](docs/context-affinity.md#process-bound-environments) for details
+
+- **Docker Test Configs** - Containerized test environment
+  - `docker/Dockerfile.python312` - Python 3.12 test image
+  - `docker/Dockerfile.python314` - Python 3.14 test image
+  - `docker/Dockerfile.asan` - AddressSanitizer build for memory testing
+  - `docker/docker-compose.yml` - Multi-container test orchestration
+  - `docker/run-tests.sh` - Automated test runner script
+
+- **Async Task Benchmark** - Performance testing for async operations
+  - `examples/bench_async_task.erl` - Erlang benchmark runner
+  - `priv/test_async_task.py` - Python async task implementation
+
 ## 2.1.0 (2026-03-12)
 
 ### Added
