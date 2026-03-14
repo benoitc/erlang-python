@@ -57,7 +57,7 @@
 %% Exported for py_reactor_context
 -export([extend_erlang_module_in_context/1]).
 
--type context_mode() :: auto | subinterp | worker.
+-type context_mode() :: auto | subinterp | worker | owngil.
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
@@ -78,8 +78,13 @@
 %%
 %% The process creates a Python context based on the mode:
 %% - `auto' - Detect best mode (subinterp on Python 3.12+, worker otherwise)
-%% - `subinterp' - Create a sub-interpreter with its own GIL
-%% - `worker' - Create a thread-state worker
+%% - `subinterp' - Create a sub-interpreter with shared GIL (uses pool)
+%% - `worker' - Create a thread-state worker (main interpreter namespace)
+%% - `owngil' - Create a sub-interpreter with its own GIL (true parallelism)
+%%
+%% The `owngil' mode creates a dedicated pthread for each context, allowing
+%% true parallel Python execution. This is useful for CPU-bound workloads.
+%% Requires Python 3.12+.
 %%
 %% @param Id Unique identifier for this context
 %% @param Mode Context mode
@@ -438,7 +443,13 @@ create_context(auto) ->
 create_context(subinterp) ->
     py_nif:context_create(subinterp);
 create_context(worker) ->
-    py_nif:context_create(worker).
+    py_nif:context_create(worker);
+create_context(owngil) ->
+    %% OWN_GIL mode requires Python 3.12+
+    case py_nif:subinterp_supported() of
+        true -> py_nif:context_create(owngil);
+        false -> {error, owngil_requires_python312}
+    end.
 
 %% @private
 %% Main context loop. Handles requests and uses suspension-based callback support.

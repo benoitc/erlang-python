@@ -699,6 +699,22 @@ typedef enum {
 } py_cmd_type_t;
 
 /**
+ * @enum ctx_request_type_t
+ * @brief Request types for OWN_GIL context thread dispatch
+ *
+ * Used by OWN_GIL contexts to communicate between the NIF (dirty scheduler)
+ * and the dedicated pthread that owns the subinterpreter.
+ */
+typedef enum {
+    CTX_REQ_NONE = 0,           /**< No request (idle state) */
+    CTX_REQ_CALL,               /**< Call a Python function */
+    CTX_REQ_EVAL,               /**< Evaluate a Python expression */
+    CTX_REQ_EXEC,               /**< Execute Python statements */
+    CTX_REQ_CALLBACK_RESULT,    /**< Erlang callback result available */
+    CTX_REQ_SHUTDOWN            /**< Shutdown the thread */
+} ctx_request_type_t;
+
+/**
  * @struct py_cmd_t
  * @brief Command structure for thread-per-context dispatch
  *
@@ -776,6 +792,56 @@ typedef struct {
 #ifdef HAVE_SUBINTERPRETERS
     /** @brief Index into subinterpreter pool (-1 = not using pool / worker mode) */
     int pool_slot;
+
+    /* ========== OWN_GIL mode fields ========== */
+
+    /** @brief Whether this context uses OWN_GIL mode (dedicated pthread) */
+    bool uses_own_gil;
+
+    /** @brief Dedicated pthread for OWN_GIL mode */
+    pthread_t own_gil_thread;
+
+    /** @brief Thread state for OWN_GIL subinterpreter */
+    PyThreadState *own_gil_tstate;
+
+    /** @brief Interpreter state for OWN_GIL subinterpreter */
+    PyInterpreterState *own_gil_interp;
+
+    /* IPC via condition variables */
+
+    /** @brief Mutex for request/response synchronization */
+    pthread_mutex_t request_mutex;
+
+    /** @brief Condition variable: request ready for processing */
+    pthread_cond_t request_ready;
+
+    /** @brief Condition variable: response ready for caller */
+    pthread_cond_t response_ready;
+
+    /* Request/response state */
+
+    /** @brief Current request type (CTX_REQ_*) */
+    int request_type;
+
+    /** @brief Shared environment for zero-copy term passing */
+    ErlNifEnv *shared_env;
+
+    /** @brief Request term (copied into shared_env) */
+    ERL_NIF_TERM request_term;
+
+    /** @brief Response term (created in shared_env) */
+    ERL_NIF_TERM response_term;
+
+    /** @brief True if response indicates success */
+    bool response_ok;
+
+    /* Lifecycle flags */
+
+    /** @brief True when worker thread is running */
+    _Atomic bool thread_running;
+
+    /** @brief True when shutdown has been requested */
+    _Atomic bool shutdown_requested;
 #else
     /** @brief Worker thread state (non-subinterp mode) */
     PyThreadState *thread_state;
@@ -840,7 +906,10 @@ typedef enum {
     PY_GUARD_WORKER,
 
     /** @brief Subinterp mode: GIL + PyThreadState_Swap to pool slot */
-    PY_GUARD_SUBINTERP
+    PY_GUARD_SUBINTERP,
+
+    /** @brief OWN_GIL mode: dispatch to dedicated pthread with its own GIL */
+    PY_GUARD_OWN_GIL
 } py_guard_mode_t;
 
 /**
