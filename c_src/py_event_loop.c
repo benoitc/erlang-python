@@ -2774,9 +2774,10 @@ bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
             loop->pending_capacity = new_capacity;
             /* Note: Linked list doesn't need realloc, just the capacity limit */
         } else {
-            /* At hard cap - log warning but don't drop silently */
-            /* TODO: Add proper logging mechanism */
-            return false;  /* Queue at maximum capacity */
+            /* At hard cap - warn and reject */
+            fprintf(stderr, "event_loop_add_pending: queue at maximum capacity (%zu), rejecting event\n",
+                    (size_t)MAX_PENDING_CAPACITY);
+            return false;
         }
     }
 

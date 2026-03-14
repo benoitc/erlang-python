@@ -141,7 +141,7 @@ static inline bool is_numpy_ndarray(PyObject *obj) {
  *
  * @see term_to_py() for the reverse conversion
  */
-static ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
+ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
     /*
      * Type check ordering optimized for web/ASGI workloads:
      * 1. Strings (most common in HTTP headers, bodies, JSON)
