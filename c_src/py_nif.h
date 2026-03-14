@@ -1106,6 +1106,12 @@ typedef struct {
     /** @brief Keyword arguments (Python dict or NULL, owned reference) */
     PyObject *kwargs;
 
+    /** @brief Captured globals from caller's frame (owned reference) */
+    PyObject *globals;
+
+    /** @brief Captured locals from caller's frame (owned reference) */
+    PyObject *locals;
+
     /** @brief Continuation depth (overflow protection) */
     uint32_t depth;
 

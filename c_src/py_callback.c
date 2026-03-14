@@ -1435,6 +1435,8 @@ static void InlineScheduleMarker_dealloc(InlineScheduleMarkerObject *self) {
     Py_XDECREF(self->func);
     Py_XDECREF(self->args);
     Py_XDECREF(self->kwargs);
+    Py_XDECREF(self->globals);
+    Py_XDECREF(self->locals);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -1559,6 +1561,22 @@ static PyObject *py_schedule_inline(PyObject *self, PyObject *args, PyObject *kw
 
     Py_INCREF(call_kwargs);
     marker->kwargs = call_kwargs;
+
+    /* Capture globals and locals from caller's frame */
+    PyObject *frame_globals = PyEval_GetGlobals();  /* Borrowed reference */
+    PyObject *frame_locals = PyEval_GetLocals();    /* Borrowed reference */
+    if (frame_globals != NULL) {
+        Py_INCREF(frame_globals);
+        marker->globals = frame_globals;
+    } else {
+        marker->globals = NULL;
+    }
+    if (frame_locals != NULL) {
+        Py_INCREF(frame_locals);
+        marker->locals = frame_locals;
+    } else {
+        marker->locals = NULL;
+    }
 
     return (PyObject *)marker;
 }

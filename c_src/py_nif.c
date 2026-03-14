@@ -278,6 +278,8 @@ typedef struct {
     PyObject *func;        /* Function name (string) */
     PyObject *args;        /* Arguments (tuple or None) */
     PyObject *kwargs;      /* Keyword arguments (dict or None) */
+    PyObject *globals;     /* Captured globals from caller's frame */
+    PyObject *locals;      /* Captured locals from caller's frame */
 } InlineScheduleMarkerObject;
 static int is_inline_schedule_marker(PyObject *obj);
 
@@ -671,12 +673,15 @@ static void inline_continuation_destructor(ErlNifEnv *env, void *obj) {
     }
 
     /* Clean up Python objects if Python is still initialized */
-    if (runtime_is_running() && (cont->args != NULL || cont->kwargs != NULL)) {
+    if (runtime_is_running() && (cont->args != NULL || cont->kwargs != NULL ||
+                                  cont->globals != NULL || cont->locals != NULL)) {
         /* For subinterpreter contexts: defer cleanup to Py_EndInterpreter */
 #ifdef HAVE_SUBINTERPRETERS
         if (cont->ctx != NULL && cont->ctx->is_subinterp) {
             cont->args = NULL;
             cont->kwargs = NULL;
+            cont->globals = NULL;
+            cont->locals = NULL;
         } else
 #endif
         {
@@ -685,12 +690,18 @@ static void inline_continuation_destructor(ErlNifEnv *env, void *obj) {
                 PyGILState_STATE gstate = PyGILState_Ensure();
                 Py_XDECREF(cont->args);
                 Py_XDECREF(cont->kwargs);
+                Py_XDECREF(cont->globals);
+                Py_XDECREF(cont->locals);
                 cont->args = NULL;
                 cont->kwargs = NULL;
+                cont->globals = NULL;
+                cont->locals = NULL;
                 PyGILState_Release(gstate);
             } else {
                 cont->args = NULL;
                 cont->kwargs = NULL;
+                cont->globals = NULL;
+                cont->locals = NULL;
             }
         }
     }
@@ -781,6 +792,20 @@ static inline_continuation_t *create_inline_continuation(
         cont->kwargs = NULL;
     }
 
+    /* Store captured globals and locals */
+    if (marker->globals != NULL) {
+        Py_INCREF(marker->globals);
+        cont->globals = marker->globals;
+    } else {
+        cont->globals = NULL;
+    }
+    if (marker->locals != NULL) {
+        Py_INCREF(marker->locals);
+        cont->locals = marker->locals;
+    } else {
+        cont->locals = NULL;
+    }
+
     /* Store context (keep resource reference) */
     cont->ctx = ctx;
     enif_keep_resource(ctx);
@@ -853,12 +878,30 @@ static ERL_NIF_TERM nif_inline_continuation(ErlNifEnv *env, int argc, const ERL_
     PyObject *func = NULL;
     PyObject *module = NULL;
 
-    /* Use local_env globals if available for __main__, otherwise standard import */
+    /* Priority for __main__ lookups:
+     * 1. Captured globals/locals from the marker (caller's frame)
+     * 2. local_env globals (process-local environment)
+     * 3. ctx->globals/locals (context defaults)
+     */
     py_env_resource_t *local_env = (py_env_resource_t *)cont->local_env;
 
     if (strcmp(cont->module_name, "__main__") == 0) {
-        PyObject *globals = (local_env != NULL) ? local_env->globals : ctx->globals;
-        func = PyDict_GetItemString(globals, cont->func_name);
+        /* Try captured globals first (from caller's frame) */
+        if (cont->globals != NULL) {
+            func = PyDict_GetItemString(cont->globals, cont->func_name);
+        }
+        /* Try captured locals */
+        if (func == NULL && cont->locals != NULL) {
+            func = PyDict_GetItemString(cont->locals, cont->func_name);
+        }
+        /* Fallback to local_env globals */
+        if (func == NULL && local_env != NULL) {
+            func = PyDict_GetItemString(local_env->globals, cont->func_name);
+        }
+        /* Fallback to context globals/locals */
+        if (func == NULL) {
+            func = PyDict_GetItemString(ctx->globals, cont->func_name);
+        }
         if (func == NULL) {
             func = PyDict_GetItemString(ctx->locals, cont->func_name);
         }

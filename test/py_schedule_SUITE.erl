@@ -25,6 +25,7 @@
     test_schedule_inline_with_kwargs/1,
     test_schedule_inline_to_schedule_py/1,
     test_schedule_inline_error/1,
+    test_schedule_inline_captures_globals/1,
     test_call_is_blocking/1
 ]).
 
@@ -48,6 +49,7 @@ all() ->
         test_schedule_inline_with_kwargs,
         test_schedule_inline_to_schedule_py,
         test_schedule_inline_error,
+        test_schedule_inline_captures_globals,
         test_call_is_blocking
     ].
 
@@ -373,4 +375,33 @@ def call_nonexistent():
         _ when is_list(Reason) -> ok;
         _ -> ct:fail("Unexpected error format: ~p", [Reason])
     end,
+    ok.
+
+%% Test that schedule_inline captures globals from caller's frame
+test_schedule_inline_captures_globals(_Config) ->
+    %% This test verifies that schedule_inline captures the caller's frame
+    %% globals and uses them for function lookup in the continuation.
+    %% This is important for subinterpreter support.
+    Ctx = py:context(),
+    ok = py:exec(Ctx, <<"
+import __main__
+
+# Define a helper function at module scope
+def helper_multiply(x):
+    return x * 3
+
+# Define an outer function that creates a local function reference
+# and uses schedule_inline to call it
+def test_captured_globals():
+    import erlang
+    # This should capture the current globals which includes helper_multiply
+    return erlang.schedule_inline('__main__', 'helper_multiply', args=[7])
+
+__main__.helper_multiply = helper_multiply
+__main__.test_captured_globals = test_captured_globals
+">>),
+    %% Call the function - should work because globals are captured
+    {ok, Result} = py:eval(Ctx, <<"test_captured_globals()">>),
+    ct:pal("schedule_inline captures globals result: ~p", [Result]),
+    21 = Result,  %% 7 * 3 = 21
     ok.
