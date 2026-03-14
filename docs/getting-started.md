@@ -458,6 +458,35 @@ py:register_pool(io, {db, query}).        %% Only db.query goes to io pool
 
 This prevents slow HTTP requests from blocking quick math operations. See [Dual Pool Support](pools.md) for configuration and advanced usage.
 
+## Zero-Copy Buffers
+
+For WSGI/ASGI applications that need to stream HTTP request bodies, use `py_buffer`:
+
+```erlang
+%% Create buffer for HTTP body
+{ok, Buf} = py_buffer:new(ContentLength),
+
+%% Write body chunks as they arrive
+ok = py_buffer:write(Buf, Chunk1),
+ok = py_buffer:write(Buf, Chunk2),
+ok = py_buffer:close(Buf),
+
+%% Pass to WSGI app as wsgi.input
+py:call(Ctx, myapp, handle, [#{<<"wsgi.input">> => Buf}]).
+```
+
+Python sees it as a file-like object with blocking reads:
+
+```python
+def handle(environ):
+    body = environ['wsgi.input'].read()  # Blocks until data ready
+    # Or iterate lines
+    for line in environ['wsgi.input']:
+        process(line)
+```
+
+See [Buffer API](buffer.md) for zero-copy memoryview access and fast substring search.
+
 ## Next Steps
 
 - See [Dual Pool Support](pools.md) for separating CPU and I/O operations
@@ -469,6 +498,7 @@ This prevents slow HTTP requests from blocking quick math operations. See [Dual 
 - See [Logging and Tracing](logging.md) for Python logging and distributed tracing
 - See [AI Integration](ai-integration.md) for ML/AI examples
 - See [Asyncio Event Loop](asyncio.md) for the Erlang-native asyncio implementation with TCP and UDP support
+- See [Buffer API](buffer.md) for zero-copy WSGI input buffers
 - See [Reactor](reactor.md) for FD-based protocol handling
 - See [Security](security.md) for sandbox and blocked operations
 - See [Web Frameworks](web-frameworks.md) for ASGI/WSGI integration
