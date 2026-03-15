@@ -69,7 +69,7 @@ jobs:
 
       - name: Clean and compile
         run: |
-          rebar3 clean
+          rm -rf _build
           rebar3 compile
 
       - name: Run tests
@@ -162,7 +162,7 @@ jobs:
         env:
           PYTHON_GIL: "0"
         run: |
-          rebar3 clean
+          rm -rf _build
           rebar3 compile
 
       - name: Run tests
@@ -223,7 +223,7 @@ jobs:
 
       - name: Clean and compile with ASan
         run: |
-          rm -rf _build/cmake
+          rm -rf _build
           mkdir -p _build/cmake
           cd _build/cmake
           cmake ../../c_src -DENABLE_ASAN=ON -DENABLE_UBSAN=ON
