@@ -947,9 +947,6 @@ reactor.set_protocol_factory(EchoProtocol)
 
 %% @doc Multiple connections in owngil reactor
 owngil_reactor_multiple_conn_test(_Config) ->
-    {skip, "py_reactor_context OWN_GIL integration needs investigation"}.
-
-owngil_reactor_multiple_conn_test_DISABLED(_Config) ->
     SetupCode = <<"
 import erlang.reactor as reactor
 
@@ -1011,9 +1008,6 @@ reactor.set_protocol_factory(CounterProtocol)
 
 %% @doc async_pending pattern in owngil reactor
 owngil_reactor_async_pending_test(_Config) ->
-    {skip, "py_reactor_context OWN_GIL integration needs investigation"}.
-
-owngil_reactor_async_pending_test_DISABLED(_Config) ->
     SetupCode = <<"
 import erlang.reactor as reactor
 
@@ -1079,9 +1073,6 @@ result = {
 
 %% @doc Protocol factory isolation between owngil contexts
 owngil_reactor_isolation_test(_Config) ->
-    {skip, "py_reactor_context OWN_GIL integration needs investigation"}.
-
-owngil_reactor_isolation_test_DISABLED(_Config) ->
     EchoSetup = <<"
 import erlang.reactor as reactor
 

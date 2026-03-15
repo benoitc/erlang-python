@@ -2824,6 +2824,14 @@ static void *owngil_context_thread_main(void *arg) {
         return NULL;
     }
 
+    /* Register py_event_loop module for reactor support */
+    if (create_py_event_loop_module() < 0) {
+        PyErr_Print();
+        Py_EndInterpreter(ctx->own_gil_tstate);
+        atomic_store(&ctx->thread_running, false);
+        return NULL;
+    }
+
     /* Create namespace dictionaries */
     ctx->globals = PyDict_New();
     ctx->locals = PyDict_New();
