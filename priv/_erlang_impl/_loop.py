@@ -1101,14 +1101,18 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if context is None:
             context = contextvars.copy_context()
 
-        if self._handle_pool:
+        # Use try/except for thread-safety in free-threaded Python
+        # The pool check and pop are not atomic, so another thread could
+        # empty the pool between the check and pop
+        try:
             handle = self._handle_pool.pop()
             handle._callback = callback
             handle._args = args
             handle._cancelled = False
             handle._context = context
             return handle
-        return events.Handle(callback, args, self, context)
+        except IndexError:
+            return events.Handle(callback, args, self, context)
 
     def _return_handle(self, handle):
         """Return a Handle to the pool for reuse.
