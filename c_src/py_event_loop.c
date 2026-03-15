@@ -4103,6 +4103,13 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
             enif_make_atom(env, read_result == 1 ? "close" : "continue"));
     }
 
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_reactor_read_to_owngil(env, ctx, fd, buffer);
+    }
+#endif
+
     /* Acquire context (handles both worker mode and subinterpreter mode) */
     py_context_guard_t guard = py_context_acquire(ctx);
     if (!guard.acquired) {
@@ -4192,6 +4199,13 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd");
     }
 
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_reactor_write_to_owngil(env, ctx, fd);
+    }
+#endif
+
     /* Acquire context (handles both worker mode and subinterpreter mode) */
     py_context_guard_t guard = py_context_acquire(ctx);
     if (!guard.acquired) {
@@ -4270,6 +4284,13 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
     if (!enif_is_map(env, argv[2])) {
         return make_error(env, "invalid_client_info");
     }
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_reactor_init_to_owngil(env, ctx, fd, argv[2]);
+    }
+#endif
 
     /* Acquire context (handles both worker mode and subinterpreter mode) */
     py_context_guard_t guard = py_context_acquire(ctx);
@@ -4611,6 +4632,156 @@ ERL_NIF_TERM nif_fd_close(ErlNifEnv *env, int argc,
         return make_error(env, strerror(errno));
     }
 
+    return ATOM_OK;
+}
+
+/* ============================================================================
+ * OWN_GIL Reactor Dispatch Functions
+ * ============================================================================
+ * These functions are called from the OWN_GIL thread in py_nif.c.
+ * The GIL is already held when these are called.
+ */
+
+/**
+ * Execute reactor on_read_ready in OWN_GIL thread.
+ * Called with GIL already held.
+ */
+ERL_NIF_TERM owngil_reactor_on_read_ready(ErlNifEnv *env, int fd, void *buffer_ptr) {
+    reactor_buffer_resource_t *buffer = (reactor_buffer_resource_t *)buffer_ptr;
+
+    /* Create ReactorBuffer Python object wrapping the resource */
+    PyObject *py_buffer = ReactorBuffer_from_resource(buffer, buffer);
+    /* Release our reference - Python now owns the only reference */
+    enif_release_resource(buffer);
+
+    if (py_buffer == NULL) {
+        PyErr_Clear();
+        return make_error(env, "buffer_creation_failed");
+    }
+
+    /* Get module state for THIS interpreter's reactor cache */
+    py_event_loop_module_state_t *state = get_module_state();
+    if (!ensure_reactor_cached_for_interp(state)) {
+        PyErr_Clear();
+        Py_DECREF(py_buffer);
+        return make_error(env, "reactor_cache_init_failed");
+    }
+
+    /* Call cached on_read_ready(fd, data) */
+    PyObject *py_fd = PyLong_FromLong(fd);
+    if (py_fd == NULL) {
+        PyErr_Clear();
+        Py_DECREF(py_buffer);
+        return make_error(env, "fd_conversion_failed");
+    }
+
+    PyObject *result = PyObject_CallFunctionObjArgs(state->reactor_on_read, py_fd, py_buffer, NULL);
+    Py_DECREF(py_fd);
+    Py_DECREF(py_buffer);
+
+    if (result == NULL) {
+        PyErr_Clear();
+        return make_error(env, "on_read_ready_failed");
+    }
+
+    /* Convert result to Erlang term */
+    ERL_NIF_TERM action;
+    if (PyUnicode_Check(result)) {
+        const char *str = PyUnicode_AsUTF8(result);
+        if (str != NULL) {
+            size_t len = strlen(str);
+            unsigned char *buf = enif_make_new_binary(env, len, &action);
+            memcpy(buf, str, len);
+        } else {
+            action = enif_make_atom(env, "unknown");
+        }
+    } else {
+        action = enif_make_atom(env, "unknown");
+    }
+
+    Py_DECREF(result);
+    return enif_make_tuple2(env, ATOM_OK, action);
+}
+
+/**
+ * Execute reactor on_write_ready in OWN_GIL thread.
+ * Called with GIL already held.
+ */
+ERL_NIF_TERM owngil_reactor_on_write_ready(ErlNifEnv *env, int fd) {
+    /* Get module state for THIS interpreter's reactor cache */
+    py_event_loop_module_state_t *state = get_module_state();
+    if (!ensure_reactor_cached_for_interp(state)) {
+        PyErr_Clear();
+        return make_error(env, "reactor_cache_init_failed");
+    }
+
+    /* Call cached on_write_ready(fd) */
+    PyObject *py_fd = PyLong_FromLong(fd);
+    if (py_fd == NULL) {
+        PyErr_Clear();
+        return make_error(env, "fd_conversion_failed");
+    }
+
+    PyObject *result = PyObject_CallFunctionObjArgs(state->reactor_on_write, py_fd, NULL);
+    Py_DECREF(py_fd);
+
+    if (result == NULL) {
+        PyErr_Clear();
+        return make_error(env, "on_write_ready_failed");
+    }
+
+    /* Convert result to Erlang term */
+    ERL_NIF_TERM action;
+    if (PyUnicode_Check(result)) {
+        const char *str = PyUnicode_AsUTF8(result);
+        if (str != NULL) {
+            size_t len = strlen(str);
+            unsigned char *buf = enif_make_new_binary(env, len, &action);
+            memcpy(buf, str, len);
+        } else {
+            action = enif_make_atom(env, "unknown");
+        }
+    } else {
+        action = enif_make_atom(env, "unknown");
+    }
+
+    Py_DECREF(result);
+    return enif_make_tuple2(env, ATOM_OK, action);
+}
+
+/**
+ * Execute reactor init_connection in OWN_GIL thread.
+ * Called with GIL already held.
+ */
+ERL_NIF_TERM owngil_reactor_init_connection(ErlNifEnv *env, int fd,
+                                             ERL_NIF_TERM client_info_term) {
+    /* Convert client_info to Python dict */
+    PyObject *py_client_info = term_to_py(env, client_info_term);
+    if (py_client_info == NULL) {
+        PyErr_Clear();
+        return make_error(env, "client_info_conversion_failed");
+    }
+
+    /* Import erlang.reactor module */
+    PyObject *reactor_module = PyImport_ImportModule("erlang.reactor");
+    if (reactor_module == NULL) {
+        Py_DECREF(py_client_info);
+        PyErr_Clear();
+        return make_error(env, "import_erlang_reactor_failed");
+    }
+
+    /* Call init_connection(fd, client_info) */
+    PyObject *result = PyObject_CallMethod(reactor_module, "init_connection",
+                                            "iO", fd, py_client_info);
+    Py_DECREF(reactor_module);
+    Py_DECREF(py_client_info);
+
+    if (result == NULL) {
+        PyErr_Clear();
+        return make_error(env, "init_connection_failed");
+    }
+
+    Py_DECREF(result);
     return ATOM_OK;
 }
 

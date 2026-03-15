@@ -1035,4 +1035,47 @@ ERL_NIF_TERM nif_socketpair(ErlNifEnv *env, int argc,
 ERL_NIF_TERM nif_fd_close(ErlNifEnv *env, int argc,
                            const ERL_NIF_TERM argv[]);
 
+/* ============================================================================
+ * OWN_GIL Reactor Dispatch Functions
+ * ============================================================================
+ * These functions execute reactor operations in the context of the OWN_GIL
+ * thread. They are called from owngil_execute_request() in py_nif.c.
+ */
+
+/**
+ * @brief Execute reactor on_read_ready in OWN_GIL thread
+ *
+ * Called with the GIL already held by the OWN_GIL thread.
+ *
+ * @param env Shared NIF environment
+ * @param fd File descriptor
+ * @param buffer_ptr Reactor buffer resource (transferred ownership)
+ * @return Erlang term: {ok, Action} | {error, Reason}
+ */
+ERL_NIF_TERM owngil_reactor_on_read_ready(ErlNifEnv *env, int fd, void *buffer_ptr);
+
+/**
+ * @brief Execute reactor on_write_ready in OWN_GIL thread
+ *
+ * Called with the GIL already held by the OWN_GIL thread.
+ *
+ * @param env Shared NIF environment
+ * @param fd File descriptor
+ * @return Erlang term: {ok, Action} | {error, Reason}
+ */
+ERL_NIF_TERM owngil_reactor_on_write_ready(ErlNifEnv *env, int fd);
+
+/**
+ * @brief Execute reactor init_connection in OWN_GIL thread
+ *
+ * Called with the GIL already held by the OWN_GIL thread.
+ *
+ * @param env Shared NIF environment
+ * @param fd File descriptor
+ * @param client_info_term Erlang term with client info map
+ * @return Erlang term: ok | {error, Reason}
+ */
+ERL_NIF_TERM owngil_reactor_init_connection(ErlNifEnv *env, int fd,
+                                             ERL_NIF_TERM client_info_term);
+
 #endif /* PY_EVENT_LOOP_H */

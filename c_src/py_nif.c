@@ -2669,6 +2669,85 @@ static void owngil_execute_exec(py_context_t *ctx) {
 }
 
 /**
+ * @brief Execute a reactor on_read_ready request in OWN_GIL thread
+ */
+static void owngil_execute_reactor_read(py_context_t *ctx) {
+    /* Extract fd from request term (it's just an integer) */
+    int fd;
+    if (!enif_get_int(ctx->shared_env, ctx->request_term, &fd)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_fd"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Get buffer from auxiliary pointer */
+    void *buffer_ptr = ctx->reactor_buffer_ptr;
+    ctx->reactor_buffer_ptr = NULL;  /* Transfer ownership */
+
+    if (buffer_ptr == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "no_buffer"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Call the OWN_GIL reactor function */
+    ctx->response_term = owngil_reactor_on_read_ready(ctx->shared_env, fd, buffer_ptr);
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Execute a reactor on_write_ready request in OWN_GIL thread
+ */
+static void owngil_execute_reactor_write(py_context_t *ctx) {
+    /* Extract fd from request term */
+    int fd;
+    if (!enif_get_int(ctx->shared_env, ctx->request_term, &fd)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_fd"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Call the OWN_GIL reactor function */
+    ctx->response_term = owngil_reactor_on_write_ready(ctx->shared_env, fd);
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Execute a reactor init_connection request in OWN_GIL thread
+ */
+static void owngil_execute_reactor_init(py_context_t *ctx) {
+    /* Extract {Fd, ClientInfo} from request term */
+    const ERL_NIF_TERM *tuple;
+    int arity;
+    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &arity, &tuple) || arity != 2) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_request"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    int fd;
+    if (!enif_get_int(ctx->shared_env, tuple[0], &fd)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_fd"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Call the OWN_GIL reactor function */
+    ctx->response_term = owngil_reactor_init_connection(ctx->shared_env, fd, tuple[1]);
+    ctx->response_ok = true;
+}
+
+/**
  * @brief Execute a request based on its type
  */
 static void owngil_execute_request(py_context_t *ctx) {
@@ -2681,6 +2760,15 @@ static void owngil_execute_request(py_context_t *ctx) {
             break;
         case CTX_REQ_EXEC:
             owngil_execute_exec(ctx);
+            break;
+        case CTX_REQ_REACTOR_ON_READ_READY:
+            owngil_execute_reactor_read(ctx);
+            break;
+        case CTX_REQ_REACTOR_ON_WRITE_READY:
+            owngil_execute_reactor_write(ctx);
+            break;
+        case CTX_REQ_REACTOR_INIT_CONNECTION:
+            owngil_execute_reactor_init(ctx);
             break;
         default:
             ctx->response_term = enif_make_tuple2(ctx->shared_env,
@@ -2850,6 +2938,108 @@ static ERL_NIF_TERM dispatch_to_owngil_thread(
     enif_clear_env(ctx->shared_env);
     ctx->request_term = enif_make_copy(ctx->shared_env, request_data);
     ctx->request_type = req_type;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch reactor on_read_ready to OWN_GIL thread
+ *
+ * Similar to dispatch_to_owngil_thread but also passes buffer pointer.
+ */
+ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, void *buffer_ptr) {
+    if (!atomic_load(&ctx->thread_running)) {
+        enif_release_resource(buffer_ptr);
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Clear and set up request */
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_int(ctx->shared_env, fd);
+    ctx->reactor_buffer_ptr = buffer_ptr;  /* Transfer ownership */
+    ctx->request_type = CTX_REQ_REACTOR_ON_READ_READY;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch reactor on_write_ready to OWN_GIL thread
+ */
+ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                               int fd) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Clear and set up request */
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_int(ctx->shared_env, fd);
+    ctx->request_type = CTX_REQ_REACTOR_ON_WRITE_READY;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch reactor init_connection to OWN_GIL thread
+ */
+ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, ERL_NIF_TERM client_info) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Clear and set up request */
+    enif_clear_env(ctx->shared_env);
+    ERL_NIF_TERM fd_term = enif_make_int(ctx->shared_env, fd);
+    ERL_NIF_TERM info_copy = enif_make_copy(ctx->shared_env, client_info);
+    ctx->request_term = enif_make_tuple2(ctx->shared_env, fd_term, info_copy);
+    ctx->request_type = CTX_REQ_REACTOR_INIT_CONNECTION;
 
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);

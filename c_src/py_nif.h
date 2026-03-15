@@ -711,7 +711,11 @@ typedef enum {
     CTX_REQ_EVAL,               /**< Evaluate a Python expression */
     CTX_REQ_EXEC,               /**< Execute Python statements */
     CTX_REQ_CALLBACK_RESULT,    /**< Erlang callback result available */
-    CTX_REQ_SHUTDOWN            /**< Shutdown the thread */
+    CTX_REQ_SHUTDOWN,           /**< Shutdown the thread */
+    /* Reactor dispatch requests for OWN_GIL mode */
+    CTX_REQ_REACTOR_ON_READ_READY,   /**< Handle read ready event */
+    CTX_REQ_REACTOR_ON_WRITE_READY,  /**< Handle write ready event */
+    CTX_REQ_REACTOR_INIT_CONNECTION  /**< Initialize a connection */
 } ctx_request_type_t;
 
 /**
@@ -834,6 +838,9 @@ typedef struct {
 
     /** @brief True if response indicates success */
     bool response_ok;
+
+    /** @brief Auxiliary pointer for reactor buffer (OWN_GIL dispatch) */
+    void *reactor_buffer_ptr;
 
     /* Lifecycle flags */
 
@@ -2007,5 +2014,50 @@ static inline void gil_release(gil_guard_t guard) {
 }
 
 /** @} */
+
+/* ============================================================================
+ * OWN_GIL Reactor Dispatch
+ * ============================================================================
+ * Functions for dispatching reactor operations to OWN_GIL threads.
+ */
+
+#ifdef HAVE_SUBINTERPRETERS
+
+/**
+ * @brief Dispatch reactor on_read_ready to OWN_GIL thread
+ *
+ * @param env Caller's NIF environment
+ * @param ctx OWN_GIL context
+ * @param fd File descriptor
+ * @param buffer_ptr Reactor buffer resource (ownership transferred)
+ * @return Result term
+ */
+ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, void *buffer_ptr);
+
+/**
+ * @brief Dispatch reactor on_write_ready to OWN_GIL thread
+ *
+ * @param env Caller's NIF environment
+ * @param ctx OWN_GIL context
+ * @param fd File descriptor
+ * @return Result term
+ */
+ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                               int fd);
+
+/**
+ * @brief Dispatch reactor init_connection to OWN_GIL thread
+ *
+ * @param env Caller's NIF environment
+ * @param ctx OWN_GIL context
+ * @param fd File descriptor
+ * @param client_info Client info map term
+ * @return Result term
+ */
+ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, ERL_NIF_TERM client_info);
+
+#endif /* HAVE_SUBINTERPRETERS */
 
 #endif /* PY_NIF_H */
