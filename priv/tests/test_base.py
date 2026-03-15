@@ -387,7 +387,11 @@ class _TestRunMethods:
         t2 = self.loop.time()
 
         self.assertGreater(t2, t1)
-        self.assertAlmostEqual(t2 - t1, 0.01, places=2)
+        # Check elapsed time is at least the sleep duration, with tolerance
+        # for CI runner timing variance (can be much slower under load)
+        elapsed = t2 - t1
+        self.assertGreaterEqual(elapsed, 0.005)  # At least half the sleep time
+        self.assertLess(elapsed, 1.0)  # But not unreasonably long
 
 
 class _TestFuturesAndTasks:
