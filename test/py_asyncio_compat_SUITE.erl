@@ -99,28 +99,21 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
-    %% Skip asyncio compat tests when subinterpreters are in use
-    %% The event loop integration is not yet compatible with OWN_GIL subinterpreters
-    case py_nif:subinterp_supported() of
-        true ->
-            {skip, "asyncio compat tests not supported with subinterpreters"};
-        false ->
-            case application:ensure_all_started(erlang_python) of
-                {ok, _} ->
-                    {ok, _} = py:start_contexts(),
-                    %% Wait for event loop to be fully initialized
-                    case wait_for_event_loop(5000) of
-                        ok ->
-                            %% Set up Python path for tests
-                            PrivDir = code:priv_dir(erlang_python),
-                            ok = setup_python_path(PrivDir),
-                            [{priv_dir, PrivDir} | Config];
-                        {error, Reason} ->
-                            ct:fail({event_loop_not_ready, Reason})
-                    end;
-                {error, {App, Reason}} ->
-                    ct:fail({failed_to_start, App, Reason})
-            end
+    case application:ensure_all_started(erlang_python) of
+        {ok, _} ->
+            {ok, _} = py:start_contexts(),
+            %% Wait for event loop to be fully initialized
+            case wait_for_event_loop(5000) of
+                ok ->
+                    %% Set up Python path for tests
+                    PrivDir = code:priv_dir(erlang_python),
+                    ok = setup_python_path(PrivDir),
+                    [{priv_dir, PrivDir} | Config];
+                {error, Reason} ->
+                    ct:fail({event_loop_not_ready, Reason})
+            end;
+        {error, {App, Reason}} ->
+            ct:fail({failed_to_start, App, Reason})
     end.
 
 end_per_suite(_Config) ->
@@ -296,16 +289,22 @@ handle_test_results(Module, Pattern, Results) ->
             ct:log("~s (~s): All ~p tests passed", [Module, Pattern, TestsRun]),
             ok;
         false ->
-            %% Log detailed failure information
+            %% Log detailed failure information to stderr for CI visibility
             lists:foreach(
                 fun(Detail) ->
                     Test = maps:get(<<"test">>, Detail, <<"unknown">>),
                     Trace = maps:get(<<"traceback">>, Detail, <<>>),
-                    ct:log("FAILED: ~s~n~s", [Test, Trace])
+                    ct:log("FAILED: ~s~n~s", [Test, Trace]),
+                    io:format(standard_error, "~n=== FAILED TEST: ~s ===~n~s~n", [Test, Trace])
                 end,
                 FailureDetails
             ),
-            ct:fail({tests_failed, Module, Pattern, #{
+            %% Include first failure in the error for compact output
+            FirstFail = case FailureDetails of
+                [First|_] -> maps:get(<<"test">>, First, <<"unknown">>);
+                _ -> <<"unknown">>
+            end,
+            ct:fail({tests_failed, Module, Pattern, FirstFail, #{
                 tests_run => TestsRun,
                 failures => Failures,
                 errors => Errors,

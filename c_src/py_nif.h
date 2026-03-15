@@ -699,6 +699,31 @@ typedef enum {
 } py_cmd_type_t;
 
 /**
+ * @enum ctx_request_type_t
+ * @brief Request types for OWN_GIL context thread dispatch
+ *
+ * Used by OWN_GIL contexts to communicate between the NIF (dirty scheduler)
+ * and the dedicated pthread that owns the subinterpreter.
+ */
+typedef enum {
+    CTX_REQ_NONE = 0,           /**< No request (idle state) */
+    CTX_REQ_CALL,               /**< Call a Python function */
+    CTX_REQ_EVAL,               /**< Evaluate a Python expression */
+    CTX_REQ_EXEC,               /**< Execute Python statements */
+    CTX_REQ_CALLBACK_RESULT,    /**< Erlang callback result available */
+    CTX_REQ_SHUTDOWN,           /**< Shutdown the thread */
+    /* Reactor dispatch requests for OWN_GIL mode */
+    CTX_REQ_REACTOR_ON_READ_READY,   /**< Handle read ready event */
+    CTX_REQ_REACTOR_ON_WRITE_READY,  /**< Handle write ready event */
+    CTX_REQ_REACTOR_INIT_CONNECTION, /**< Initialize a connection */
+    /* Process-local environment requests for OWN_GIL mode */
+    CTX_REQ_CALL_WITH_ENV,      /**< Call with process-local environment */
+    CTX_REQ_EVAL_WITH_ENV,      /**< Eval with process-local environment */
+    CTX_REQ_EXEC_WITH_ENV,      /**< Exec with process-local environment */
+    CTX_REQ_CREATE_LOCAL_ENV    /**< Create process-local env dicts */
+} ctx_request_type_t;
+
+/**
  * @struct py_cmd_t
  * @brief Command structure for thread-per-context dispatch
  *
@@ -776,6 +801,65 @@ typedef struct {
 #ifdef HAVE_SUBINTERPRETERS
     /** @brief Index into subinterpreter pool (-1 = not using pool / worker mode) */
     int pool_slot;
+
+    /* ========== OWN_GIL mode fields ========== */
+
+    /** @brief Whether this context uses OWN_GIL mode (dedicated pthread) */
+    bool uses_own_gil;
+
+    /** @brief Dedicated pthread for OWN_GIL mode */
+    pthread_t own_gil_thread;
+
+    /** @brief Thread state for OWN_GIL subinterpreter */
+    PyThreadState *own_gil_tstate;
+
+    /** @brief Interpreter state for OWN_GIL subinterpreter */
+    PyInterpreterState *own_gil_interp;
+
+    /* IPC via condition variables */
+
+    /** @brief Mutex for request/response synchronization */
+    pthread_mutex_t request_mutex;
+
+    /** @brief Condition variable: request ready for processing */
+    pthread_cond_t request_ready;
+
+    /** @brief Condition variable: response ready for caller */
+    pthread_cond_t response_ready;
+
+    /* Request/response state */
+
+    /** @brief Current request type (CTX_REQ_*) */
+    int request_type;
+
+    /** @brief Shared environment for zero-copy term passing */
+    ErlNifEnv *shared_env;
+
+    /** @brief Request term (copied into shared_env) */
+    ERL_NIF_TERM request_term;
+
+    /** @brief Response term (created in shared_env) */
+    ERL_NIF_TERM response_term;
+
+    /** @brief True if response indicates success */
+    bool response_ok;
+
+    /** @brief Auxiliary pointer for reactor buffer (OWN_GIL dispatch) */
+    void *reactor_buffer_ptr;
+
+    /** @brief Process-local env pointer for OWN_GIL dispatch (py_env_resource_t*) */
+    void *local_env_ptr;
+
+    /* Lifecycle flags */
+
+    /** @brief True when worker thread is running */
+    _Atomic bool thread_running;
+
+    /** @brief True if thread initialization failed */
+    _Atomic bool init_error;
+
+    /** @brief True when shutdown has been requested */
+    _Atomic bool shutdown_requested;
 #else
     /** @brief Worker thread state (non-subinterp mode) */
     PyThreadState *thread_state;
@@ -840,7 +924,10 @@ typedef enum {
     PY_GUARD_WORKER,
 
     /** @brief Subinterp mode: GIL + PyThreadState_Swap to pool slot */
-    PY_GUARD_SUBINTERP
+    PY_GUARD_SUBINTERP,
+
+    /** @brief OWN_GIL mode: dispatch to dedicated pthread with its own GIL */
+    PY_GUARD_OWN_GIL
 } py_guard_mode_t;
 
 /**
@@ -1938,5 +2025,50 @@ static inline void gil_release(gil_guard_t guard) {
 }
 
 /** @} */
+
+/* ============================================================================
+ * OWN_GIL Reactor Dispatch
+ * ============================================================================
+ * Functions for dispatching reactor operations to OWN_GIL threads.
+ */
+
+#ifdef HAVE_SUBINTERPRETERS
+
+/**
+ * @brief Dispatch reactor on_read_ready to OWN_GIL thread
+ *
+ * @param env Caller's NIF environment
+ * @param ctx OWN_GIL context
+ * @param fd File descriptor
+ * @param buffer_ptr Reactor buffer resource (ownership transferred)
+ * @return Result term
+ */
+ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, void *buffer_ptr);
+
+/**
+ * @brief Dispatch reactor on_write_ready to OWN_GIL thread
+ *
+ * @param env Caller's NIF environment
+ * @param ctx OWN_GIL context
+ * @param fd File descriptor
+ * @return Result term
+ */
+ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                               int fd);
+
+/**
+ * @brief Dispatch reactor init_connection to OWN_GIL thread
+ *
+ * @param env Caller's NIF environment
+ * @param ctx OWN_GIL context
+ * @param fd File descriptor
+ * @param client_info Client info map term
+ * @return Result term
+ */
+ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, ERL_NIF_TERM client_info);
+
+#endif /* HAVE_SUBINTERPRETERS */
 
 #endif /* PY_NIF_H */

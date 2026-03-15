@@ -30,9 +30,6 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
     %% Ensure contexts are running
     {ok, _} = py:start_contexts(),
-    %% Install Erlang event loop policy for asyncio.run()
-    Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"import erlang; erlang.install()">>),
     Config.
 
 end_per_suite(_Config) ->
@@ -55,13 +52,14 @@ test_asyncio_sleep(_Config) ->
     ok = py:exec(Ctx, <<"
 import asyncio
 import time
+import erlang
 
 async def timed_sleep():
     start = time.monotonic()
     await asyncio.sleep(0.05)
     return time.monotonic() - start
 
-elapsed = asyncio.run(timed_sleep())
+elapsed = erlang.run(timed_sleep())
 assert elapsed >= 0.04, f'Expected >= 0.04s, got {elapsed:.3f}s'
 ">>),
     ok.
@@ -72,6 +70,7 @@ test_asyncio_gather(_Config) ->
     ok = py:exec(Ctx, <<"
 import asyncio
 import time
+import erlang
 
 async def task(val):
     await asyncio.sleep(0.05)
@@ -85,7 +84,7 @@ async def main():
     # Allow more time on CI (0.3s instead of 0.15s)
     assert elapsed < 0.3, f'Expected < 0.3s, got {elapsed:.3f}s'
 
-asyncio.run(main())
+erlang.run(main())
 ">>),
     ok.
 
@@ -94,6 +93,7 @@ test_asyncio_tcp_echo(_Config) ->
     Ctx = py:context(1),
     ok = py:exec(Ctx, <<"
 import asyncio
+import erlang
 
 async def handler(r, w):
     data = await r.read(100)
@@ -115,7 +115,7 @@ async def test():
     await srv.wait_closed()
     assert resp == b'hello', f'Expected b\"hello\", got {resp}'
 
-asyncio.run(test())
+erlang.run(test())
 ">>),
     ok.
 
@@ -124,6 +124,7 @@ test_asyncio_concurrent_tcp(_Config) ->
     Ctx = py:context(1),
     ok = py:exec(Ctx, <<"
 import asyncio
+import erlang
 
 async def handler(r, w):
     data = await r.read(100)
@@ -153,6 +154,6 @@ async def test():
     await srv.wait_closed()
     assert set(results) == {b're:1', b're:2', b're:3'}, f'Expected {{b\"re:1\", b\"re:2\", b\"re:3\"}}, got {set(results)}'
 
-asyncio.run(test())
+erlang.run(test())
 ">>),
     ok.

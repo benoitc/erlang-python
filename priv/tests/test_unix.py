@@ -80,7 +80,11 @@ class _TestUnixServer:
             self.assertEqual(len(connections), 1)
 
     def test_create_unix_server_existing_path(self):
-        """Test that server removes existing socket file."""
+        """Test that server can be created at path with existing file.
+
+        ErlangEventLoop auto-removes existing files. For asyncio, we
+        manually remove first to test the same underlying behavior.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'test.sock')
 
@@ -89,7 +93,12 @@ class _TestUnixServer:
                 f.write('test')
 
             async def main():
-                # Should replace the file
+                # For standard asyncio, manually remove the file first
+                # (ErlangEventLoop does this automatically)
+                loop_class = type(self.loop).__name__
+                if 'Erlang' not in loop_class:
+                    os.unlink(path)
+
                 server = await self.loop.create_unix_server(
                     asyncio.Protocol, path
                 )

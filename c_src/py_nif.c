@@ -126,7 +126,7 @@ static void py_env_resource_dtor(ErlNifEnv *env, void *obj) {
 
 #ifdef HAVE_SUBINTERPRETERS
     if (res->pool_slot >= 0) {
-        /* Created in a subinterpreter - must DECREF in correct interpreter */
+        /* Created in a shared-GIL subinterpreter - must DECREF in correct interpreter */
         subinterp_slot_t *slot = subinterp_pool_get(res->pool_slot);
 
         /* Verify slot is still valid and has same interpreter */
@@ -142,6 +142,14 @@ static void py_env_resource_dtor(ErlNifEnv *env, void *obj) {
             /* If interp_id mismatch, slot was reused - skip DECREF */
         }
         /* If slot invalid/not initialized, interpreter destroyed - skip DECREF */
+    } else if (res->interp_id != 0) {
+        /* OWN_GIL subinterpreter: pool_slot == -1 but interp_id != 0
+         * These dicts were created in an OWN_GIL interpreter. We cannot safely
+         * DECREF them here because:
+         * 1. The interpreter might already be destroyed
+         * 2. We cannot switch to its thread state from this thread
+         * When the OWN_GIL context is destroyed, Py_EndInterpreter cleans up
+         * all objects, so we skip DECREF to avoid double-free or invalid access. */
     } else
 #endif
     {
@@ -227,6 +235,9 @@ static inline void clear_pending_callback_tls(void) {
 /* Thread-local timeout state */
 __thread uint64_t tl_timeout_deadline = 0;
 __thread bool tl_timeout_enabled = false;
+
+/* Thread-local variable to track current local env during reentrant calls */
+__thread py_env_resource_t *tl_current_local_env = NULL;
 
 /* Atoms */
 ERL_NIF_TERM ATOM_OK;
@@ -2419,6 +2430,1317 @@ static PyObject *context_get_module(py_context_t *ctx, const char *module_name);
 /* Old thread-per-context functions removed - now using shared-GIL pool model */
 
 /* ============================================================================
+ * OWN_GIL Context Support
+ *
+ * OWN_GIL contexts create a dedicated pthread with its own Python subinterpreter
+ * that has an independent GIL. This enables true parallel Python execution.
+ *
+ * Architecture:
+ *   - Each OWN_GIL context gets its own pthread at creation time
+ *   - The pthread creates an OWN_GIL subinterpreter and runs a request loop
+ *   - Dirty schedulers dispatch requests via condition variables
+ *   - Terms are passed via enif_make_copy() (zero serialization overhead)
+ * ============================================================================ */
+
+#ifdef HAVE_SUBINTERPRETERS
+
+/**
+ * @brief Execute a call request in the OWN_GIL thread
+ */
+static void owngil_execute_call(py_context_t *ctx) {
+    /* Decode request from shared_env */
+    ERL_NIF_TERM module_term, func_term, args_term, kwargs_term;
+    const ERL_NIF_TERM *tuple_terms;
+    int tuple_arity;
+
+    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &tuple_arity, &tuple_terms) ||
+        tuple_arity < 4) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_request"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    module_term = tuple_terms[0];
+    func_term = tuple_terms[1];
+    args_term = tuple_terms[2];
+    kwargs_term = tuple_terms[3];
+
+    ErlNifBinary module_bin, func_bin;
+    if (!enif_inspect_binary(ctx->shared_env, module_term, &module_bin) ||
+        !enif_inspect_binary(ctx->shared_env, func_term, &func_bin)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_module_or_func"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    char *module_name = binary_to_string(&module_bin);
+    char *func_name_str = binary_to_string(&func_bin);
+
+    if (module_name == NULL || func_name_str == NULL) {
+        enif_free(module_name);
+        enif_free(func_name_str);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "alloc_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Get or import module */
+    PyObject *module = context_get_module(ctx, module_name);
+    if (module == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+        enif_free(module_name);
+        enif_free(func_name_str);
+        return;
+    }
+
+    /* Get function */
+    PyObject *func = PyObject_GetAttrString(module, func_name_str);
+    enif_free(module_name);
+    enif_free(func_name_str);
+
+    if (func == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Convert args */
+    unsigned int args_len;
+    if (!enif_get_list_length(ctx->shared_env, args_term, &args_len)) {
+        Py_DECREF(func);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_args"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    PyObject *args = PyTuple_New(args_len);
+    ERL_NIF_TERM head, tail = args_term;
+    for (unsigned int i = 0; i < args_len; i++) {
+        enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
+        PyObject *arg = term_to_py(ctx->shared_env, head);
+        if (arg == NULL) {
+            Py_DECREF(args);
+            Py_DECREF(func);
+            ctx->response_term = enif_make_tuple2(ctx->shared_env,
+                enif_make_atom(ctx->shared_env, "error"),
+                enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
+            ctx->response_ok = false;
+            return;
+        }
+        PyTuple_SET_ITEM(args, i, arg);
+    }
+
+    /* Convert kwargs */
+    PyObject *kwargs = NULL;
+    if (enif_is_map(ctx->shared_env, kwargs_term)) {
+        kwargs = term_to_py(ctx->shared_env, kwargs_term);
+    }
+
+    /* Call the function */
+    PyObject *py_result = PyObject_Call(func, args, kwargs);
+    Py_DECREF(func);
+    Py_DECREF(args);
+    Py_XDECREF(kwargs);
+
+    if (py_result == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+    } else {
+        ERL_NIF_TERM term_result = py_to_term(ctx->shared_env, py_result);
+        Py_DECREF(py_result);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "ok"), term_result);
+        ctx->response_ok = true;
+    }
+}
+
+/**
+ * @brief Execute an eval request in the OWN_GIL thread
+ */
+static void owngil_execute_eval(py_context_t *ctx) {
+    /* Decode request: {Code, Locals} */
+    const ERL_NIF_TERM *tuple_terms;
+    int tuple_arity;
+
+    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &tuple_arity, &tuple_terms) ||
+        tuple_arity < 2) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_request"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(ctx->shared_env, tuple_terms[0], &code_bin)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_code"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    char *code = binary_to_string(&code_bin);
+    if (code == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "alloc_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Merge locals into context's locals */
+    if (enif_is_map(ctx->shared_env, tuple_terms[1])) {
+        PyObject *locals_map = term_to_py(ctx->shared_env, tuple_terms[1]);
+        if (locals_map != NULL && PyDict_Check(locals_map)) {
+            PyDict_Merge(ctx->locals, locals_map, 1);
+            Py_DECREF(locals_map);
+        }
+    }
+
+    /* Compile and evaluate */
+    PyObject *compiled = Py_CompileString(code, "<eval>", Py_eval_input);
+    enif_free(code);
+
+    if (compiled == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+        return;
+    }
+
+    PyObject *py_result = PyEval_EvalCode(compiled, ctx->globals, ctx->locals);
+    Py_DECREF(compiled);
+
+    if (py_result == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+    } else {
+        ERL_NIF_TERM term_result = py_to_term(ctx->shared_env, py_result);
+        Py_DECREF(py_result);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "ok"), term_result);
+        ctx->response_ok = true;
+    }
+}
+
+/**
+ * @brief Execute an exec request in the OWN_GIL thread
+ */
+static void owngil_execute_exec(py_context_t *ctx) {
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(ctx->shared_env, ctx->request_term, &code_bin)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_code"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    char *code = binary_to_string(&code_bin);
+    if (code == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "alloc_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Compile and execute */
+    PyObject *compiled = Py_CompileString(code, "<exec>", Py_file_input);
+    enif_free(code);
+
+    if (compiled == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Use globals for both globals and locals to simulate module-level execution.
+     * This ensures imports are accessible from subsequent code. */
+    PyObject *py_result = PyEval_EvalCode(compiled, ctx->globals, ctx->globals);
+    Py_DECREF(compiled);
+
+    if (py_result == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+    } else {
+        Py_DECREF(py_result);
+        ctx->response_term = enif_make_atom(ctx->shared_env, "ok");
+        ctx->response_ok = true;
+    }
+}
+
+/**
+ * @brief Execute a reactor on_read_ready request in OWN_GIL thread
+ */
+static void owngil_execute_reactor_read(py_context_t *ctx) {
+    /* Extract fd from request term (it's just an integer) */
+    int fd;
+    if (!enif_get_int(ctx->shared_env, ctx->request_term, &fd)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_fd"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Get buffer from auxiliary pointer */
+    void *buffer_ptr = ctx->reactor_buffer_ptr;
+    ctx->reactor_buffer_ptr = NULL;  /* Transfer ownership */
+
+    if (buffer_ptr == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "no_buffer"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Call the OWN_GIL reactor function */
+    ctx->response_term = owngil_reactor_on_read_ready(ctx->shared_env, fd, buffer_ptr);
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Execute a reactor on_write_ready request in OWN_GIL thread
+ */
+static void owngil_execute_reactor_write(py_context_t *ctx) {
+    /* Extract fd from request term */
+    int fd;
+    if (!enif_get_int(ctx->shared_env, ctx->request_term, &fd)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_fd"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Call the OWN_GIL reactor function */
+    ctx->response_term = owngil_reactor_on_write_ready(ctx->shared_env, fd);
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Execute a reactor init_connection request in OWN_GIL thread
+ */
+static void owngil_execute_reactor_init(py_context_t *ctx) {
+    /* Extract {Fd, ClientInfo} from request term */
+    const ERL_NIF_TERM *tuple;
+    int arity;
+    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &arity, &tuple) || arity != 2) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_request"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    int fd;
+    if (!enif_get_int(ctx->shared_env, tuple[0], &fd)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_fd"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Call the OWN_GIL reactor function */
+    ctx->response_term = owngil_reactor_init_connection(ctx->shared_env, fd, tuple[1]);
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Execute an exec request with process-local env in the OWN_GIL thread
+ *
+ * Uses penv->globals/locals instead of ctx->globals/locals
+ */
+static void owngil_execute_exec_with_env(py_context_t *ctx) {
+    py_env_resource_t *penv = (py_env_resource_t *)ctx->local_env_ptr;
+    ctx->local_env_ptr = NULL;  /* Clear after use */
+
+    if (penv == NULL || penv->globals == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_env"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(ctx->shared_env, ctx->request_term, &code_bin)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_code"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    char *code = binary_to_string(&code_bin);
+    if (code == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "alloc_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Set thread-local env for callback support */
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
+
+    /* Compile and execute using process-local environment */
+    PyObject *compiled = Py_CompileString(code, "<exec>", Py_file_input);
+    enif_free(code);
+
+    if (compiled == NULL) {
+        tl_current_local_env = prev_local_env;
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Use penv->globals for both to simulate module-level execution */
+    PyObject *py_result = PyEval_EvalCode(compiled, penv->globals, penv->globals);
+    Py_DECREF(compiled);
+
+    tl_current_local_env = prev_local_env;
+
+    if (py_result == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+    } else {
+        Py_DECREF(py_result);
+        ctx->response_term = enif_make_atom(ctx->shared_env, "ok");
+        ctx->response_ok = true;
+    }
+}
+
+/**
+ * @brief Execute an eval request with process-local env in the OWN_GIL thread
+ *
+ * Uses penv->globals/locals instead of ctx->globals/locals
+ */
+static void owngil_execute_eval_with_env(py_context_t *ctx) {
+    py_env_resource_t *penv = (py_env_resource_t *)ctx->local_env_ptr;
+    ctx->local_env_ptr = NULL;  /* Clear after use */
+
+    if (penv == NULL || penv->globals == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_env"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Decode request: {Code, Locals} */
+    const ERL_NIF_TERM *tuple_terms;
+    int tuple_arity;
+
+    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &tuple_arity, &tuple_terms) ||
+        tuple_arity < 2) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_request"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(ctx->shared_env, tuple_terms[0], &code_bin)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_code"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    char *code = binary_to_string(&code_bin);
+    if (code == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "alloc_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Set thread-local env for callback support */
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
+
+    /* Build eval_locals from penv->globals + any passed locals */
+    PyObject *eval_locals = PyDict_Copy(penv->globals);
+    if (enif_is_map(ctx->shared_env, tuple_terms[1])) {
+        PyObject *locals_map = term_to_py(ctx->shared_env, tuple_terms[1]);
+        if (locals_map != NULL && PyDict_Check(locals_map)) {
+            PyDict_Merge(eval_locals, locals_map, 1);
+            Py_DECREF(locals_map);
+        }
+    }
+
+    /* Compile and evaluate using process-local globals */
+    PyObject *compiled = Py_CompileString(code, "<eval>", Py_eval_input);
+    enif_free(code);
+
+    if (compiled == NULL) {
+        Py_DECREF(eval_locals);
+        tl_current_local_env = prev_local_env;
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+        return;
+    }
+
+    PyObject *py_result = PyEval_EvalCode(compiled, penv->globals, eval_locals);
+    Py_DECREF(compiled);
+    Py_DECREF(eval_locals);
+
+    tl_current_local_env = prev_local_env;
+
+    if (py_result == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+    } else {
+        ERL_NIF_TERM term_result = py_to_term(ctx->shared_env, py_result);
+        Py_DECREF(py_result);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "ok"), term_result);
+        ctx->response_ok = true;
+    }
+}
+
+/**
+ * @brief Execute a call request with process-local env in the OWN_GIL thread
+ *
+ * Uses penv->globals for function lookup in __main__ module
+ */
+static void owngil_execute_call_with_env(py_context_t *ctx) {
+    py_env_resource_t *penv = (py_env_resource_t *)ctx->local_env_ptr;
+    ctx->local_env_ptr = NULL;  /* Clear after use */
+
+    if (penv == NULL || penv->globals == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_env"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Decode request from shared_env: {Module, Func, Args, Kwargs} */
+    ERL_NIF_TERM module_term, func_term, args_term, kwargs_term;
+    const ERL_NIF_TERM *tuple_terms;
+    int tuple_arity;
+
+    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &tuple_arity, &tuple_terms) ||
+        tuple_arity < 4) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_request"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    module_term = tuple_terms[0];
+    func_term = tuple_terms[1];
+    args_term = tuple_terms[2];
+    kwargs_term = tuple_terms[3];
+
+    ErlNifBinary module_bin, func_bin;
+    if (!enif_inspect_binary(ctx->shared_env, module_term, &module_bin) ||
+        !enif_inspect_binary(ctx->shared_env, func_term, &func_bin)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_module_or_func"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    char *module_name = binary_to_string(&module_bin);
+    char *func_name_str = binary_to_string(&func_bin);
+
+    if (module_name == NULL || func_name_str == NULL) {
+        enif_free(module_name);
+        enif_free(func_name_str);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "alloc_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Set thread-local env for callback support */
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
+
+    PyObject *func = NULL;
+
+    /* Special handling for __main__ module - look up in process-local globals */
+    if (strcmp(module_name, "__main__") == 0) {
+        func = PyDict_GetItemString(penv->globals, func_name_str);  /* Borrowed ref */
+        if (func != NULL) {
+            Py_INCREF(func);
+        }
+    }
+
+    if (func == NULL) {
+        /* Get or import module from context cache */
+        PyObject *module = context_get_module(ctx, module_name);
+        if (module == NULL) {
+            enif_free(module_name);
+            enif_free(func_name_str);
+            tl_current_local_env = prev_local_env;
+            ctx->response_term = make_py_error(ctx->shared_env);
+            ctx->response_ok = false;
+            return;
+        }
+
+        /* Get function */
+        func = PyObject_GetAttrString(module, func_name_str);
+        if (func == NULL) {
+            enif_free(module_name);
+            enif_free(func_name_str);
+            tl_current_local_env = prev_local_env;
+            ctx->response_term = make_py_error(ctx->shared_env);
+            ctx->response_ok = false;
+            return;
+        }
+    }
+
+    enif_free(module_name);
+    enif_free(func_name_str);
+
+    /* Convert args */
+    unsigned int args_len;
+    if (!enif_get_list_length(ctx->shared_env, args_term, &args_len)) {
+        Py_DECREF(func);
+        tl_current_local_env = prev_local_env;
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_args"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    PyObject *args = PyTuple_New(args_len);
+    ERL_NIF_TERM head, tail = args_term;
+    for (unsigned int i = 0; i < args_len; i++) {
+        enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
+        PyObject *arg = term_to_py(ctx->shared_env, head);
+        if (arg == NULL) {
+            Py_DECREF(args);
+            Py_DECREF(func);
+            tl_current_local_env = prev_local_env;
+            ctx->response_term = enif_make_tuple2(ctx->shared_env,
+                enif_make_atom(ctx->shared_env, "error"),
+                enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
+            ctx->response_ok = false;
+            return;
+        }
+        PyTuple_SET_ITEM(args, i, arg);
+    }
+
+    /* Convert kwargs */
+    PyObject *kwargs = NULL;
+    if (enif_is_map(ctx->shared_env, kwargs_term)) {
+        kwargs = term_to_py(ctx->shared_env, kwargs_term);
+    }
+
+    /* Call the function */
+    PyObject *py_result = PyObject_Call(func, args, kwargs);
+    Py_DECREF(func);
+    Py_DECREF(args);
+    Py_XDECREF(kwargs);
+
+    tl_current_local_env = prev_local_env;
+
+    if (py_result == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
+    } else {
+        ERL_NIF_TERM term_result = py_to_term(ctx->shared_env, py_result);
+        Py_DECREF(py_result);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "ok"), term_result);
+        ctx->response_ok = true;
+    }
+}
+
+/**
+ * @brief Create process-local env dicts in the OWN_GIL thread
+ *
+ * Creates globals/locals dicts in the correct interpreter context.
+ * The py_env_resource_t is passed via local_env_ptr.
+ */
+static void owngil_execute_create_local_env(py_context_t *ctx) {
+    py_env_resource_t *res = (py_env_resource_t *)ctx->local_env_ptr;
+    ctx->local_env_ptr = NULL;  /* Clear after use */
+
+    if (res == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "invalid_env_resource"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Store interpreter info for destructor */
+    res->pool_slot = -1;  /* OWN_GIL doesn't use pool slots */
+    PyInterpreterState *interp = PyInterpreterState_Get();
+    if (interp != NULL) {
+        res->interp_id = PyInterpreterState_GetID(interp);
+    }
+
+    /* Create globals dict with builtins and erlang module */
+    res->globals = PyDict_New();
+    if (res->globals == NULL) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "globals_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Add __builtins__ */
+    PyObject *builtins = PyEval_GetBuiltins();
+    if (builtins != NULL) {
+        PyDict_SetItemString(res->globals, "__builtins__", builtins);
+    }
+
+    /* Add __name__ = '__main__' */
+    PyObject *main_name = PyUnicode_FromString("__main__");
+    if (main_name != NULL) {
+        PyDict_SetItemString(res->globals, "__name__", main_name);
+        Py_DECREF(main_name);
+    }
+
+    /* Add erlang module */
+    PyObject *erlang = PyImport_ImportModule("erlang");
+    if (erlang != NULL) {
+        PyDict_SetItemString(res->globals, "erlang", erlang);
+        Py_DECREF(erlang);
+    }
+
+    /* Use the same dict for locals (module-level execution) */
+    res->locals = res->globals;
+    Py_INCREF(res->locals);
+
+    ctx->response_term = enif_make_atom(ctx->shared_env, "ok");
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Execute a request based on its type
+ */
+static void owngil_execute_request(py_context_t *ctx) {
+    switch (ctx->request_type) {
+        case CTX_REQ_CALL:
+            owngil_execute_call(ctx);
+            break;
+        case CTX_REQ_EVAL:
+            owngil_execute_eval(ctx);
+            break;
+        case CTX_REQ_EXEC:
+            owngil_execute_exec(ctx);
+            break;
+        case CTX_REQ_REACTOR_ON_READ_READY:
+            owngil_execute_reactor_read(ctx);
+            break;
+        case CTX_REQ_REACTOR_ON_WRITE_READY:
+            owngil_execute_reactor_write(ctx);
+            break;
+        case CTX_REQ_REACTOR_INIT_CONNECTION:
+            owngil_execute_reactor_init(ctx);
+            break;
+        case CTX_REQ_EXEC_WITH_ENV:
+            owngil_execute_exec_with_env(ctx);
+            break;
+        case CTX_REQ_EVAL_WITH_ENV:
+            owngil_execute_eval_with_env(ctx);
+            break;
+        case CTX_REQ_CALL_WITH_ENV:
+            owngil_execute_call_with_env(ctx);
+            break;
+        case CTX_REQ_CREATE_LOCAL_ENV:
+            owngil_execute_create_local_env(ctx);
+            break;
+        default:
+            ctx->response_term = enif_make_tuple2(ctx->shared_env,
+                enif_make_atom(ctx->shared_env, "error"),
+                enif_make_atom(ctx->shared_env, "unknown_request_type"));
+            ctx->response_ok = false;
+            break;
+    }
+}
+
+/**
+ * @brief Main loop for OWN_GIL context thread
+ *
+ * This function runs in a dedicated pthread. It creates an OWN_GIL subinterpreter,
+ * then enters a request loop where it processes requests from the dirty scheduler.
+ */
+static void *owngil_context_thread_main(void *arg) {
+    py_context_t *ctx = (py_context_t *)arg;
+
+    /* Attach to Python runtime to create the subinterpreter.
+     * We need to hold the main GIL while creating the subinterpreter. */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Create OWN_GIL subinterpreter */
+    PyInterpreterConfig config = {
+        .use_main_obmalloc = 0,
+        .allow_fork = 0,
+        .allow_exec = 0,
+        .allow_threads = 1,
+        .allow_daemon_threads = 0,
+        .check_multi_interp_extensions = 1,
+        .gil = PyInterpreterConfig_OWN_GIL,
+    };
+
+    PyStatus status = Py_NewInterpreterFromConfig(&ctx->own_gil_tstate, &config);
+    if (PyStatus_IsError(status)) {
+        fprintf(stderr, "OWN_GIL: Py_NewInterpreterFromConfig failed: %s\n",
+                status.err_msg ? status.err_msg : "unknown error");
+        PyGILState_Release(gstate);
+        atomic_store(&ctx->init_error, true);
+        return NULL;
+    }
+
+    ctx->own_gil_interp = PyThreadState_GetInterpreter(ctx->own_gil_tstate);
+
+    /* After Py_NewInterpreterFromConfig, we are now in the new interpreter's
+     * thread state and hold its GIL. The main interpreter's gstate is no longer
+     * relevant for this thread. */
+
+    /* Register erlang module in this subinterpreter */
+    if (create_erlang_module() < 0) {
+        fprintf(stderr, "OWN_GIL: create_erlang_module failed\n");
+        PyErr_Print();
+        Py_EndInterpreter(ctx->own_gil_tstate);
+        atomic_store(&ctx->init_error, true);
+        return NULL;
+    }
+
+    /* Register py_event_loop module for reactor support */
+    if (create_py_event_loop_module() < 0) {
+        fprintf(stderr, "OWN_GIL: create_py_event_loop_module failed\n");
+        PyErr_Print();
+        Py_EndInterpreter(ctx->own_gil_tstate);
+        atomic_store(&ctx->init_error, true);
+        return NULL;
+    }
+
+    /* Create namespace dictionaries */
+    ctx->globals = PyDict_New();
+    ctx->locals = PyDict_New();
+    ctx->module_cache = PyDict_New();
+
+    if (ctx->globals == NULL || ctx->locals == NULL || ctx->module_cache == NULL) {
+        fprintf(stderr, "OWN_GIL: PyDict_New failed for namespace dicts\n");
+        Py_XDECREF(ctx->globals);
+        Py_XDECREF(ctx->locals);
+        Py_XDECREF(ctx->module_cache);
+        Py_EndInterpreter(ctx->own_gil_tstate);
+        /* Don't call PyGILState_Release - interpreter is gone */
+        atomic_store(&ctx->init_error, true);
+        return NULL;
+    }
+
+    /* Import __builtins__ into globals */
+    PyObject *builtins = PyEval_GetBuiltins();
+    PyDict_SetItemString(ctx->globals, "__builtins__", builtins);
+
+    /* Import erlang module into globals */
+    PyObject *erlang_module = PyImport_ImportModule("erlang");
+    if (erlang_module != NULL) {
+        PyDict_SetItemString(ctx->globals, "erlang", erlang_module);
+        Py_DECREF(erlang_module);
+    } else {
+        PyErr_Clear();  /* Non-fatal - basic operations still work */
+    }
+
+    /* Release our OWN_GIL (we'll reacquire when processing requests) */
+    PyEval_SaveThread();
+
+    /* Signal that we're ready */
+    atomic_store(&ctx->thread_running, true);
+
+    /* Main request loop */
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    while (!atomic_load(&ctx->shutdown_requested)) {
+        /* Wait for a request */
+        while (ctx->request_type == CTX_REQ_NONE &&
+               !atomic_load(&ctx->shutdown_requested)) {
+            pthread_cond_wait(&ctx->request_ready, &ctx->request_mutex);
+        }
+
+        if (atomic_load(&ctx->shutdown_requested)) {
+            break;
+        }
+
+        /* Release mutex while processing (allow concurrent dispatch attempts to queue) */
+        pthread_mutex_unlock(&ctx->request_mutex);
+
+        /* Acquire our GIL and process */
+        PyEval_RestoreThread(ctx->own_gil_tstate);
+        owngil_execute_request(ctx);
+        PyEval_SaveThread();
+
+        /* Re-acquire mutex to signal completion and get next request */
+        pthread_mutex_lock(&ctx->request_mutex);
+        ctx->request_type = CTX_REQ_NONE;
+        pthread_cond_signal(&ctx->response_ready);
+    }
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    /* Cleanup: acquire our OWN_GIL and destroy interpreter */
+    PyEval_RestoreThread(ctx->own_gil_tstate);
+    Py_XDECREF(ctx->module_cache);
+    Py_XDECREF(ctx->globals);
+    Py_XDECREF(ctx->locals);
+    ctx->globals = NULL;
+    ctx->locals = NULL;
+    ctx->module_cache = NULL;
+
+    /* End interpreter - this releases our GIL and cleans up */
+    Py_EndInterpreter(ctx->own_gil_tstate);
+    ctx->own_gil_tstate = NULL;
+    ctx->own_gil_interp = NULL;
+
+    /* Don't call PyGILState_Release(gstate) here!
+     * After Py_NewInterpreterFromConfig switched us to the OWN_GIL interpreter,
+     * the original gstate is no longer valid. Py_EndInterpreter handles cleanup. */
+
+    atomic_store(&ctx->thread_running, false);
+    return NULL;
+}
+
+/**
+ * @brief Dispatch a request to the OWN_GIL thread and wait for response
+ *
+ * Called from dirty schedulers. Copies the request term to the shared env,
+ * signals the worker thread, and waits for the response.
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with OWN_GIL
+ * @param req_type Request type (CTX_REQ_CALL, CTX_REQ_EVAL, CTX_REQ_EXEC)
+ * @param request_data Request data term
+ * @return Result term copied back to caller's env
+ */
+static ERL_NIF_TERM dispatch_to_owngil_thread(
+    ErlNifEnv *env,
+    py_context_t *ctx,
+    ctx_request_type_t req_type,
+    ERL_NIF_TERM request_data
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Copy request to shared env (zero serialization overhead) */
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_copy(ctx->shared_env, request_data);
+    ctx->request_type = req_type;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch reactor on_read_ready to OWN_GIL thread
+ *
+ * Similar to dispatch_to_owngil_thread but also passes buffer pointer.
+ */
+ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, void *buffer_ptr) {
+    if (!atomic_load(&ctx->thread_running)) {
+        enif_release_resource(buffer_ptr);
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Clear and set up request */
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_int(ctx->shared_env, fd);
+    ctx->reactor_buffer_ptr = buffer_ptr;  /* Transfer ownership */
+    ctx->request_type = CTX_REQ_REACTOR_ON_READ_READY;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch reactor on_write_ready to OWN_GIL thread
+ */
+ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                               int fd) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Clear and set up request */
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_int(ctx->shared_env, fd);
+    ctx->request_type = CTX_REQ_REACTOR_ON_WRITE_READY;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch reactor init_connection to OWN_GIL thread
+ */
+ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
+                                              int fd, ERL_NIF_TERM client_info) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Clear and set up request */
+    enif_clear_env(ctx->shared_env);
+    ERL_NIF_TERM fd_term = enif_make_int(ctx->shared_env, fd);
+    ERL_NIF_TERM info_copy = enif_make_copy(ctx->shared_env, client_info);
+    ctx->request_term = enif_make_tuple2(ctx->shared_env, fd_term, info_copy);
+    ctx->request_type = CTX_REQ_REACTOR_INIT_CONNECTION;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch exec_with_env to OWN_GIL thread
+ *
+ * Passes the process-local env resource to the worker thread via local_env_ptr.
+ */
+static ERL_NIF_TERM dispatch_exec_with_env_to_owngil(
+    ErlNifEnv *env, py_context_t *ctx,
+    ERL_NIF_TERM code, py_env_resource_t *penv
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Copy request to shared env */
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_copy(ctx->shared_env, code);
+    ctx->local_env_ptr = penv;  /* Pass env resource pointer */
+    ctx->request_type = CTX_REQ_EXEC_WITH_ENV;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch eval_with_env to OWN_GIL thread
+ *
+ * Passes the process-local env resource to the worker thread via local_env_ptr.
+ */
+static ERL_NIF_TERM dispatch_eval_with_env_to_owngil(
+    ErlNifEnv *env, py_context_t *ctx,
+    ERL_NIF_TERM code, ERL_NIF_TERM locals,
+    py_env_resource_t *penv
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Copy request to shared env: {Code, Locals} */
+    enif_clear_env(ctx->shared_env);
+    ERL_NIF_TERM code_copy = enif_make_copy(ctx->shared_env, code);
+    ERL_NIF_TERM locals_copy = enif_make_copy(ctx->shared_env, locals);
+    ctx->request_term = enif_make_tuple2(ctx->shared_env, code_copy, locals_copy);
+    ctx->local_env_ptr = penv;  /* Pass env resource pointer */
+    ctx->request_type = CTX_REQ_EVAL_WITH_ENV;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch call_with_env to OWN_GIL thread
+ *
+ * Passes the process-local env resource to the worker thread via local_env_ptr.
+ */
+static ERL_NIF_TERM dispatch_call_with_env_to_owngil(
+    ErlNifEnv *env, py_context_t *ctx,
+    ERL_NIF_TERM module, ERL_NIF_TERM func,
+    ERL_NIF_TERM args, ERL_NIF_TERM kwargs,
+    py_env_resource_t *penv
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Copy request to shared env: {Module, Func, Args, Kwargs} */
+    enif_clear_env(ctx->shared_env);
+    ERL_NIF_TERM module_copy = enif_make_copy(ctx->shared_env, module);
+    ERL_NIF_TERM func_copy = enif_make_copy(ctx->shared_env, func);
+    ERL_NIF_TERM args_copy = enif_make_copy(ctx->shared_env, args);
+    ERL_NIF_TERM kwargs_copy = enif_make_copy(ctx->shared_env, kwargs);
+    ctx->request_term = enif_make_tuple4(ctx->shared_env,
+        module_copy, func_copy, args_copy, kwargs_copy);
+    ctx->local_env_ptr = penv;  /* Pass env resource pointer */
+    ctx->request_type = CTX_REQ_CALL_WITH_ENV;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch create_local_env to OWN_GIL thread
+ *
+ * Creates the globals/locals dicts in the correct interpreter context.
+ * Returns ok or error.
+ */
+static ERL_NIF_TERM dispatch_create_local_env_to_owngil(
+    ErlNifEnv *env, py_context_t *ctx,
+    py_env_resource_t *res
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    /* Pass env resource pointer to worker thread */
+    enif_clear_env(ctx->shared_env);
+    ctx->local_env_ptr = res;
+    ctx->request_type = CTX_REQ_CREATE_LOCAL_ENV;
+
+    /* Signal the worker thread */
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response */
+    while (ctx->request_type != CTX_REQ_NONE) {
+        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+    }
+
+    /* Copy response back to caller's env */
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+#endif /* HAVE_SUBINTERPRETERS */
+
+/**
+ * @brief Initialize OWN_GIL fields in a context and start the worker thread
+ *
+ * @param ctx Context to initialize
+ * @return 0 on success, -1 on failure
+ */
+#ifdef HAVE_SUBINTERPRETERS
+static int owngil_context_init(py_context_t *ctx) {
+    ctx->uses_own_gil = true;
+    ctx->own_gil_tstate = NULL;
+    ctx->own_gil_interp = NULL;
+    ctx->local_env_ptr = NULL;
+    atomic_store(&ctx->thread_running, false);
+    atomic_store(&ctx->init_error, false);
+    atomic_store(&ctx->shutdown_requested, false);
+    ctx->request_type = CTX_REQ_NONE;
+    ctx->response_ok = false;
+
+    /* Initialize mutex and condition variables */
+    if (pthread_mutex_init(&ctx->request_mutex, NULL) != 0) {
+        return -1;
+    }
+
+    if (pthread_cond_init(&ctx->request_ready, NULL) != 0) {
+        pthread_mutex_destroy(&ctx->request_mutex);
+        return -1;
+    }
+
+    if (pthread_cond_init(&ctx->response_ready, NULL) != 0) {
+        pthread_cond_destroy(&ctx->request_ready);
+        pthread_mutex_destroy(&ctx->request_mutex);
+        return -1;
+    }
+
+    /* Create shared environment for term passing */
+    ctx->shared_env = enif_alloc_env();
+    if (ctx->shared_env == NULL) {
+        pthread_cond_destroy(&ctx->response_ready);
+        pthread_cond_destroy(&ctx->request_ready);
+        pthread_mutex_destroy(&ctx->request_mutex);
+        return -1;
+    }
+
+    /* Start the worker thread */
+    if (pthread_create(&ctx->own_gil_thread, NULL, owngil_context_thread_main, ctx) != 0) {
+        enif_free_env(ctx->shared_env);
+        pthread_cond_destroy(&ctx->response_ready);
+        pthread_cond_destroy(&ctx->request_ready);
+        pthread_mutex_destroy(&ctx->request_mutex);
+        return -1;
+    }
+
+    /* Wait for thread to initialize or fail */
+    int wait_count = 0;
+    while (!atomic_load(&ctx->thread_running) &&
+           !atomic_load(&ctx->init_error) &&
+           wait_count < 2000) {
+        usleep(1000);  /* 1ms */
+        wait_count++;
+    }
+
+    if (atomic_load(&ctx->init_error) || !atomic_load(&ctx->thread_running)) {
+        /* Thread failed to start */
+        pthread_join(ctx->own_gil_thread, NULL);
+        enif_free_env(ctx->shared_env);
+        pthread_cond_destroy(&ctx->response_ready);
+        pthread_cond_destroy(&ctx->request_ready);
+        pthread_mutex_destroy(&ctx->request_mutex);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Shutdown OWN_GIL context and clean up resources
+ *
+ * @param ctx Context to shutdown
+ */
+static void owngil_context_shutdown(py_context_t *ctx) {
+    if (!ctx->uses_own_gil) {
+        return;
+    }
+
+    /* Signal shutdown */
+    atomic_store(&ctx->shutdown_requested, true);
+
+    pthread_mutex_lock(&ctx->request_mutex);
+    ctx->request_type = CTX_REQ_SHUTDOWN;
+    pthread_cond_signal(&ctx->request_ready);
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    /* Wait for thread to exit */
+    pthread_join(ctx->own_gil_thread, NULL);
+
+    /* Clean up resources */
+    if (ctx->shared_env != NULL) {
+        enif_free_env(ctx->shared_env);
+        ctx->shared_env = NULL;
+    }
+
+    pthread_cond_destroy(&ctx->response_ready);
+    pthread_cond_destroy(&ctx->request_ready);
+    pthread_mutex_destroy(&ctx->request_mutex);
+
+    ctx->uses_own_gil = false;
+}
+
+#endif /* HAVE_SUBINTERPRETERS */
+
+/* ============================================================================
  * Process-per-context NIFs (NO MUTEX)
  *
  * These NIFs are designed for the process-per-context architecture.
@@ -2430,10 +3752,13 @@ static PyObject *context_get_module(py_context_t *ctx, const char *module_name);
  * @brief Create a new Python context
  *
  * nif_context_create(Mode) -> {ok, ContextRef, InterpId} | {error, Reason}
- * Mode: subinterp | worker
+ * Mode: subinterp | worker | owngil
  *
  * For subinterp mode: allocates a slot from the pre-created subinterpreter pool.
  * Execution happens on dirty schedulers using PyThreadState_Swap().
+ *
+ * For owngil mode: creates a dedicated pthread with an OWN_GIL subinterpreter.
+ * This enables true parallel Python execution across contexts.
  *
  * For worker mode: creates namespace in the main interpreter.
  */
@@ -2451,6 +3776,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     }
 
     bool use_subinterp = (strcmp(mode_str, "subinterp") == 0);
+    bool use_owngil = (strcmp(mode_str, "owngil") == 0);
 
     /* Allocate context resource */
     py_context_t *ctx = enif_alloc_resource(PY_CONTEXT_RESOURCE_TYPE, sizeof(py_context_t));
@@ -2460,7 +3786,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
     /* Initialize fields */
     ctx->interp_id = atomic_fetch_add(&g_context_id_counter, 1);
-    ctx->is_subinterp = use_subinterp;
+    ctx->is_subinterp = use_subinterp || use_owngil;
     ctx->destroyed = false;
     ctx->has_callback_handler = false;
     ctx->callback_pipe[0] = -1;
@@ -2477,8 +3803,22 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
 #ifdef HAVE_SUBINTERPRETERS
     ctx->pool_slot = -1;  /* Default: not using pool */
+    ctx->uses_own_gil = false;
 
-    if (use_subinterp) {
+    if (use_owngil) {
+        /* OWN_GIL mode: create dedicated pthread with OWN_GIL subinterpreter */
+        if (owngil_context_init(ctx) != 0) {
+            close(ctx->callback_pipe[0]);
+            close(ctx->callback_pipe[1]);
+            enif_release_resource(ctx);
+            return make_error(env, "owngil_init_failed");
+        }
+
+        ERL_NIF_TERM ref = enif_make_resource(env, ctx);
+        enif_release_resource(ctx);
+        atomic_fetch_add(&g_counters.ctx_created, 1);
+        return enif_make_tuple3(env, ATOM_OK, ref, enif_make_uint(env, ctx->interp_id));
+    } else if (use_subinterp) {
         /* Allocate a slot from the subinterpreter pool */
         int slot = subinterp_pool_alloc();
         if (slot < 0) {
@@ -2610,6 +3950,22 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
     ctx->destroyed = true;
 
 #ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: shutdown the dedicated thread */
+    if (ctx->uses_own_gil) {
+        owngil_context_shutdown(ctx);
+        /* Close callback pipes */
+        if (ctx->callback_pipe[0] >= 0) {
+            close(ctx->callback_pipe[0]);
+            ctx->callback_pipe[0] = -1;
+        }
+        if (ctx->callback_pipe[1] >= 0) {
+            close(ctx->callback_pipe[1]);
+            ctx->callback_pipe[1] = -1;
+        }
+        atomic_fetch_add(&g_counters.ctx_destroyed, 1);
+        return ATOM_OK;
+    }
+
     if (ctx->is_subinterp && ctx->pool_slot >= 0) {
         /* Clean up context's own namespace dictionaries */
         if (runtime_is_running()) {
@@ -2717,6 +4073,21 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
     if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
         return make_error(env, "invalid_context");
     }
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to dedicated thread */
+    if (ctx->uses_own_gil) {
+        /* Build request tuple: {Module, Func, Args, Kwargs} */
+        ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
+            ? argv[4] : enif_make_new_map(env);
+        ERL_NIF_TERM request = enif_make_tuple4(env,
+            argv[1],  /* Module */
+            argv[2],  /* Func */
+            argv[3],  /* Args */
+            kwargs);
+        return dispatch_to_owngil_thread(env, ctx, CTX_REQ_CALL, request);
+    }
+#endif
 
     /* Both worker mode and subinterpreter mode use py_context_acquire.
      * For subinterpreters, py_context_acquire handles PyThreadState_Swap
@@ -2896,6 +4267,17 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_context");
     }
 
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to dedicated thread */
+    if (ctx->uses_own_gil) {
+        /* Build request tuple: {Code, Locals} */
+        ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
+            ? argv[2] : enif_make_new_map(env);
+        ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
+        return dispatch_to_owngil_thread(env, ctx, CTX_REQ_EVAL, request);
+    }
+#endif
+
     /* Both worker mode and subinterpreter mode use py_context_acquire.
      * For subinterpreters, py_context_acquire handles PyThreadState_Swap
      * to switch to the pool slot's interpreter. */
@@ -3026,6 +4408,13 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_context");
     }
 
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_to_owngil_thread(env, ctx, CTX_REQ_EXEC, argv[1]);
+    }
+#endif
+
     /* Both worker mode and subinterpreter mode use py_context_acquire.
      * For subinterpreters, py_context_acquire handles PyThreadState_Swap
      * to switch to the pool slot's interpreter. */
@@ -3079,9 +4468,6 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
  * Process-local Environment NIFs
  * ============================================================================ */
 
-/* Thread-local variable to track current local env during reentrant calls */
-__thread py_env_resource_t *tl_current_local_env = NULL;
-
 /**
  * @brief Create a new process-local Python environment
  *
@@ -3116,6 +4502,29 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     res->locals = NULL;
     res->interp_id = 0;
     res->pool_slot = -1;
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to the dedicated thread to create dicts */
+    if (ctx->uses_own_gil) {
+        ERL_NIF_TERM dispatch_result = dispatch_create_local_env_to_owngil(env, ctx, res);
+
+        /* Check if dispatch succeeded */
+        ERL_NIF_TERM error_atom = enif_make_atom(env, "error");
+        const ERL_NIF_TERM *tuple_elems;
+        int arity;
+        if (enif_get_tuple(env, dispatch_result, &arity, &tuple_elems) &&
+            arity == 2 && enif_is_identical(tuple_elems[0], error_atom)) {
+            /* Dispatch failed - release resource and return error */
+            enif_release_resource(res);
+            return dispatch_result;
+        }
+
+        /* Success - return the resource */
+        ERL_NIF_TERM ref = enif_make_resource(env, res);
+        enif_release_resource(res);  /* Ref now owns it */
+        return enif_make_tuple2(env, ATOM_OK, ref);
+    }
+#endif
 
     /* Acquire context to switch to correct interpreter */
     py_context_guard_t guard = py_context_acquire(ctx);
@@ -3208,6 +4617,13 @@ static ERL_NIF_TERM nif_context_exec_with_env(ErlNifEnv *env, int argc, const ER
         return make_error(env, "invalid_env");
     }
 
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to the dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_exec_with_env_to_owngil(env, ctx, argv[1], penv);
+    }
+#endif
+
     char *code = binary_to_string(&code_bin);
     if (code == NULL) {
         return make_error(env, "alloc_failed");
@@ -3282,6 +4698,13 @@ static ERL_NIF_TERM nif_context_eval_with_env(ErlNifEnv *env, int argc, const ER
     if (!enif_get_resource(env, argv[3], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
         return make_error(env, "invalid_env");
     }
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to the dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_eval_with_env_to_owngil(env, ctx, argv[1], argv[2], penv);
+    }
+#endif
 
     char *code = binary_to_string(&code_bin);
     if (code == NULL) {
@@ -3433,6 +4856,13 @@ static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ER
     if (!enif_get_resource(env, argv[5], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
         return make_error(env, "invalid_env");
     }
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to the dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_call_with_env_to_owngil(env, ctx, argv[1], argv[2], argv[3], argv[4], penv);
+    }
+#endif
 
     char *module_name = binary_to_string(&module_bin);
     char *func_name = binary_to_string(&func_bin);
@@ -4966,6 +6396,9 @@ static ErlNifFunc nif_funcs[] = {
     {"submit_task", 7, nif_submit_task, 0},  /* Thread-safe, no GIL needed */
     {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"event_loop_set_py_loop", 2, nif_event_loop_set_py_loop, 0},
+    /* Per-process namespace NIFs */
+    {"event_loop_exec", 2, nif_event_loop_exec, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"event_loop_eval", 2, nif_event_loop_eval, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},

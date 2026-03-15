@@ -89,6 +89,41 @@ typedef struct {
     uint64_t hits;
 } cached_callable_t;
 
+/* ============================================================================
+ * Per-Process Namespace
+ * ============================================================================ */
+
+/**
+ * @struct process_namespace_t
+ * @brief Per-process Python namespace for event loop tasks
+ *
+ * Each Erlang process that executes Python code via the event loop gets
+ * its own isolated namespace (globals/locals). This allows functions
+ * defined via event_loop_exec to be called via create_task.
+ *
+ * Namespaces are automatically cleaned up when the owning process exits
+ * (via enif_monitor_process).
+ */
+typedef struct process_namespace {
+    /** @brief PID of the owning Erlang process */
+    ErlNifPid owner_pid;
+
+    /** @brief Global namespace dict for this process */
+    PyObject *globals;
+
+    /** @brief Local namespace dict for this process */
+    PyObject *locals;
+
+    /** @brief Module import cache for this process */
+    PyObject *module_cache;
+
+    /** @brief Monitor for detecting process death */
+    ErlNifMonitor monitor;
+
+    /** @brief Next namespace in linked list */
+    struct process_namespace *next;
+} process_namespace_t;
+
 /** @brief Event types for pending callbacks */
 typedef enum {
     EVENT_TYPE_READ = 1,
@@ -329,6 +364,14 @@ typedef struct erlang_event_loop {
 
     /** @brief Number of entries in callable cache */
     int callable_cache_count;
+
+    /* ========== Per-Process Namespace Registry ========== */
+
+    /** @brief Head of per-process namespace linked list */
+    process_namespace_t *namespaces_head;
+
+    /** @brief Mutex protecting namespace registry */
+    pthread_mutex_t namespaces_mutex;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -343,6 +386,15 @@ extern ErlNifResourceType *FD_RESOURCE_TYPE;
 
 /** @brief Resource type for timer_resource_t */
 extern ErlNifResourceType *TIMER_RESOURCE_TYPE;
+
+/**
+ * @brief Current event loop namespace for reentrant calls
+ *
+ * Set during task execution in process_ready_tasks. Used by erlang.call()
+ * to access the same namespace when Python calls back to Erlang and
+ * Erlang calls back to Python.
+ */
+extern __thread process_namespace_t *tl_current_event_loop_namespace;
 
 /* ============================================================================
  * Atom Declarations
@@ -1034,5 +1086,48 @@ ERL_NIF_TERM nif_socketpair(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_fd_close(ErlNifEnv *env, int argc,
                            const ERL_NIF_TERM argv[]);
+
+/* ============================================================================
+ * OWN_GIL Reactor Dispatch Functions
+ * ============================================================================
+ * These functions execute reactor operations in the context of the OWN_GIL
+ * thread. They are called from owngil_execute_request() in py_nif.c.
+ */
+
+/**
+ * @brief Execute reactor on_read_ready in OWN_GIL thread
+ *
+ * Called with the GIL already held by the OWN_GIL thread.
+ *
+ * @param env Shared NIF environment
+ * @param fd File descriptor
+ * @param buffer_ptr Reactor buffer resource (transferred ownership)
+ * @return Erlang term: {ok, Action} | {error, Reason}
+ */
+ERL_NIF_TERM owngil_reactor_on_read_ready(ErlNifEnv *env, int fd, void *buffer_ptr);
+
+/**
+ * @brief Execute reactor on_write_ready in OWN_GIL thread
+ *
+ * Called with the GIL already held by the OWN_GIL thread.
+ *
+ * @param env Shared NIF environment
+ * @param fd File descriptor
+ * @return Erlang term: {ok, Action} | {error, Reason}
+ */
+ERL_NIF_TERM owngil_reactor_on_write_ready(ErlNifEnv *env, int fd);
+
+/**
+ * @brief Execute reactor init_connection in OWN_GIL thread
+ *
+ * Called with the GIL already held by the OWN_GIL thread.
+ *
+ * @param env Shared NIF environment
+ * @param fd File descriptor
+ * @param client_info_term Erlang term with client info map
+ * @return Erlang term: ok | {error, Reason}
+ */
+ERL_NIF_TERM owngil_reactor_init_connection(ErlNifEnv *env, int fd,
+                                             ERL_NIF_TERM client_info_term);
 
 #endif /* PY_EVENT_LOOP_H */
