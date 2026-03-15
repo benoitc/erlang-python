@@ -39,6 +39,158 @@ spawn(fun() ->
 end).
 ```
 
+## OWN_GIL Mode
+
+OWN_GIL contexts (Python 3.12+) provide true parallel execution with dedicated pthreads. Process-bound environments work with OWN_GIL, allowing multiple Erlang processes to share a single OWN_GIL context while maintaining isolated Python namespaces.
+
+### Explicit Environment Creation
+
+For OWN_GIL contexts, you can explicitly create and manage environments:
+
+```erlang
+%% Create an OWN_GIL context
+{ok, Ctx} = py_context:start_link(1, owngil),
+
+%% Create a process-local environment
+{ok, Env} = py_context:create_local_env(Ctx),
+
+%% Get the NIF reference for low-level operations
+CtxRef = py_context:get_nif_ref(Ctx),
+
+%% Execute code in the isolated environment
+ok = py_nif:context_exec(CtxRef, <<"
+class MyService:
+    def __init__(self):
+        self.counter = 0
+    def increment(self):
+        self.counter += 1
+        return self.counter
+
+service = MyService()
+">>, Env),
+
+%% Call functions in the environment
+{ok, 1} = py_nif:context_eval(CtxRef, <<"service.increment()">>, #{}, Env),
+{ok, 2} = py_nif:context_eval(CtxRef, <<"service.increment()">>, #{}, Env).
+```
+
+### Sharing Context, Isolating State
+
+Multiple Erlang processes can share an OWN_GIL context while maintaining isolated namespaces:
+
+```erlang
+%% Shared OWN_GIL context
+{ok, Ctx} = py_context:start_link(1, owngil),
+CtxRef = py_context:get_nif_ref(Ctx),
+
+%% Process A - its own namespace
+spawn(fun() ->
+    {ok, EnvA} = py_context:create_local_env(Ctx),
+    ok = py_nif:context_exec(CtxRef, <<"x = 'from A'">>, EnvA),
+    {ok, <<"from A">>} = py_nif:context_eval(CtxRef, <<"x">>, #{}, EnvA)
+end),
+
+%% Process B - separate namespace, same context
+spawn(fun() ->
+    {ok, EnvB} = py_context:create_local_env(Ctx),
+    ok = py_nif:context_exec(CtxRef, <<"x = 'from B'">>, EnvB),
+    {ok, <<"from B">>} = py_nif:context_eval(CtxRef, <<"x">>, #{}, EnvB)
+end).
+%% Both execute in parallel on the same OWN_GIL thread, but with isolated state
+```
+
+### When to Use Explicit vs Implicit Environments
+
+| Approach | API | Use Case |
+|----------|-----|----------|
+| **Implicit** | `py:exec/eval/call` | Simple cases, automatic management |
+| **Explicit** | `create_local_env` + `py_nif:context_*` | OWN_GIL, fine-grained control, multiple envs per process |
+
+**Use implicit (py:exec)** when:
+- Using worker or subinterp modes
+- One environment per process is sufficient
+- You want automatic lifecycle management
+
+**Use explicit (create_local_env)** when:
+- Using OWN_GIL mode for parallel execution
+- Need multiple environments in a single process
+- Want to pass environments between processes
+- Need direct NIF-level control
+
+## Event Loop Environments
+
+The event loop API also supports per-process namespaces. Each Erlang process gets an isolated namespace within the event loop, allowing you to define functions and state that persist across async task calls.
+
+### Defining Functions for Async Tasks
+
+```erlang
+%% Get the event loop reference
+{ok, Loop} = py_event_loop:get_loop(),
+LoopRef = py_event_loop:get_nif_ref(Loop),
+
+%% Define a function in this process's namespace
+ok = py_nif:event_loop_exec(LoopRef, <<"
+import asyncio
+
+async def my_async_function(x):
+    await asyncio.sleep(0.1)
+    return x * 2
+
+counter = 0
+
+async def increment_and_get():
+    global counter
+    counter += 1
+    return counter
+">>),
+
+%% Call the function via create_task - uses __main__ module
+{ok, Ref} = py_event_loop:create_task(Loop, '__main__', my_async_function, [21]),
+{ok, 42} = py_event_loop:await(Ref),
+
+%% State persists across calls
+{ok, Ref1} = py_event_loop:create_task(Loop, '__main__', increment_and_get, []),
+{ok, 1} = py_event_loop:await(Ref1),
+{ok, Ref2} = py_event_loop:create_task(Loop, '__main__', increment_and_get, []),
+{ok, 2} = py_event_loop:await(Ref2).
+```
+
+### Evaluating Expressions
+
+```erlang
+%% Evaluate expressions in the process's namespace
+{ok, 42} = py_nif:event_loop_eval(LoopRef, <<"21 * 2">>),
+
+%% Access variables defined via exec
+ok = py_nif:event_loop_exec(LoopRef, <<"result = 'computed'">>),
+{ok, <<"computed">>} = py_nif:event_loop_eval(LoopRef, <<"result">>).
+```
+
+### Process Isolation
+
+Different Erlang processes have isolated event loop namespaces:
+
+```erlang
+{ok, Loop} = py_event_loop:get_loop(),
+LoopRef = py_event_loop:get_nif_ref(Loop),
+
+%% Process A defines x
+spawn(fun() ->
+    ok = py_nif:event_loop_exec(LoopRef, <<"x = 'A'">>),
+    {ok, <<"A">>} = py_nif:event_loop_eval(LoopRef, <<"x">>)
+end),
+
+%% Process B has its own x
+spawn(fun() ->
+    ok = py_nif:event_loop_exec(LoopRef, <<"x = 'B'">>),
+    {ok, <<"B">>} = py_nif:event_loop_eval(LoopRef, <<"x">>)
+end).
+```
+
+### Cleanup
+
+Event loop namespaces are automatically cleaned up when the Erlang process exits. The event loop monitors each process that creates a namespace and removes it on process termination.
+
 ## Building Python Actors
 
 The process-bound model enables a pattern we call "Python actors" - Erlang processes that encapsulate Python state and expose it through message passing.
@@ -277,6 +429,8 @@ This design prioritizes safety over avoiding minor memory leaks during edge case
 
 ## See Also
 
+- [OWN_GIL Internals](owngil_internals.md) - Architecture and safety mechanisms for OWN_GIL mode
+- [Scalability](scalability.md) - Mode comparison (owngil vs subinterp vs worker)
+- [Event Loop Architecture](event_loop_architecture.md) - Per-process namespace management
 - [Context Affinity](context-affinity.md) - Context binding and routing
 - [Scheduling](asyncio.md) - Cooperative scheduling for long operations
-- [Scalability](scalability.md) - Multi-context and subinterpreter configurations
