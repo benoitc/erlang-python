@@ -220,30 +220,36 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._check_closed()
         self._check_running()
 
-        new_task = not futures.isfuture(future)
-        future = tasks.ensure_future(future, loop=self)
-
-        if new_task:
-            future._log_destroy_pending = False
-
-        def _done_callback(f):
-            self.stop()
-
-        future.add_done_callback(_done_callback)
-
+        # Set running loop early so task factories work correctly
+        old_running_loop = events._get_running_loop()
+        events._set_running_loop(self)
         try:
-            self.run_forever()
-        except Exception:
-            if new_task and future.done() and not future.cancelled():
-                future.exception()
-            raise
+            new_task = not futures.isfuture(future)
+            future = tasks.ensure_future(future, loop=self)
+
+            if new_task:
+                future._log_destroy_pending = False
+
+            def _done_callback(f):
+                self.stop()
+
+            future.add_done_callback(_done_callback)
+
+            try:
+                self.run_forever()
+            except Exception:
+                if new_task and future.done() and not future.cancelled():
+                    future.exception()
+                raise
+            finally:
+                future.remove_done_callback(_done_callback)
+
+            if not future.done():
+                raise RuntimeError('Event loop stopped before Future completed.')
+
+            return future.result()
         finally:
-            future.remove_done_callback(_done_callback)
-
-        if not future.done():
-            raise RuntimeError('Event loop stopped before Future completed.')
-
-        return future.result()
+            events._set_running_loop(old_running_loop)
 
     def stop(self):
         """Stop the event loop."""
