@@ -136,6 +136,16 @@
 #endif
 #endif
 
+/**
+ * Py_NewRef was added in Python 3.10. Provide compatibility macro for older versions.
+ */
+#if PY_VERSION_HEX < 0x030A0000
+static inline PyObject *Py_NewRef(PyObject *o) {
+    Py_INCREF(o);
+    return o;
+}
+#endif
+
 /** @} */
 
 /* Include subinterpreter pool header for shared-GIL pool model */
