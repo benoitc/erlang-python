@@ -2275,6 +2275,10 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     PyObject *asyncio;
     PyObject *run_and_send;
 
+    /* For thread-local event loop context (dirty NIF scheduler workaround) */
+    PyObject *events_module = NULL;
+    PyObject *old_running_loop = NULL;
+
     if (loop->py_cache_valid && loop->cached_asyncio != NULL && loop->cached_run_and_send != NULL) {
         /* Use cached references */
         asyncio = loop->cached_asyncio;
@@ -2354,6 +2358,32 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         } else {
             Py_DECREF(new_loop);
         }
+    }
+
+    /* ========================================================================
+     * Set event loop in current thread's context (dirty NIF scheduler fix)
+     *
+     * process_ready_tasks runs on dirty NIF scheduler threads (named 'Dummy-X'),
+     * not the main thread. Python's asyncio uses thread-local storage for event
+     * loops, so we must explicitly set our loop as both the current event loop
+     * and the running loop for this thread.
+     *
+     * This mirrors what Python's asyncio.run() does internally (see _loop.py).
+     * ======================================================================== */
+    events_module = PyImport_ImportModule("asyncio.events");
+    if (events_module != NULL) {
+        /* Set our loop as current event loop for this thread */
+        PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", loop->py_loop);
+        Py_XDECREF(set_result);
+
+        /* Save and set running loop (needed for asyncio.Task creation) */
+        old_running_loop = PyObject_CallMethod(events_module, "_get_running_loop", NULL);
+        if (old_running_loop == NULL) {
+            PyErr_Clear();
+            old_running_loop = Py_NewRef(Py_None);
+        }
+        PyObject *set_running = PyObject_CallMethod(events_module, "_set_running_loop", "O", loop->py_loop);
+        Py_XDECREF(set_running);
     }
 
     /* Process all dequeued tasks */
@@ -2569,6 +2599,15 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         } else {
             PyErr_Clear();
         }
+    }
+
+    /* Restore original event loop context before releasing GIL */
+    if (events_module != NULL) {
+        PyObject *restore = PyObject_CallMethod(events_module, "_set_running_loop", "O",
+                                                old_running_loop ? old_running_loop : Py_None);
+        Py_XDECREF(restore);
+        Py_XDECREF(old_running_loop);
+        Py_DECREF(events_module);
     }
 
     PyGILState_Release(gstate);
