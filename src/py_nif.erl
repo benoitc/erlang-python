@@ -104,6 +104,9 @@
     submit_task/7,
     process_ready_tasks/1,
     event_loop_set_py_loop/2,
+    %% Per-process namespace NIFs
+    event_loop_exec/2,
+    event_loop_eval/2,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -782,6 +785,19 @@ process_ready_tasks(_LoopRef) ->
 event_loop_set_py_loop(_LoopRef, _PyLoopRef) ->
     ?NIF_STUB.
 
+%% @doc Execute Python code in the calling process's namespace.
+%% Each Erlang process gets an isolated namespace for the event loop.
+%% Functions defined via exec can be called via create_task with __main__ module.
+-spec event_loop_exec(reference(), binary() | iolist()) -> ok | {error, term()}.
+event_loop_exec(_LoopRef, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Evaluate a Python expression in the calling process's namespace.
+%% Returns the result of the expression.
+-spec event_loop_eval(reference(), binary() | iolist()) -> {ok, term()} | {error, term()}.
+event_loop_eval(_LoopRef, _Expr) ->
+    ?NIF_STUB.
+
 %% @doc Register a file descriptor for read monitoring.
 %% Uses enif_select to register with the Erlang scheduler.
 -spec add_reader(reference(), integer(), non_neg_integer()) ->
@@ -1244,9 +1260,9 @@ pool_stats() ->
 %% on the mode parameter. Returns a reference to the context and its
 %% interpreter ID for routing.
 %%
-%% @param Mode `subinterp' or `worker'
+%% @param Mode `subinterp', `worker', or `owngil'
 %% @returns {ok, ContextRef, InterpId} | {error, Reason}
--spec context_create(subinterp | worker) ->
+-spec context_create(subinterp | worker | owngil) ->
     {ok, reference(), non_neg_integer()} | {error, term()}.
 context_create(_Mode) ->
     ?NIF_STUB.

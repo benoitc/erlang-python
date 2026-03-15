@@ -242,3 +242,107 @@ pthread_mutex_unlock               PyGILState_Release
 | GIL acquisitions | 1 per batch | Not per-task |
 | Handle allocations | ~0 (pooled) | After warmup |
 | Time syscalls | 1 per iteration | Cached within iteration |
+
+## Per-Process Namespace Management
+
+Each Erlang process can have an isolated Python namespace within an event loop. These namespaces are tracked in a linked list protected by `namespaces_mutex`.
+
+### Usage
+
+Define functions and state for async tasks in your process's namespace:
+
+```erlang
+%% Get event loop reference
+{ok, Loop} = py_event_loop:get_loop(),
+LoopRef = py_event_loop:get_nif_ref(Loop),
+
+%% Define async functions in this process's namespace
+ok = py_nif:event_loop_exec(LoopRef, <<"
+import asyncio
+
+async def process_data(items):
+    results = []
+    for item in items:
+        await asyncio.sleep(0.01)  # Simulate async I/O
+        results.append(item * 2)
+    return results
+
+# State persists across calls
+call_count = 0
+
+async def tracked_call(x):
+    global call_count
+    call_count += 1
+    return {'result': x, 'call_number': call_count}
+">>),
+
+%% Use the functions via create_task with __main__ module
+{ok, Ref1} = py_event_loop:create_task(Loop, '__main__', process_data, [[1,2,3]]),
+{ok, [2,4,6]} = py_event_loop:await(Ref1),
+
+%% State is maintained
+{ok, Ref2} = py_event_loop:create_task(Loop, '__main__', tracked_call, [42]),
+{ok, #{<<"result">> := 42, <<"call_number">> := 1}} = py_event_loop:await(Ref2).
+```
+
+### Evaluating Expressions
+
+```erlang
+%% Quick evaluation in the process namespace
+{ok, 100} = py_nif:event_loop_eval(LoopRef, <<"50 * 2">>),
+
+%% Access previously defined variables
+ok = py_nif:event_loop_exec(LoopRef, <<"config = {'timeout': 30}">>),
+{ok, #{<<"timeout">> := 30}} = py_nif:event_loop_eval(LoopRef, <<"config">>).
+```
+
+### Process Isolation
+
+Each Erlang process has its own isolated namespace:
+
+```erlang
+%% Two processes define the same variable name - no conflict
+Pids = [spawn(fun() ->
+    ok = py_nif:event_loop_exec(LoopRef, <<"my_id = ", (integer_to_binary(N))/binary>>),
+    {ok, N} = py_nif:event_loop_eval(LoopRef, <<"my_id">>),
+    io:format("Process ~p has my_id = ~p~n", [self(), N])
+end) || N <- lists:seq(1, 5)].
+```
+
+### Lock Ordering
+
+To prevent ABBA deadlocks, locks must always be acquired in this order:
+
+```
+1. GIL (PyGILState_Ensure)
+2. namespaces_mutex (pthread_mutex_lock)
+```
+
+This ordering is enforced in:
+- `ensure_process_namespace()` - Called with GIL held, then acquires mutex
+- `event_loop_down()` - Acquires GIL first, then mutex for cleanup
+- `event_loop_destructor()` - Acquires GIL first, then mutex for cleanup
+
+### Cleanup Behavior
+
+When a monitored process dies (`event_loop_down`) or the event loop is destroyed:
+
+**For main interpreter (`interp_id == 0`):**
+```c
+PyGILState_STATE gstate = PyGILState_Ensure();
+pthread_mutex_lock(&loop->namespaces_mutex);
+// Py_XDECREF(ns->globals), etc.
+pthread_mutex_unlock(&loop->namespaces_mutex);
+PyGILState_Release(gstate);
+```
+
+**For subinterpreters (`interp_id != 0`):**
+```c
+pthread_mutex_lock(&loop->namespaces_mutex);
+// Skip Py_XDECREF - cannot safely acquire subinterpreter GIL
+// Objects freed when interpreter is destroyed
+enif_free(ns);
+pthread_mutex_unlock(&loop->namespaces_mutex);
+```
+
+This design accepts a minor memory leak (Python dicts not decrefd) to avoid the complexity and risk of acquiring a subinterpreter's GIL from an arbitrary thread.

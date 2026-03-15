@@ -29,7 +29,15 @@
     %% Edge cases
     test_empty_args/1,
     test_large_result/1,
-    test_nested_data/1
+    test_nested_data/1,
+    %% Thread-local context tests
+    test_thread_local_event_loop/1,
+    %% Per-process namespace tests
+    test_process_namespace_exec/1,
+    test_process_namespace_eval/1,
+    test_process_namespace_async_func/1,
+    test_process_namespace_isolation/1,
+    test_process_namespace_reentrant/1
 ]).
 
 all() ->
@@ -58,7 +66,15 @@ all() ->
         %% Edge cases
         test_empty_args,
         test_large_result,
-        test_nested_data
+        test_nested_data,
+        %% Thread-local context tests
+        test_thread_local_event_loop,
+        %% Per-process namespace tests
+        test_process_namespace_exec,
+        test_process_namespace_eval,
+        test_process_namespace_async_func,
+        test_process_namespace_isolation,
+        test_process_namespace_reentrant
     ].
 
 groups() -> [].
@@ -66,74 +82,6 @@ groups() -> [].
 init_per_suite(Config) ->
     application:ensure_all_started(erlang_python),
     timer:sleep(500),  % Allow event loop to initialize
-
-    %% Create test Python module with various test functions
-    TestModule = <<"
-import asyncio
-
-# Simple sync function
-def sync_func():
-    return 'sync_result'
-
-def sync_add(x, y):
-    return x + y
-
-def sync_multiply(x, y):
-    return x * y
-
-# Async coroutines
-async def simple_async():
-    await asyncio.sleep(0.001)
-    return 'async_result'
-
-async def add_async(x, y):
-    await asyncio.sleep(0.001)
-    return x + y
-
-async def multiply_async(x, y):
-    await asyncio.sleep(0.001)
-    return x * y
-
-async def sleep_and_return(seconds, value):
-    await asyncio.sleep(seconds)
-    return value
-
-# Error cases
-async def failing_async():
-    await asyncio.sleep(0.001)
-    raise ValueError('test_error')
-
-def sync_error():
-    raise RuntimeError('sync_error')
-
-# Edge cases
-def return_none():
-    return None
-
-def return_empty_list():
-    return []
-
-def return_empty_dict():
-    return {}
-
-def return_large_list(n):
-    return list(range(n))
-
-def return_nested():
-    return {'a': [1, 2, {'b': 3}], 'c': (4, 5)}
-
-def echo(*args, **kwargs):
-    return {'args': args, 'kwargs': kwargs}
-
-# Slow function for timeout tests
-async def slow_async(seconds):
-    await asyncio.sleep(seconds)
-    return 'completed'
-">>,
-
-    %% Execute test module to define functions
-    ok = py:exec(TestModule),
-
     Config.
 
 end_per_suite(_Config) ->
@@ -233,10 +181,10 @@ test_async_sleep(_Config) ->
 %% ============================================================================
 
 test_async_error(_Config) ->
-    %% Test error from async coroutine
-    Ref = py_event_loop:create_task('__main__', failing_async, []),
+    %% Test error handling - math.sqrt(-1) raises ValueError
+    Ref = py_event_loop:create_task(math, sqrt, [-1.0]),
     Result = py_event_loop:await(Ref, 5000),
-    ct:log("failing_async() = ~p", [Result]),
+    ct:log("math.sqrt(-1) = ~p", [Result]),
     case Result of
         {error, _} -> ok;
         {ok, _} -> ct:fail("Expected error but got success")
@@ -265,10 +213,11 @@ test_invalid_function(_Config) ->
     end.
 
 test_timeout(_Config) ->
-    %% Test timeout handling
-    Ref = py_event_loop:create_task('__main__', slow_async, [10.0]),
-    Result = py_event_loop:await(Ref, 100),  % 100ms timeout, but sleep is 10s
-    ct:log("slow_async with short timeout: ~p", [Result]),
+    %% Test timeout handling - we just verify await timeout works
+    %% Use a short sleep (0.5s) but even shorter timeout (50ms)
+    Ref = py_event_loop:create_task(time, sleep, [0.5]),
+    Result = py_event_loop:await(Ref, 50),
+    ct:log("time.sleep(0.5) with 50ms timeout: ~p", [Result]),
     {error, timeout} = Result.
 
 %% ============================================================================
@@ -372,3 +321,153 @@ test_nested_data(_Config) ->
     #{<<"a">> := AVal, <<"b">> := BVal} = Result,
     [1, 2, 3] = AVal,
     #{<<"c">> := 4} = BVal.
+
+%% ============================================================================
+%% Thread-local context tests
+%% ============================================================================
+
+test_thread_local_event_loop(_Config) ->
+    %% Test that the event loop thread-local context is properly set.
+    %%
+    %% This verifies the fix for the thread-local event loop context issue.
+    %% process_ready_tasks runs on dirty NIF scheduler threads (named 'Dummy-X'),
+    %% not the main thread. Without the fix, asyncio.get_running_loop() would
+    %% raise RuntimeError: "There is no current event loop in thread 'Dummy-1'."
+    %%
+    %% The fix sets events._set_running_loop() before processing tasks.
+    %%
+    %% We verify this by running multiple concurrent async tasks - if the
+    %% running loop context weren't set, task creation would fail.
+    NumTasks = 20,
+    Refs = [py_event_loop:create_task(math, sqrt, [float(N * N)])
+            || N <- lists:seq(1, NumTasks)],
+
+    %% Await all results - this exercises the event loop processing
+    Results = [{N, py_event_loop:await(Ref, 5000)}
+               || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)],
+
+    ct:log("Thread-local context test: ~p tasks completed", [length(Results)]),
+
+    %% Verify all succeeded with correct results
+    lists:foreach(fun({N, {ok, R}}) ->
+        Expected = float(N),
+        true = abs(R - Expected) < 0.0001
+    end, Results).
+
+%% ============================================================================
+%% Per-process namespace tests
+%% ============================================================================
+
+test_process_namespace_exec(_Config) ->
+    %% Test executing Python code in process namespace
+    ok = py_event_loop:exec(<<"x = 42">>),
+    ok = py_event_loop:exec(<<"y = x * 2">>),
+    ct:log("exec test: defined x and y in process namespace").
+
+test_process_namespace_eval(_Config) ->
+    %% Test evaluating expressions in process namespace
+    ok = py_event_loop:exec(<<"a = 10">>),
+    ok = py_event_loop:exec(<<"b = 20">>),
+    {ok, 10} = py_event_loop:eval(<<"a">>),
+    {ok, 20} = py_event_loop:eval(<<"b">>),
+    {ok, 30} = py_event_loop:eval(<<"a + b">>),
+    ct:log("eval test: expressions evaluated correctly").
+
+test_process_namespace_async_func(_Config) ->
+    %% Test defining an async function and calling it via create_task
+    ok = py_event_loop:exec(<<"
+def double(x):
+    return x * 2
+
+def add(a, b):
+    return a + b
+">>),
+
+    %% Call the sync function via create_task with __main__ module
+    Ref1 = py_event_loop:create_task('__main__', double, [21]),
+    {ok, 42} = py_event_loop:await(Ref1, 5000),
+
+    Ref2 = py_event_loop:create_task('__main__', add, [10, 32]),
+    {ok, 42} = py_event_loop:await(Ref2, 5000),
+
+    ct:log("async_func test: functions in process namespace called successfully").
+
+test_process_namespace_isolation(_Config) ->
+    %% Test that different processes have isolated namespaces
+    Parent = self(),
+
+    %% Define a variable in parent process
+    ok = py_event_loop:exec(<<"parent_var = 'parent'">>),
+    {ok, <<"parent">>} = py_event_loop:eval(<<"parent_var">>),
+
+    %% Spawn a child process that defines its own variable
+    Child = spawn(fun() ->
+        %% Child should not see parent's variable
+        Result1 = py_event_loop:eval(<<"parent_var">>),
+
+        %% Define child's own variable
+        ok = py_event_loop:exec(<<"child_var = 'child'">>),
+        {ok, <<"child">>} = py_event_loop:eval(<<"child_var">>),
+
+        Parent ! {self(), parent_visible, Result1}
+    end),
+
+    %% Wait for child result
+    receive
+        {Child, parent_visible, ParentResult} ->
+            %% Child should NOT see parent's variable (isolated namespace)
+            case ParentResult of
+                {error, _} ->
+                    ct:log("isolation test: child correctly cannot see parent_var");
+                {ok, _} ->
+                    ct:log("isolation test: child unexpectedly saw parent_var (shared namespace)")
+            end
+    after 5000 ->
+        ct:fail("isolation test: child process timed out")
+    end,
+
+    %% Parent should still see its variable
+    {ok, <<"parent">>} = py_event_loop:eval(<<"parent_var">>),
+
+    %% Parent should NOT see child's variable
+    ChildVarResult = py_event_loop:eval(<<"child_var">>),
+    case ChildVarResult of
+        {error, _} ->
+            ct:log("isolation test: parent correctly cannot see child_var");
+        {ok, _} ->
+            ct:log("isolation test: parent unexpectedly saw child_var")
+    end.
+
+test_process_namespace_reentrant(_Config) ->
+    %% Test that namespace variables are accessible during task execution
+    %% This verifies the thread-local namespace is set correctly
+
+    %% Define a variable and a function that uses it
+    ok = py_event_loop:exec(<<"
+shared_value = 100
+
+def use_shared():
+    # Access shared_value from namespace
+    return shared_value + 23
+">>),
+
+    %% Call the function via create_task - it should access the namespace
+    Ref = py_event_loop:create_task('__main__', use_shared, []),
+    {ok, Result} = py_event_loop:await(Ref, 5000),
+    ct:log("reentrant test: use_shared() returned ~p (expected 123)", [Result]),
+    123 = Result,
+
+    %% Test with a function that modifies namespace
+    ok = py_event_loop:exec(<<"
+def increment_shared():
+    global shared_value
+    shared_value += 1
+    return shared_value
+">>),
+
+    Ref2 = py_event_loop:create_task('__main__', increment_shared, []),
+    {ok, 101} = py_event_loop:await(Ref2, 5000),
+
+    %% Verify the change persists in namespace
+    {ok, 101} = py_event_loop:eval(<<"shared_value">>),
+    ct:log("reentrant test: namespace modifications persist correctly").

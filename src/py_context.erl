@@ -48,7 +48,8 @@
     to_term/1,
     get_interp_id/1,
     is_subinterp/1,
-    create_local_env/1
+    create_local_env/1,
+    get_nif_ref/1
 ]).
 
 %% Internal exports
@@ -57,7 +58,7 @@
 %% Exported for py_reactor_context
 -export([extend_erlang_module_in_context/1]).
 
--type context_mode() :: auto | subinterp | worker.
+-type context_mode() :: auto | subinterp | worker | owngil.
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
@@ -78,8 +79,13 @@
 %%
 %% The process creates a Python context based on the mode:
 %% - `auto' - Detect best mode (subinterp on Python 3.12+, worker otherwise)
-%% - `subinterp' - Create a sub-interpreter with its own GIL
-%% - `worker' - Create a thread-state worker
+%% - `subinterp' - Create a sub-interpreter with shared GIL (uses pool)
+%% - `worker' - Create a thread-state worker (main interpreter namespace)
+%% - `owngil' - Create a sub-interpreter with its own GIL (true parallelism)
+%%
+%% The `owngil' mode creates a dedicated pthread for each context, allowing
+%% true parallel Python execution. This is useful for CPU-bound workloads.
+%% Requires Python 3.12+.
 %%
 %% @param Id Unique identifier for this context
 %% @param Mode Context mode
@@ -343,6 +349,20 @@ create_local_env(Ctx) when is_pid(Ctx) ->
             {error, {context_died, Reason}}
     end.
 
+%% @doc Get the NIF context reference from a context process.
+%% This is useful for calling low-level py_nif functions directly.
+-spec get_nif_ref(context()) -> reference().
+get_nif_ref(Ctx) when is_pid(Ctx) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {get_nif_ref, self(), MRef},
+    receive
+        {MRef, Ref} ->
+            erlang:demonitor(MRef, [flush]),
+            Ref;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            error({context_died, Reason})
+    end.
+
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
@@ -438,7 +458,13 @@ create_context(auto) ->
 create_context(subinterp) ->
     py_nif:context_create(subinterp);
 create_context(worker) ->
-    py_nif:context_create(worker).
+    py_nif:context_create(worker);
+create_context(owngil) ->
+    %% OWN_GIL mode requires Python 3.12+
+    case py_nif:subinterp_supported() of
+        true -> py_nif:context_create(owngil);
+        false -> {error, owngil_requires_python312}
+    end.
 
 %% @private
 %% Main context loop. Handles requests and uses suspension-based callback support.
@@ -498,6 +524,10 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
             %% Create env inside this context's interpreter
             Result = py_nif:create_local_env(Ref),
             From ! {MRef, Result},
+            loop(State);
+
+        {get_nif_ref, From, MRef} ->
+            From ! {MRef, Ref},
             loop(State);
 
         {stop, From, MRef} ->
@@ -807,6 +837,10 @@ wait_for_callback(Ref, CallbackPid) ->
         {create_local_env, From, MRef} ->
             Result = py_nif:create_local_env(Ref),
             From ! {MRef, Result},
+            wait_for_callback(Ref, CallbackPid);
+
+        {get_nif_ref, From, MRef} ->
+            From ! {MRef, Ref},
             wait_for_callback(Ref, CallbackPid)
     end.
 

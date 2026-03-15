@@ -33,7 +33,10 @@
     run/3, run/4,
     create_task/3, create_task/4,
     await/1, await/2,
-    spawn_task/3, spawn_task/4
+    spawn_task/3, spawn_task/4,
+    %% Per-process namespace API
+    exec/1, exec/2,
+    eval/1, eval/2
 ]).
 
 %% gen_server callbacks
@@ -217,6 +220,55 @@ spawn_task(Module, Func, Args, Kwargs) ->
     FuncBin = py_util:to_binary(Func),
     ok = py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs),
     ok.
+
+%% ============================================================================
+%% Per-Process Namespace API
+%% ============================================================================
+
+%% @doc Execute Python code in the calling process's event loop namespace.
+%%
+%% Each Erlang process gets an isolated Python namespace (globals/locals)
+%% for the event loop. Functions defined via exec/1 can be called via
+%% create_task/3 with the `__main__' module.
+%%
+%% The namespace is automatically cleaned up when the process exits.
+%%
+%% Example:
+%% <pre>
+%% ok = py_event_loop:exec(&lt;&lt;"
+%%     async def my_async_func(x):
+%%         return x * 2
+%% "&gt;&gt;),
+%% Ref = py_event_loop:create_task('__main__', my_async_func, [21]),
+%% {ok, 42} = py_event_loop:await(Ref)
+%% </pre>
+-spec exec(Code :: binary() | iolist()) -> ok | {error, term()}.
+exec(Code) ->
+    {ok, LoopRef} = get_loop(),
+    exec(LoopRef, Code).
+
+-spec exec(LoopRef :: reference(), Code :: binary() | iolist()) -> ok | {error, term()}.
+exec(LoopRef, Code) ->
+    py_nif:event_loop_exec(LoopRef, Code).
+
+%% @doc Evaluate a Python expression in the calling process's namespace.
+%%
+%% Returns the result of evaluating the expression.
+%%
+%% Example:
+%% <pre>
+%% ok = py_event_loop:exec(&lt;&lt;"x = 42"&gt;&gt;),
+%% {ok, 42} = py_event_loop:eval(&lt;&lt;"x"&gt;&gt;),
+%% {ok, 84} = py_event_loop:eval(&lt;&lt;"x * 2"&gt;&gt;)
+%% </pre>
+-spec eval(Expr :: binary() | iolist()) -> {ok, term()} | {error, term()}.
+eval(Expr) ->
+    {ok, LoopRef} = get_loop(),
+    eval(LoopRef, Expr).
+
+-spec eval(LoopRef :: reference(), Expr :: binary() | iolist()) -> {ok, term()} | {error, term()}.
+eval(LoopRef, Expr) ->
+    py_nif:event_loop_eval(LoopRef, Expr).
 
 %% ============================================================================
 %% gen_server callbacks

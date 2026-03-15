@@ -220,30 +220,36 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._check_closed()
         self._check_running()
 
-        new_task = not futures.isfuture(future)
-        future = tasks.ensure_future(future, loop=self)
-
-        if new_task:
-            future._log_destroy_pending = False
-
-        def _done_callback(f):
-            self.stop()
-
-        future.add_done_callback(_done_callback)
-
+        # Set running loop early so task factories work correctly
+        old_running_loop = events._get_running_loop()
+        events._set_running_loop(self)
         try:
-            self.run_forever()
-        except Exception:
-            if new_task and future.done() and not future.cancelled():
-                future.exception()
-            raise
+            new_task = not futures.isfuture(future)
+            future = tasks.ensure_future(future, loop=self)
+
+            if new_task:
+                future._log_destroy_pending = False
+
+            def _done_callback(f):
+                self.stop()
+
+            future.add_done_callback(_done_callback)
+
+            try:
+                self.run_forever()
+            except Exception:
+                if new_task and future.done() and not future.cancelled():
+                    future.exception()
+                raise
+            finally:
+                future.remove_done_callback(_done_callback)
+
+            if not future.done():
+                raise RuntimeError('Event loop stopped before Future completed.')
+
+            return future.result()
         finally:
-            future.remove_done_callback(_done_callback)
-
-        if not future.done():
-            raise RuntimeError('Event loop stopped before Future completed.')
-
-        return future.result()
+            events._set_running_loop(old_running_loop)
 
     def stop(self):
         """Stop the event loop."""
@@ -408,7 +414,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         """Schedule a coroutine to be executed."""
         self._check_closed()
         if self._task_factory is None:
-            if sys.version_info >= (3, 11):
+            if sys.version_info >= (3, 12):
+                # Python 3.12+: use eager_start=False to prevent eager execution
+                task = tasks.Task(coro, loop=self, name=name, context=context,
+                                  eager_start=False)
+            elif sys.version_info >= (3, 11):
                 task = tasks.Task(coro, loop=self, name=name, context=context)
             elif sys.version_info >= (3, 8):
                 task = tasks.Task(coro, loop=self, name=name)
@@ -1091,14 +1101,18 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if context is None:
             context = contextvars.copy_context()
 
-        if self._handle_pool:
+        # Use try/except for thread-safety in free-threaded Python
+        # The pool check and pop are not atomic, so another thread could
+        # empty the pool between the check and pop
+        try:
             handle = self._handle_pool.pop()
             handle._callback = callback
             handle._args = args
             handle._cancelled = False
             handle._context = context
             return handle
-        return events.Handle(callback, args, self, context)
+        except IndexError:
+            return events.Handle(callback, args, self, context)
 
     def _return_handle(self, handle):
         """Return a Handle to the pool for reuse.
