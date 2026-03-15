@@ -27,6 +27,7 @@ import asyncio
 import contextvars
 import gc
 import socket
+import sys
 import threading
 import time
 import unittest
@@ -475,8 +476,13 @@ class _TestFuturesAndTasks:
 
         def task_factory(loop, coro):
             factory_calls.append(True)
-            # Create task using modern API (Python 3.12+)
-            return asyncio.Task(coro, eager_start=False)
+            # Create task compatible with all Python versions
+            if sys.version_info >= (3, 12):
+                # Python 3.12+: use eager_start=False to opt out of eager execution
+                return asyncio.Task(coro, eager_start=False)
+            else:
+                # Python 3.10-3.11: loop parameter deprecated but still works
+                return asyncio.Task(coro, loop=loop)
 
         self.loop.set_task_factory(task_factory)
         self.assertEqual(self.loop.get_task_factory(), task_factory)
