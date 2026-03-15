@@ -289,16 +289,22 @@ handle_test_results(Module, Pattern, Results) ->
             ct:log("~s (~s): All ~p tests passed", [Module, Pattern, TestsRun]),
             ok;
         false ->
-            %% Log detailed failure information
+            %% Log detailed failure information to stderr for CI visibility
             lists:foreach(
                 fun(Detail) ->
                     Test = maps:get(<<"test">>, Detail, <<"unknown">>),
                     Trace = maps:get(<<"traceback">>, Detail, <<>>),
-                    ct:log("FAILED: ~s~n~s", [Test, Trace])
+                    ct:log("FAILED: ~s~n~s", [Test, Trace]),
+                    io:format(standard_error, "~n=== FAILED TEST: ~s ===~n~s~n", [Test, Trace])
                 end,
                 FailureDetails
             ),
-            ct:fail({tests_failed, Module, Pattern, #{
+            %% Include first failure in the error for compact output
+            FirstFail = case FailureDetails of
+                [First|_] -> maps:get(<<"test">>, First, <<"unknown">>);
+                _ -> <<"unknown">>
+            end,
+            ct:fail({tests_failed, Module, Pattern, FirstFail, #{
                 tests_run => TestsRun,
                 failures => Failures,
                 errors => Errors,
