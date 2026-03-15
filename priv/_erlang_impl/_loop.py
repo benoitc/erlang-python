@@ -414,7 +414,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         """Schedule a coroutine to be executed."""
         self._check_closed()
         if self._task_factory is None:
-            if sys.version_info >= (3, 11):
+            if sys.version_info >= (3, 12):
+                # Python 3.12+: use eager_start=False to prevent eager execution
+                task = tasks.Task(coro, loop=self, name=name, context=context,
+                                  eager_start=False)
+            elif sys.version_info >= (3, 11):
                 task = tasks.Task(coro, loop=self, name=name, context=context)
             elif sys.version_info >= (3, 8):
                 task = tasks.Task(coro, loop=self, name=name)
