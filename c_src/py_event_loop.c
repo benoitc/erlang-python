@@ -2912,13 +2912,17 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     /* NOTE: We don't DECREF asyncio and run_and_send here because they're cached
      * in the loop structure. They'll be freed when the loop is destroyed. */
 
-    /* Run one iteration of the event loop only if coroutines were scheduled.
+    /* Run one iteration of the event loop if:
+     * 1. New coroutines were scheduled (need to start them), OR
+     * 2. There are pending events (timers, FD callbacks) to process
+     *
      * For sync functions (like math.sqrt), results are sent directly via enif_send
      * and we don't need to drive the Python event loop.
      *
      * Pass timeout_hint=0 so we don't block - we just added work that needs
      * processing immediately. This is a uvloop-style optimization. */
-    if (coros_scheduled > 0) {
+    int pending_count = atomic_load(&loop->pending_count);
+    if (coros_scheduled > 0 || pending_count > 0) {
         PyObject *run_result = PyObject_CallMethod(loop->py_loop, "_run_once", "i", 0);
         if (run_result != NULL) {
             Py_DECREF(run_result);

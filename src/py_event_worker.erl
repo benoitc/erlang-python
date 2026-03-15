@@ -45,10 +45,14 @@ handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
     py_nif:handle_fd_event_and_reselect(FdRes, read),
+    %% Trigger event processing after FD event dispatch
+    self() ! task_ready,
     {noreply, State};
 
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
     py_nif:handle_fd_event_and_reselect(FdRes, write),
+    %% Trigger event processing after FD event dispatch
+    self() ! task_ready,
     {noreply, State};
 
 handle_info({start_timer, _LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
@@ -80,6 +84,9 @@ handle_info({timeout, TimerRef}, State) ->
         {_ErlTimerRef, CallbackId} ->
             py_nif:dispatch_timer(LoopRef, CallbackId),
             NewTimers = maps:remove(TimerRef, Timers),
+            %% Trigger event processing after timer dispatch
+            %% This ensures _run_once is called to handle the timer callback
+            self() ! task_ready,
             {noreply, State#state{timers = NewTimers}}
     end;
 
