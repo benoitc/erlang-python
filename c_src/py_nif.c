@@ -3208,7 +3208,7 @@ static void *owngil_context_thread_main(void *arg) {
         fprintf(stderr, "OWN_GIL: Py_NewInterpreterFromConfig failed: %s\n",
                 status.err_msg ? status.err_msg : "unknown error");
         PyGILState_Release(gstate);
-        atomic_store(&ctx->thread_running, false);
+        atomic_store(&ctx->init_error, true);
         return NULL;
     }
 
@@ -3223,7 +3223,7 @@ static void *owngil_context_thread_main(void *arg) {
         fprintf(stderr, "OWN_GIL: create_erlang_module failed\n");
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
-        atomic_store(&ctx->thread_running, false);
+        atomic_store(&ctx->init_error, true);
         return NULL;
     }
 
@@ -3232,7 +3232,7 @@ static void *owngil_context_thread_main(void *arg) {
         fprintf(stderr, "OWN_GIL: create_py_event_loop_module failed\n");
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
-        atomic_store(&ctx->thread_running, false);
+        atomic_store(&ctx->init_error, true);
         return NULL;
     }
 
@@ -3242,12 +3242,13 @@ static void *owngil_context_thread_main(void *arg) {
     ctx->module_cache = PyDict_New();
 
     if (ctx->globals == NULL || ctx->locals == NULL || ctx->module_cache == NULL) {
+        fprintf(stderr, "OWN_GIL: PyDict_New failed for namespace dicts\n");
         Py_XDECREF(ctx->globals);
         Py_XDECREF(ctx->locals);
         Py_XDECREF(ctx->module_cache);
         Py_EndInterpreter(ctx->own_gil_tstate);
         /* Don't call PyGILState_Release - interpreter is gone */
-        atomic_store(&ctx->thread_running, false);
+        atomic_store(&ctx->init_error, true);
         return NULL;
     }
 
@@ -3642,6 +3643,7 @@ static int owngil_context_init(py_context_t *ctx) {
     ctx->own_gil_interp = NULL;
     ctx->local_env_ptr = NULL;
     atomic_store(&ctx->thread_running, false);
+    atomic_store(&ctx->init_error, false);
     atomic_store(&ctx->shutdown_requested, false);
     ctx->request_type = CTX_REQ_NONE;
     ctx->response_ok = false;
@@ -3680,16 +3682,17 @@ static int owngil_context_init(py_context_t *ctx) {
         return -1;
     }
 
-    /* Wait for thread to initialize - up to 5 seconds on slow CI */
+    /* Wait for thread to initialize or fail */
     int wait_count = 0;
-    while (!atomic_load(&ctx->thread_running) && wait_count < 5000) {
+    while (!atomic_load(&ctx->thread_running) &&
+           !atomic_load(&ctx->init_error) &&
+           wait_count < 2000) {
         usleep(1000);  /* 1ms */
         wait_count++;
     }
 
-    if (!atomic_load(&ctx->thread_running)) {
-        /* Thread failed to start - check if there's an init error */
-        fprintf(stderr, "OWN_GIL thread failed to initialize after %d ms\n", wait_count);
+    if (atomic_load(&ctx->init_error) || !atomic_load(&ctx->thread_running)) {
+        /* Thread failed to start */
         pthread_join(ctx->own_gil_thread, NULL);
         enif_free_env(ctx->shared_env);
         pthread_cond_destroy(&ctx->response_ready);

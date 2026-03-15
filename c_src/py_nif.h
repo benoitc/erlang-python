@@ -855,6 +855,9 @@ typedef struct {
     /** @brief True when worker thread is running */
     _Atomic bool thread_running;
 
+    /** @brief True if thread initialization failed */
+    _Atomic bool init_error;
+
     /** @brief True when shutdown has been requested */
     _Atomic bool shutdown_requested;
 #else
