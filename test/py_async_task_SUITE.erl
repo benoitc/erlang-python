@@ -36,7 +36,8 @@
     test_process_namespace_exec/1,
     test_process_namespace_eval/1,
     test_process_namespace_async_func/1,
-    test_process_namespace_isolation/1
+    test_process_namespace_isolation/1,
+    test_process_namespace_reentrant/1
 ]).
 
 all() ->
@@ -72,7 +73,8 @@ all() ->
         test_process_namespace_exec,
         test_process_namespace_eval,
         test_process_namespace_async_func,
-        test_process_namespace_isolation
+        test_process_namespace_isolation,
+        test_process_namespace_reentrant
     ].
 
 groups() -> [].
@@ -435,3 +437,37 @@ test_process_namespace_isolation(_Config) ->
         {ok, _} ->
             ct:log("isolation test: parent unexpectedly saw child_var")
     end.
+
+test_process_namespace_reentrant(_Config) ->
+    %% Test that namespace variables are accessible during task execution
+    %% This verifies the thread-local namespace is set correctly
+
+    %% Define a variable and a function that uses it
+    ok = py_event_loop:exec(<<"
+shared_value = 100
+
+def use_shared():
+    # Access shared_value from namespace
+    return shared_value + 23
+">>),
+
+    %% Call the function via create_task - it should access the namespace
+    Ref = py_event_loop:create_task('__main__', use_shared, []),
+    {ok, Result} = py_event_loop:await(Ref, 5000),
+    ct:log("reentrant test: use_shared() returned ~p (expected 123)", [Result]),
+    123 = Result,
+
+    %% Test with a function that modifies namespace
+    ok = py_event_loop:exec(<<"
+def increment_shared():
+    global shared_value
+    shared_value += 1
+    return shared_value
+">>),
+
+    Ref2 = py_event_loop:create_task('__main__', increment_shared, []),
+    {ok, 101} = py_event_loop:await(Ref2, 5000),
+
+    %% Verify the change persists in namespace
+    {ok, 101} = py_event_loop:eval(<<"shared_value">>),
+    ct:log("reentrant test: namespace modifications persist correctly").

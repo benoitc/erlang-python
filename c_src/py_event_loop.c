@@ -55,6 +55,12 @@ ErlNifResourceType *TIMER_RESOURCE_TYPE = NULL;
 static char g_priv_dir[1024] = {0};
 static bool g_priv_dir_set = false;
 
+/**
+ * Thread-local for current event loop namespace during task execution.
+ * This allows reentrant calls (erlang.call -> Python) to use the same namespace.
+ */
+__thread process_namespace_t *tl_current_event_loop_namespace = NULL;
+
 /** Atoms for event loop messages */
 ERL_NIF_TERM ATOM_SELECT;
 ERL_NIF_TERM ATOM_READY_INPUT;
@@ -2736,8 +2742,16 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             kwargs = term_to_py(term_env, tuple_elems[5]);
         }
 
+        /* Set current namespace for reentrant calls (erlang.call -> Python) */
+        process_namespace_t *prev_namespace = tl_current_event_loop_namespace;
+        tl_current_event_loop_namespace = ns;
+
         /* Call the function to get coroutine */
         PyObject *coro = PyObject_Call(func, args, kwargs);
+
+        /* Restore previous namespace */
+        tl_current_event_loop_namespace = prev_namespace;
+
         Py_DECREF(func);
         Py_DECREF(args);
         Py_XDECREF(kwargs);

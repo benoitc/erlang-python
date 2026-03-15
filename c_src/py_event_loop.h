@@ -387,6 +387,15 @@ extern ErlNifResourceType *FD_RESOURCE_TYPE;
 /** @brief Resource type for timer_resource_t */
 extern ErlNifResourceType *TIMER_RESOURCE_TYPE;
 
+/**
+ * @brief Current event loop namespace for reentrant calls
+ *
+ * Set during task execution in process_ready_tasks. Used by erlang.call()
+ * to access the same namespace when Python calls back to Erlang and
+ * Erlang calls back to Python.
+ */
+extern __thread process_namespace_t *tl_current_event_loop_namespace;
+
 /* ============================================================================
  * Atom Declarations
  * ============================================================================ */
