@@ -234,12 +234,14 @@ spawn_task(Module, Func, Args, Kwargs) ->
 %% The namespace is automatically cleaned up when the process exits.
 %%
 %% Example:
-%%   ok = py_event_loop:exec(<<"
+%% <pre>
+%% ok = py_event_loop:exec(&lt;&lt;"
 %%     async def my_async_func(x):
 %%         return x * 2
-%%   ">>),
-%%   Ref = py_event_loop:create_task('__main__', my_async_func, [21]),
-%%   {ok, 42} = py_event_loop:await(Ref)
+%% "&gt;&gt;),
+%% Ref = py_event_loop:create_task('__main__', my_async_func, [21]),
+%% {ok, 42} = py_event_loop:await(Ref)
+%% </pre>
 -spec exec(Code :: binary() | iolist()) -> ok | {error, term()}.
 exec(Code) ->
     {ok, LoopRef} = get_loop(),
@@ -254,9 +256,11 @@ exec(LoopRef, Code) ->
 %% Returns the result of evaluating the expression.
 %%
 %% Example:
-%%   ok = py_event_loop:exec(<<"x = 42">>),
-%%   {ok, 42} = py_event_loop:eval(<<"x">>),
-%%   {ok, 84} = py_event_loop:eval(<<"x * 2">>)
+%% <pre>
+%% ok = py_event_loop:exec(&lt;&lt;"x = 42"&gt;&gt;),
+%% {ok, 42} = py_event_loop:eval(&lt;&lt;"x"&gt;&gt;),
+%% {ok, 84} = py_event_loop:eval(&lt;&lt;"x * 2"&gt;&gt;)
+%% </pre>
 -spec eval(Expr :: binary() | iolist()) -> {ok, term()} | {error, term()}.
 eval(Expr) ->
     {ok, LoopRef} = get_loop(),

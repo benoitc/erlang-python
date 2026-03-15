@@ -479,7 +479,7 @@ class _TestFuturesAndTasks:
             # Create task compatible with all Python versions
             if sys.version_info >= (3, 12):
                 # Python 3.12+: use eager_start=False to opt out of eager execution
-                return asyncio.Task(coro, eager_start=False)
+                return asyncio.Task(coro, loop=loop, eager_start=False)
             else:
                 # Python 3.10-3.11: loop parameter deprecated but still works
                 return asyncio.Task(coro, loop=loop)
