@@ -3262,7 +3262,8 @@ static void *owngil_context_thread_main(void *arg) {
         PyDict_SetItemString(ctx->globals, "erlang", erlang_module);
         Py_DECREF(erlang_module);
     } else {
-        PyErr_Clear();  /* Non-fatal - basic operations still work */
+        /* Non-fatal - basic operations still work, but log for debugging */
+        log_and_clear_python_error("OWN_GIL erlang module import");
     }
 
     /* Release our OWN_GIL (we'll reacquire when processing requests) */
@@ -3324,10 +3325,19 @@ static void *owngil_context_thread_main(void *arg) {
 }
 
 /**
+ * Timeout for OWN_GIL dispatch in seconds.
+ * If worker thread doesn't respond within this time, assume it's dead.
+ */
+#define OWNGIL_DISPATCH_TIMEOUT_SECS 30
+
+/**
  * @brief Dispatch a request to the OWN_GIL thread and wait for response
  *
  * Called from dirty schedulers. Copies the request term to the shared env,
  * signals the worker thread, and waits for the response.
+ *
+ * Uses pthread_cond_timedwait to prevent indefinite blocking if the worker
+ * thread dies or becomes unresponsive.
  *
  * @param env Caller's NIF environment
  * @param ctx Context with OWN_GIL
@@ -3355,9 +3365,21 @@ static ERL_NIF_TERM dispatch_to_owngil_thread(
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock on worker death */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            /* Worker thread is unresponsive - mark it as not running */
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL dispatch timeout: worker thread unresponsive after %d seconds\n",
+                    OWNGIL_DISPATCH_TIMEOUT_SECS);
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3372,6 +3394,7 @@ static ERL_NIF_TERM dispatch_to_owngil_thread(
  * @brief Dispatch reactor on_read_ready to OWN_GIL thread
  *
  * Similar to dispatch_to_owngil_thread but also passes buffer pointer.
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
                                               int fd, void *buffer_ptr) {
@@ -3391,9 +3414,25 @@ ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            /* Worker thread is unresponsive - clean up buffer and mark dead */
+            atomic_store(&ctx->thread_running, false);
+            /* Buffer ownership was transferred but never processed - release it */
+            if (ctx->reactor_buffer_ptr) {
+                enif_release_resource(ctx->reactor_buffer_ptr);
+                ctx->reactor_buffer_ptr = NULL;
+            }
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL reactor dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3406,6 +3445,8 @@ ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
 
 /**
  * @brief Dispatch reactor on_write_ready to OWN_GIL thread
+ *
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
                                                int fd) {
@@ -3423,9 +3464,19 @@ ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL reactor write dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3438,6 +3489,8 @@ ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
 
 /**
  * @brief Dispatch reactor init_connection to OWN_GIL thread
+ *
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
                                               int fd, ERL_NIF_TERM client_info) {
@@ -3457,9 +3510,19 @@ ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL reactor init dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3474,6 +3537,7 @@ ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
  * @brief Dispatch exec_with_env to OWN_GIL thread
  *
  * Passes the process-local env resource to the worker thread via local_env_ptr.
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 static ERL_NIF_TERM dispatch_exec_with_env_to_owngil(
     ErlNifEnv *env, py_context_t *ctx,
@@ -3494,9 +3558,19 @@ static ERL_NIF_TERM dispatch_exec_with_env_to_owngil(
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL exec_with_env dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3511,6 +3585,7 @@ static ERL_NIF_TERM dispatch_exec_with_env_to_owngil(
  * @brief Dispatch eval_with_env to OWN_GIL thread
  *
  * Passes the process-local env resource to the worker thread via local_env_ptr.
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 static ERL_NIF_TERM dispatch_eval_with_env_to_owngil(
     ErlNifEnv *env, py_context_t *ctx,
@@ -3534,9 +3609,19 @@ static ERL_NIF_TERM dispatch_eval_with_env_to_owngil(
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL eval_with_env dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3551,6 +3636,7 @@ static ERL_NIF_TERM dispatch_eval_with_env_to_owngil(
  * @brief Dispatch call_with_env to OWN_GIL thread
  *
  * Passes the process-local env resource to the worker thread via local_env_ptr.
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 static ERL_NIF_TERM dispatch_call_with_env_to_owngil(
     ErlNifEnv *env, py_context_t *ctx,
@@ -3578,9 +3664,19 @@ static ERL_NIF_TERM dispatch_call_with_env_to_owngil(
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL call_with_env dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */
@@ -3596,6 +3692,7 @@ static ERL_NIF_TERM dispatch_call_with_env_to_owngil(
  *
  * Creates the globals/locals dicts in the correct interpreter context.
  * Returns ok or error.
+ * Uses timeout to prevent deadlock if worker thread dies.
  */
 static ERL_NIF_TERM dispatch_create_local_env_to_owngil(
     ErlNifEnv *env, py_context_t *ctx,
@@ -3615,9 +3712,19 @@ static ERL_NIF_TERM dispatch_create_local_env_to_owngil(
     /* Signal the worker thread */
     pthread_cond_signal(&ctx->request_ready);
 
-    /* Wait for response */
+    /* Wait for response with timeout to prevent deadlock */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
     while (ctx->request_type != CTX_REQ_NONE) {
-        pthread_cond_wait(&ctx->response_ready, &ctx->request_mutex);
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL create_local_env dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
     }
 
     /* Copy response back to caller's env */

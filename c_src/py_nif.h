@@ -2027,6 +2027,53 @@ static inline void gil_release(gil_guard_t guard) {
 /** @} */
 
 /* ============================================================================
+ * Debug Helpers
+ * ============================================================================
+ */
+
+/**
+ * @brief Log Python error details before clearing
+ *
+ * When PyErr_Occurred() is true, this logs the error type and message to stderr
+ * with the given context string, then clears the error. Useful for debugging
+ * when errors are being swallowed.
+ *
+ * @param context Short description of where the error occurred (e.g., "OWN_GIL init")
+ */
+static inline void log_and_clear_python_error(const char *context) {
+    if (!PyErr_Occurred()) {
+        return;
+    }
+
+    PyObject *type, *value, *traceback;
+    PyErr_Fetch(&type, &value, &traceback);
+
+    const char *type_name = "UnknownError";
+    if (type != NULL && PyType_Check(type)) {
+        type_name = ((PyTypeObject *)type)->tp_name;
+    }
+
+    const char *msg = "";
+    PyObject *str_value = NULL;
+    if (value != NULL) {
+        str_value = PyObject_Str(value);
+        if (str_value != NULL) {
+            msg = PyUnicode_AsUTF8(str_value);
+            if (msg == NULL) {
+                msg = "(unable to convert error message)";
+            }
+        }
+    }
+
+    fprintf(stderr, "[Python Error] %s: %s: %s\n", context, type_name, msg);
+
+    Py_XDECREF(str_value);
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(traceback);
+}
+
+/* ============================================================================
  * OWN_GIL Reactor Dispatch
  * ============================================================================
  * Functions for dispatching reactor operations to OWN_GIL threads.

@@ -2059,6 +2059,9 @@ static erlang_module_state_t *get_erlang_module_state(void) {
  * Initialize async callback system for the current interpreter.
  * Creates the response pipe and pending futures dict.
  * Uses per-interpreter module state.
+ *
+ * Thread-safe: uses async_futures_mutex to prevent race conditions
+ * when multiple threads call this concurrently.
  */
 static int async_callback_init(void) {
     erlang_module_state_t *state = get_erlang_module_state();
@@ -2066,11 +2069,16 @@ static int async_callback_init(void) {
         return -1;
     }
 
+    /* Lock to prevent TOCTOU race condition on pipe_initialized check */
+    pthread_mutex_lock(&state->async_futures_mutex);
+
     if (state->pipe_initialized) {
+        pthread_mutex_unlock(&state->async_futures_mutex);
         return 0;  /* Already initialized for this interpreter */
     }
 
     if (pipe(state->async_callback_pipe) < 0) {
+        pthread_mutex_unlock(&state->async_futures_mutex);
         return -1;
     }
 
@@ -2086,10 +2094,12 @@ static int async_callback_init(void) {
         close(state->async_callback_pipe[1]);
         state->async_callback_pipe[0] = -1;
         state->async_callback_pipe[1] = -1;
+        pthread_mutex_unlock(&state->async_futures_mutex);
         return -1;
     }
 
     state->pipe_initialized = true;
+    pthread_mutex_unlock(&state->async_futures_mutex);
     return 0;
 }
 

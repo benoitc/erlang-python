@@ -352,6 +352,28 @@ int create_default_event_loop(ErlNifEnv *env);
 
 /**
  * @brief Destructor for event loop resources
+ *
+ * Memory/Resource Management Note:
+ * This destructor intentionally skips Python object cleanup (Py_DECREF) in
+ * certain scenarios to avoid crashes:
+ *
+ * 1. Subinterpreter event loops (interp_id > 0): The subinterpreter may have
+ *    been destroyed by Py_EndInterpreter before this destructor runs (which
+ *    runs on the Erlang GC thread). Calling PyGILState_Ensure would crash.
+ *
+ * 2. Runtime shutdown: If runtime_is_running() returns false, Python is
+ *    shutting down or stopped. Calling Python C API would crash.
+ *
+ * 3. Thread state issues: If PyGILState_Check() returns true, we already
+ *    hold the GIL from somewhere else - calling PyGILState_Ensure would
+ *    deadlock or corrupt thread state.
+ *
+ * In all these cases, we accept a small memory leak (the Python objects)
+ * rather than risking a crash. This is the standard Python embedding pattern
+ * for destructor-time cleanup from non-Python threads.
+ *
+ * The leaked Python objects will be reclaimed when the Python runtime fully
+ * shuts down via Py_FinalizeEx().
  */
 void event_loop_destructor(ErlNifEnv *env, void *obj) {
     (void)env;
@@ -443,7 +465,10 @@ cleanup_native:
         loop->msg_env = NULL;
     }
 
-    /* Clean up per-process namespaces */
+    /* Clean up per-process namespaces.
+     * Note: Same leak-vs-crash tradeoff as above. If we can't safely
+     * acquire the GIL, we skip Py_XDECREF and accept leaking the Python
+     * dict objects. The native namespace struct is always freed. */
     pthread_mutex_lock(&loop->namespaces_mutex);
     process_namespace_t *ns = loop->namespaces_head;
     while (ns != NULL) {

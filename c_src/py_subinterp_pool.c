@@ -162,18 +162,18 @@ int subinterp_pool_init(int size) {
         /* Create erlang module in this subinterpreter */
         if (create_erlang_module() < 0) {
             fprintf(stderr, "subinterp_pool_init: failed to create erlang module in subinterp %d\n", i);
-            PyErr_Clear();
+            log_and_clear_python_error("subinterp create_erlang_module");
             /* Non-fatal - continue without erlang module */
         } else {
             /* Register ReactorBuffer with erlang module in this subinterpreter */
             if (ReactorBuffer_register_with_reactor() < 0) {
-                PyErr_Clear();
+                log_and_clear_python_error("subinterp ReactorBuffer_register");
                 /* Non-fatal - ReactorBuffer just won't be available */
             }
 
             /* Register PyBuffer with erlang module in this subinterpreter */
             if (PyBuffer_register_with_module() < 0) {
-                PyErr_Clear();
+                log_and_clear_python_error("subinterp PyBuffer_register");
                 /* Non-fatal - PyBuffer just won't be available */
             }
 
@@ -183,7 +183,7 @@ int subinterp_pool_init(int size) {
                 PyDict_SetItemString(slot->globals, "erlang", erlang_module);
                 Py_DECREF(erlang_module);
             } else {
-                PyErr_Clear();
+                log_and_clear_python_error("subinterp erlang import");
             }
         }
 
@@ -191,7 +191,7 @@ int subinterp_pool_init(int size) {
          * This enables asyncio support (sleep, timers, etc.) */
         if (init_subinterpreter_event_loop(NULL) < 0) {
             fprintf(stderr, "subinterp_pool_init: failed to init event loop in subinterp %d\n", i);
-            PyErr_Clear();
+            log_and_clear_python_error("subinterp event_loop_init");
             /* Non-fatal - async features just won't work */
         }
 
