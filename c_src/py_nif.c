@@ -6388,6 +6388,9 @@ static ErlNifFunc nif_funcs[] = {
     {"submit_task", 7, nif_submit_task, 0},  /* Thread-safe, no GIL needed */
     {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"event_loop_set_py_loop", 2, nif_event_loop_set_py_loop, 0},
+    /* Per-process namespace NIFs */
+    {"event_loop_exec", 2, nif_event_loop_exec, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"event_loop_eval", 2, nif_event_loop_eval, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},

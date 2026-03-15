@@ -89,6 +89,41 @@ typedef struct {
     uint64_t hits;
 } cached_callable_t;
 
+/* ============================================================================
+ * Per-Process Namespace
+ * ============================================================================ */
+
+/**
+ * @struct process_namespace_t
+ * @brief Per-process Python namespace for event loop tasks
+ *
+ * Each Erlang process that executes Python code via the event loop gets
+ * its own isolated namespace (globals/locals). This allows functions
+ * defined via event_loop_exec to be called via create_task.
+ *
+ * Namespaces are automatically cleaned up when the owning process exits
+ * (via enif_monitor_process).
+ */
+typedef struct process_namespace {
+    /** @brief PID of the owning Erlang process */
+    ErlNifPid owner_pid;
+
+    /** @brief Global namespace dict for this process */
+    PyObject *globals;
+
+    /** @brief Local namespace dict for this process */
+    PyObject *locals;
+
+    /** @brief Module import cache for this process */
+    PyObject *module_cache;
+
+    /** @brief Monitor for detecting process death */
+    ErlNifMonitor monitor;
+
+    /** @brief Next namespace in linked list */
+    struct process_namespace *next;
+} process_namespace_t;
+
 /** @brief Event types for pending callbacks */
 typedef enum {
     EVENT_TYPE_READ = 1,
@@ -329,6 +364,14 @@ typedef struct erlang_event_loop {
 
     /** @brief Number of entries in callable cache */
     int callable_cache_count;
+
+    /* ========== Per-Process Namespace Registry ========== */
+
+    /** @brief Head of per-process namespace linked list */
+    process_namespace_t *namespaces_head;
+
+    /** @brief Mutex protecting namespace registry */
+    pthread_mutex_t namespaces_mutex;
 } erlang_event_loop_t;
 
 /* ============================================================================

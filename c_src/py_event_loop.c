@@ -224,8 +224,15 @@ static void cleanup_reactor_cache(py_event_loop_module_state_t *state) {
 static py_event_loop_module_state_t *get_module_state(void);
 static py_event_loop_module_state_t *get_module_state_from_module(PyObject *module);
 
-/* Forward declaration for callable cache cleanup */
+/* Forward declarations for callable cache */
 static void callable_cache_clear(erlang_event_loop_t *loop);
+static PyObject *callable_cache_lookup(erlang_event_loop_t *loop,
+                                        const char *module_name,
+                                        const char *func_name);
+static bool callable_cache_insert(erlang_event_loop_t *loop,
+                                   const char *module_name,
+                                   const char *func_name,
+                                   PyObject *callable);
 
 /**
  * Try to acquire a router for the event loop.
@@ -430,6 +437,28 @@ cleanup_native:
         loop->msg_env = NULL;
     }
 
+    /* Clean up per-process namespaces */
+    pthread_mutex_lock(&loop->namespaces_mutex);
+    process_namespace_t *ns = loop->namespaces_head;
+    while (ns != NULL) {
+        process_namespace_t *next = ns->next;
+        /* Only cleanup Python objects if runtime is still running */
+        if (runtime_is_running() && loop->interp_id == 0 &&
+            PyGILState_GetThisThreadState() == NULL &&
+            !PyGILState_Check()) {
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Py_XDECREF(ns->globals);
+            Py_XDECREF(ns->locals);
+            Py_XDECREF(ns->module_cache);
+            PyGILState_Release(gstate);
+        }
+        enif_free(ns);
+        ns = next;
+    }
+    loop->namespaces_head = NULL;
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+    pthread_mutex_destroy(&loop->namespaces_mutex);
+
     /* Destroy synchronization primitives */
     pthread_mutex_destroy(&loop->mutex);
     pthread_cond_destroy(&loop->event_cond);
@@ -549,16 +578,233 @@ void timer_resource_destructor(ErlNifEnv *env, void *obj) {
 }
 
 /* ============================================================================
+ * Per-Process Namespace Management
+ * ============================================================================ */
+
+/**
+ * @brief Down callback for event loop resources (process monitor)
+ *
+ * Called when a monitored process dies. Cleans up the process's namespace.
+ */
+void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
+                     ErlNifMonitor *mon) {
+    (void)env;
+    (void)mon;
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)obj;
+
+    pthread_mutex_lock(&loop->namespaces_mutex);
+
+    /* Find and remove namespace for this pid */
+    process_namespace_t **pp = &loop->namespaces_head;
+    while (*pp != NULL) {
+        if (enif_compare_pids(&(*pp)->owner_pid, pid) == 0) {
+            process_namespace_t *to_free = *pp;
+            *pp = to_free->next;
+
+            /* Must hold GIL to free Python objects */
+            if (runtime_is_running() && loop->interp_id == 0) {
+                PyGILState_STATE gstate = PyGILState_Ensure();
+                Py_XDECREF(to_free->globals);
+                Py_XDECREF(to_free->locals);
+                Py_XDECREF(to_free->module_cache);
+                PyGILState_Release(gstate);
+            }
+
+            enif_free(to_free);
+            break;
+        }
+        pp = &(*pp)->next;
+    }
+
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+}
+
+/**
+ * @brief Look up namespace for a process (without creating)
+ *
+ * @param loop Event loop containing namespace registry
+ * @param pid Process to look up
+ * @return Namespace or NULL if not found
+ *
+ * @note Thread-safe (uses namespaces_mutex)
+ */
+static process_namespace_t *lookup_process_namespace(
+    erlang_event_loop_t *loop,
+    ErlNifPid *pid
+) {
+    pthread_mutex_lock(&loop->namespaces_mutex);
+
+    process_namespace_t *ns = loop->namespaces_head;
+    while (ns != NULL) {
+        if (enif_compare_pids(&ns->owner_pid, pid) == 0) {
+            pthread_mutex_unlock(&loop->namespaces_mutex);
+            return ns;
+        }
+        ns = ns->next;
+    }
+
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+    return NULL;
+}
+
+/**
+ * @brief Get or create namespace for a process
+ *
+ * Each Erlang process gets its own isolated Python namespace (globals/locals).
+ * The namespace is automatically cleaned up when the process exits.
+ *
+ * @param env NIF environment (for monitoring)
+ * @param loop Event loop containing namespace registry
+ * @param pid Process to get namespace for
+ * @return Namespace or NULL on failure
+ *
+ * @note Must be called with GIL held
+ * @note Thread-safe (uses namespaces_mutex)
+ */
+static process_namespace_t *ensure_process_namespace(
+    ErlNifEnv *env,
+    erlang_event_loop_t *loop,
+    ErlNifPid *pid
+) {
+    pthread_mutex_lock(&loop->namespaces_mutex);
+
+    /* Search for existing namespace */
+    process_namespace_t *ns = loop->namespaces_head;
+    while (ns != NULL) {
+        if (enif_compare_pids(&ns->owner_pid, pid) == 0) {
+            pthread_mutex_unlock(&loop->namespaces_mutex);
+            return ns;
+        }
+        ns = ns->next;
+    }
+
+    /* Create new namespace */
+    ns = enif_alloc(sizeof(process_namespace_t));
+    if (ns == NULL) {
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        return NULL;
+    }
+
+    ns->owner_pid = *pid;
+    ns->globals = PyDict_New();
+    ns->locals = PyDict_New();
+    ns->module_cache = PyDict_New();
+
+    if (ns->globals == NULL || ns->locals == NULL || ns->module_cache == NULL) {
+        Py_XDECREF(ns->globals);
+        Py_XDECREF(ns->locals);
+        Py_XDECREF(ns->module_cache);
+        enif_free(ns);
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        return NULL;
+    }
+
+    /* Import builtins into globals */
+    PyObject *builtins = PyEval_GetBuiltins();
+    if (builtins != NULL) {
+        PyDict_SetItemString(ns->globals, "__builtins__", builtins);
+    }
+
+    /* Import erlang module into globals */
+    PyObject *erlang_module = PyImport_ImportModule("erlang");
+    if (erlang_module != NULL) {
+        PyDict_SetItemString(ns->globals, "erlang", erlang_module);
+        Py_DECREF(erlang_module);
+    }
+
+    /* Monitor process for cleanup */
+    if (enif_monitor_process(env, loop, pid, &ns->monitor) != 0) {
+        Py_DECREF(ns->globals);
+        Py_DECREF(ns->locals);
+        Py_DECREF(ns->module_cache);
+        enif_free(ns);
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        return NULL;
+    }
+
+    /* Add to list */
+    ns->next = loop->namespaces_head;
+    loop->namespaces_head = ns;
+
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+    return ns;
+}
+
+/**
+ * @brief Look up function in process namespace or module
+ *
+ * For __main__ module, looks in process namespace first.
+ * For other modules, uses PyImport_ImportModule.
+ *
+ * @param loop Event loop (for callable cache)
+ * @param ns Process namespace (may be NULL)
+ * @param module_name Module name
+ * @param func_name Function name
+ * @return New reference to callable, or NULL on failure
+ *
+ * @note Must be called with GIL held
+ */
+static PyObject *get_function_for_task(
+    erlang_event_loop_t *loop,
+    process_namespace_t *ns,
+    const char *module_name,
+    const char *func_name
+) {
+    PyObject *func = NULL;
+
+    /* For __main__ or _process_, check process namespace first */
+    if (ns != NULL &&
+        (strcmp(module_name, "__main__") == 0 ||
+         strcmp(module_name, "_process_") == 0)) {
+        func = PyDict_GetItemString(ns->globals, func_name);
+        if (func != NULL) {
+            Py_INCREF(func);
+            return func;
+        }
+    }
+
+    /* Try callable cache (uvloop-style optimization) */
+    func = callable_cache_lookup(loop, module_name, func_name);
+    if (func != NULL) {
+        Py_INCREF(func);
+        return func;
+    }
+
+    /* Cache miss - import module and get function */
+    PyObject *module = PyImport_ImportModule(module_name);
+    if (module == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    func = PyObject_GetAttrString(module, func_name);
+    Py_DECREF(module);
+
+    if (func == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    /* Cache for next lookup (only for non-__main__ modules) */
+    if (strcmp(module_name, "__main__") != 0 &&
+        strcmp(module_name, "_process_") != 0) {
+        callable_cache_insert(loop, module_name, func_name, func);
+    }
+
+    return func;
+}
+
+/* ============================================================================
  * Initialization
  * ============================================================================ */
 
 int event_loop_init(ErlNifEnv *env) {
-    /* Create event loop resource type */
+    /* Create event loop resource type with down callback for process monitors */
     ErlNifResourceTypeInit loop_init = {
         .dtor = event_loop_destructor,
         .stop = NULL,
-        .down = NULL,
-        .members = 1
+        .down = event_loop_down,
+        .members = 3
     };
 
     EVENT_LOOP_RESOURCE_TYPE = enif_init_resource_type(
@@ -789,6 +1035,18 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     /* Initialize callable cache */
     memset(loop->callable_cache, 0, sizeof(loop->callable_cache));
     loop->callable_cache_count = 0;
+
+    /* Initialize per-process namespace registry */
+    loop->namespaces_head = NULL;
+    if (pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&loop->task_queue_mutex);
+        enif_ioq_destroy(loop->task_queue);
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        return make_error(env, "namespaces_mutex_init_failed");
+    }
 
     /* Create result */
     ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
@@ -2429,40 +2687,19 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         memcpy(func_name, func_bin.data, func_bin.size);
         func_name[func_bin.size] = '\0';
 
-        /* OPTIMIZATION: Try callable cache first (uvloop-style) */
-        PyObject *func = callable_cache_lookup(loop, module_name, func_name);
+        /* Look up namespace for caller process (only exists if they called exec/eval) */
+        process_namespace_t *ns = lookup_process_namespace(loop, &caller_pid);
 
-        if (func == NULL) {
-            /* Cache miss - import module and get function */
-            PyObject *module = PyImport_ImportModule(module_name);
-            if (module == NULL) {
-                PyErr_Clear();
-                enif_free(module_name);
-                enif_free(func_name);
-                enif_free_env(term_env);
-                continue;
-            }
-
-            func = PyObject_GetAttrString(module, func_name);
-            Py_DECREF(module);
-
-            if (func == NULL) {
-                PyErr_Clear();
-                enif_free(module_name);
-                enif_free(func_name);
-                enif_free_env(term_env);
-                continue;
-            }
-
-            /* Cache for next lookup */
-            callable_cache_insert(loop, module_name, func_name, func);
-        } else {
-            /* Cache hit - need to incref since cache holds the reference */
-            Py_INCREF(func);
-        }
+        /* Look up function (checks process namespace for __main__, then cache/import) */
+        PyObject *func = get_function_for_task(loop, ns, module_name, func_name);
 
         enif_free(module_name);
         enif_free(func_name);
+
+        if (func == NULL) {
+            enif_free_env(term_env);
+            continue;
+        }
 
         /* Convert args list to Python tuple */
         unsigned int args_len;
@@ -2650,6 +2887,200 @@ ERL_NIF_TERM nif_event_loop_set_py_loop(ErlNifEnv *env, int argc,
      * The actual py_loop is set via py_set_loop_ref() Python function */
 
     return ATOM_OK;
+}
+
+/**
+ * event_loop_exec(LoopRef, Code) -> ok | {error, Reason}
+ *
+ * Execute Python code in the calling process's namespace.
+ * This allows defining functions that can be called via create_task.
+ *
+ * The namespace is isolated per Erlang process and automatically
+ * cleaned up when the process exits.
+ *
+ * @param LoopRef Event loop resource reference
+ * @param Code Binary containing Python code to execute
+ * @return ok on success, {error, Reason} on failure
+ */
+ERL_NIF_TERM nif_event_loop_exec(ErlNifEnv *env, int argc,
+                                  const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get code binary */
+    ErlNifBinary code_bin;
+    if (!enif_inspect_binary(env, argv[1], &code_bin)) {
+        /* Try iolist */
+        if (!enif_inspect_iolist_as_binary(env, argv[1], &code_bin)) {
+            return make_error(env, "invalid_code");
+        }
+    }
+
+    /* Convert to C string */
+    char *code = enif_alloc(code_bin.size + 1);
+    if (code == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(code, code_bin.data, code_bin.size);
+    code[code_bin.size] = '\0';
+
+    /* Get caller PID */
+    ErlNifPid caller_pid;
+    if (enif_self(env, &caller_pid) == NULL) {
+        enif_free(code);
+        return make_error(env, "no_self");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Get or create namespace for this process */
+    process_namespace_t *ns = ensure_process_namespace(env, loop, &caller_pid);
+    if (ns == NULL) {
+        PyGILState_Release(gstate);
+        enif_free(code);
+        return make_error(env, "namespace_failed");
+    }
+
+    /* Execute code in process namespace */
+    PyObject *result = PyRun_String(code, Py_file_input, ns->globals, ns->globals);
+    enif_free(code);
+
+    if (result == NULL) {
+        /* Get error info */
+        PyObject *exc_type, *exc_value, *exc_tb;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+        ERL_NIF_TERM error_term;
+        if (exc_value != NULL) {
+            PyObject *str = PyObject_Str(exc_value);
+            if (str != NULL) {
+                const char *err_str = PyUnicode_AsUTF8(str);
+                if (err_str != NULL) {
+                    error_term = enif_make_string(env, err_str, ERL_NIF_LATIN1);
+                } else {
+                    error_term = enif_make_atom(env, "exec_failed");
+                }
+                Py_DECREF(str);
+            } else {
+                error_term = enif_make_atom(env, "exec_failed");
+            }
+        } else {
+            error_term = enif_make_atom(env, "exec_failed");
+        }
+
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        PyGILState_Release(gstate);
+
+        return enif_make_tuple2(env, enif_make_atom(env, "error"), error_term);
+    }
+
+    Py_DECREF(result);
+    PyGILState_Release(gstate);
+
+    return ATOM_OK;
+}
+
+/**
+ * event_loop_eval(LoopRef, Expr) -> {ok, Result} | {error, Reason}
+ *
+ * Evaluate a Python expression in the calling process's namespace.
+ *
+ * @param LoopRef Event loop resource reference
+ * @param Expr Binary containing Python expression to evaluate
+ * @return {ok, Result} on success, {error, Reason} on failure
+ */
+ERL_NIF_TERM nif_event_loop_eval(ErlNifEnv *env, int argc,
+                                  const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get expression binary */
+    ErlNifBinary expr_bin;
+    if (!enif_inspect_binary(env, argv[1], &expr_bin)) {
+        if (!enif_inspect_iolist_as_binary(env, argv[1], &expr_bin)) {
+            return make_error(env, "invalid_expr");
+        }
+    }
+
+    /* Convert to C string */
+    char *expr = enif_alloc(expr_bin.size + 1);
+    if (expr == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(expr, expr_bin.data, expr_bin.size);
+    expr[expr_bin.size] = '\0';
+
+    /* Get caller PID */
+    ErlNifPid caller_pid;
+    if (enif_self(env, &caller_pid) == NULL) {
+        enif_free(expr);
+        return make_error(env, "no_self");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Get or create namespace for this process */
+    process_namespace_t *ns = ensure_process_namespace(env, loop, &caller_pid);
+    if (ns == NULL) {
+        PyGILState_Release(gstate);
+        enif_free(expr);
+        return make_error(env, "namespace_failed");
+    }
+
+    /* Evaluate expression in process namespace */
+    PyObject *result = PyRun_String(expr, Py_eval_input, ns->globals, ns->locals);
+    enif_free(expr);
+
+    if (result == NULL) {
+        PyObject *exc_type, *exc_value, *exc_tb;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+        ERL_NIF_TERM error_term;
+        if (exc_value != NULL) {
+            PyObject *str = PyObject_Str(exc_value);
+            if (str != NULL) {
+                const char *err_str = PyUnicode_AsUTF8(str);
+                if (err_str != NULL) {
+                    error_term = enif_make_string(env, err_str, ERL_NIF_LATIN1);
+                } else {
+                    error_term = enif_make_atom(env, "eval_failed");
+                }
+                Py_DECREF(str);
+            } else {
+                error_term = enif_make_atom(env, "eval_failed");
+            }
+        } else {
+            error_term = enif_make_atom(env, "eval_failed");
+        }
+
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        PyGILState_Release(gstate);
+
+        return enif_make_tuple2(env, enif_make_atom(env, "error"), error_term);
+    }
+
+    /* Convert result to Erlang term */
+    ERL_NIF_TERM result_term = py_to_term(env, result);
+    Py_DECREF(result);
+    PyGILState_Release(gstate);
+
+    return enif_make_tuple2(env, ATOM_OK, result_term);
 }
 
 /* ============================================================================

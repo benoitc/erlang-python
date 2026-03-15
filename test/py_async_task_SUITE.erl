@@ -31,7 +31,12 @@
     test_large_result/1,
     test_nested_data/1,
     %% Thread-local context tests
-    test_thread_local_event_loop/1
+    test_thread_local_event_loop/1,
+    %% Per-process namespace tests
+    test_process_namespace_exec/1,
+    test_process_namespace_eval/1,
+    test_process_namespace_async_func/1,
+    test_process_namespace_isolation/1
 ]).
 
 all() ->
@@ -62,7 +67,12 @@ all() ->
         test_large_result,
         test_nested_data,
         %% Thread-local context tests
-        test_thread_local_event_loop
+        test_thread_local_event_loop,
+        %% Per-process namespace tests
+        test_process_namespace_exec,
+        test_process_namespace_eval,
+        test_process_namespace_async_func,
+        test_process_namespace_isolation
     ].
 
 groups() -> [].
@@ -341,3 +351,87 @@ test_thread_local_event_loop(_Config) ->
         Expected = float(N),
         true = abs(R - Expected) < 0.0001
     end, Results).
+
+%% ============================================================================
+%% Per-process namespace tests
+%% ============================================================================
+
+test_process_namespace_exec(_Config) ->
+    %% Test executing Python code in process namespace
+    ok = py_event_loop:exec(<<"x = 42">>),
+    ok = py_event_loop:exec(<<"y = x * 2">>),
+    ct:log("exec test: defined x and y in process namespace").
+
+test_process_namespace_eval(_Config) ->
+    %% Test evaluating expressions in process namespace
+    ok = py_event_loop:exec(<<"a = 10">>),
+    ok = py_event_loop:exec(<<"b = 20">>),
+    {ok, 10} = py_event_loop:eval(<<"a">>),
+    {ok, 20} = py_event_loop:eval(<<"b">>),
+    {ok, 30} = py_event_loop:eval(<<"a + b">>),
+    ct:log("eval test: expressions evaluated correctly").
+
+test_process_namespace_async_func(_Config) ->
+    %% Test defining an async function and calling it via create_task
+    ok = py_event_loop:exec(<<"
+def double(x):
+    return x * 2
+
+def add(a, b):
+    return a + b
+">>),
+
+    %% Call the sync function via create_task with __main__ module
+    Ref1 = py_event_loop:create_task('__main__', double, [21]),
+    {ok, 42} = py_event_loop:await(Ref1, 5000),
+
+    Ref2 = py_event_loop:create_task('__main__', add, [10, 32]),
+    {ok, 42} = py_event_loop:await(Ref2, 5000),
+
+    ct:log("async_func test: functions in process namespace called successfully").
+
+test_process_namespace_isolation(_Config) ->
+    %% Test that different processes have isolated namespaces
+    Parent = self(),
+
+    %% Define a variable in parent process
+    ok = py_event_loop:exec(<<"parent_var = 'parent'">>),
+    {ok, <<"parent">>} = py_event_loop:eval(<<"parent_var">>),
+
+    %% Spawn a child process that defines its own variable
+    Child = spawn(fun() ->
+        %% Child should not see parent's variable
+        Result1 = py_event_loop:eval(<<"parent_var">>),
+
+        %% Define child's own variable
+        ok = py_event_loop:exec(<<"child_var = 'child'">>),
+        {ok, <<"child">>} = py_event_loop:eval(<<"child_var">>),
+
+        Parent ! {self(), parent_visible, Result1}
+    end),
+
+    %% Wait for child result
+    receive
+        {Child, parent_visible, ParentResult} ->
+            %% Child should NOT see parent's variable (isolated namespace)
+            case ParentResult of
+                {error, _} ->
+                    ct:log("isolation test: child correctly cannot see parent_var");
+                {ok, _} ->
+                    ct:log("isolation test: child unexpectedly saw parent_var (shared namespace)")
+            end
+    after 5000 ->
+        ct:fail("isolation test: child process timed out")
+    end,
+
+    %% Parent should still see its variable
+    {ok, <<"parent">>} = py_event_loop:eval(<<"parent_var">>),
+
+    %% Parent should NOT see child's variable
+    ChildVarResult = py_event_loop:eval(<<"child_var">>),
+    case ChildVarResult of
+        {error, _} ->
+            ct:log("isolation test: parent correctly cannot see child_var");
+        {ok, _} ->
+            ct:log("isolation test: parent unexpectedly saw child_var")
+    end.
