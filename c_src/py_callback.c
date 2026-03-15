@@ -1666,6 +1666,13 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
      * 2. tl_current_context with callback_handler (old blocking pipe mode)
      * 3. tl_current_worker (legacy worker API)
      * 4. thread_worker_call (spawned threads)
+     *
+     * NOTE: In OWN_GIL mode, erlang.call() goes through thread_worker_call()
+     * rather than using suspension/resume. This is because OWN_GIL contexts
+     * bypass the suspension protocol - the dedicated pthread that owns the GIL
+     * cannot be suspended. As a result, the call executes on a different
+     * context/interpreter (the thread worker), not the calling OWN_GIL context.
+     * Re-entrant calls back to the same OWN_GIL context are not supported.
      */
     bool has_context_suspension = (tl_current_context != NULL && tl_allow_suspension);
     bool has_context_handler = (tl_current_context != NULL && tl_current_context->has_callback_handler);
@@ -1678,6 +1685,7 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
          * - threading.Thread instances
          * - concurrent.futures.ThreadPoolExecutor workers
          * - Any other Python threads
+         * - OWN_GIL contexts (which don't support suspension)
          */
         Py_ssize_t nargs = PyTuple_Size(args);
         if (nargs < 1) {
@@ -2783,10 +2791,9 @@ static void erlang_module_free(void *module) {
     Py_XDECREF(state->async_pending_futures);
     state->async_pending_futures = NULL;
 
-    if (state->pipe_initialized) {
-        pthread_mutex_destroy(&state->async_futures_mutex);
-        state->pipe_initialized = false;
-    }
+    /* Always destroy mutex - it was always initialized in create_erlang_module */
+    pthread_mutex_destroy(&state->async_futures_mutex);
+    state->pipe_initialized = false;
 }
 
 /* Module definition */

@@ -2775,6 +2775,17 @@ static void owngil_execute_exec_with_env(py_context_t *ctx) {
         return;
     }
 
+    /* Verify interpreter ownership - prevent dangling pointer access.
+     * Compare env's interp_id with the current Python interpreter's ID. */
+    PyInterpreterState *current_interp = PyInterpreterState_Get();
+    if (current_interp != NULL && penv->interp_id != PyInterpreterState_GetID(current_interp)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "env_wrong_interpreter"));
+        ctx->response_ok = false;
+        return;
+    }
+
     ErlNifBinary code_bin;
     if (!enif_inspect_binary(ctx->shared_env, ctx->request_term, &code_bin)) {
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
@@ -2837,6 +2848,17 @@ static void owngil_execute_eval_with_env(py_context_t *ctx) {
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
             enif_make_atom(ctx->shared_env, "error"),
             enif_make_atom(ctx->shared_env, "invalid_env"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Verify interpreter ownership - prevent dangling pointer access.
+     * Compare env's interp_id with the current Python interpreter's ID. */
+    PyInterpreterState *current_interp = PyInterpreterState_Get();
+    if (current_interp != NULL && penv->interp_id != PyInterpreterState_GetID(current_interp)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "env_wrong_interpreter"));
         ctx->response_ok = false;
         return;
     }
@@ -2929,6 +2951,17 @@ static void owngil_execute_call_with_env(py_context_t *ctx) {
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
             enif_make_atom(ctx->shared_env, "error"),
             enif_make_atom(ctx->shared_env, "invalid_env"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Verify interpreter ownership - prevent dangling pointer access.
+     * Compare env's interp_id with the current Python interpreter's ID. */
+    PyInterpreterState *current_interp = PyInterpreterState_Get();
+    if (current_interp != NULL && penv->interp_id != PyInterpreterState_GetID(current_interp)) {
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "env_wrong_interpreter"));
         ctx->response_ok = false;
         return;
     }

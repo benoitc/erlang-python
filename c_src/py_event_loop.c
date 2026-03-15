@@ -465,29 +465,51 @@ cleanup_native:
         loop->msg_env = NULL;
     }
 
-    /* Clean up per-process namespaces.
-     * Note: Same leak-vs-crash tradeoff as above. If we can't safely
-     * acquire the GIL, we skip Py_XDECREF and accept leaking the Python
-     * dict objects. The native namespace struct is always freed. */
-    pthread_mutex_lock(&loop->namespaces_mutex);
-    process_namespace_t *ns = loop->namespaces_head;
-    while (ns != NULL) {
-        process_namespace_t *next = ns->next;
-        /* Only cleanup Python objects if runtime is still running */
-        if (runtime_is_running() && loop->interp_id == 0 &&
-            PyGILState_GetThisThreadState() == NULL &&
-            !PyGILState_Check()) {
-            PyGILState_STATE gstate = PyGILState_Ensure();
+    /*
+     * Clean up per-process namespaces.
+     *
+     * Lock ordering: GIL first, then namespaces_mutex (consistent with normal path).
+     * This prevents ABBA deadlock with execution paths that acquire GIL then mutex.
+     *
+     * For subinterpreters (interp_id != 0), we can't use PyGILState_Ensure.
+     * Just free the native structs without Py_DECREF - Python objects will be
+     * cleaned up when the interpreter is destroyed.
+     */
+    if (runtime_is_running() && loop->interp_id == 0 &&
+        PyGILState_GetThisThreadState() == NULL &&
+        !PyGILState_Check()) {
+        /* Main interpreter: GIL first, then mutex */
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        pthread_mutex_lock(&loop->namespaces_mutex);
+
+        process_namespace_t *ns = loop->namespaces_head;
+        while (ns != NULL) {
+            process_namespace_t *next = ns->next;
             Py_XDECREF(ns->globals);
             Py_XDECREF(ns->locals);
             Py_XDECREF(ns->module_cache);
-            PyGILState_Release(gstate);
+            enif_free(ns);
+            ns = next;
         }
-        enif_free(ns);
-        ns = next;
+        loop->namespaces_head = NULL;
+
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        PyGILState_Release(gstate);
+    } else {
+        /* Subinterpreter or runtime not running: just free structs */
+        pthread_mutex_lock(&loop->namespaces_mutex);
+
+        process_namespace_t *ns = loop->namespaces_head;
+        while (ns != NULL) {
+            process_namespace_t *next = ns->next;
+            /* Skip Py_XDECREF - can't safely acquire GIL */
+            enif_free(ns);
+            ns = next;
+        }
+        loop->namespaces_head = NULL;
+
+        pthread_mutex_unlock(&loop->namespaces_mutex);
     }
-    loop->namespaces_head = NULL;
-    pthread_mutex_unlock(&loop->namespaces_mutex);
     pthread_mutex_destroy(&loop->namespaces_mutex);
 
     /* Destroy synchronization primitives */
@@ -616,6 +638,8 @@ void timer_resource_destructor(ErlNifEnv *env, void *obj) {
  * @brief Down callback for event loop resources (process monitor)
  *
  * Called when a monitored process dies. Cleans up the process's namespace.
+ *
+ * Lock ordering: GIL first, then namespaces_mutex (consistent with normal path)
  */
 void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
                      ErlNifMonitor *mon) {
@@ -623,6 +647,36 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
     (void)mon;
     erlang_event_loop_t *loop = (erlang_event_loop_t *)obj;
 
+    /*
+     * For subinterpreters (interp_id != 0), we can't use PyGILState_Ensure.
+     * Just remove from the list without Py_DECREF - the Python objects will
+     * be cleaned up when the interpreter is destroyed.
+     */
+    if (!runtime_is_running() || loop->interp_id != 0) {
+        pthread_mutex_lock(&loop->namespaces_mutex);
+
+        process_namespace_t **pp = &loop->namespaces_head;
+        while (*pp != NULL) {
+            if (enif_compare_pids(&(*pp)->owner_pid, pid) == 0) {
+                process_namespace_t *to_free = *pp;
+                *pp = to_free->next;
+                /* Skip Py_XDECREF - can't safely acquire GIL for subinterp */
+                enif_free(to_free);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        return;
+    }
+
+    /*
+     * For main interpreter: acquire GIL FIRST to maintain consistent lock
+     * ordering with the normal execution path (which acquires GIL, then mutex).
+     * This prevents ABBA deadlock.
+     */
+    PyGILState_STATE gstate = PyGILState_Ensure();
     pthread_mutex_lock(&loop->namespaces_mutex);
 
     /* Find and remove namespace for this pid */
@@ -632,14 +686,9 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
             process_namespace_t *to_free = *pp;
             *pp = to_free->next;
 
-            /* Must hold GIL to free Python objects */
-            if (runtime_is_running() && loop->interp_id == 0) {
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                Py_XDECREF(to_free->globals);
-                Py_XDECREF(to_free->locals);
-                Py_XDECREF(to_free->module_cache);
-                PyGILState_Release(gstate);
-            }
+            Py_XDECREF(to_free->globals);
+            Py_XDECREF(to_free->locals);
+            Py_XDECREF(to_free->module_cache);
 
             enif_free(to_free);
             break;
@@ -648,6 +697,7 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
     }
 
     pthread_mutex_unlock(&loop->namespaces_mutex);
+    PyGILState_Release(gstate);
 }
 
 /**
