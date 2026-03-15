@@ -21,22 +21,61 @@ py:num_executors().
 | Mode | Python Version | Parallelism | GIL Behavior | Best For |
 |------|----------------|-------------|--------------|----------|
 | **free_threaded** | 3.13+ (nogil build) | True N-way | None | Maximum throughput |
-| **subinterp** | 3.12+ | True N-way | Per-interpreter | CPU-bound, isolation |
+| **owngil** | 3.12+ | True N-way | Per-interpreter (dedicated thread) | CPU-bound parallel |
+| **subinterp** | 3.12+ | None (shared GIL) | Shared GIL (pool) | High call frequency |
 | **multi_executor** | Any | GIL contention | Shared, round-robin | I/O-bound, compatibility |
 
 ### Free-Threaded Mode (Python 3.13+)
 
 When running on a free-threaded Python build (compiled with `--disable-gil`), erlang_python executes Python calls directly without any executor routing. This provides maximum parallelism for CPU-bound workloads.
 
-### Sub-interpreter Mode (Python 3.12+)
+### OWN_GIL Mode (Python 3.12+)
 
-Uses Python's sub-interpreter feature with per-interpreter GIL (`Py_GIL_OWN`). Each sub-interpreter runs in its own dedicated thread with its own GIL, enabling true parallel execution across interpreters.
+Creates dedicated pthreads with independent GILs for true parallel Python execution. Each OWN_GIL context runs in its own thread, enabling CPU parallelism.
 
 **Architecture:**
-- Thread pool manages N subinterpreters (default: number of schedulers)
-- Each subinterpreter has its own thread, GIL, and Python state
-- Requests are routed to subinterpreters via `py_context_router`
-- 25-30% faster cast operations compared to worker mode
+- Each context gets a dedicated pthread with its own subinterpreter and GIL
+- Requests dispatched via mutex/condvar IPC (not dirty schedulers)
+- True parallel execution across multiple OWN_GIL contexts
+- Higher per-call latency (~10μs vs ~2.5μs) but better parallelism
+
+**Usage:**
+```erlang
+%% Create OWN_GIL contexts for parallel execution
+{ok, Ctx1} = py_context:start_link(1, owngil),
+{ok, Ctx2} = py_context:start_link(2, owngil),
+
+%% These execute in parallel with independent GILs
+spawn(fun() -> py_context:call(Ctx1, heavy_compute, run, [Data1]) end),
+spawn(fun() -> py_context:call(Ctx2, heavy_compute, run, [Data2]) end).
+```
+
+**Process-Local Environments:**
+```erlang
+%% Multiple processes can share an OWN_GIL context with isolated namespaces
+{ok, Env} = py_context:create_local_env(Ctx),
+CtxRef = py_context:get_nif_ref(Ctx),
+ok = py_nif:context_exec(CtxRef, <<"x = 42">>, Env),
+{ok, 42} = py_nif:context_eval(CtxRef, <<"x">>, #{}, Env).
+```
+
+**When to use OWN_GIL:**
+- CPU-bound Python workloads that benefit from parallelism
+- Long-running computations
+- When you need true concurrent Python execution
+- Scientific computing, ML inference, data processing
+
+**See also:** [OWN_GIL Internals](owngil_internals.md) for architecture details.
+
+### Sub-interpreter Mode (Python 3.12+)
+
+Uses Python's sub-interpreter feature with a shared GIL pool. Multiple contexts share the GIL but have isolated namespaces. Best for high call frequency with low latency.
+
+**Architecture:**
+- Pool of pre-created subinterpreters with shared GIL
+- Execution on dirty schedulers with `PyThreadState_Swap`
+- Lower latency (~2.5μs) but no true parallelism
+- Best throughput for short operations
 
 **Note:** Each sub-interpreter has isolated state. Use the [Shared State](#shared-state) API to share data between workers.
 
@@ -74,11 +113,17 @@ Runs N executor threads that share the GIL. Requests are distributed round-robin
 - You're running CPU-bound workloads
 - Memory efficiency is important
 
-**Use Subinterpreters (Python 3.12+) when:**
-- You need parallelism with state isolation
-- You want crash isolation between contexts
-- You're running untrusted or unstable code
-- You need predictable per-request state
+**Use OWN_GIL (Python 3.12+) when:**
+- You need true CPU parallelism across Python contexts
+- Running long computations (ML inference, data processing)
+- Workload benefits from multiple independent Python interpreters
+- You can tolerate higher per-call latency for better throughput
+
+**Use Subinterpreters/Shared-GIL (Python 3.12+) when:**
+- You need high call frequency with low latency
+- Individual operations are short
+- You want namespace isolation without thread overhead
+- Memory efficiency is important (shared interpreter pool)
 
 **Use Multi-Executor (Python < 3.12) when:**
 - Running on older Python versions

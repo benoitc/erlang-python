@@ -4,6 +4,50 @@
 
 OWN_GIL mode provides true parallel Python execution using Python 3.12+ per-interpreter GIL (`PyInterpreterConfig_OWN_GIL`). Each OWN_GIL context runs in a dedicated pthread with its own subinterpreter and GIL.
 
+## Quick Start
+
+```erlang
+%% Create an OWN_GIL context (requires Python 3.12+)
+{ok, Ctx} = py_context:start_link(1, owngil),
+
+%% Basic operations work the same as other modes
+{ok, 4.0} = py_context:call(Ctx, math, sqrt, [16], #{}),
+ok = py_context:exec(Ctx, <<"x = 42">>),
+{ok, 42} = py_context:eval(Ctx, <<"x">>),
+
+%% True parallelism: multiple OWN_GIL contexts execute simultaneously
+{ok, Ctx2} = py_context:start_link(2, owngil),
+%% Ctx and Ctx2 run in parallel with independent GILs
+
+%% Process-local environments for namespace isolation
+{ok, Env} = py_context:create_local_env(Ctx),
+CtxRef = py_context:get_nif_ref(Ctx),
+ok = py_nif:context_exec(CtxRef, <<"my_var = 'isolated'">>  , Env),
+
+%% Cleanup
+py_context:stop(Ctx),
+py_context:stop(Ctx2).
+```
+
+## Feature Compatibility
+
+All major erlang_python features work with OWN_GIL mode:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `py_context:call/5` | Full | Function calls |
+| `py_context:eval/2` | Full | Expression evaluation |
+| `py_context:exec/2` | Full | Statement execution |
+| Channels (`py_channel`) | Full | Bidirectional messaging |
+| Buffers (`py_buffer`) | Full | Zero-copy streaming |
+| Callbacks (`erlang.call`) | Partial | Uses thread_worker, not re-entrant |
+| PIDs (`erlang.Pid`) | Full | Round-trip serialization |
+| Send (`erlang.send`) | Full | Fire-and-forget messaging |
+| Reactor (`erlang.reactor`) | Full | FD-based protocols |
+| Async Tasks | Full | `py_event_loop:create_task` |
+| Asyncio | Full | `asyncio.sleep`, `gather`, etc. |
+| Process-local envs | Full | Namespace isolation |
+
 ## Architecture
 
 ```
@@ -394,6 +438,46 @@ Use shared-GIL (subinterp) when:
 - I/O-bound or short operations
 - High call frequency
 - Resource constraints
+
+## Benchmarking
+
+Run the benchmark to compare modes on your system:
+
+```bash
+rebar3 compile && escript examples/bench_owngil.erl
+```
+
+Example output:
+```
+========================================================
+  OWN_GIL vs SHARED_GIL Benchmark
+========================================================
+
+System Information
+------------------
+  Erlang/OTP:       27
+  Schedulers:       8
+  Python:           3.14.0
+  Subinterp:        true
+
+1. Single Context Latency (1000 calls to math.sqrt)
+   Mode            us/call    calls/sec
+   ----            -------    ---------
+   subinterp           2.5       400000
+   owngil             10.2        98000
+
+2. Parallel Throughput (4 contexts, 10000 calls each)
+   Mode            total_ms   calls/sec
+   ----            --------   ---------
+   subinterp          100.5       398000
+   owngil              28.3      1415000   <- 3.5x faster
+
+3. CPU-Bound Speedup (fibonacci(30) x 4 contexts)
+   Mode            total_ms   speedup
+   ----            --------   -------
+   subinterp          800.2      1.0x
+   owngil             205.1      3.9x     <- near-linear scaling
+```
 
 ## Safety Mechanisms
 

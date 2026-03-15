@@ -67,6 +67,44 @@
   - `examples/bench_async_task.erl` - Erlang benchmark runner
   - `priv/test_async_task.py` - Python async task implementation
 
+- **OWN_GIL Context Mode** - True parallel Python execution (Python 3.12+)
+  - `py_context:start_link(Id, owngil)` - Create context with dedicated pthread and GIL
+  - Each OWN_GIL context runs in its own thread with independent Python GIL
+  - Enables true CPU parallelism across multiple Python contexts
+  - Full feature support: channels, buffers, callbacks, PIDs, reactor, async tasks
+  - `py_context:get_nif_ref/1` - Get NIF reference for low-level operations
+  - New benchmark: `examples/bench_owngil.erl` comparing SHARED_GIL vs OWN_GIL
+  - See [OWN_GIL Internals](docs/owngil_internals.md) for architecture details
+
+- **Process-Local Environments for OWN_GIL** - Namespace isolation within shared contexts
+  - `py_context:create_local_env/1` - Create isolated Python namespace for calling process
+  - `py_nif:context_exec(Ref, Code, Env)` - Execute with process-local environment
+  - `py_nif:context_eval(Ref, Expr, Locals, Env)` - Evaluate with process-local environment
+  - `py_nif:context_call(Ref, Mod, Func, Args, Kwargs, Env)` - Call with process-local environment
+  - Multiple Erlang processes can share an OWN_GIL context with isolated namespaces
+  - Interpreter ID validation prevents cross-interpreter env usage
+
+- **Per-Process Event Loop Namespaces** - Process isolation for event loop API
+  - `py_nif:event_loop_exec/2` - Execute code in calling process's namespace
+  - `py_nif:event_loop_eval/2` - Evaluate expression in calling process's namespace
+  - Functions defined via exec callable via `create_task` with `__main__` module
+  - Automatic cleanup when Erlang process exits
+
+- **OWN_GIL Test Suites** - Feature verification
+  - `py_context_owngil_SUITE` - Core OWN_GIL functionality (15 tests)
+  - `py_owngil_features_SUITE` - Feature integration (44 tests covering channels,
+    buffers, callbacks, PIDs, reactor, async tasks, asyncio, local envs)
+
+### Changed
+
+- **Event Loop Lock Ordering** - GIL acquired before `namespaces_mutex` in cleanup paths
+  to prevent ABBA deadlocks with normal execution path
+
+- **Asyncio Compatibility** - Fixed for Python 3.12+ with subinterpreters
+  - Thread-local event loop context in `process_ready_tasks`
+  - Eager task execution handling for Python 3.12+
+  - Deprecation warning fix: use `erlang.run()` instead of `erlang.install()`
+
 ## 2.1.0 (2026-03-12)
 
 ### Added
