@@ -1244,9 +1244,9 @@ pool_stats() ->
 %% on the mode parameter. Returns a reference to the context and its
 %% interpreter ID for routing.
 %%
-%% @param Mode `subinterp' or `worker'
+%% @param Mode `subinterp', `worker', or `owngil'
 %% @returns {ok, ContextRef, InterpId} | {error, Reason}
--spec context_create(subinterp | worker) ->
+-spec context_create(subinterp | worker | owngil) ->
     {ok, reference(), non_neg_integer()} | {error, term()}.
 context_create(_Mode) ->
     ?NIF_STUB.
