@@ -3205,6 +3205,8 @@ static void *owngil_context_thread_main(void *arg) {
 
     PyStatus status = Py_NewInterpreterFromConfig(&ctx->own_gil_tstate, &config);
     if (PyStatus_IsError(status)) {
+        fprintf(stderr, "OWN_GIL: Py_NewInterpreterFromConfig failed: %s\n",
+                status.err_msg ? status.err_msg : "unknown error");
         PyGILState_Release(gstate);
         atomic_store(&ctx->thread_running, false);
         return NULL;
@@ -3218,6 +3220,7 @@ static void *owngil_context_thread_main(void *arg) {
 
     /* Register erlang module in this subinterpreter */
     if (create_erlang_module() < 0) {
+        fprintf(stderr, "OWN_GIL: create_erlang_module failed\n");
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
         atomic_store(&ctx->thread_running, false);
@@ -3226,6 +3229,7 @@ static void *owngil_context_thread_main(void *arg) {
 
     /* Register py_event_loop module for reactor support */
     if (create_py_event_loop_module() < 0) {
+        fprintf(stderr, "OWN_GIL: create_py_event_loop_module failed\n");
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
         atomic_store(&ctx->thread_running, false);
@@ -3676,15 +3680,16 @@ static int owngil_context_init(py_context_t *ctx) {
         return -1;
     }
 
-    /* Wait for thread to initialize */
+    /* Wait for thread to initialize - up to 5 seconds on slow CI */
     int wait_count = 0;
-    while (!atomic_load(&ctx->thread_running) && wait_count < 1000) {
+    while (!atomic_load(&ctx->thread_running) && wait_count < 5000) {
         usleep(1000);  /* 1ms */
         wait_count++;
     }
 
     if (!atomic_load(&ctx->thread_running)) {
-        /* Thread failed to start */
+        /* Thread failed to start - check if there's an init error */
+        fprintf(stderr, "OWN_GIL thread failed to initialize after %d ms\n", wait_count);
         pthread_join(ctx->own_gil_thread, NULL);
         enif_free_env(ctx->shared_env);
         pthread_cond_destroy(&ctx->response_ready);
