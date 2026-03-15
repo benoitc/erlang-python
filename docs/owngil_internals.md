@@ -253,6 +253,129 @@ py_env_resource_dtor(env, res) {
 }
 ```
 
+## Reactor / Event Loop Integration
+
+OWN_GIL contexts support the reactor pattern for I/O-driven protocols. The `py_event_loop` module is registered in each OWN_GIL subinterpreter during startup.
+
+### Why Event Loop Registration Matters
+
+Each Python subinterpreter has its own module namespace. The `py_event_loop` module provides:
+- `erlang.reactor` protocol callbacks (`on_read_ready`, `on_write_ready`, `init_connection`)
+- Per-interpreter state for cached function references
+- Module state isolation between interpreters
+
+### Reactor Request Flow
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                           Erlang                                        │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  py_reactor_context                                                     │
+│       │                                                                 │
+│       │  {select, FdRes, Ref, ready_input}                             │
+│       ▼                                                                 │
+│  handle_info                                                            │
+│       │                                                                 │
+│       ├── Read data from fd into ReactorBuffer                         │
+│       │                                                                 │
+│       └── py_nif:reactor_on_read_ready(CtxRef, Fd)                     │
+│                │                                                        │
+└────────────────┼────────────────────────────────────────────────────────┘
+                 │
+                 │ [ctx->uses_own_gil == true]
+                 ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  dispatch_reactor_read_to_owngil(env, ctx, fd, buffer_ptr)             │
+│       │                                                                 │
+│       ├── ctx->reactor_buffer_ptr = buffer_ptr                         │
+│       ├── ctx->request_type = CTX_REQ_REACTOR_READ                     │
+│       ├── pthread_cond_signal(&request_ready)                          │
+│       └── pthread_cond_wait(&response_ready)                           │
+└────────────────────────────────────────────────────────────────────────┘
+                 │
+                 ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  OWN_GIL Thread                                                         │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  owngil_execute_reactor_read(ctx)                                       │
+│       │                                                                 │
+│       ├── Create ReactorBuffer Python object                           │
+│       │                                                                 │
+│       ├── Get module state (per-interpreter reactor cache)             │
+│       │   state = get_module_state()                                   │
+│       │   ensure_reactor_cached_for_interp(state)                      │
+│       │                                                                 │
+│       └── Call Python: state->reactor_on_read(fd, buffer)              │
+│                │                                                        │
+│                ▼                                                        │
+│           erlang.reactor.on_read_ready(fd, data)                        │
+│                │                                                        │
+│                ▼                                                        │
+│           Protocol.data_received(data)                                  │
+│                │                                                        │
+│                └── Returns action: "continue" | "write_pending" | ...   │
+│                                                                         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Module State Per-Interpreter
+
+Each OWN_GIL subinterpreter maintains its own cached references:
+
+```c
+typedef struct {
+    PyObject *reactor_module;      // erlang.reactor module
+    PyObject *reactor_on_read;     // Cached on_read_ready function
+    PyObject *reactor_on_write;    // Cached on_write_ready function
+    PyObject *reactor_init_conn;   // Cached init_connection function
+    // ...
+} py_event_loop_module_state_t;
+```
+
+The `ensure_reactor_cached_for_interp()` function lazily imports `erlang.reactor` and caches the callback functions on first use within each interpreter.
+
+### Reactor Request Types
+
+| Request Type | Dispatch Function | Execute Function |
+|--------------|-------------------|------------------|
+| `CTX_REQ_REACTOR_READ` | `dispatch_reactor_read_to_owngil` | `owngil_execute_reactor_read` |
+| `CTX_REQ_REACTOR_WRITE` | `dispatch_reactor_write_to_owngil` | `owngil_execute_reactor_write` |
+| `CTX_REQ_REACTOR_INIT` | `dispatch_reactor_init_to_owngil` | `owngil_execute_reactor_init` |
+
+### Buffer Handling
+
+For read operations, the `ReactorBuffer` (zero-copy buffer) is passed through:
+
+1. `py_reactor_context` reads data into a `reactor_buffer_resource_t`
+2. Buffer pointer stored in `ctx->reactor_buffer_ptr`
+3. OWN_GIL thread wraps it in a Python `ReactorBuffer` object
+4. Python protocol receives data via buffer protocol (zero-copy)
+
+### Example: TCP Echo Server with OWN_GIL
+
+```erlang
+%% Start OWN_GIL context for protocol handling
+{ok, Ctx} = py_context:start_link(1, owngil),
+
+%% Define protocol in Python
+py_context:exec(Ctx, <<"
+import erlang.reactor as reactor
+
+class EchoProtocol(reactor.Protocol):
+    def data_received(self, data):
+        self.write(data)  # Echo back
+        return 'write_pending'
+">>),
+
+%% Start reactor with the context
+{ok, Reactor} = py_reactor_context:start_link(#{
+    context => Ctx,
+    protocol_class => <<"EchoProtocol">>
+}).
+```
+
 ## Performance Characteristics
 
 | Operation | Shared-GIL | OWN_GIL |
