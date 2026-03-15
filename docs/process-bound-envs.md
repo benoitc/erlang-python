@@ -249,6 +249,32 @@ Environments are stored as NIF resources with the following lifecycle:
 
 For subinterpreters, environments are created inside the target interpreter using its memory allocator - critical for memory safety.
 
+### Interpreter ID Validation
+
+Each `py_env_resource_t` stores the Python interpreter ID (`interp_id`) when created. For OWN_GIL contexts, before any operation using a process-local env, the system validates that the env belongs to the current interpreter:
+
+```c
+PyInterpreterState *current_interp = PyInterpreterState_Get();
+if (penv->interp_id != PyInterpreterState_GetID(current_interp)) {
+    return {error, env_wrong_interpreter};
+}
+```
+
+This prevents:
+- Using an env from a destroyed interpreter (dangling pointer)
+- Using an env created for a different OWN_GIL context
+- Memory corruption from cross-interpreter dict access
+
+### Cleanup Safety
+
+For the main interpreter (`interp_id == 0`), the destructor acquires the GIL and decrefs the Python dicts normally.
+
+For subinterpreters, the destructor skips `Py_DECREF` because:
+1. `PyGILState_Ensure` cannot safely acquire a subinterpreter's GIL
+2. The Python objects will be freed when the subinterpreter is destroyed via `Py_EndInterpreter`
+
+This design prioritizes safety over avoiding minor memory leaks during edge cases.
+
 ## See Also
 
 - [Context Affinity](context-affinity.md) - Context binding and routing

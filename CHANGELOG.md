@@ -2,6 +2,21 @@
 
 ## 2.2.0 (unreleased)
 
+### Fixed
+
+- **OWN_GIL Safety Fixes** - Critical fixes for OWN_GIL subinterpreter mode
+  - **Mutex leak in erlang module** - `async_futures_mutex` now always destroyed in
+    `erlang_module_free()` regardless of `pipe_initialized` flag
+  - **ABBA deadlock prevention** - Fixed lock ordering in `event_loop_down()` and
+    `event_loop_destructor()` to acquire GIL before `namespaces_mutex`, matching the
+    normal execution path and preventing deadlocks
+  - **Dangling env pointer detection** - Added `interp_id` validation in
+    `owngil_execute_*_with_env()` functions to detect and reject env resources
+    created by a different interpreter, returning `{error, env_wrong_interpreter}`
+  - **OWN_GIL callback documentation** - Documented that `erlang.call()` from OWN_GIL
+    contexts uses `thread_worker_call()` rather than suspension/resume protocol;
+    re-entrant calls to the same OWN_GIL context are not supported
+
 ### Added
 
 - **PyBuffer API** - Zero-copy WSGI input buffer for streaming HTTP bodies

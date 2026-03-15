@@ -242,3 +242,45 @@ pthread_mutex_unlock               PyGILState_Release
 | GIL acquisitions | 1 per batch | Not per-task |
 | Handle allocations | ~0 (pooled) | After warmup |
 | Time syscalls | 1 per iteration | Cached within iteration |
+
+## Per-Process Namespace Management
+
+Each Erlang process can have an isolated Python namespace within an event loop. These namespaces are tracked in a linked list protected by `namespaces_mutex`.
+
+### Lock Ordering
+
+To prevent ABBA deadlocks, locks must always be acquired in this order:
+
+```
+1. GIL (PyGILState_Ensure)
+2. namespaces_mutex (pthread_mutex_lock)
+```
+
+This ordering is enforced in:
+- `ensure_process_namespace()` - Called with GIL held, then acquires mutex
+- `event_loop_down()` - Acquires GIL first, then mutex for cleanup
+- `event_loop_destructor()` - Acquires GIL first, then mutex for cleanup
+
+### Cleanup Behavior
+
+When a monitored process dies (`event_loop_down`) or the event loop is destroyed:
+
+**For main interpreter (`interp_id == 0`):**
+```c
+PyGILState_STATE gstate = PyGILState_Ensure();
+pthread_mutex_lock(&loop->namespaces_mutex);
+// Py_XDECREF(ns->globals), etc.
+pthread_mutex_unlock(&loop->namespaces_mutex);
+PyGILState_Release(gstate);
+```
+
+**For subinterpreters (`interp_id != 0`):**
+```c
+pthread_mutex_lock(&loop->namespaces_mutex);
+// Skip Py_XDECREF - cannot safely acquire subinterpreter GIL
+// Objects freed when interpreter is destroyed
+enif_free(ns);
+pthread_mutex_unlock(&loop->namespaces_mutex);
+```
+
+This design accepts a minor memory leak (Python dicts not decrefd) to avoid the complexity and risk of acquiring a subinterpreter's GIL from an arbitrary thread.

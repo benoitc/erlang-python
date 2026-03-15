@@ -395,11 +395,65 @@ Use shared-GIL (subinterp) when:
 - High call frequency
 - Resource constraints
 
+## Safety Mechanisms
+
+### Interpreter ID Validation
+
+Process-local environments (`py_env_resource_t`) store the Python interpreter ID when created. Before execution, OWN_GIL functions validate that the env belongs to the current interpreter:
+
+```c
+PyInterpreterState *current_interp = PyInterpreterState_Get();
+if (current_interp != NULL && penv->interp_id != PyInterpreterState_GetID(current_interp)) {
+    // Return {error, env_wrong_interpreter}
+}
+```
+
+This prevents dangling pointer access when an env resource outlives its interpreter.
+
+### Lock Ordering (ABBA Deadlock Prevention)
+
+Lock ordering must be consistent to prevent deadlocks:
+
+**Correct order: GIL first, then namespaces_mutex**
+
+Normal execution path:
+```
+PyGILState_Ensure()     // 1. Acquire GIL
+pthread_mutex_lock()     // 2. Acquire mutex
+// ... work ...
+pthread_mutex_unlock()   // 3. Release mutex
+PyGILState_Release()     // 4. Release GIL
+```
+
+Cleanup paths (`event_loop_down`, `event_loop_destructor`) follow the same order:
+```c
+// For main interpreter: GIL first, then mutex
+PyGILState_STATE gstate = PyGILState_Ensure();
+pthread_mutex_lock(&loop->namespaces_mutex);
+// ... cleanup with Py_XDECREF ...
+pthread_mutex_unlock(&loop->namespaces_mutex);
+PyGILState_Release(gstate);
+```
+
+For subinterpreters (where `PyGILState_Ensure` cannot be used), cleanup skips `Py_DECREF` - the objects will be freed when the interpreter is destroyed.
+
+### Callback Re-entry Limitation
+
+OWN_GIL contexts do not support the suspension/resume protocol used for `erlang.call()` callbacks. When Python code in an OWN_GIL context calls `erlang.call()`:
+
+1. The call is routed to `thread_worker_call()` (not the OWN_GIL thread)
+2. The call executes on a thread worker, not the calling OWN_GIL context
+3. Re-entrant calls back to the same OWN_GIL context are not supported
+
+This is because the OWN_GIL thread cannot be suspended - it owns its GIL and must remain responsive to process requests.
+
 ## Files
 
 | File | Description |
 |------|-------------|
 | `c_src/py_nif.h` | Structure definitions, request types |
 | `c_src/py_nif.c` | Thread main, dispatch, execute functions |
+| `c_src/py_callback.c` | Callback handling, thread worker dispatch |
+| `c_src/py_event_loop.c` | Event loop and namespace management |
 | `src/py_context.erl` | Erlang API for context management |
 | `test/py_owngil_features_SUITE.erl` | Test suite |
