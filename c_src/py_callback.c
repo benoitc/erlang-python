@@ -2022,52 +2022,75 @@ static PyObject *erlang_send_impl(PyObject *self, PyObject *args) {
 extern ErlNifPid g_thread_coordinator_pid;
 extern bool g_has_thread_coordinator;
 
-/* Global state for async callbacks */
-static int g_async_callback_pipe[2] = {-1, -1};  /* [0]=read, [1]=write */
-static PyObject *g_async_pending_futures = NULL;  /* Dict: callback_id -> Future */
-static pthread_mutex_t g_async_futures_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* Per-interpreter module state for async callbacks.
+ * Each subinterpreter gets its own pipe and futures dict. */
+typedef struct {
+    int async_callback_pipe[2];      /* [0]=read, [1]=write - per-interpreter pipe */
+    PyObject *async_pending_futures; /* Dict: callback_id -> Future */
+    pthread_mutex_t async_futures_mutex;
+    bool pipe_initialized;
+} erlang_module_state_t;
 
-/* Thread-safe initialization using pthread_once */
-static pthread_once_t g_async_callback_init_once = PTHREAD_ONCE_INIT;
-static int g_async_callback_init_result = 0;
+/* Forward declaration for module state accessor */
+static erlang_module_state_t *get_erlang_module_state(void);
 
 /**
- * Internal initialization function called by pthread_once.
- * Thread-safe: only called once by pthread_once.
+ * Get the erlang module state for the current interpreter.
+ * Returns NULL if module not available.
  */
-static void async_callback_init_impl(void) {
-    if (pipe(g_async_callback_pipe) < 0) {
-        g_async_callback_init_result = -1;
-        return;
+static erlang_module_state_t *get_erlang_module_state(void) {
+    PyObject *name = PyUnicode_FromString("erlang");
+    if (name == NULL) {
+        PyErr_Clear();
+        return NULL;
     }
-
-    /* Set the read end to non-blocking for asyncio compatibility */
-    int flags = fcntl(g_async_callback_pipe[0], F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(g_async_callback_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    PyObject *module = PyImport_GetModule(name);
+    Py_DECREF(name);
+    if (module == NULL) {
+        PyErr_Clear();
+        return NULL;
     }
-
-    g_async_pending_futures = PyDict_New();
-    if (g_async_pending_futures == NULL) {
-        close(g_async_callback_pipe[0]);
-        close(g_async_callback_pipe[1]);
-        g_async_callback_pipe[0] = -1;
-        g_async_callback_pipe[1] = -1;
-        g_async_callback_init_result = -1;
-        return;
-    }
-
-    g_async_callback_init_result = 0;
+    erlang_module_state_t *state = (erlang_module_state_t *)PyModule_GetState(module);
+    Py_DECREF(module);
+    return state;
 }
 
 /**
- * Initialize async callback system.
+ * Initialize async callback system for the current interpreter.
  * Creates the response pipe and pending futures dict.
- * Thread-safe: uses pthread_once for initialization.
+ * Uses per-interpreter module state.
  */
 static int async_callback_init(void) {
-    pthread_once(&g_async_callback_init_once, async_callback_init_impl);
-    return g_async_callback_init_result;
+    erlang_module_state_t *state = get_erlang_module_state();
+    if (state == NULL) {
+        return -1;
+    }
+
+    if (state->pipe_initialized) {
+        return 0;  /* Already initialized for this interpreter */
+    }
+
+    if (pipe(state->async_callback_pipe) < 0) {
+        return -1;
+    }
+
+    /* Set the read end to non-blocking for asyncio compatibility */
+    int flags = fcntl(state->async_callback_pipe[0], F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(state->async_callback_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    }
+
+    state->async_pending_futures = PyDict_New();
+    if (state->async_pending_futures == NULL) {
+        close(state->async_callback_pipe[0]);
+        close(state->async_callback_pipe[1]);
+        state->async_callback_pipe[0] = -1;
+        state->async_callback_pipe[1] = -1;
+        return -1;
+    }
+
+    state->pipe_initialized = true;
+    return 0;
 }
 
 /**
@@ -2076,12 +2099,17 @@ static int async_callback_init(void) {
  * Returns: 1 if processed, 0 if no data, -1 on error
  */
 static int process_async_callback_response(void) {
+    erlang_module_state_t *state = get_erlang_module_state();
+    if (state == NULL || !state->pipe_initialized) {
+        return -1;
+    }
+
     /* Read callback_id (8 bytes) + response_len (4 bytes) + response_data */
     uint64_t callback_id;
     uint32_t response_len;
     ssize_t n;
 
-    n = read(g_async_callback_pipe[0], &callback_id, sizeof(callback_id));
+    n = read(state->async_callback_pipe[0], &callback_id, sizeof(callback_id));
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return 0;  /* No data available (non-blocking) */
@@ -2095,7 +2123,7 @@ static int process_async_callback_response(void) {
         return -1;  /* Partial read - error */
     }
 
-    n = read(g_async_callback_pipe[0], &response_len, sizeof(response_len));
+    n = read(state->async_callback_pipe[0], &response_len, sizeof(response_len));
     if (n != sizeof(response_len)) {
         return -1;
     }
@@ -2106,7 +2134,7 @@ static int process_async_callback_response(void) {
         if (response_data == NULL) {
             return -1;
         }
-        n = read(g_async_callback_pipe[0], response_data, response_len);
+        n = read(state->async_callback_pipe[0], response_data, response_len);
         if (n != (ssize_t)response_len) {
             enif_free(response_data);
             return -1;
@@ -2114,18 +2142,18 @@ static int process_async_callback_response(void) {
     }
 
     /* Look up and resolve the Future */
-    pthread_mutex_lock(&g_async_futures_mutex);
+    pthread_mutex_lock(&state->async_futures_mutex);
 
     PyObject *key = PyLong_FromUnsignedLongLong(callback_id);
-    PyObject *future = PyDict_GetItem(g_async_pending_futures, key);
+    PyObject *future = PyDict_GetItem(state->async_pending_futures, key);
 
     if (future != NULL) {
         Py_INCREF(future);  /* Keep reference while we use it */
-        PyDict_DelItem(g_async_pending_futures, key);
+        PyDict_DelItem(state->async_pending_futures, key);
     }
     Py_DECREF(key);
 
-    pthread_mutex_unlock(&g_async_futures_mutex);
+    pthread_mutex_unlock(&state->async_futures_mutex);
 
     if (future != NULL) {
         /* Parse response and resolve Future */
@@ -2206,13 +2234,19 @@ static PyObject *get_async_callback_fd(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
 
-    /* async_callback_init uses pthread_once, so it's safe to call multiple times */
+    /* Initialize per-interpreter pipe if needed */
     if (async_callback_init() < 0) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize async callback system");
         return NULL;
     }
 
-    return PyLong_FromLong(g_async_callback_pipe[0]);
+    erlang_module_state_t *state = get_erlang_module_state();
+    if (state == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Module state not available");
+        return NULL;
+    }
+
+    return PyLong_FromLong(state->async_callback_pipe[0]);
 }
 
 /**
@@ -2252,6 +2286,13 @@ static PyObject *send_async_callback_request(PyObject *self, PyObject *args) {
         return NULL;
     }
 
+    /* Get per-interpreter state for the pipe */
+    erlang_module_state_t *state = get_erlang_module_state();
+    if (state == NULL || !state->pipe_initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "Async callback system not initialized");
+        return NULL;
+    }
+
     /* Generate callback ID */
     uint64_t callback_id = atomic_fetch_add(&g_callback_id_counter, 1);
 
@@ -2277,13 +2318,13 @@ static PyObject *send_async_callback_request(PyObject *self, PyObject *args) {
     ERL_NIF_TERM id_term = enif_make_uint64(msg_env, callback_id);
 
     /* Send message: {async_callback, CallbackId, FuncName, Args, WriteFd}
-     * The WriteFd is the async callback pipe write end */
+     * The WriteFd is the per-interpreter async callback pipe write end */
     ERL_NIF_TERM msg = enif_make_tuple5(msg_env,
         enif_make_atom(msg_env, "async_callback"),
         id_term,
         func_term,
         args_term,
-        enif_make_int(msg_env, g_async_callback_pipe[1]));
+        enif_make_int(msg_env, state->async_callback_pipe[1]));
 
     if (!enif_send(NULL, &g_thread_coordinator_pid, msg_env, msg)) {
         enif_free_env(msg_env);
@@ -2308,14 +2349,20 @@ static PyObject *register_async_future(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    pthread_mutex_lock(&g_async_futures_mutex);
+    erlang_module_state_t *state = get_erlang_module_state();
+    if (state == NULL || state->async_pending_futures == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Async callback system not initialized");
+        return NULL;
+    }
+
+    pthread_mutex_lock(&state->async_futures_mutex);
 
     PyObject *key = PyLong_FromUnsignedLongLong(callback_id);
     Py_INCREF(future);
-    PyDict_SetItem(g_async_pending_futures, key, future);
+    PyDict_SetItem(state->async_pending_futures, key, future);
     Py_DECREF(key);
 
-    pthread_mutex_unlock(&g_async_futures_mutex);
+    pthread_mutex_unlock(&state->async_futures_mutex);
 
     Py_RETURN_NONE;
 }
@@ -2704,13 +2751,42 @@ static PyMethodDef getattr_method = {
     "Get an Erlang function wrapper by name."
 };
 
+/**
+ * Module cleanup - called when module is deallocated.
+ * Closes per-interpreter pipe and frees futures dict.
+ */
+static void erlang_module_free(void *module) {
+    erlang_module_state_t *state = PyModule_GetState((PyObject *)module);
+    if (state == NULL) {
+        return;
+    }
+
+    if (state->async_callback_pipe[0] >= 0) {
+        close(state->async_callback_pipe[0]);
+        state->async_callback_pipe[0] = -1;
+    }
+    if (state->async_callback_pipe[1] >= 0) {
+        close(state->async_callback_pipe[1]);
+        state->async_callback_pipe[1] = -1;
+    }
+
+    Py_XDECREF(state->async_pending_futures);
+    state->async_pending_futures = NULL;
+
+    if (state->pipe_initialized) {
+        pthread_mutex_destroy(&state->async_futures_mutex);
+        state->pipe_initialized = false;
+    }
+}
+
 /* Module definition */
 static struct PyModuleDef ErlangModuleDef = {
     PyModuleDef_HEAD_INIT,
-    "erlang",                           /* Module name */
-    "Interface for calling Erlang functions from Python.",  /* Docstring */
-    -1,                                 /* Size of per-interpreter state (-1 = global) */
-    ErlangModuleMethods                 /* Methods */
+    .m_name = "erlang",
+    .m_doc = "Interface for calling Erlang functions from Python.",
+    .m_size = sizeof(erlang_module_state_t),  /* Per-interpreter state */
+    .m_methods = ErlangModuleMethods,
+    .m_free = erlang_module_free,
 };
 
 /**
@@ -2760,6 +2836,16 @@ static int create_erlang_module(void) {
     PyObject *module = PyModule_Create(&ErlangModuleDef);
     if (module == NULL) {
         return -1;
+    }
+
+    /* Initialize per-interpreter module state */
+    erlang_module_state_t *state = PyModule_GetState(module);
+    if (state != NULL) {
+        state->async_callback_pipe[0] = -1;
+        state->async_callback_pipe[1] = -1;
+        state->async_pending_futures = NULL;
+        pthread_mutex_init(&state->async_futures_mutex, NULL);
+        state->pipe_initialized = false;
     }
 
     /* Create the SuspensionRequired exception.
