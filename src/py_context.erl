@@ -48,7 +48,8 @@
     to_term/1,
     get_interp_id/1,
     is_subinterp/1,
-    create_local_env/1
+    create_local_env/1,
+    get_nif_ref/1
 ]).
 
 %% Internal exports
@@ -348,6 +349,20 @@ create_local_env(Ctx) when is_pid(Ctx) ->
             {error, {context_died, Reason}}
     end.
 
+%% @doc Get the NIF context reference from a context process.
+%% This is useful for calling low-level py_nif functions directly.
+-spec get_nif_ref(context()) -> reference().
+get_nif_ref(Ctx) when is_pid(Ctx) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {get_nif_ref, self(), MRef},
+    receive
+        {MRef, Ref} ->
+            erlang:demonitor(MRef, [flush]),
+            Ref;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            error({context_died, Reason})
+    end.
+
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
@@ -509,6 +524,10 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
             %% Create env inside this context's interpreter
             Result = py_nif:create_local_env(Ref),
             From ! {MRef, Result},
+            loop(State);
+
+        {get_nif_ref, From, MRef} ->
+            From ! {MRef, Ref},
             loop(State);
 
         {stop, From, MRef} ->
@@ -818,6 +837,10 @@ wait_for_callback(Ref, CallbackPid) ->
         {create_local_env, From, MRef} ->
             Result = py_nif:create_local_env(Ref),
             From ! {MRef, Result},
+            wait_for_callback(Ref, CallbackPid);
+
+        {get_nif_ref, From, MRef} ->
+            From ! {MRef, Ref},
             wait_for_callback(Ref, CallbackPid)
     end.
 

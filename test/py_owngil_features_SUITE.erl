@@ -90,6 +90,12 @@
     owngil_asyncio_parallel_loops_test/1
 ]).
 
+%% Local env tests
+-export([
+    owngil_local_env_isolation_test/1,
+    owngil_local_env_call_test/1
+]).
+
 all() ->
     [{group, channels},
      {group, buffers},
@@ -97,7 +103,8 @@ all() ->
      {group, pid_send},
      {group, reactor},
      {group, async_task},
-     {group, asyncio}].
+     {group, asyncio},
+     {group, local_env}].
 
 groups() ->
     [{channels, [sequence], [
@@ -155,6 +162,10 @@ groups() ->
         owngil_asyncio_basic_sleep_test,
         owngil_asyncio_gather_test,
         owngil_asyncio_parallel_loops_test
+    ]},
+     {local_env, [sequence], [
+        owngil_local_env_isolation_test,
+        owngil_local_env_call_test
     ]}].
 
 init_per_suite(Config) ->
@@ -1403,3 +1414,67 @@ create_socketpair() ->
 get_fd(Socket) ->
     {ok, Fd} = inet:getfd(Socket),
     Fd.
+
+%%% ============================================================================
+%%% Local Environment Tests
+%%% ============================================================================
+
+%% @doc Test process-local env isolation in OWN_GIL contexts
+owngil_local_env_isolation_test(_Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+
+    %% Create two separate local environments
+    {ok, Env1} = py_context:create_local_env(Ctx),
+    {ok, Env2} = py_context:create_local_env(Ctx),
+
+    CtxRef = py_context:get_nif_ref(Ctx),
+
+    %% Set different values in each environment
+    %% py_nif:context_exec/3 is the with_env variant (arity overload)
+    ok = py_nif:context_exec(CtxRef, <<"x = 1">>, Env1),
+    ok = py_nif:context_exec(CtxRef, <<"x = 2">>, Env2),
+
+    %% Verify each environment has its own isolated value
+    %% py_nif:context_eval/4 is the with_env variant (arity overload)
+    {ok, 1} = py_nif:context_eval(CtxRef, <<"x">>, #{}, Env1),
+    {ok, 2} = py_nif:context_eval(CtxRef, <<"x">>, #{}, Env2),
+
+    %% Test isolation: setting y in Env1 should not affect Env2
+    ok = py_nif:context_exec(CtxRef, <<"y = 'env1'">>, Env1),
+    {ok, <<"env1">>} = py_nif:context_eval(CtxRef, <<"y">>, #{}, Env1),
+
+    %% y should not exist in Env2
+    Result = py_nif:context_eval(CtxRef, <<"y">>, #{}, Env2),
+    case Result of
+        {error, _} -> ok;  %% Expected: NameError
+        _ -> ct:fail({unexpected_result, Result})
+    end,
+
+    py_context:stop(Ctx).
+
+%% @doc Test calling functions defined in local env via OWN_GIL context
+owngil_local_env_call_test(_Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+
+    %% Create local environment
+    {ok, Env} = py_context:create_local_env(Ctx),
+    CtxRef = py_context:get_nif_ref(Ctx),
+
+    %% Define a function in the local environment
+    %% py_nif:context_exec/3 is the with_env variant (arity overload)
+    ok = py_nif:context_exec(CtxRef, <<"
+def double(x):
+    return x * 2
+
+def greet(name):
+    return f'Hello, {name}!'
+">>, Env),
+
+    %% Call the function using call/6 (the with_env variant by arity)
+    {ok, 42} = py_nif:context_call(CtxRef, <<"__main__">>, <<"double">>, [21], #{}, Env),
+    {ok, <<"Hello, World!">>} = py_nif:context_call(CtxRef, <<"__main__">>, <<"greet">>, [<<"World">>], #{}, Env),
+
+    %% Test calling imported module function
+    {ok, 2.0} = py_nif:context_call(CtxRef, <<"math">>, <<"sqrt">>, [4.0], #{}, Env),
+
+    py_context:stop(Ctx).

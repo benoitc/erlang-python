@@ -715,7 +715,12 @@ typedef enum {
     /* Reactor dispatch requests for OWN_GIL mode */
     CTX_REQ_REACTOR_ON_READ_READY,   /**< Handle read ready event */
     CTX_REQ_REACTOR_ON_WRITE_READY,  /**< Handle write ready event */
-    CTX_REQ_REACTOR_INIT_CONNECTION  /**< Initialize a connection */
+    CTX_REQ_REACTOR_INIT_CONNECTION, /**< Initialize a connection */
+    /* Process-local environment requests for OWN_GIL mode */
+    CTX_REQ_CALL_WITH_ENV,      /**< Call with process-local environment */
+    CTX_REQ_EVAL_WITH_ENV,      /**< Eval with process-local environment */
+    CTX_REQ_EXEC_WITH_ENV,      /**< Exec with process-local environment */
+    CTX_REQ_CREATE_LOCAL_ENV    /**< Create process-local env dicts */
 } ctx_request_type_t;
 
 /**
@@ -841,6 +846,9 @@ typedef struct {
 
     /** @brief Auxiliary pointer for reactor buffer (OWN_GIL dispatch) */
     void *reactor_buffer_ptr;
+
+    /** @brief Process-local env pointer for OWN_GIL dispatch (py_env_resource_t*) */
+    void *local_env_ptr;
 
     /* Lifecycle flags */
 
