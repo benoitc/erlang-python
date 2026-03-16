@@ -62,7 +62,7 @@ Return values from Python are converted back to Erlang:
 
 | Python | Erlang | Notes |
 |--------|--------|-------|
-| `int` | `integer()` | Arbitrary precision supported |
+| `int` | `integer()` or `string()` | Integers > 64 bits returned as strings |
 | `float` | `float()` | IEEE 754 double precision |
 | `float('nan')` | `nan` | Atom for Not-a-Number |
 | `float('inf')` | `infinity` | Atom for positive infinity |
@@ -83,7 +83,9 @@ Return values from Python are converted back to Erlang:
 ```erlang
 %% Integers
 {ok, 42} = py:eval(<<"42">>).
-{ok, 123456789012345678901234567890} = py:eval(<<"123456789012345678901234567890">>).
+
+%% Big integers (> 64 bits) are returned as strings
+{ok, "123456789012345678901234567890"} = py:eval(<<"123456789012345678901234567890">>).
 
 %% Floats
 {ok, 3.14} = py:eval(<<"3.14">>).
@@ -248,7 +250,7 @@ Some Python types cannot be directly converted:
 
 - **Large strings**: Binary conversion is efficient, but very large strings may cause memory pressure
 - **Deep nesting**: Deeply nested structures require recursive traversal
-- **Big integers**: Arbitrary precision integers work but large ones are slower
+- **Big integers**: Integers larger than 64 bits are returned as strings; convert with `list_to_integer/1` if needed
 - **NumPy arrays**: Call `.tolist()` for explicit conversion; direct array conversion may be slower
 
 For large data transfers, consider:
