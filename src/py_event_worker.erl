@@ -134,6 +134,9 @@ drain_tasks_loop(LoopRef) ->
             ok;
         {error, py_loop_not_set} ->
             ok;
+        {error, task_queue_not_initialized} ->
+            %% Loop is being destroyed, ignore
+            ok;
         {error, Reason} ->
             error_logger:warning_msg("py_event_worker: task processing failed: ~p~n", [Reason]),
             ok
