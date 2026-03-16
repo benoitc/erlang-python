@@ -935,6 +935,22 @@ ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]);
 
 /**
+ * @brief Set the shared router PID for per-loop created loops
+ *
+ * NIF: set_shared_router(RouterPid) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Set the shared worker PID for task_ready notifications
+ *
+ * NIF: set_shared_worker(WorkerPid) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_set_shared_worker(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]);
+
+/**
  * @brief Create and register the py_event_loop Python module
  *
  * Called during Python initialization.

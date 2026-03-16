@@ -17,6 +17,7 @@
     test_async_coroutine/1,
     test_async_with_args/1,
     test_async_sleep/1,
+    test_timer_event_triggering/1,
     %% Error handling tests
     test_async_error/1,
     test_invalid_module/1,
@@ -54,6 +55,7 @@ all() ->
         test_async_coroutine,
         test_async_with_args,
         test_async_sleep,
+        test_timer_event_triggering,
         %% Error handling tests
         test_async_error,
         test_invalid_module,
@@ -175,6 +177,45 @@ test_async_sleep(_Config) ->
     lists:foreach(fun({N, {ok, R}}) ->
         true = abs(R - float(N)) < 0.0001
     end, Results).
+
+test_timer_event_triggering(_Config) ->
+    %% Test that timer events properly trigger event loop processing.
+    %%
+    %% This verifies the fix for the timer event triggering issue where
+    %% asyncio.sleep would never complete because dispatch_timer added
+    %% events to pending_head but nothing called _run_once to process them.
+    %%
+    %% The fix ensures that after dispatching timer/FD events, the worker
+    %% sends task_ready to itself to trigger _run_once processing.
+    %%
+    %% Uses test_async_task module which has async functions with asyncio.sleep.
+
+    %% Test simple_task which uses asyncio.sleep(0.01)
+    ct:log("Testing simple async task with asyncio.sleep..."),
+    Ref1 = py_event_loop:create_task(test_async_task, simple_task, []),
+    Result1 = py_event_loop:await(Ref1, 5000),
+    ct:log("simple_task result: ~p", [Result1]),
+    {ok, <<"hello from async">>} = Result1,
+
+    %% Test task_with_args which uses asyncio.sleep(0.01)
+    ct:log("Testing async task with args and asyncio.sleep..."),
+    Ref2 = py_event_loop:create_task(test_async_task, task_with_args, [10, 32]),
+    Result2 = py_event_loop:await(Ref2, 5000),
+    ct:log("task_with_args result: ~p", [Result2]),
+    {ok, 42} = Result2,
+
+    %% Test concurrent async tasks with sleep
+    ct:log("Testing concurrent async tasks with asyncio.sleep..."),
+    Refs = [py_event_loop:create_task(test_async_task, task_with_args, [N, N])
+            || N <- lists:seq(1, 5)],
+    Results = [py_event_loop:await(Ref, 5000) || Ref <- Refs],
+    ct:log("Concurrent results: ~p", [Results]),
+
+    %% Verify all completed with correct values (N + N)
+    Expected = [{ok, N * 2} || N <- lists:seq(1, 5)],
+    Expected = Results,
+
+    ct:log("timer_event_triggering test: all asyncio.sleep operations completed").
 
 %% ============================================================================
 %% Error handling tests

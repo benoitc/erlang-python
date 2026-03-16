@@ -152,6 +152,7 @@
     set_python_event_loop/1,
     set_isolation_mode/1,
     set_shared_router/1,
+    set_shared_worker/1,
     %% ASGI optimizations
     asgi_build_scope/1,
     asgi_run/5,
@@ -1058,6 +1059,13 @@ set_isolation_mode(_Mode) ->
 %% for FD monitoring and timer operations.
 -spec set_shared_router(pid()) -> ok | {error, term()}.
 set_shared_router(_RouterPid) ->
+    ?NIF_STUB.
+
+%% @doc Set the shared worker PID for task_ready notifications.
+%% The worker receives task_ready messages from dispatch_timer and other
+%% event sources to trigger process_ready_tasks.
+-spec set_shared_worker(pid()) -> ok | {error, term()}.
+set_shared_worker(_WorkerPid) ->
     ?NIF_STUB.
 
 %%% ============================================================================

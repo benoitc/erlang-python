@@ -1373,6 +1373,21 @@ extern PyObject *ProcessErrorException;
 typedef struct { PyObject_HEAD; ErlNifPid pid; } ErlangPidObject;
 extern PyTypeObject ErlangPidType;
 
+/** @brief Python type for opaque Erlang references (stored as serialized binary) */
+typedef struct {
+    PyObject_HEAD;
+    unsigned char *data;  /* Serialized reference data */
+    size_t size;          /* Size of serialized data */
+} ErlangRefObject;
+extern PyTypeObject ErlangRefType;
+
+/** @brief Python type for Erlang atoms (stored as string) */
+typedef struct {
+    PyObject_HEAD;
+    char *name;           /* Atom name (null-terminated) */
+} ErlangAtomObject;
+extern PyTypeObject ErlangAtomType;
+
 /** @brief Cached numpy.ndarray type for fast isinstance checks (NULL if numpy unavailable) */
 extern PyObject *g_numpy_ndarray_type;
 

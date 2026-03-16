@@ -114,8 +114,20 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             # Fallback for testing without actual NIF
             self._pel = _MockNifModule()
 
-        # Create isolated loop capsule
-        self._loop_capsule = self._pel._loop_new()
+        # Use the global loop capsule instead of creating a new one.
+        # The global loop (created by Erlang) has has_worker=true, which ensures
+        # that timers and FD events are dispatched to the worker process.
+        # The worker triggers process_ready_tasks which calls _run_once.
+        # Without this, Python-created loops would have their own pending queues
+        # that never get processed because the worker doesn't know about them.
+        if hasattr(self._pel, '_get_global_loop_capsule'):
+            try:
+                self._loop_capsule = self._pel._get_global_loop_capsule()
+            except RuntimeError:
+                # Fall back to creating a new loop if global not available
+                self._loop_capsule = self._pel._loop_new()
+        else:
+            self._loop_capsule = self._pel._loop_new()
 
         # Store reference to this Python loop in the C struct
         # This enables process_ready_tasks to access the loop directly
@@ -1058,6 +1070,13 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 if not handle._cancelled:
                     self._ready_append(handle)
 
+    def _get_ready_count(self):
+        """Return the number of ready callbacks.
+
+        Used by C code to check if there's more work to do.
+        """
+        return len(self._ready)
+
     def _check_closed(self):
         """Raise an error if the loop is closed."""
         if self._closed:
@@ -1281,16 +1300,25 @@ async def _run_and_send(coro, caller_pid, ref):
         ref: A reference to include in the result message
 
     The result message format is:
-        ('async_result', ref, ('ok', result)) - on success
-        ('async_result', ref, ('error', error_str)) - on failure
+        (async_result, ref, (ok, result)) - on success
+        (async_result, ref, (error, error_str)) - on failure
+
+    Note: Uses erlang.atom() to create atoms for message keys, since Python
+    strings become Erlang binaries but the await function expects atoms.
     """
     import erlang
+
+    # Create atoms for message keys (strings become binaries, await expects atoms)
+    async_result = erlang.atom('async_result')
+    ok = erlang.atom('ok')
+    error = erlang.atom('error')
+
     try:
         result = await coro
-        erlang.send(caller_pid, ('async_result', ref, ('ok', result)))
+        erlang.send(caller_pid, (async_result, ref, (ok, result)))
     except asyncio.CancelledError:
-        erlang.send(caller_pid, ('async_result', ref, ('error', 'cancelled')))
+        erlang.send(caller_pid, (async_result, ref, (error, 'cancelled')))
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        erlang.send(caller_pid, ('async_result', ref, ('error', f'{type(e).__name__}: {e}\n{tb}')))
+        erlang.send(caller_pid, (async_result, ref, (error, f'{type(e).__name__}: {e}\n{tb}')))

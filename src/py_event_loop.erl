@@ -290,6 +290,8 @@ init([]) ->
             {ok, WorkerPid} = py_event_worker:start_link(WorkerId, LoopRef),
             ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
             ok = py_nif:event_loop_set_id(LoopRef, WorkerId),
+            %% Set global shared worker for dispatch_timer task_ready notifications
+            ok = py_nif:set_shared_worker(WorkerPid),
 
             %% Also start legacy router for backward compatibility
             {ok, RouterPid} = py_event_router:start_link(LoopRef),
@@ -356,7 +358,9 @@ handle_call(get_loop, _From, #state{loop_ref = undefined} = State) ->
             {ok, WorkerPid} = py_event_worker:start_link(WorkerId, LoopRef),
             ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
             ok = py_nif:event_loop_set_id(LoopRef, WorkerId),
+            ok = py_nif:set_shared_worker(WorkerPid),
             {ok, RouterPid} = py_event_router:start_link(LoopRef),
+            ok = py_nif:set_shared_router(RouterPid),
             ok = py_nif:set_python_event_loop(LoopRef),
             NewState = State#state{
                 loop_ref = LoopRef,

@@ -1277,6 +1277,168 @@ PyTypeObject ErlangPidType = {
 };
 
 /* ============================================================================
+ * ErlangRef - opaque Erlang reference type
+ *
+ * Stores the reference as a serialized binary for round-trip through Python.
+ * ============================================================================ */
+
+static void ErlangRef_dealloc(ErlangRefObject *self) {
+    if (self->data != NULL) {
+        PyMem_Free(self->data);
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *ErlangRef_repr(ErlangRefObject *self) {
+    return PyUnicode_FromFormat("<erlang.Ref size=%zu>", self->size);
+}
+
+static PyObject *ErlangRef_richcompare(PyObject *a, PyObject *b, int op) {
+    if (!Py_IS_TYPE(b, &ErlangRefType)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    ErlangRefObject *ra = (ErlangRefObject *)a;
+    ErlangRefObject *rb = (ErlangRefObject *)b;
+
+    int cmp = 0;
+    if (ra->size != rb->size) {
+        cmp = (ra->size < rb->size) ? -1 : 1;
+    } else {
+        cmp = memcmp(ra->data, rb->data, ra->size);
+    }
+
+    switch (op) {
+        case Py_EQ: return PyBool_FromLong(cmp == 0);
+        case Py_NE: return PyBool_FromLong(cmp != 0);
+        default: Py_RETURN_NOTIMPLEMENTED;
+    }
+}
+
+static Py_hash_t ErlangRef_hash(ErlangRefObject *self) {
+    /* Simple hash of the serialized data */
+    Py_hash_t h = 0;
+    for (size_t i = 0; i < self->size; i++) {
+        h = h * 31 + self->data[i];
+    }
+    if (h == -1) h = -2;
+    return h;
+}
+
+PyTypeObject ErlangRefType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang.Ref",
+    .tp_basicsize = sizeof(ErlangRefObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)ErlangRef_dealloc,
+    .tp_repr = (reprfunc)ErlangRef_repr,
+    .tp_richcompare = ErlangRef_richcompare,
+    .tp_hash = (hashfunc)ErlangRef_hash,
+    .tp_doc = "Opaque Erlang reference",
+};
+
+/* ============================================================================
+ * ErlangAtom - Python type for Erlang atoms
+ *
+ * Erlang atoms are symbols (like Ruby symbols or Lisp symbols). This type
+ * allows Python code to explicitly create atoms for message passing.
+ * ============================================================================ */
+
+static void ErlangAtom_dealloc(ErlangAtomObject *self) {
+    if (self->name != NULL) {
+        PyMem_Free(self->name);
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *ErlangAtom_repr(ErlangAtomObject *self) {
+    return PyUnicode_FromFormat("<erlang.Atom '%s'>", self->name);
+}
+
+static PyObject *ErlangAtom_str(ErlangAtomObject *self) {
+    return PyUnicode_FromString(self->name);
+}
+
+static PyObject *ErlangAtom_richcompare(PyObject *a, PyObject *b, int op) {
+    if (!Py_IS_TYPE(b, &ErlangAtomType)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    ErlangAtomObject *aa = (ErlangAtomObject *)a;
+    ErlangAtomObject *ab = (ErlangAtomObject *)b;
+
+    int cmp = strcmp(aa->name, ab->name);
+
+    switch (op) {
+        case Py_EQ: return PyBool_FromLong(cmp == 0);
+        case Py_NE: return PyBool_FromLong(cmp != 0);
+        case Py_LT: return PyBool_FromLong(cmp < 0);
+        case Py_LE: return PyBool_FromLong(cmp <= 0);
+        case Py_GT: return PyBool_FromLong(cmp > 0);
+        case Py_GE: return PyBool_FromLong(cmp >= 0);
+        default: Py_RETURN_NOTIMPLEMENTED;
+    }
+}
+
+static Py_hash_t ErlangAtom_hash(ErlangAtomObject *self) {
+    /* Use Python's string hash for consistency */
+    PyObject *str = PyUnicode_FromString(self->name);
+    if (str == NULL) return -1;
+    Py_hash_t h = PyObject_Hash(str);
+    Py_DECREF(str);
+    return h;
+}
+
+PyTypeObject ErlangAtomType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "erlang.Atom",
+    .tp_basicsize = sizeof(ErlangAtomObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)ErlangAtom_dealloc,
+    .tp_repr = (reprfunc)ErlangAtom_repr,
+    .tp_str = (reprfunc)ErlangAtom_str,
+    .tp_richcompare = ErlangAtom_richcompare,
+    .tp_hash = (hashfunc)ErlangAtom_hash,
+    .tp_doc = "Erlang atom (symbol)",
+};
+
+/**
+ * erlang.atom(name) - Create an Erlang atom
+ *
+ * Args: name (string)
+ * Returns: ErlangAtomObject
+ */
+static PyObject *erlang_atom_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    const char *name;
+    Py_ssize_t name_len;
+
+    if (!PyArg_ParseTuple(args, "s#", &name, &name_len)) {
+        return NULL;
+    }
+
+    /* Validate atom name length (Erlang limit is 255 bytes) */
+    if (name_len > 255) {
+        PyErr_SetString(PyExc_ValueError, "Atom name too long (max 255 bytes)");
+        return NULL;
+    }
+
+    ErlangAtomObject *obj = PyObject_New(ErlangAtomObject, &ErlangAtomType);
+    if (obj == NULL) {
+        return NULL;
+    }
+
+    obj->name = PyMem_Malloc(name_len + 1);
+    if (obj->name == NULL) {
+        Py_DECREF(obj);
+        return PyErr_NoMemory();
+    }
+
+    memcpy(obj->name, name, name_len);
+    obj->name[name_len] = '\0';
+
+    return (PyObject *)obj;
+}
+
+/* ============================================================================
  * ScheduleMarker - marker type for explicit scheduler release
  *
  * When a Python handler returns a ScheduleMarker, the NIF detects it and
@@ -2002,7 +2164,9 @@ static PyObject *erlang_send_impl(PyObject *self, PyObject *args) {
     }
 
     /* Fire-and-forget send */
-    if (!enif_send(NULL, &pid->pid, msg_env, msg)) {
+    int send_result = enif_send(NULL, &pid->pid, msg_env, msg);
+
+    if (!send_result) {
         enif_free_env(msg_env);
         PyErr_SetString(get_current_process_error(),
             "Failed to send message: process may not exist");
@@ -2698,6 +2862,10 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Call a registered Erlang function.\n\n"
      "Usage: erlang.call('func_name', arg1, arg2, ...)\n"
      "Returns: The result from the Erlang function."},
+    {"atom", erlang_atom_impl, METH_VARARGS,
+     "Create an Erlang atom.\n\n"
+     "Usage: erlang.atom('name')\n"
+     "Returns: An ErlangAtom object that converts to an Erlang atom."},
     {"send", erlang_send_impl, METH_VARARGS,
      "Send a message to an Erlang process (fire-and-forget).\n\n"
      "Usage: erlang.send(pid, term)\n"
@@ -2840,6 +3008,16 @@ static int create_erlang_module(void) {
         return -1;
     }
 
+    /* Initialize ErlangRef type */
+    if (PyType_Ready(&ErlangRefType) < 0) {
+        return -1;
+    }
+
+    /* Initialize ErlangAtom type */
+    if (PyType_Ready(&ErlangAtomType) < 0) {
+        return -1;
+    }
+
     /* Initialize ScheduleMarker type */
     if (PyType_Ready(&ScheduleMarkerType) < 0) {
         return -1;
@@ -2907,6 +3085,22 @@ static int create_erlang_module(void) {
     Py_INCREF(&ErlangPidType);
     if (PyModule_AddObject(module, "Pid", (PyObject *)&ErlangPidType) < 0) {
         Py_DECREF(&ErlangPidType);
+        Py_DECREF(module);
+        return -1;
+    }
+
+    /* Add ErlangRef type to module */
+    Py_INCREF(&ErlangRefType);
+    if (PyModule_AddObject(module, "Ref", (PyObject *)&ErlangRefType) < 0) {
+        Py_DECREF(&ErlangRefType);
+        Py_DECREF(module);
+        return -1;
+    }
+
+    /* Add ErlangAtom type to module */
+    Py_INCREF(&ErlangAtomType);
+    if (PyModule_AddObject(module, "Atom", (PyObject *)&ErlangAtomType) < 0) {
+        Py_DECREF(&ErlangAtomType);
         Py_DECREF(module);
         return -1;
     }

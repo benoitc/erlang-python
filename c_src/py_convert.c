@@ -339,6 +339,23 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         return enif_make_pid(env, &pid_obj->pid);
     }
 
+    /* Handle ErlangRef → Erlang reference (deserialize from binary) */
+    if (Py_IS_TYPE(obj, &ErlangRefType)) {
+        ErlangRefObject *ref_obj = (ErlangRefObject *)obj;
+        ERL_NIF_TERM result;
+        if (enif_binary_to_term(env, ref_obj->data, ref_obj->size, &result, 0) > 0) {
+            return result;
+        }
+        /* Failed to deserialize - return undefined */
+        return enif_make_atom(env, "undefined");
+    }
+
+    /* Handle ErlangAtom → Erlang atom */
+    if (Py_IS_TYPE(obj, &ErlangAtomType)) {
+        ErlangAtomObject *atom_obj = (ErlangAtomObject *)obj;
+        return enif_make_atom(env, atom_obj->name);
+    }
+
     /* Handle NumPy arrays by converting to Python list first */
     if (is_numpy_ndarray(obj)) {
         PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
@@ -601,6 +618,31 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         /* Wrap the buffer resource in a PyBufferObject.
          * PyBuffer_from_resource increments the resource refcount. */
         return PyBuffer_from_resource(pybuf, pybuf);
+    }
+
+    /* Check for reference - serialize to binary for round-trip.
+     * IMPORTANT: This must come AFTER all resource checks, because NIF
+     * resource terms also satisfy enif_is_ref() but should be handled
+     * as their specific resource type (PyObj, Channel, Buffer, etc). */
+    if (enif_is_ref(env, term)) {
+        ErlNifBinary bin;
+        if (enif_term_to_binary(env, term, &bin)) {
+            ErlangRefObject *obj = PyObject_New(ErlangRefObject, &ErlangRefType);
+            if (obj == NULL) {
+                enif_release_binary(&bin);
+                return NULL;
+            }
+            obj->data = PyMem_Malloc(bin.size);
+            if (obj->data == NULL) {
+                Py_DECREF(obj);
+                enif_release_binary(&bin);
+                return NULL;
+            }
+            memcpy(obj->data, bin.data, bin.size);
+            obj->size = bin.size;
+            enif_release_binary(&bin);
+            return (PyObject *)obj;
+        }
     }
 
     /* Fallback: return None for unknown types */

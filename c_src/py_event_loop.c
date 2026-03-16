@@ -144,6 +144,15 @@ static ErlNifPid g_global_shared_router;
 static bool g_global_shared_router_valid = false;
 static pthread_mutex_t g_global_router_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Global shared worker for scalable I/O model.
+ * Used by dispatch_timer to send task_ready, ensuring process_ready_tasks
+ * is called after timer events. This centralizes the wakeup mechanism
+ * so both router-dispatched and worker-dispatched timers work correctly.
+ */
+static ErlNifPid g_global_shared_worker;
+static bool g_global_shared_worker_valid = false;
+static pthread_mutex_t g_global_worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* ============================================================================
  * Per-Interpreter Reactor Cache
  * ============================================================================
@@ -1786,6 +1795,9 @@ ERL_NIF_TERM nif_dispatch_callback(ErlNifEnv *env, int argc,
  * dispatch_timer(LoopRef, CallbackId) -> ok
  *
  * Called when a timer expires.
+ * Adds timer event to pending queue and sends task_ready to worker
+ * to trigger process_ready_tasks. This ensures _run_once is called
+ * to handle the timer callback.
  */
 ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
                                 const ERL_NIF_TERM argv[]) {
@@ -1803,6 +1815,21 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
     }
 
     event_loop_add_pending(loop, EVENT_TYPE_TIMER, callback_id, -1);
+
+    /* Send task_ready to worker to trigger process_ready_tasks.
+     * This ensures _run_once is called to handle the timer callback.
+     * Without this, timers dispatched via the router would never be processed
+     * because the worker wouldn't know there are pending events. */
+    pthread_mutex_lock(&g_global_worker_mutex);
+    if (g_global_shared_worker_valid) {
+        ErlNifEnv *msg_env = enif_alloc_env();
+        if (msg_env != NULL) {
+            ERL_NIF_TERM task_ready_atom = enif_make_atom(msg_env, "task_ready");
+            enif_send(NULL, &g_global_shared_worker, msg_env, task_ready_atom);
+            enif_free_env(msg_env);
+        }
+    }
+    pthread_mutex_unlock(&g_global_worker_mutex);
 
     return ATOM_OK;
 }
@@ -2535,10 +2562,17 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
      */
     atomic_store(&loop->task_wake_pending, false);
 
-    /* OPTIMIZATION: Check task count BEFORE acquiring GIL
-     * This avoids expensive GIL acquisition when there's nothing to do */
+    /* OPTIMIZATION: Check if there's any work BEFORE acquiring GIL
+     * This avoids expensive GIL acquisition when there's nothing to do.
+     *
+     * We need to check BOTH:
+     * - task_count: new tasks submitted via submit_task
+     * - pending_count: timer/FD events dispatched via dispatch_timer/handle_fd_event
+     *
+     * If either has work, we need to proceed and call _run_once. */
     uint_fast64_t task_count = atomic_load(&loop->task_count);
-    if (task_count == 0) {
+    int pending_count = atomic_load(&loop->pending_count);
+    if (task_count == 0 && pending_count == 0) {
         return ATOM_OK;  /* Nothing to process, skip GIL entirely */
     }
 
@@ -2598,10 +2632,10 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     pthread_mutex_unlock(&loop->task_queue_mutex);
 
-    /* If no tasks were dequeued, return early (no GIL needed) */
-    if (num_tasks == 0) {
-        return ATOM_OK;
-    }
+    /* NOTE: We do NOT return early here even if num_tasks == 0.
+     * We may have pending timer/FD events that need _run_once to process.
+     * The first check (task_count == 0 && pending_count == 0) at the start
+     * of this function already handles the case where there's truly no work. */
 
     /* ========================================================================
      * PHASE 2: Process all tasks WITH GIL (Python operations)
@@ -2670,8 +2704,37 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     /* Lazy loop creation (uvloop-style): create Python loop on first use */
     if (!loop->py_loop_valid || loop->py_loop == NULL) {
-        /* Create new event loop via asyncio policy (triggers ErlangEventLoop.__init__) */
-        PyObject *new_loop = PyObject_CallMethod(asyncio, "new_event_loop", NULL);
+        /* Create ErlangEventLoop directly instead of via asyncio.new_event_loop().
+         * This is necessary because dirty NIF scheduler threads don't have the
+         * event loop policy set. asyncio.new_event_loop() would create a
+         * SelectorEventLoop instead of our ErlangEventLoop. */
+        PyObject *erlang_loop_mod = PyImport_ImportModule("_erlang_impl._loop");
+        if (erlang_loop_mod == NULL) {
+            PyErr_Clear();
+            erlang_loop_mod = PyImport_ImportModule("erlang_loop");
+        }
+        if (erlang_loop_mod == NULL) {
+            PyErr_Clear();
+            for (int i = 0; i < num_tasks; i++) {
+                enif_free_env(tasks[i].term_env);
+            }
+            PyGILState_Release(gstate);
+            return make_error(env, "loop_module_import_failed");
+        }
+
+        PyObject *loop_class = PyObject_GetAttrString(erlang_loop_mod, "ErlangEventLoop");
+        Py_DECREF(erlang_loop_mod);
+        if (loop_class == NULL) {
+            PyErr_Clear();
+            for (int i = 0; i < num_tasks; i++) {
+                enif_free_env(tasks[i].term_env);
+            }
+            PyGILState_Release(gstate);
+            return make_error(env, "loop_class_not_found");
+        }
+
+        PyObject *new_loop = PyObject_CallNoArgs(loop_class);
+        Py_DECREF(loop_class);
         if (new_loop == NULL) {
             PyErr_Clear();
             for (int i = 0; i < num_tasks; i++) {
@@ -2681,7 +2744,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             return make_error(env, "loop_creation_failed");
         }
 
-        /* Set as current event loop */
+        /* Set as current event loop for this thread */
         PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", new_loop);
         Py_XDECREF(set_result);
 
@@ -2850,6 +2913,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             enif_free_env(term_env);
             continue;
         }
+        /* Copy PID */
         pid_obj->pid = caller_pid;
 
         /* Convert ref to Python */
@@ -2912,23 +2976,48 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     /* NOTE: We don't DECREF asyncio and run_and_send here because they're cached
      * in the loop structure. They'll be freed when the loop is destroyed. */
 
-    /* Run one iteration of the event loop if:
-     * 1. New coroutines were scheduled (need to start them), OR
-     * 2. There are pending events (timers, FD callbacks) to process
+    /* Run the event loop until there's no more immediate work.
      *
-     * For sync functions (like math.sqrt), results are sent directly via enif_send
-     * and we don't need to drive the Python event loop.
+     * We need to keep calling _run_once because:
+     * 1. First call may schedule timers (coroutine hits await asyncio.sleep)
+     * 2. Timer dispatch adds callback to _ready queue
+     * 3. Next _run_once processes the _ready queue (resumes coroutine)
+     * 4. Coroutine may complete and send result, or schedule more work
      *
-     * Pass timeout_hint=0 so we don't block - we just added work that needs
-     * processing immediately. This is a uvloop-style optimization. */
-    int pending_count = atomic_load(&loop->pending_count);
-    if (coros_scheduled > 0 || pending_count > 0) {
+     * We loop until both pending_count AND Python's _ready queue are empty.
+     * Pass timeout_hint=0 so we don't block. */
+    int current_pending = atomic_load(&loop->pending_count);
+    int py_ready = 0;
+    int iterations = 0;
+    const int max_iterations = 100;  /* Safety limit */
+
+    /* Loop while there's work: new coroutines, pending events, OR ready callbacks */
+    while ((coros_scheduled > 0 || current_pending > 0 || py_ready > 0) && iterations < max_iterations) {
+        iterations++;
+
         PyObject *run_result = PyObject_CallMethod(loop->py_loop, "_run_once", "i", 0);
         if (run_result != NULL) {
             Py_DECREF(run_result);
         } else {
+            PyErr_Print();
             PyErr_Clear();
+            break;
         }
+
+        /* Check if Python loop has more ready callbacks */
+        PyObject *ready_len = PyObject_CallMethod(loop->py_loop, "_get_ready_count", NULL);
+        py_ready = 0;
+        if (ready_len != NULL) {
+            py_ready = (int)PyLong_AsLong(ready_len);
+            Py_DECREF(ready_len);
+            if (PyErr_Occurred()) {
+                PyErr_Clear();
+                py_ready = 0;
+            }
+        }
+
+        current_pending = atomic_load(&loop->pending_count);
+        coros_scheduled = 0;  /* Already processed on first iteration */
     }
 
     /* Restore original event loop context before releasing GIL */
@@ -5457,6 +5546,28 @@ ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
     return ATOM_OK;
 }
 
+/**
+ * Set the shared worker PID for task_ready notifications.
+ * This worker receives task_ready messages from dispatch_timer and other
+ * event sources to trigger process_ready_tasks.
+ */
+ERL_NIF_TERM nif_set_shared_worker(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    ErlNifPid worker_pid;
+    if (!enif_get_local_pid(env, argv[0], &worker_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+
+    pthread_mutex_lock(&g_global_worker_mutex);
+    g_global_shared_worker = worker_pid;
+    g_global_shared_worker_valid = true;
+    pthread_mutex_unlock(&g_global_worker_mutex);
+
+    return ATOM_OK;
+}
+
 /* Python function: _poll_events(timeout_ms) -> num_events */
 static PyObject *py_poll_events(PyObject *self, PyObject *args) {
     (void)self;
@@ -6256,6 +6367,30 @@ static PyObject *py_set_global_loop_ref(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+/* Python function: _get_global_loop_capsule() -> capsule
+ *
+ * Returns a capsule for the global interpreter event loop.
+ * This is the loop created by Erlang that has has_worker=true.
+ * Python's ErlangEventLoop should use this capsule instead of creating
+ * a new one, so that timers and FD events are properly dispatched to
+ * the worker which triggers process_ready_tasks.
+ */
+static PyObject *py_get_global_loop_capsule(PyObject *self, PyObject *args) {
+    (void)self;
+    (void)args;
+
+    erlang_event_loop_t *loop = get_interpreter_event_loop();
+    if (loop == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Global event loop not initialized");
+        return NULL;
+    }
+
+    /* Keep the resource alive while capsule exists */
+    enif_keep_resource(loop);
+
+    return PyCapsule_New(loop, LOOP_CAPSULE_NAME, NULL);
+}
+
 /* Python function: _run_once_native_for(capsule, timeout_ms) -> [(callback_id, event_type), ...] */
 static PyObject *py_run_once_for(PyObject *self, PyObject *args) {
     (void)self;
@@ -6657,14 +6792,27 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!event_loop_ensure_router(loop)) {
+    /* For timer scheduling, we need to use the global interpreter loop which
+     * has the worker process. The capsule's loop may be a Python-created loop
+     * that doesn't have has_worker set, which would cause timer dispatches
+     * to go to the router instead of the worker, breaking the event loop flow.
+     *
+     * The global loop (created by Erlang) has has_worker=true and its worker
+     * properly triggers process_ready_tasks after timer dispatch. */
+    erlang_event_loop_t *target_loop = get_interpreter_event_loop();
+    if (target_loop == NULL) {
+        /* Fall back to capsule's loop if global not available */
+        target_loop = loop;
+    }
+
+    if (!event_loop_ensure_router(target_loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
 
     if (delay_ms < 0) delay_ms = 0;
 
-    uint64_t timer_ref_id = atomic_fetch_add(&loop->next_callback_id, 1);
+    uint64_t timer_ref_id = atomic_fetch_add(&target_loop->next_callback_id, 1);
 
     ErlNifEnv *msg_env = enif_alloc_env();
     if (msg_env == NULL) {
@@ -6672,8 +6820,8 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    /* Include loop resource in message so router dispatches to correct loop */
-    ERL_NIF_TERM loop_term = enif_make_resource(msg_env, loop);
+    /* Include the target loop resource in message so dispatch goes to correct loop */
+    ERL_NIF_TERM loop_term = enif_make_resource(msg_env, target_loop);
 
     ERL_NIF_TERM msg = enif_make_tuple5(
         msg_env,
@@ -6685,7 +6833,7 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
     );
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = target_loop->has_worker ? &target_loop->worker_pid : &target_loop->router_pid;
     int send_result = enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
 
@@ -6865,6 +7013,7 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_cancel_timer", py_cancel_timer, METH_VARARGS, "Cancel an Erlang timer"},
     /* Handle-based API (takes explicit loop capsule) */
     {"_loop_new", py_loop_new, METH_NOARGS, "Create a new event loop, returns capsule"},
+    {"_get_global_loop_capsule", py_get_global_loop_capsule, METH_NOARGS, "Get capsule for global event loop"},
     {"_loop_destroy", py_loop_destroy, METH_VARARGS, "Destroy an event loop"},
     {"_set_loop_ref", py_set_loop_ref, METH_VARARGS, "Store Python loop reference in C struct"},
     {"_set_global_loop_ref", py_set_global_loop_ref, METH_VARARGS, "Store Python loop reference in global loop"},
