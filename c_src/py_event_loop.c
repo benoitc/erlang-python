@@ -1816,20 +1816,13 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
 
     event_loop_add_pending(loop, EVENT_TYPE_TIMER, callback_id, -1);
 
-    /* Send task_ready to worker to trigger process_ready_tasks.
-     * This ensures _run_once is called to handle the timer callback.
-     * Without this, timers dispatched via the router would never be processed
-     * because the worker wouldn't know there are pending events. */
-    pthread_mutex_lock(&g_global_worker_mutex);
-    if (g_global_shared_worker_valid) {
-        ErlNifEnv *msg_env = enif_alloc_env();
-        if (msg_env != NULL) {
-            ERL_NIF_TERM task_ready_atom = enif_make_atom(msg_env, "task_ready");
-            enif_send(NULL, &g_global_shared_worker, msg_env, task_ready_atom);
-            enif_free_env(msg_env);
-        }
-    }
-    pthread_mutex_unlock(&g_global_worker_mutex);
+    /* Note: We rely on event_loop_add_pending signaling the condition variable
+     * to wake up poll_events_wait. This works for both:
+     * - erlang.run() inside py:exec: Python loop is waiting on poll_events_wait
+     * - create_task: The worker is triggered by its own timer handling
+     *
+     * We don't send task_ready to the global worker here because dispatch_timer
+     * may be called on a loop different from the one the global worker manages. */
 
     return ATOM_OK;
 }
