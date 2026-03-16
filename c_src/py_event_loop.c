@@ -2976,6 +2976,30 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     /* NOTE: We don't DECREF asyncio and run_and_send here because they're cached
      * in the loop structure. They'll be freed when the loop is destroyed. */
 
+    /* Check if Python loop is already running (e.g., from erlang.run() in py:exec).
+     * If so, skip calling _run_once - the running loop will handle events itself
+     * when poll_events_wait returns. Calling _run_once on a running loop is not
+     * safe because _run_once is not reentrant. */
+    PyObject *is_running = PyObject_CallMethod(loop->py_loop, "is_running", NULL);
+    if (is_running != NULL) {
+        int running = PyObject_IsTrue(is_running);
+        Py_DECREF(is_running);
+        if (running) {
+            /* Loop is already running - just signal it and clean up.
+             * The pending events were already added by dispatch_timer/handle_fd_event,
+             * and the condition variable was signaled. The running loop will wake up
+             * and process them. */
+            if (events_module != NULL) {
+                Py_XDECREF(old_running_loop);
+                Py_DECREF(events_module);
+            }
+            PyGILState_Release(gstate);
+            return ATOM_OK;
+        }
+    } else {
+        PyErr_Clear();
+    }
+
     /* Run the event loop until there's no more immediate work.
      *
      * We need to keep calling _run_once because:

@@ -70,7 +70,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
     # Use __slots__ for faster attribute access and reduced memory
     __slots__ = (
-        '_pel', '_loop_capsule',
+        '_pel', '_loop_capsule', '_uses_global_capsule',
         '_readers', '_writers',
         '_callbacks_by_cid',  # callback_id -> (callback, args, event_type) for O(1) dispatch
         '_fd_resources',  # fd -> fd_key (shared fd_resource_t per fd)
@@ -120,9 +120,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # The worker triggers process_ready_tasks which calls _run_once.
         # Without this, Python-created loops would have their own pending queues
         # that never get processed because the worker doesn't know about them.
+        self._uses_global_capsule = False
         if hasattr(self._pel, '_get_global_loop_capsule'):
             try:
                 self._loop_capsule = self._pel._get_global_loop_capsule()
+                self._uses_global_capsule = True
             except RuntimeError:
                 # Fall back to creating a new loop if global not available
                 self._loop_capsule = self._pel._loop_new()
@@ -316,11 +318,12 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             self._default_executor.shutdown(wait=True)
             self._default_executor = None
 
-        # Destroy loop capsule
-        try:
-            self._pel._loop_destroy(self._loop_capsule)
-        except Exception:
-            pass
+        # Destroy loop capsule (but not if using shared global capsule)
+        if not self._uses_global_capsule:
+            try:
+                self._pel._loop_destroy(self._loop_capsule)
+            except Exception:
+                pass
         self._loop_capsule = None
 
     async def shutdown_asyncgens(self):
