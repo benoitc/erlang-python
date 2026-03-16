@@ -6176,6 +6176,20 @@ static void loop_capsule_destructor(PyObject *capsule) {
     }
 }
 
+/**
+ * Destructor for global loop capsules.
+ * Only releases reference - does NOT signal shutdown since the global
+ * loop is shared and managed by Erlang, not Python.
+ */
+static void global_loop_capsule_destructor(PyObject *capsule) {
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(
+        capsule, LOOP_CAPSULE_NAME);
+    if (loop != NULL) {
+        /* Only release the reference, don't shutdown */
+        enif_release_resource(loop);
+    }
+}
+
 /* Python function: _loop_new() -> capsule */
 static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     (void)self;
@@ -6384,6 +6398,36 @@ static PyObject *py_set_global_loop_ref(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+/**
+ * Python function: _clear_loop_ref(capsule)
+ *
+ * Clear the Python loop reference from an event loop capsule.
+ * Should be called when the Python loop is closed to allow
+ * creating a new loop later.
+ */
+static PyObject *py_clear_loop_ref(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    /* Clear the Python loop reference */
+    if (loop->py_loop != NULL) {
+        Py_DECREF(loop->py_loop);
+        loop->py_loop = NULL;
+    }
+    loop->py_loop_valid = false;
+
+    Py_RETURN_NONE;
+}
+
 /* Python function: _get_global_loop_capsule() -> capsule
  *
  * Returns a capsule for the global interpreter event loop.
@@ -6405,7 +6449,67 @@ static PyObject *py_get_global_loop_capsule(PyObject *self, PyObject *args) {
     /* Keep the resource alive while capsule exists */
     enif_keep_resource(loop);
 
-    return PyCapsule_New(loop, LOOP_CAPSULE_NAME, NULL);
+    return PyCapsule_New(loop, LOOP_CAPSULE_NAME, global_loop_capsule_destructor);
+}
+
+/**
+ * Python function: _has_loop_ref(capsule) -> bool
+ *
+ * Check if a loop capsule has an ACTIVE Python loop reference.
+ * Returns True only if there's a valid loop that is currently RUNNING.
+ * This prevents multiple concurrent loops while allowing sequential
+ * loop replacement (e.g., between test cases).
+ *
+ * The key insight is that the event confusion bug occurs when multiple
+ * loops are running simultaneously. A non-running loop (even if not
+ * explicitly closed) can be safely replaced.
+ */
+static PyObject *py_has_loop_ref(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        return NULL;
+    }
+
+    if (loop->py_loop_valid && loop->py_loop != NULL) {
+        /* Check if the existing loop is running - only block if running */
+        PyObject *is_running = PyObject_CallMethod(loop->py_loop, "is_running", NULL);
+        if (is_running != NULL) {
+            int running = PyObject_IsTrue(is_running);
+            Py_DECREF(is_running);
+            if (running) {
+                /* Loop is still running - prevent concurrent loop creation */
+                Py_RETURN_TRUE;
+            }
+        } else {
+            /* Error calling is_running - clear error and check is_closed as fallback */
+            PyErr_Clear();
+        }
+
+        /* Loop exists but is not running - check if closed for cleanup */
+        PyObject *is_closed = PyObject_CallMethod(loop->py_loop, "is_closed", NULL);
+        if (is_closed != NULL) {
+            int closed = PyObject_IsTrue(is_closed);
+            Py_DECREF(is_closed);
+            if (closed) {
+                /* Loop is closed, clean up reference */
+                Py_DECREF(loop->py_loop);
+                loop->py_loop = NULL;
+                loop->py_loop_valid = false;
+            }
+        } else {
+            PyErr_Clear();
+        }
+        /* Not running, allow replacement */
+        Py_RETURN_FALSE;
+    }
+    Py_RETURN_FALSE;
 }
 
 /* Python function: _run_once_native_for(capsule, timeout_ms) -> [(callback_id, event_type), ...] */
@@ -7031,6 +7135,8 @@ static PyMethodDef PyEventLoopMethods[] = {
     /* Handle-based API (takes explicit loop capsule) */
     {"_loop_new", py_loop_new, METH_NOARGS, "Create a new event loop, returns capsule"},
     {"_get_global_loop_capsule", py_get_global_loop_capsule, METH_NOARGS, "Get capsule for global event loop"},
+    {"_has_loop_ref", py_has_loop_ref, METH_VARARGS, "Check if loop capsule has Python loop reference"},
+    {"_clear_loop_ref", py_clear_loop_ref, METH_VARARGS, "Clear Python loop reference from C struct"},
     {"_loop_destroy", py_loop_destroy, METH_VARARGS, "Destroy an event loop"},
     {"_set_loop_ref", py_set_loop_ref, METH_VARARGS, "Store Python loop reference in C struct"},
     {"_set_global_loop_ref", py_set_global_loop_ref, METH_VARARGS, "Store Python loop reference in global loop"},

@@ -2862,10 +2862,11 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Call a registered Erlang function.\n\n"
      "Usage: erlang.call('func_name', arg1, arg2, ...)\n"
      "Returns: The result from the Erlang function."},
-    {"atom", erlang_atom_impl, METH_VARARGS,
-     "Create an Erlang atom.\n\n"
-     "Usage: erlang.atom('name')\n"
-     "Returns: An ErlangAtom object that converts to an Erlang atom."},
+    {"_atom", erlang_atom_impl, METH_VARARGS,
+     "Internal: Create an Erlang atom.\n\n"
+     "Usage: erlang._atom('name')\n"
+     "Returns: An ErlangAtom object that converts to an Erlang atom.\n"
+     "NOTE: Use erlang.atom() wrapper instead for safety limits."},
     {"send", erlang_send_impl, METH_VARARGS,
      "Send a message to an Erlang process (fire-and-forget).\n\n"
      "Usage: erlang.send(pid, term)\n"

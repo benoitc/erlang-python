@@ -1040,17 +1040,31 @@ activate_venv_with_site_packages(VenvBin, SitePackages) ->
             {ok, _} = eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
             {ok, _} = eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{sp => SitePackages}),
             %% Add site-packages and process .pth files (editable installs)
-            ok = exec(<<"import site as _site, sys as _sys\n"
-                         "_b = frozenset(_sys.path)\n"
-                         "_site.addsitedir(_sys._venv_site_packages)\n"
-                         "_sys.path[:] = [p for p in _sys.path if p not in _b] + [p for p in _sys.path if p in _b]\n"
-                         "del _site, _sys, _b\n">>),
+            %% Note: We embed the site-packages path directly since exec doesn't support
+            %% variables and sys attributes may not persist across calls in subinterpreters
+            SitePackagesStr = binary_to_list(SitePackages),
+            ExecCode = iolist_to_binary([
+                <<"import site as _site, sys as _sys\n">>,
+                <<"_sp = '">>, escape_python_string(SitePackagesStr), <<"'\n">>,
+                <<"_b = frozenset(_sys.path)\n">>,
+                <<"_site.addsitedir(_sp)\n">>,
+                <<"_sys.path[:] = [p for p in _sys.path if p not in _b] + [p for p in _sys.path if p in _b]\n">>,
+                <<"del _site, _sys, _b, _sp\n">>
+            ]),
+            ok = exec(ExecCode),
             ok;
         {ok, false} ->
             {error, {invalid_venv, SitePackages}};
         Error ->
             Error
     end.
+
+%% @private Escape a string for embedding in Python code
+escape_python_string(Str) ->
+    lists:flatmap(fun($') -> "\\'";
+                     ($\\) -> "\\\\";
+                     (C) -> [C]
+                  end, Str).
 
 %% @doc Deactivate the current virtual environment.
 %% Restores sys.path to its original state.

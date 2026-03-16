@@ -125,9 +125,20 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             try:
                 self._loop_capsule = self._pel._get_global_loop_capsule()
                 self._uses_global_capsule = True
-            except RuntimeError:
+                # Check if another loop already owns this capsule.
+                # Only one ErlangEventLoop per interpreter is supported.
+                if hasattr(self._pel, '_has_loop_ref') and self._pel._has_loop_ref(self._loop_capsule):
+                    raise RuntimeError(
+                        "An ErlangEventLoop already exists for this interpreter. "
+                        "Only one loop per interpreter is supported."
+                    )
+            except RuntimeError as e:
+                # Re-raise our "already exists" error
+                if "already exists" in str(e):
+                    raise
                 # Fall back to creating a new loop if global not available
                 self._loop_capsule = self._pel._loop_new()
+                self._uses_global_capsule = False
         else:
             self._loop_capsule = self._pel._loop_new()
 
@@ -317,6 +328,15 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         if self._default_executor is not None:
             self._default_executor.shutdown(wait=True)
             self._default_executor = None
+
+        # Clear loop ref to allow creating a new loop later.
+        # This is important for the global capsule case where the capsule
+        # persists but a new Python loop may be created.
+        if self._loop_capsule is not None and hasattr(self._pel, '_clear_loop_ref'):
+            try:
+                self._pel._clear_loop_ref(self._loop_capsule)
+            except Exception:
+                pass
 
         # Destroy loop capsule (but not if using shared global capsule)
         if not self._uses_global_capsule:
@@ -1306,15 +1326,16 @@ async def _run_and_send(coro, caller_pid, ref):
         (async_result, ref, (ok, result)) - on success
         (async_result, ref, (error, error_str)) - on failure
 
-    Note: Uses erlang.atom() to create atoms for message keys, since Python
+    Note: Uses cached atom() to create atoms for message keys, since Python
     strings become Erlang binaries but the await function expects atoms.
     """
     import erlang
+    from . import atom  # Use cached version from _erlang_impl
 
     # Create atoms for message keys (strings become binaries, await expects atoms)
-    async_result = erlang.atom('async_result')
-    ok = erlang.atom('ok')
-    error = erlang.atom('error')
+    async_result = atom('async_result')
+    ok = atom('ok')
+    error = atom('error')
 
     try:
         result = await coro

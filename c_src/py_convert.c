@@ -353,6 +353,12 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
     /* Handle ErlangAtom → Erlang atom */
     if (Py_IS_TYPE(obj, &ErlangAtomType)) {
         ErlangAtomObject *atom_obj = (ErlangAtomObject *)obj;
+        ERL_NIF_TERM atom_term;
+        /* Try existing atom first (no new allocation) */
+        if (enif_make_existing_atom(env, atom_obj->name, &atom_term, ERL_NIF_LATIN1)) {
+            return atom_term;
+        }
+        /* Atom doesn't exist yet, create it */
         return enif_make_atom(env, atom_obj->name);
     }
 

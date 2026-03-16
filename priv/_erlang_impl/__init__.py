@@ -44,6 +44,7 @@ Usage patterns (matching uvloop exactly):
     loop.run_until_complete(main())
 """
 
+import os
 import sys
 import asyncio
 import time
@@ -82,10 +83,58 @@ __all__ = [
     'Channel',
     'reply',
     'ChannelClosed',
+    'atom',
 ]
+
+# Atom caching with configurable limit to prevent BEAM atom table exhaustion.
+# The BEAM VM has a hard limit (~1M atoms) and crashes when exceeded.
+# This provides a Python-level safety valve well under that limit.
+_MAX_USER_ATOMS = int(os.environ.get('ERLANG_PYTHON_MAX_ATOMS', '10000'))
+_atom_cache = {}
 
 # Re-export for uvloop API compatibility
 EventLoopPolicy = ErlangEventLoopPolicy
+
+
+def atom(name):
+    """Create an Erlang atom with safety limit.
+
+    Atoms in Erlang are permanent and the BEAM VM has a hard limit
+    (~1M atoms). This function provides a Python-level cache with
+    a configurable limit to prevent atom table exhaustion from
+    untrusted Python code.
+
+    Args:
+        name: The atom name as a string.
+
+    Returns:
+        An ErlangAtom object that converts to an Erlang atom.
+
+    Raises:
+        RuntimeError: If the atom limit is reached.
+
+    The limit can be configured via the ERLANG_PYTHON_MAX_ATOMS
+    environment variable (default: 10000).
+
+    Example:
+        >>> import erlang
+        >>> ok = erlang.atom('ok')
+        >>> error = erlang.atom('error')
+    """
+    if name in _atom_cache:
+        return _atom_cache[name]
+
+    if len(_atom_cache) >= _MAX_USER_ATOMS:
+        raise RuntimeError(
+            f"Atom limit ({_MAX_USER_ATOMS}) reached. "
+            "Set ERLANG_PYTHON_MAX_ATOMS env var to increase."
+        )
+
+    # Import erlang module to access internal _atom function
+    import erlang as _erlang
+    result = _erlang._atom(name)
+    _atom_cache[name] = result
+    return result
 
 
 def get_event_loop_policy() -> ErlangEventLoopPolicy:
