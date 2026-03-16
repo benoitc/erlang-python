@@ -191,6 +191,37 @@ end).
 
 Event loop namespaces are automatically cleaned up when the Erlang process exits. The event loop monitors each process that creates a namespace and removes it on process termination.
 
+### Automatic Env Reuse with py:exec
+
+Functions defined via `py:exec(Ctx, Code)` can be called directly using the async task API (`py_event_loop:run/3,4`, `create_task/3,4`, `spawn_task/3,4`). The process-local environment is automatically detected and used for function lookup.
+
+```erlang
+%% Create a context and define an async function
+Ctx = py:context(1),
+ok = py:exec(Ctx, <<"
+import asyncio
+
+async def process_data(items):
+    results = []
+    for item in items:
+        await asyncio.sleep(0.001)
+        results.append(item * 2)
+    return results
+">>),
+
+%% Call it directly - env is reused automatically
+{ok, [2,4,6]} = py_event_loop:run('__main__', process_data, [[1,2,3]]).
+
+%% Also works with create_task and spawn_task
+Ref = py_event_loop:create_task('__main__', process_data, [[4,5,6]]),
+{ok, [8,10,12]} = py_event_loop:await(Ref).
+
+%% Fire-and-forget
+ok = py_event_loop:spawn_task('__main__', process_data, [[7,8,9]]).
+```
+
+This eliminates the need to manually pass environment references when calling functions defined in the process-local namespace.
+
 ## Building Python Actors
 
 The process-bound model enables a pattern we call "Python actors" - Erlang processes that encapsulate Python state and expose it through message passing.

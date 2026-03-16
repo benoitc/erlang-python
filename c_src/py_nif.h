@@ -1313,6 +1313,31 @@ extern ErlNifResourceType *PY_CONTEXT_SUSPENDED_RESOURCE_TYPE;
 /** @brief Resource type for inline_continuation_t (inline scheduler continuation) */
 extern ErlNifResourceType *INLINE_CONTINUATION_RESOURCE_TYPE;
 
+/**
+ * @struct py_env_resource_t
+ * @brief Process-local Python environment (globals/locals)
+ *
+ * Stored in process dictionary as py_local_env. When the process exits,
+ * Erlang GC drops the reference, triggering the destructor which frees
+ * the Python dicts.
+ */
+typedef struct {
+    /** @brief Global namespace dictionary */
+    PyObject *globals;
+    /** @brief Local namespace dictionary (same as globals for module-level execution) */
+    PyObject *locals;
+    /** @brief Interpreter ID that owns these dicts (0 = main interpreter) */
+    int64_t interp_id;
+    /** @brief Pool slot index (-1 for main interpreter) */
+    int pool_slot;
+} py_env_resource_t;
+
+/** @brief Resource type for py_env_resource_t (process-local Python environment) */
+extern ErlNifResourceType *PY_ENV_RESOURCE_TYPE;
+
+/** @brief Get the PY_ENV_RESOURCE_TYPE (for use by other modules) */
+ErlNifResourceType *get_env_resource_type(void);
+
 /** @brief Atomic counter for unique interpreter IDs */
 extern _Atomic uint32_t g_context_id_counter;
 

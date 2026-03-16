@@ -38,7 +38,11 @@
     test_process_namespace_eval/1,
     test_process_namespace_async_func/1,
     test_process_namespace_isolation/1,
-    test_process_namespace_reentrant/1
+    test_process_namespace_reentrant/1,
+    %% Env reuse tests
+    test_env_reuse_with_exec/1,
+    test_env_reuse_async_function/1,
+    test_env_reuse_spawn_task/1
 ]).
 
 all() ->
@@ -76,7 +80,11 @@ all() ->
         test_process_namespace_eval,
         test_process_namespace_async_func,
         test_process_namespace_isolation,
-        test_process_namespace_reentrant
+        test_process_namespace_reentrant,
+        %% Env reuse tests
+        test_env_reuse_with_exec,
+        test_env_reuse_async_function,
+        test_env_reuse_spawn_task
     ].
 
 groups() -> [].
@@ -512,3 +520,112 @@ def increment_shared():
     %% Verify the change persists in namespace
     {ok, 101} = py_event_loop:eval(<<"shared_value">>),
     ct:log("reentrant test: namespace modifications persist correctly").
+
+%% ============================================================================
+%% Env reuse tests
+%% ============================================================================
+
+test_env_reuse_with_exec(_Config) ->
+    %% Test that functions defined via py:exec with a context can be called
+    %% using py_event_loop:run without explicit env passing.
+    %%
+    %% This verifies the automatic env reuse feature: when a process has
+    %% a py_local_env in its process dictionary (from py:context/py:exec),
+    %% py_event_loop:run automatically passes that env to the NIF so
+    %% functions defined via exec are visible.
+
+    %% Create a context and define a sync function via py:exec
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+def multiply(a, b):
+    return a * b
+
+def greet(name):
+    return f'Hello, {name}!'
+">>),
+
+    %% Call the functions via py_event_loop:run - should find them automatically
+    {ok, Result1} = py_event_loop:run('__main__', multiply, [6, 7]),
+    ct:log("env_reuse test: multiply(6, 7) = ~p", [Result1]),
+    42 = Result1,
+
+    {ok, Result2} = py_event_loop:run('__main__', greet, [<<"World">>]),
+    ct:log("env_reuse test: greet('World') = ~p", [Result2]),
+    <<"Hello, World!">> = Result2,
+
+    ct:log("env_reuse_with_exec test: py:exec functions callable via py_event_loop:run").
+
+test_env_reuse_async_function(_Config) ->
+    %% Test that async functions defined via py:exec can be called
+    %% using py_event_loop:run with automatic env reuse.
+
+    %% Create a context and define an async function
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+
+async def async_add(a, b):
+    await asyncio.sleep(0.01)
+    return a + b
+
+async def async_process(data):
+    # Simulate chunked processing
+    chunks = []
+    for i in range(0, len(data), 4):
+        chunk = data[i:i+4]
+        await asyncio.sleep(0.001)
+        chunks.append(chunk)
+    return chunks
+">>),
+
+    %% Call async function via py_event_loop:run
+    {ok, Sum} = py_event_loop:run('__main__', async_add, [10, 32]),
+    ct:log("env_reuse test: async_add(10, 32) = ~p", [Sum]),
+    42 = Sum,
+
+    %% Test with data processing
+    Data = <<"abcdefghijklmnop">>,
+    {ok, Chunks} = py_event_loop:run('__main__', async_process, [Data]),
+    ct:log("env_reuse test: async_process chunks = ~p", [Chunks]),
+    [<<"abcd">>, <<"efgh">>, <<"ijkl">>, <<"mnop">>] = Chunks,
+
+    ct:log("env_reuse_async_function test: async py:exec functions work with py_event_loop:run").
+
+test_env_reuse_spawn_task(_Config) ->
+    %% Test that spawn_task also uses the caller's env for function lookup.
+    %%
+    %% spawn_task spawns a receiver process but should use the caller's env
+    %% to find functions defined via py:exec.
+
+    %% Create a context and define a function that writes to a shared variable
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+spawn_test_results = []
+
+def record_value(x):
+    spawn_test_results.append(x)
+    return x
+
+def get_results():
+    return list(spawn_test_results)
+">>),
+
+    %% Use spawn_task to call the function (fire and forget)
+    ok = py_event_loop:spawn_task('__main__', record_value, [42]),
+
+    %% Wait a bit for the task to complete
+    timer:sleep(200),
+
+    %% Verify the function was called by checking the results list via run
+    {ok, Results} = py_event_loop:run('__main__', get_results, []),
+    ct:log("env_reuse_spawn_task test: spawn_test_results = ~p", [Results]),
+
+    %% Should contain the value we passed
+    case Results of
+        [42] ->
+            ct:log("env_reuse_spawn_task test: spawn_task correctly used caller's env");
+        _ ->
+            %% If empty or different, the function wasn't found or wasn't called
+            ct:log("env_reuse_spawn_task test: unexpected results ~p", [Results]),
+            ct:fail({unexpected_results, Results})
+    end.

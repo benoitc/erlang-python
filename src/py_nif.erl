@@ -102,6 +102,7 @@
     event_loop_run_async/7,
     %% Async task queue NIFs (uvloop-inspired)
     submit_task/7,
+    submit_task_with_env/8,
     process_ready_tasks/1,
     event_loop_set_py_loop/2,
     %% Per-process namespace NIFs
@@ -767,6 +768,16 @@ event_loop_run_async(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs)
 -spec submit_task(reference(), pid(), reference(), binary(), binary(), list(), map()) ->
     ok | {error, term()}.
 submit_task(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Submit an async task with process-local env.
+%%
+%% Like submit_task but includes an env resource reference. The env's globals
+%% dict is used for function lookup, allowing functions defined via py:exec()
+%% to be called from the event loop.
+-spec submit_task_with_env(reference(), pid(), reference(), binary(), binary(), list(), map(), reference()) ->
+    ok | {error, term()}.
+submit_task_with_env(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs, _EnvRef) ->
     ?NIF_STUB.
 
 %% @doc Process all pending tasks from the task queue.
