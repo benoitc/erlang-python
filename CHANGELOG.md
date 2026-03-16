@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **Event Loop Isolation and Resource Safety** - Three fixes for event loop and atom handling
+  - **Single-loop-per-interpreter enforcement** - Prevents multiple `ErlangEventLoop` instances
+    from causing event confusion. Added `_has_loop_ref()` check that detects running loops;
+    attempting to create a second loop while one is running raises `RuntimeError`
+  - **Atom creation safety** - Added Python-level caching with configurable limit (10000 default,
+    `ERLANG_PYTHON_MAX_ATOMS` env var) to prevent BEAM atom table exhaustion from untrusted code.
+    The `erlang.atom()` API now goes through the cached wrapper; internal `_atom()` NIF still available
+  - **Global capsule resource leak** - Added `global_loop_capsule_destructor` that properly calls
+    `enif_release_resource()` when capsule is garbage collected. Previously NULL destructor caused
+    reference leaks on each `ErlangEventLoop` creation
+
+- **Python 3.14 venv activation** - Fixed `.pth` file processing in subinterpreters. Python 3.14
+  stricter module isolation prevented `sys._venv_site_packages` from persisting across eval/exec calls.
+  Now embeds site-packages path directly in the exec code string
+
 - **OWN_GIL Safety Fixes** - Critical fixes for OWN_GIL subinterpreter mode
   - **Mutex leak in erlang module** - `async_futures_mutex` now always destroyed in
     `erlang_module_free()` regardless of `pipe_initialized` flag
