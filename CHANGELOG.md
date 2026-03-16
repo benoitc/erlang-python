@@ -34,6 +34,11 @@
 
 ### Added
 
+- **Automatic Env Reuse for Event Loop Tasks** - Functions defined via `py:exec(Ctx, Code)`
+  can now be called directly using `py_event_loop:run/3,4`, `create_task/3,4`, and `spawn_task/3,4`
+  without manual env passing. The process-local environment is automatically detected and used
+  for function lookup when targeting `__main__` module.
+
 - **PyBuffer API** - Zero-copy WSGI input buffer for streaming HTTP bodies
   - `py_buffer:new/0,1` - Create buffer (chunked or with content_length)
   - `py_buffer:write/2` - Append data, signals waiting Python readers

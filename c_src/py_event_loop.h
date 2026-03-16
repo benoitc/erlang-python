@@ -124,6 +124,27 @@ typedef struct process_namespace {
     struct process_namespace *next;
 } process_namespace_t;
 
+/**
+ * @struct pid_env_mapping_t
+ * @brief Mapping from Erlang PID to process-local Python environment
+ *
+ * Used to pass env resources across the task queue without serialization.
+ * The env is kept alive by enif_keep_resource until the mapping is removed.
+ */
+typedef struct pid_env_mapping {
+    /** @brief PID of the owning Erlang process */
+    ErlNifPid pid;
+
+    /** @brief Environment resource (kept via enif_keep_resource) */
+    void *env;  /* py_env_resource_t* - forward declared to avoid header deps */
+
+    /** @brief Reference count for this mapping (multiple tasks may use it) */
+    int refcount;
+
+    /** @brief Next mapping in linked list */
+    struct pid_env_mapping *next;
+} pid_env_mapping_t;
+
 /** @brief Event types for pending callbacks */
 typedef enum {
     EVENT_TYPE_READ = 1,
@@ -372,6 +393,12 @@ typedef struct erlang_event_loop {
 
     /** @brief Mutex protecting namespace registry */
     pthread_mutex_t namespaces_mutex;
+
+    /* ========== PID-to-Env Mapping Registry ========== */
+    /* Protected by namespaces_mutex (shared with namespace registry) */
+
+    /** @brief Head of PID-to-env mapping linked list */
+    pid_env_mapping_t *pid_env_head;
 } erlang_event_loop_t;
 
 /* ============================================================================
@@ -623,6 +650,18 @@ ERL_NIF_TERM nif_dispatch_sleep_complete(ErlNifEnv *env, int argc,
  */
 ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
                               const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Submit an async task with process-local env (thread-safe)
+ *
+ * Like submit_task but includes an env resource reference. The env's globals
+ * dict is used for function lookup, allowing functions defined via py:exec()
+ * to be called from the event loop.
+ *
+ * NIF: submit_task_with_env(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs, EnvRef) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_submit_task_with_env(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Process all pending tasks from the task queue

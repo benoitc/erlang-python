@@ -502,6 +502,18 @@ cleanup_native:
         }
         loop->namespaces_head = NULL;
 
+        /* Clean up PID-to-env mappings */
+        pid_env_mapping_t *mapping = loop->pid_env_head;
+        while (mapping != NULL) {
+            pid_env_mapping_t *next = mapping->next;
+            if (mapping->env != NULL) {
+                enif_release_resource(mapping->env);
+            }
+            enif_free(mapping);
+            mapping = next;
+        }
+        loop->pid_env_head = NULL;
+
         pthread_mutex_unlock(&loop->namespaces_mutex);
         PyGILState_Release(gstate);
     } else {
@@ -516,6 +528,18 @@ cleanup_native:
             ns = next;
         }
         loop->namespaces_head = NULL;
+
+        /* Clean up PID-to-env mappings */
+        pid_env_mapping_t *mapping = loop->pid_env_head;
+        while (mapping != NULL) {
+            pid_env_mapping_t *next = mapping->next;
+            if (mapping->env != NULL) {
+                enif_release_resource(mapping->env);
+            }
+            enif_free(mapping);
+            mapping = next;
+        }
+        loop->pid_env_head = NULL;
 
         pthread_mutex_unlock(&loop->namespaces_mutex);
     }
@@ -1128,6 +1152,7 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
 
     /* Initialize per-process namespace registry */
     loop->namespaces_head = NULL;
+    loop->pid_env_head = NULL;
     if (pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
         pthread_mutex_destroy(&loop->task_queue_mutex);
         enif_ioq_destroy(loop->task_queue);
@@ -2501,6 +2526,164 @@ ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
     return ATOM_OK;
 }
 
+/* ============================================================================
+ * PID-to-Env Mapping Helpers
+ * ============================================================================ */
+
+/**
+ * @brief Register or update an env mapping for a PID
+ *
+ * Increments refcount if mapping exists, otherwise creates new mapping.
+ * Calls enif_keep_resource to keep the env alive.
+ *
+ * @param loop Event loop containing the mapping registry
+ * @param pid PID to register
+ * @param env_res Environment resource (will be kept via enif_keep_resource)
+ * @return true on success, false on allocation failure
+ */
+static bool register_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid,
+                              void *env_res) {
+    pthread_mutex_lock(&loop->namespaces_mutex);
+
+    /* Check if mapping already exists */
+    pid_env_mapping_t *mapping = loop->pid_env_head;
+    while (mapping != NULL) {
+        if (enif_compare_pids(&mapping->pid, pid) == 0) {
+            /* Found existing mapping - increment refcount */
+            mapping->refcount++;
+            pthread_mutex_unlock(&loop->namespaces_mutex);
+            return true;
+        }
+        mapping = mapping->next;
+    }
+
+    /* Create new mapping */
+    mapping = enif_alloc(sizeof(pid_env_mapping_t));
+    if (mapping == NULL) {
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        return false;
+    }
+
+    mapping->pid = *pid;
+    mapping->env = env_res;
+    mapping->refcount = 1;
+    mapping->next = loop->pid_env_head;
+    loop->pid_env_head = mapping;
+
+    /* Keep the resource alive */
+    enif_keep_resource(env_res);
+
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+    return true;
+}
+
+/**
+ * @brief Look up env for a PID
+ *
+ * @param loop Event loop containing the mapping registry
+ * @param pid PID to look up
+ * @return Environment resource or NULL if not found
+ */
+static void *lookup_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid) {
+    pthread_mutex_lock(&loop->namespaces_mutex);
+
+    pid_env_mapping_t *mapping = loop->pid_env_head;
+    while (mapping != NULL) {
+        if (enif_compare_pids(&mapping->pid, pid) == 0) {
+            void *env_res = mapping->env;
+            pthread_mutex_unlock(&loop->namespaces_mutex);
+            return env_res;
+        }
+        mapping = mapping->next;
+    }
+
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+    return NULL;
+}
+
+/**
+ * submit_task_with_env(LoopRef, CallerPid, Ref, Module, Func, Args, Kwargs, EnvRef) -> ok | {error, Reason}
+ *
+ * Like submit_task but registers the process-local env for the caller PID.
+ * The env's globals dict is used for function lookup, allowing functions
+ * defined via py:exec() to be called from the event loop.
+ *
+ * Note: The env resource is stored in a PID->env mapping, not serialized.
+ * This avoids the issue of resource references not surviving serialization.
+ */
+ERL_NIF_TERM nif_submit_task_with_env(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    if (!loop->task_queue_initialized) {
+        return make_error(env, "task_queue_not_initialized");
+    }
+
+    /* Validate caller_pid */
+    ErlNifPid caller_pid;
+    if (!enif_get_local_pid(env, argv[1], &caller_pid)) {
+        return make_error(env, "invalid_caller_pid");
+    }
+
+    /* Get and register the env resource */
+    void *env_res;
+    if (!enif_get_resource(env, argv[7], get_env_resource_type(), &env_res)) {
+        return make_error(env, "invalid_env");
+    }
+
+    /* Register the env for this PID (increments refcount if exists) */
+    if (!register_pid_env(loop, &caller_pid, env_res)) {
+        return make_error(env, "env_registration_failed");
+    }
+
+    /* Create task tuple: {CallerPid, Ref, Module, Func, Args, Kwargs}
+     * Note: We use 6-tuple, NOT 7-tuple. The env is looked up by PID. */
+    ERL_NIF_TERM task_tuple = enif_make_tuple6(env,
+        argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
+
+    /* Serialize to binary */
+    ErlNifBinary task_bin;
+    if (!enif_term_to_binary(env, task_tuple, &task_bin)) {
+        return make_error(env, "serialization_failed");
+    }
+
+    /* Thread-safe enqueue */
+    pthread_mutex_lock(&loop->task_queue_mutex);
+    int enq_result = enif_ioq_enq_binary(loop->task_queue, &task_bin, 0);
+    pthread_mutex_unlock(&loop->task_queue_mutex);
+
+    if (enq_result != 1) {
+        enif_release_binary(&task_bin);
+        return make_error(env, "enqueue_failed");
+    }
+
+    /* Increment task count */
+    atomic_fetch_add(&loop->task_count, 1);
+
+    /* Coalesced wakeup (uvloop-style) */
+    if (loop->has_worker) {
+        if (!atomic_exchange(&loop->task_wake_pending, true)) {
+            ErlNifEnv *msg_env = enif_alloc_env();
+            if (msg_env != NULL) {
+                if (ATOM_TASK_READY == 0) {
+                    ATOM_TASK_READY = enif_make_atom(msg_env, "task_ready");
+                }
+                ERL_NIF_TERM msg = enif_make_atom(msg_env, "task_ready");
+                enif_send(NULL, &loop->worker_pid, msg_env, msg);
+                enif_free_env(msg_env);
+            }
+        }
+    }
+
+    return ATOM_OK;
+}
+
 /**
  * Maximum tasks to dequeue in one batch before acquiring GIL.
  * This bounds memory usage while still amortizing GIL acquisition cost.
@@ -2792,7 +2975,8 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         /* Extract: {CallerPid, Ref, Module, Func, Args, Kwargs} */
         int arity;
         const ERL_NIF_TERM *tuple_elems;
-        if (!enif_get_tuple(term_env, task_term, &arity, &tuple_elems) || arity != 6) {
+        if (!enif_get_tuple(term_env, task_term, &arity, &tuple_elems) ||
+            arity != 6) {
             enif_free_env(term_env);
             continue;
         }
@@ -2810,6 +2994,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             continue;
         }
 
+        /* Look up env by PID (registered via submit_task_with_env) */
+        py_env_resource_t *task_env = (py_env_resource_t *)lookup_pid_env(loop, &caller_pid);
+
         /* Convert module/func to C strings */
         char *module_name = enif_alloc(module_bin.size + 1);
         char *func_name = enif_alloc(func_bin.size + 1);
@@ -2824,11 +3011,27 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         memcpy(func_name, func_bin.data, func_bin.size);
         func_name[func_bin.size] = '\0';
 
-        /* Look up namespace for caller process (only exists if they called exec/eval) */
+        /* Look up namespace for caller process (used for reentrant calls) */
         process_namespace_t *ns = lookup_process_namespace(loop, &caller_pid);
 
-        /* Look up function (checks process namespace for __main__, then cache/import) */
-        PyObject *func = get_function_for_task(loop, ns, module_name, func_name);
+        /* Look up function - check task_env first, then process namespace, then import */
+        PyObject *func = NULL;
+
+        /* First, check the passed env's globals (from py:exec) */
+        if (task_env != NULL && task_env->globals != NULL) {
+            if (strcmp(module_name, "__main__") == 0 ||
+                strcmp(module_name, "_process_") == 0) {
+                func = PyDict_GetItemString(task_env->globals, func_name);
+                if (func != NULL) {
+                    Py_INCREF(func);
+                }
+            }
+        }
+
+        /* Fallback to process namespace and cache/import */
+        if (func == NULL) {
+            func = get_function_for_task(loop, ns, module_name, func_name);
+        }
 
         enif_free(module_name);
         enif_free(func_name);

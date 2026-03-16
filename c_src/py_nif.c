@@ -70,6 +70,11 @@ ErlNifResourceType *INLINE_CONTINUATION_RESOURCE_TYPE = NULL;
 /* Process-local Python environment resource type */
 ErlNifResourceType *PY_ENV_RESOURCE_TYPE = NULL;
 
+/* Getter for PY_ENV_RESOURCE_TYPE (used by py_event_loop.c) */
+ErlNifResourceType *get_env_resource_type(void) {
+    return PY_ENV_RESOURCE_TYPE;
+}
+
 _Atomic uint32_t g_context_id_counter = 1;
 
 /* ============================================================================
@@ -80,27 +85,7 @@ _Atomic uint32_t g_context_id_counter = 1;
  * resource destructor frees the Python dicts.
  */
 
-/**
- * @struct py_env_resource_t
- * @brief Process-local Python environment (globals/locals)
- *
- * Stored in process dictionary as py_local_env. When the process exits,
- * Erlang GC drops the reference, triggering the destructor which frees
- * the Python dicts.
- *
- * Each env is bound to a specific interpreter (identified by interp_id).
- * The dicts must be freed in the same interpreter that created them.
- */
-typedef struct {
-    /** @brief Global namespace dictionary */
-    PyObject *globals;
-    /** @brief Local namespace dictionary (same as globals for module-level execution) */
-    PyObject *locals;
-    /** @brief Interpreter ID that owns these dicts (0 = main interpreter) */
-    int64_t interp_id;
-    /** @brief Pool slot index (-1 for main interpreter) */
-    int pool_slot;
-} py_env_resource_t;
+/* py_env_resource_t is now defined in py_nif.h */
 
 /**
  * @brief Destructor for py_env_resource_t
@@ -6534,6 +6519,7 @@ static ErlNifFunc nif_funcs[] = {
     {"event_loop_run_async", 7, nif_event_loop_run_async, ERL_NIF_DIRTY_JOB_IO_BOUND},
     /* Async task queue NIFs (uvloop-inspired) */
     {"submit_task", 7, nif_submit_task, 0},  /* Thread-safe, no GIL needed */
+    {"submit_task_with_env", 8, nif_submit_task_with_env, 0},  /* With process-local env */
     {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"event_loop_set_py_loop", 2, nif_event_loop_set_py_loop, 0},
     /* Per-process namespace NIFs */

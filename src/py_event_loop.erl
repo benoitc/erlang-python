@@ -166,8 +166,31 @@ create_task(Module, Func, Args, Kwargs) ->
     Caller = self(),
     ModuleBin = py_util:to_binary(Module),
     FuncBin = py_util:to_binary(Func),
-    ok = py_nif:submit_task(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs),
+    %% Check if there's a process-local env (from py:exec) and use it
+    ok = case get_process_env() of
+        undefined ->
+            py_nif:submit_task(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs);
+        EnvRef ->
+            py_nif:submit_task_with_env(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef)
+    end,
     Ref.
+
+%% @doc Get the process-local env reference if available.
+%% Returns the first env found (typically there's only one per process).
+-spec get_process_env() -> reference() | undefined.
+get_process_env() ->
+    case get(py_local_env) of
+        undefined -> undefined;
+        Envs when is_map(Envs) ->
+            %% Return any env (for __main__ lookup, any env works)
+            case maps:values(Envs) of
+                [EnvRef | _] -> EnvRef;
+                [] -> undefined
+            end;
+        EnvRef when is_reference(EnvRef) ->
+            %% Legacy single-env format
+            EnvRef
+    end.
 
 %% @doc Wait for an async task result.
 %%
@@ -207,6 +230,8 @@ spawn_task(Module, Func, Args) ->
 spawn_task(Module, Func, Args, Kwargs) ->
     {ok, LoopRef} = get_loop(),
     Ref = make_ref(),
+    %% Get env from caller's process BEFORE spawning receiver
+    CallerEnv = get_process_env(),
     %% Spawn a process that will receive and discard the result
     Receiver = erlang:spawn(fun() ->
         receive
@@ -218,7 +243,13 @@ spawn_task(Module, Func, Args, Kwargs) ->
     end),
     ModuleBin = py_util:to_binary(Module),
     FuncBin = py_util:to_binary(Func),
-    ok = py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs),
+    %% Submit task with caller's env if available
+    ok = case CallerEnv of
+        undefined ->
+            py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs);
+        EnvRef ->
+            py_nif:submit_task_with_env(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef)
+    end,
     ok.
 
 %% ============================================================================
