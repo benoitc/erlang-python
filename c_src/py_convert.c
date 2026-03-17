@@ -520,6 +520,27 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return PyBytes_FromStringAndSize((char *)bin.data, bin.size);
     }
 
+    /*
+     * Check for {bytes, Binary} tagged tuple - explicit bytes conversion.
+     * This allows users to explicitly send raw bytes without UTF-8 decoding.
+     */
+    {
+        int tuple_arity;
+        const ERL_NIF_TERM *tuple_elements;
+        if (enif_get_tuple(env, term, &tuple_arity, &tuple_elements) && tuple_arity == 2) {
+            char tag_buf[16];
+            if (enif_get_atom(env, tuple_elements[0], tag_buf, sizeof(tag_buf), ERL_NIF_LATIN1)) {
+                if (strcmp(tag_buf, "bytes") == 0) {
+                    ErlNifBinary bytes_bin;
+                    if (enif_inspect_binary(env, tuple_elements[1], &bytes_bin)) {
+                        return PyBytes_FromStringAndSize((char *)bytes_bin.data, bytes_bin.size);
+                    }
+                    /* Not a binary - fall through to normal tuple handling */
+                }
+            }
+        }
+    }
+
     /* Check list (must come after binary to preserve structure) */
     if (enif_get_list_length(env, term, &list_len)) {
         PyObject *list = PyList_New(list_len);
