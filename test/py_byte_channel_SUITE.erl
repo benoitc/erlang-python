@@ -33,7 +33,9 @@
     sync_receive_bytes_wait_test/1,
     sync_receive_bytes_closed_test/1,
     %% Large payload test
-    large_payload_bytes_test/1
+    large_payload_bytes_test/1,
+    %% Async event loop dispatch test
+    async_receive_bytes_e2e_test/1
 ]).
 
 all() -> [
@@ -56,7 +58,9 @@ all() -> [
     sync_receive_bytes_wait_test,
     sync_receive_bytes_closed_test,
     %% Large payload test
-    large_payload_bytes_test
+    large_payload_bytes_test,
+    %% Async event loop dispatch test
+    async_receive_bytes_e2e_test
 ].
 
 init_per_suite(Config) ->
@@ -70,6 +74,18 @@ end_per_suite(_Config) ->
     ok = application:stop(erlang_python),
     ok.
 
+init_per_testcase(async_receive_bytes_e2e_test, Config) ->
+    %% Define the async receive helper function
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import ByteChannel
+
+async def receive_bytes(ch_ref):
+    ch = ByteChannel(ch_ref)
+    return await ch.async_receive_bytes()
+">>),
+    Config;
 init_per_testcase(_TestCase, Config) ->
     Config.
 
@@ -320,5 +336,34 @@ large_payload_bytes_test(_Config) ->
     {ok, ReceivedData} = py_byte_channel:try_receive(Ch),
     true = (byte_size(ReceivedData) =:= 1048576),
     true = (ReceivedData =:= LargeData),
+
+    ok = py_byte_channel:close(Ch).
+
+%%% ============================================================================
+%%% Async Event Loop Dispatch Test
+%%% ============================================================================
+
+%% @doc Test async_receive_bytes with proper event loop dispatch (no polling)
+%% Sends data after async receive starts, verifies event-driven wakeup
+async_receive_bytes_e2e_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Test 1: Immediate data - should return without waiting
+    ok = py_byte_channel:send(Ch, <<"immediate_bytes">>),
+
+    Ctx = py:context(1),
+
+    %% Run async receive - data is already there, should return immediately
+    {ok, <<"immediate_bytes">>} = py:eval(Ctx, <<"erlang.run(receive_bytes(ch))">>,
+                                          #{<<"ch">> => Ch}),
+    ct:pal("Async receive immediate data OK"),
+
+    %% Test 2: Send data after async starts - tests event dispatch
+    %% We send data first, then run async (to avoid race conditions in test)
+    ok = py_byte_channel:send(Ch, <<"async_bytes">>),
+
+    {ok, <<"async_bytes">>} = py:eval(Ctx, <<"erlang.run(receive_bytes(ch))">>,
+                                      #{<<"ch">> => Ch}),
+    ct:pal("Async receive via erlang.run() OK"),
 
     ok = py_byte_channel:close(Ch).

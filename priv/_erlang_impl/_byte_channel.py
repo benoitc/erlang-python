@@ -182,7 +182,7 @@ class ByteChannel:
         """
         import asyncio
 
-        # Try non-blocking first (direct NIF - fast)
+        # Try non-blocking first (direct NIF - fast path)
         result = self.try_receive_bytes()
         if result is not None:
             return result
