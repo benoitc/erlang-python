@@ -166,6 +166,10 @@ Asyncio-compatible receive. Yields to other coroutines while waiting.
 msg = await ch.async_receive()
 ```
 
+**Behavior:**
+- When using `ErlangEventLoop`: Uses event-driven notification (no polling). The channel notifies the event loop via timer dispatch when data arrives.
+- When using other asyncio loops: Falls back to polling with 100us sleep intervals.
+
 **Raises:** `ChannelClosed` when the channel is closed.
 
 #### Iteration
@@ -320,6 +324,8 @@ async def worker(channel_ref, worker_id):
 
 ## Architecture
 
+### Sync Receive Flow
+
 ```
 Erlang                              Python
 ──────                              ──────
@@ -345,6 +351,59 @@ py_channel:send(Ch, Term)
 
 py_channel:close() ───────────────▶ StopIteration
 ```
+
+### Event-Driven Async Receive
+
+When using `ErlangEventLoop`, `async_receive()` uses event-driven notification:
+
+```
+Python                              C / Erlang
+──────                              ──────────
+
+await ch.async_receive()
+       │
+       ├── try_receive() ──────────▶ Check queue (fast path)
+       │   └── Data? Return immediately
+       │
+       └── No data:
+           │
+           ├── Create Future + callback_id
+           ├── Register in loop._timers[callback_id]
+           │
+           └── _channel_wait() ────▶ Register waiter in channel
+                                     (callback_id + loop ref)
+                                            │
+await future ◀─────────────────────────────┘
+       │                                    │
+       │                            [Data arrives]
+       │                                    │
+       │                            py_channel:send()
+       │                                    │
+       │                            channel_send()
+       │                                    │
+       │                            event_loop_add_pending()
+       │                                    │
+       │                            pthread_cond_signal()
+       │                                    │
+       │    ┌───────────────────────────────┘
+       │    │
+       │    ▼
+       │  _run_once_native_for() returns pending
+       │    │
+       │    ▼
+       │  _dispatch(callback_id, TIMER)
+       │    │
+       │    ▼
+       │  Fire handle from _timers
+       │    │
+       │    ▼
+       │  Callback: try_receive() → future.set_result(data)
+       │
+       ▼
+Return data
+```
+
+This avoids polling overhead - Python only wakes when data actually arrives.
 
 ## ByteChannel - Raw Byte Streaming
 
@@ -419,6 +478,8 @@ async def process_bytes_async(channel_ref):
     async for chunk in ch:
         process(chunk)
 ```
+
+**Event-driven async:** When using `ErlangEventLoop`, `async_receive_bytes()` uses event-driven notification instead of polling. The channel signals the event loop when data arrives, avoiding CPU overhead from sleep loops.
 
 ### ByteChannel vs Channel Architecture
 
