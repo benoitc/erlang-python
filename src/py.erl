@@ -1089,7 +1089,8 @@ deactivate_venv() ->
 %% Returns a map with venv_path and site_packages, or none if no venv is active.
 -spec venv_info() -> {ok, map() | none} | {error, term()}.
 venv_info() ->
-    Code = <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if hasattr(__import__('sys'), '_active_venv') else {'active': False})">>,
+    %% Check both attributes exist to handle partial activation/deactivation state
+    Code = <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if (hasattr(__import__('sys'), '_active_venv') and hasattr(__import__('sys'), '_venv_site_packages')) else {'active': False})">>,
     eval(Code).
 
 %% @private
