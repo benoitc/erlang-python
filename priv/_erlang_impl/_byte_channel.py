@@ -13,57 +13,60 @@
 # limitations under the License.
 
 """
-Bidirectional channel for Erlang-Python communication.
+Raw byte channel for Erlang-Python communication.
 
-Channels provide efficient streaming message passing without syscall overhead.
+ByteChannel provides raw byte streaming without term serialization,
+suitable for HTTP bodies, file transfers, and binary protocols.
+
+Unlike Channel which serializes Erlang terms, ByteChannel passes
+raw binaries directly without any encoding/decoding overhead.
 
 Usage:
 
-    # Receiving messages from Erlang (sync)
-    def process_channel(channel_ref):
-        from erlang.channel import Channel
-        ch = Channel(channel_ref)
+    # Receiving bytes from Erlang (sync)
+    def process_bytes(channel_ref):
+        from erlang import ByteChannel
+        ch = ByteChannel(channel_ref)
 
-        # Blocking receive (suspends Python, yields to Erlang)
-        msg = ch.receive()
+        # Blocking receive (releases GIL while waiting)
+        data = ch.receive_bytes()
 
         # Non-blocking receive
-        msg = ch.try_receive()  # Returns None if empty
+        data = ch.try_receive_bytes()  # Returns None if empty
 
-        # Iterate over messages
-        for msg in ch:
-            process(msg)
+        # Iterate over bytes
+        for chunk in ch:
+            process(chunk)
 
     # Async receiving (asyncio compatible)
-    async def process_channel_async(channel_ref):
-        from erlang.channel import Channel
-        ch = Channel(channel_ref)
+    async def process_bytes_async(channel_ref):
+        from erlang import ByteChannel
+        ch = ByteChannel(channel_ref)
 
         # Async receive (yields to other coroutines while waiting)
-        msg = await ch.async_receive()
+        data = await ch.async_receive_bytes()
 
         # Async iteration
-        async for msg in ch:
-            process(msg)
+        async for chunk in ch:
+            process(chunk)
 
-    # Sending replies to Erlang processes
-    from erlang.channel import reply
-    reply(pid, {"status": "ok", "data": result})
+    # Sending bytes back to Erlang
+    ch.send_bytes(b"HTTP/1.1 200 OK\\r\\n")
 """
 
-__all__ = ['Channel', 'reply', 'ChannelClosed']
+__all__ = ['ByteChannel', 'ByteChannelClosed']
 
 
-class ChannelClosed(Exception):
-    """Raised when attempting to receive from a closed channel."""
+class ByteChannelClosed(Exception):
+    """Raised when attempting to receive from a closed byte channel."""
     pass
 
 
-class Channel:
-    """Bidirectional channel for Erlang-Python communication.
+class ByteChannel:
+    """Raw byte channel for Erlang-Python communication.
 
-    Channels wrap an Erlang channel reference and provide a Pythonic
-    interface for receiving messages and iterating over them.
+    ByteChannel wraps an Erlang channel reference and provides a Pythonic
+    interface for sending and receiving raw bytes without term serialization.
 
     Attributes:
         _ref: The underlying Erlang channel reference.
@@ -72,15 +75,53 @@ class Channel:
     __slots__ = ('_ref',)
 
     def __init__(self, channel_ref):
-        """Initialize a channel wrapper.
+        """Initialize a byte channel wrapper.
 
         Args:
-            channel_ref: The Erlang channel reference from py_channel:new/0.
+            channel_ref: The Erlang channel reference from py_byte_channel:new/0.
         """
         self._ref = channel_ref
 
-    def receive(self, timeout_ms=-1):
-        """Receive the next message from the channel.
+    def send_bytes(self, data: bytes) -> bool:
+        """Send raw bytes to the channel.
+
+        Args:
+            data: Binary data to send.
+
+        Returns:
+            True on success.
+
+        Raises:
+            RuntimeError: If the channel is closed or busy (backpressure).
+            TypeError: If data is not bytes.
+        """
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError("data must be bytes, bytearray, or memoryview")
+
+        import erlang
+        # Use _channel_send which sends raw bytes
+        return erlang._channel_send(self._ref, bytes(data))
+
+    def try_receive_bytes(self) -> bytes | None:
+        """Try to receive bytes without blocking.
+
+        Returns:
+            The received bytes, or None if the channel is empty.
+
+        Raises:
+            ByteChannelClosed: If the channel has been closed.
+        """
+        import erlang
+
+        try:
+            return erlang._byte_channel_try_receive_bytes(self._ref)
+        except RuntimeError as e:
+            if "closed" in str(e):
+                raise ByteChannelClosed("Channel has been closed")
+            raise
+
+    def receive_bytes(self, timeout_ms: int = -1) -> bytes:
+        """Receive the next bytes from the channel.
 
         This is a blocking receive that waits for data. The GIL is released
         while waiting, allowing other Python threads to run.
@@ -89,62 +130,42 @@ class Channel:
             timeout_ms: Timeout in milliseconds (-1 = infinite, default)
 
         Returns:
-            The received Erlang term, converted to Python.
+            The received bytes.
 
         Raises:
-            ChannelClosed: If the channel has been closed.
+            ByteChannelClosed: If the channel has been closed.
             TimeoutError: If timeout expires before data arrives.
         """
         import erlang
 
-        # Direct NIF call - no erlang.call() roundtrip
         try:
-            return erlang._channel_receive(self._ref, timeout_ms)
+            return erlang._byte_channel_receive_bytes(self._ref, timeout_ms)
         except RuntimeError as e:
             if "closed" in str(e):
-                raise ChannelClosed("Channel has been closed")
-            raise
-
-    def try_receive(self):
-        """Try to receive a message without blocking.
-
-        Returns:
-            The received message, or None if the channel is empty.
-
-        Raises:
-            ChannelClosed: If the channel has been closed.
-        """
-        import erlang
-
-        # Direct NIF call - no erlang.call() roundtrip
-        try:
-            return erlang._channel_try_receive(self._ref)
-        except RuntimeError as e:
-            if "closed" in str(e):
-                raise ChannelClosed("Channel has been closed")
+                raise ByteChannelClosed("Channel has been closed")
             raise
 
     def __iter__(self):
-        """Iterate over messages until the channel is closed.
+        """Iterate over bytes until the channel is closed.
 
         Yields:
-            Each message received from the channel.
+            Each chunk of bytes received from the channel.
 
         Example:
-            for msg in channel:
-                process(msg)
+            for chunk in byte_channel:
+                process(chunk)
         """
         while True:
             try:
-                yield self.receive()
-            except ChannelClosed:
+                yield self.receive_bytes()
+            except ByteChannelClosed:
                 break
 
     # ========================================================================
     # Async methods (asyncio compatible)
     # ========================================================================
 
-    async def async_receive(self):
+    async def async_receive_bytes(self) -> bytes:
         """Async receive - yields to other coroutines while waiting.
 
         This method uses event-driven notification when running on ErlangEventLoop.
@@ -154,24 +175,24 @@ class Channel:
         Falls back to polling on non-Erlang event loops.
 
         Returns:
-            The received Erlang term, converted to Python.
+            The received bytes.
 
         Raises:
-            ChannelClosed: If the channel has been closed.
+            ByteChannelClosed: If the channel has been closed.
 
         Example:
-            msg = await channel.async_receive()
+            data = await byte_channel.async_receive_bytes()
         """
         import asyncio
 
-        # Try non-blocking first (direct NIF - fast)
-        result = self.try_receive()
+        # Try non-blocking first (direct NIF - fast path)
+        result = self.try_receive_bytes()
         if result is not None:
             return result
 
         # Check if closed
         if self._is_closed():
-            raise ChannelClosed("Channel has been closed")
+            raise ByteChannelClosed("Channel has been closed")
 
         # Get the running event loop
         loop = asyncio.get_running_loop()
@@ -183,7 +204,7 @@ class Channel:
             # Fallback for non-Erlang event loops: use polling
             return await self._async_receive_polling()
 
-    async def _async_receive_event_driven(self, loop):
+    async def _async_receive_event_driven(self, loop) -> bytes:
         """Event-driven async receive using channel waiter mechanism.
 
         Registers with the channel and waits for EVENT_TYPE_TIMER dispatch
@@ -201,11 +222,11 @@ class Channel:
             if future.done():
                 return
             try:
-                data = self.try_receive()
+                data = self.try_receive_bytes()
                 if data is not None:
                     future.set_result(data)
                 elif self._is_closed():
-                    future.set_exception(ChannelClosed("Channel closed"))
+                    future.set_exception(ByteChannelClosed("Channel closed"))
                 else:
                     # Data consumed by race - set None to signal retry
                     future.set_result(None)
@@ -219,7 +240,7 @@ class Channel:
 
         try:
             # Register waiter with channel (direct C call, no Erlang overhead)
-            result = erlang._channel_wait(self._ref, callback_id, loop._loop_capsule)
+            result = erlang._byte_channel_wait(self._ref, callback_id, loop._loop_capsule)
 
             if isinstance(result, tuple):
                 if result[0] == 'ok':
@@ -229,7 +250,7 @@ class Channel:
                 elif result[0] == 'error':
                     loop._timers.pop(callback_id, None)
                     if result[1] == 'closed':
-                        raise ChannelClosed("Channel closed")
+                        raise ByteChannelClosed("Channel closed")
                     raise RuntimeError(f"Channel wait failed: {result[1]}")
 
             # Waiter registered - await notification
@@ -241,44 +262,44 @@ class Channel:
                     return await self._async_receive_polling()
                 return data
             except asyncio.CancelledError:
-                erlang._channel_cancel_wait(self._ref, callback_id)
+                erlang._byte_channel_cancel_wait(self._ref, callback_id)
                 raise
         finally:
             loop._timers.pop(callback_id, None)
 
-    async def _async_receive_polling(self):
+    async def _async_receive_polling(self) -> bytes:
         """Fallback async receive using polling."""
         import asyncio
 
         while True:
             await asyncio.sleep(0.0001)  # 100us yield
-            result = self.try_receive()
+            result = self.try_receive_bytes()
             if result is not None:
                 return result
             if self._is_closed():
-                raise ChannelClosed("Channel closed")
+                raise ByteChannelClosed("Channel closed")
 
     def __aiter__(self):
-        """Return async iterator for the channel.
+        """Return async iterator for the byte channel.
 
         Example:
-            async for msg in channel:
-                process(msg)
+            async for chunk in byte_channel:
+                process(chunk)
         """
         return self
 
-    async def __anext__(self):
-        """Get next message asynchronously.
+    async def __anext__(self) -> bytes:
+        """Get next bytes asynchronously.
 
         Raises:
             StopAsyncIteration: When the channel is closed.
         """
         try:
-            return await self.async_receive()
-        except ChannelClosed:
+            return await self.async_receive_bytes()
+        except ByteChannelClosed:
             raise StopAsyncIteration
 
-    def _is_closed(self):
+    def _is_closed(self) -> bool:
         """Check if the channel is closed."""
         import erlang
         try:
@@ -287,41 +308,4 @@ class Channel:
             return True
 
     def __repr__(self):
-        return f"<Channel ref={self._ref!r}>"
-
-
-def reply(pid, term):
-    """Send a reply to an Erlang process.
-
-    This allows Python code to send messages back to Erlang processes
-    via enif_send, enabling bidirectional communication.
-
-    Args:
-        pid: The Erlang PID to send to (from erlang.self() or passed in).
-        term: The Python value to send (will be converted to Erlang term).
-
-    Returns:
-        True on success.
-
-    Raises:
-        RuntimeError: If the send fails.
-
-    Example:
-        # Python handler receives a request with the sender's PID
-        def handle_request(request):
-            sender_pid = request['reply_to']
-            result = compute_something()
-            reply(sender_pid, {'status': 'ok', 'result': result})
-    """
-    import erlang
-
-    # Use erlang.send for fire-and-forget message sending
-    # This directly calls enif_send without requiring callback handling
-    result = erlang.send(pid, term)
-
-    if result == 'ok' or result is True:
-        return True
-    elif isinstance(result, tuple) and result[0] == 'error':
-        raise RuntimeError(f"Reply failed: {result[1]}")
-    else:
-        return True
+        return f"<ByteChannel ref={self._ref!r}>"

@@ -2856,6 +2856,405 @@ static PyObject *erlang_channel_is_closed_impl(PyObject *self, PyObject *args) {
     }
 }
 
+/* ============================================================================
+ * ByteChannel Methods (raw bytes, no term conversion)
+ * ============================================================================ */
+
+/**
+ * @brief ByteChannel try_receive_bytes - non-blocking, returns raw bytes
+ *
+ * Usage: erlang._byte_channel_try_receive_bytes(channel_ref)
+ * Returns: bytes if data available, None if empty
+ * Raises: RuntimeError if channel closed
+ */
+static PyObject *erlang_byte_channel_try_receive_bytes_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+
+    int result = channel_try_receive(channel, &data, &size);
+
+    if (result == 0) {
+        /* Success - return raw bytes (NO term decoding) */
+        PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
+        enif_free(data);
+        return bytes;  /* May be NULL if allocation failed */
+    } else if (result == 1) {
+        /* Empty */
+        Py_RETURN_NONE;
+    } else {
+        /* Closed */
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+}
+
+/**
+ * @brief ByteChannel receive_bytes - blocking with GIL release, returns raw bytes
+ *
+ * Usage: erlang._byte_channel_receive_bytes(channel_ref, timeout_ms)
+ * Returns: bytes when data available
+ * Raises: RuntimeError if channel closed, TimeoutError if timeout
+ *
+ * This function releases the GIL while waiting, allowing other Python
+ * threads to run. Uses polling with short sleeps.
+ */
+static PyObject *erlang_byte_channel_receive_bytes_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    long timeout_ms = -1;  /* -1 = infinite */
+
+    if (!PyArg_ParseTuple(args, "O|l", &capsule, &timeout_ms)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+    int result;
+
+    /* First try without blocking */
+    result = channel_try_receive(channel, &data, &size);
+    if (result == 0) {
+        /* Got data - return raw bytes */
+        PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
+        enif_free(data);
+        return bytes;
+    } else if (result == -1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+
+    /* Need to wait - release GIL and poll */
+    {
+        long elapsed_us = 0;
+        const long poll_interval_us = 100;  /* 100 microseconds */
+        const long timeout_us = timeout_ms >= 0 ? timeout_ms * 1000 : -1;
+
+        Py_BEGIN_ALLOW_THREADS
+
+        while (1) {
+            result = channel_try_receive(channel, &data, &size);
+            if (result != 1) {
+                break;  /* Got data or closed */
+            }
+
+            /* Check timeout */
+            if (timeout_us >= 0 && elapsed_us >= timeout_us) {
+                result = 2;  /* Timeout */
+                break;
+            }
+
+            /* Sleep briefly */
+            usleep(poll_interval_us);
+            elapsed_us += poll_interval_us;
+        }
+
+        Py_END_ALLOW_THREADS
+    }
+
+    if (result == 2) {
+        PyErr_SetString(PyExc_TimeoutError, "channel receive timeout");
+        return NULL;
+    } else if (result == -1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+
+    /* Return raw bytes (NO term decoding) */
+    PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
+    enif_free(data);
+    return bytes;
+}
+
+/* ============================================================================
+ * Async Channel Wait Methods (direct C, no Erlang callback overhead)
+ * ============================================================================ */
+
+/**
+ * @brief Register async waiter for channel (term-based)
+ *
+ * Usage: erlang._channel_wait(channel_ref, callback_id, loop_capsule)
+ * Returns: ('ok', data) if immediate, 'ok' if waiter registered, ('error', reason)
+ */
+static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *ch_capsule;
+    PyObject *loop_capsule;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "OKO", &ch_capsule, &callback_id, &loop_capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(ch_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(ch_capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(loop_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected loop capsule");
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang.event_loop");
+    if (loop == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid loop reference");
+        return NULL;
+    }
+
+    pthread_mutex_lock(&channel->mutex);
+
+    /* Check if closed */
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->mutex);
+        return Py_BuildValue("(ss)", "error", "closed");
+    }
+
+    /* Check if waiter already exists */
+    if (channel->has_waiter || channel->has_sync_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return Py_BuildValue("(ss)", "error", "waiter_exists");
+    }
+
+    /* Check if data available */
+    size_t queue_size = enif_ioq_size(channel->queue);
+    if (queue_size > 0) {
+        SysIOVec *iov;
+        int iovcnt;
+        iov = enif_ioq_peek(channel->queue, &iovcnt);
+
+        if (iovcnt > 0 && iov != NULL && iov[0].iov_len > 0) {
+            size_t msg_size = iov[0].iov_len;
+            unsigned char *data = enif_alloc(msg_size);
+            if (data == NULL) {
+                pthread_mutex_unlock(&channel->mutex);
+                PyErr_SetString(PyExc_MemoryError, "failed to allocate memory");
+                return NULL;
+            }
+
+            memcpy(data, iov[0].iov_base, msg_size);
+            enif_ioq_deq(channel->queue, msg_size, NULL);
+            channel->current_size -= msg_size;
+            pthread_mutex_unlock(&channel->mutex);
+
+            /* Decode term: binary -> Erlang term -> Python */
+            ErlNifEnv *tmp_env = enif_alloc_env();
+            if (tmp_env == NULL) {
+                enif_free(data);
+                PyErr_SetString(PyExc_MemoryError, "failed to allocate environment");
+                return NULL;
+            }
+
+            ERL_NIF_TERM term;
+            if (enif_binary_to_term(tmp_env, data, msg_size, &term, 0) == 0) {
+                enif_free(data);
+                enif_free_env(tmp_env);
+                PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
+                return NULL;
+            }
+            enif_free(data);
+
+            PyObject *py_obj = term_to_py(tmp_env, term);
+            enif_free_env(tmp_env);
+
+            if (py_obj == NULL) {
+                return NULL;
+            }
+
+            PyObject *result_tuple = Py_BuildValue("(sO)", "ok", py_obj);
+            Py_DECREF(py_obj);
+            return result_tuple;
+        }
+    }
+
+    /* No data - register waiter */
+    enif_keep_resource(loop);
+    channel->waiter_loop = loop;
+    channel->waiter_callback_id = callback_id;
+    channel->has_waiter = true;
+
+    pthread_mutex_unlock(&channel->mutex);
+
+    return Py_BuildValue("s", "ok");
+}
+
+/**
+ * @brief Cancel async waiter for channel
+ *
+ * Usage: erlang._channel_cancel_wait(channel_ref, callback_id)
+ */
+static PyObject *erlang_channel_cancel_wait_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *ch_capsule;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "OK", &ch_capsule, &callback_id)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(ch_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(ch_capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    pthread_mutex_lock(&channel->mutex);
+
+    if (channel->has_waiter && channel->waiter_callback_id == callback_id) {
+        erlang_event_loop_t *loop = channel->waiter_loop;
+        channel->has_waiter = false;
+        channel->waiter_loop = NULL;
+        channel->waiter_callback_id = 0;
+        pthread_mutex_unlock(&channel->mutex);
+
+        if (loop != NULL) {
+            enif_release_resource(loop);
+        }
+    } else {
+        pthread_mutex_unlock(&channel->mutex);
+    }
+
+    Py_RETURN_TRUE;
+}
+
+/**
+ * @brief Register async waiter for byte channel (raw bytes)
+ *
+ * Usage: erlang._byte_channel_wait(channel_ref, callback_id, loop_capsule)
+ * Returns: ('ok', bytes) if immediate, 'ok' if waiter registered, ('error', reason)
+ */
+static PyObject *erlang_byte_channel_wait_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *ch_capsule;
+    PyObject *loop_capsule;
+    unsigned long long callback_id;
+
+    if (!PyArg_ParseTuple(args, "OKO", &ch_capsule, &callback_id, &loop_capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(ch_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(ch_capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(loop_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected loop capsule");
+        return NULL;
+    }
+
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang.event_loop");
+    if (loop == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid loop reference");
+        return NULL;
+    }
+
+    pthread_mutex_lock(&channel->mutex);
+
+    /* Check if closed */
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->mutex);
+        return Py_BuildValue("(ss)", "error", "closed");
+    }
+
+    /* Check if waiter already exists */
+    if (channel->has_waiter || channel->has_sync_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return Py_BuildValue("(ss)", "error", "waiter_exists");
+    }
+
+    /* Check if data available */
+    size_t queue_size = enif_ioq_size(channel->queue);
+    if (queue_size > 0) {
+        SysIOVec *iov;
+        int iovcnt;
+        iov = enif_ioq_peek(channel->queue, &iovcnt);
+
+        if (iovcnt > 0 && iov != NULL && iov[0].iov_len > 0) {
+            size_t msg_size = iov[0].iov_len;
+
+            /* Create Python bytes object */
+            PyObject *bytes = PyBytes_FromStringAndSize((char *)iov[0].iov_base, msg_size);
+            if (bytes == NULL) {
+                pthread_mutex_unlock(&channel->mutex);
+                return NULL;
+            }
+
+            enif_ioq_deq(channel->queue, msg_size, NULL);
+            channel->current_size -= msg_size;
+            pthread_mutex_unlock(&channel->mutex);
+
+            /* Return raw bytes (NO term decoding) */
+            return Py_BuildValue("(sO)", "ok", bytes);
+        }
+    }
+
+    /* No data - register waiter */
+    enif_keep_resource(loop);
+    channel->waiter_loop = loop;
+    channel->waiter_callback_id = callback_id;
+    channel->has_waiter = true;
+
+    pthread_mutex_unlock(&channel->mutex);
+
+    return Py_BuildValue("s", "ok");
+}
+
+/**
+ * @brief Cancel async waiter for byte channel
+ *
+ * Usage: erlang._byte_channel_cancel_wait(channel_ref, callback_id)
+ */
+static PyObject *erlang_byte_channel_cancel_wait_impl(PyObject *self, PyObject *args) {
+    /* Same implementation as channel_cancel_wait */
+    return erlang_channel_cancel_wait_impl(self, args);
+}
+
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
     {"call", erlang_call_impl, METH_VARARGS,
@@ -2929,6 +3328,32 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Check if channel is closed.\n"
      "Usage: erlang._channel_is_closed(channel_ref)\n"
      "Returns: True if closed, False otherwise."},
+    /* ByteChannel methods (raw bytes, no term conversion) */
+    {"_byte_channel_try_receive_bytes", erlang_byte_channel_try_receive_bytes_impl, METH_VARARGS,
+     "ByteChannel receive (non-blocking, raw bytes).\n"
+     "Usage: erlang._byte_channel_try_receive_bytes(channel_ref)\n"
+     "Returns: bytes if data, None if empty. Raises RuntimeError if closed."},
+    {"_byte_channel_receive_bytes", erlang_byte_channel_receive_bytes_impl, METH_VARARGS,
+     "ByteChannel receive (blocking with GIL release, raw bytes).\n"
+     "Usage: erlang._byte_channel_receive_bytes(channel_ref, timeout_ms=-1)\n"
+     "Returns: bytes. Raises RuntimeError if closed, TimeoutError if timeout."},
+    /* Async channel wait methods (direct, no Erlang callback overhead) */
+    {"_channel_wait", erlang_channel_wait_impl, METH_VARARGS,
+     "Register async waiter for channel (term-based).\n"
+     "Usage: erlang._channel_wait(channel_ref, callback_id, loop_capsule)\n"
+     "Returns: ('ok', data) if immediate, 'ok' if waiter registered, ('error', reason) on error."},
+    {"_channel_cancel_wait", erlang_channel_cancel_wait_impl, METH_VARARGS,
+     "Cancel async waiter for channel.\n"
+     "Usage: erlang._channel_cancel_wait(channel_ref, callback_id)\n"
+     "Returns: True."},
+    {"_byte_channel_wait", erlang_byte_channel_wait_impl, METH_VARARGS,
+     "Register async waiter for byte channel (raw bytes).\n"
+     "Usage: erlang._byte_channel_wait(channel_ref, callback_id, loop_capsule)\n"
+     "Returns: ('ok', bytes) if immediate, 'ok' if waiter registered, ('error', reason) on error."},
+    {"_byte_channel_cancel_wait", erlang_byte_channel_cancel_wait_impl, METH_VARARGS,
+     "Cancel async waiter for byte channel.\n"
+     "Usage: erlang._byte_channel_cancel_wait(channel_ref, callback_id)\n"
+     "Returns: True."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -3388,10 +3813,15 @@ static int create_erlang_module(void) {
         "        erlang.Channel = _erlang_impl.Channel\n"
         "        erlang.ChannelClosed = _erlang_impl.ChannelClosed\n"
         "        erlang.reply = _erlang_impl.reply\n"
+        "        # ByteChannel for raw bytes streaming\n"
+        "        erlang.byte_channel = _erlang_impl.byte_channel\n"
+        "        erlang.ByteChannel = _erlang_impl.ByteChannel\n"
+        "        erlang.ByteChannelClosed = _erlang_impl.ByteChannelClosed\n"
         "        # Make erlang behave as a package for 'import erlang.reactor' syntax\n"
         "        erlang.__path__ = [priv_dir]\n"
         "        sys.modules['erlang.reactor'] = erlang.reactor\n"
         "        sys.modules['erlang.channel'] = erlang.channel\n"
+        "        sys.modules['erlang.byte_channel'] = erlang.byte_channel\n"
         "        return True\n"
         "    except ImportError as e:\n"
         "        import sys\n"

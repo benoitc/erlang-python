@@ -835,3 +835,164 @@ ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc, const ER
     pthread_mutex_unlock(&channel->mutex);
     return ATOM_OK;
 }
+
+/* ============================================================================
+ * ByteChannel NIF Functions (raw bytes, no term conversion)
+ * ============================================================================ */
+
+/**
+ * @brief Send raw bytes to a channel (no term_to_binary)
+ *
+ * nif_byte_channel_send_bytes(ChannelRef, Binary) -> ok | busy | {error, closed}
+ *
+ * Sends raw binary data directly to the channel without term serialization.
+ * Used for ByteChannel API where raw byte streams are desired.
+ */
+ERL_NIF_TERM nif_byte_channel_send_bytes(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_channel_t *channel;
+    ErlNifBinary bin;
+
+    if (!enif_get_resource(env, argv[0], CHANNEL_RESOURCE_TYPE, (void **)&channel)) {
+        return make_error(env, "invalid_channel");
+    }
+
+    if (!enif_inspect_binary(env, argv[1], &bin)) {
+        return make_error(env, "invalid_binary");
+    }
+
+    int result = channel_send(channel, bin.data, bin.size);
+
+    switch (result) {
+        case 0:
+            return ATOM_OK;
+        case 1:
+            return ATOM_BUSY;
+        default:
+            return enif_make_tuple2(env, ATOM_ERROR, ATOM_CLOSED);
+    }
+}
+
+/**
+ * @brief Non-blocking receive raw bytes from a channel (no binary_to_term)
+ *
+ * nif_byte_channel_try_receive_bytes(ChannelRef) -> {ok, Binary} | {error, empty} | {error, closed}
+ *
+ * Receives raw binary data directly from the channel without term deserialization.
+ * Used for ByteChannel API where raw byte streams are desired.
+ */
+ERL_NIF_TERM nif_byte_channel_try_receive_bytes(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_channel_t *channel;
+
+    if (!enif_get_resource(env, argv[0], CHANNEL_RESOURCE_TYPE, (void **)&channel)) {
+        return make_error(env, "invalid_channel");
+    }
+
+    unsigned char *data;
+    size_t size;
+    int result = channel_try_receive(channel, &data, &size);
+
+    if (result == 0) {
+        /* Data available - return raw binary (NO enif_binary_to_term) */
+        ERL_NIF_TERM bin_term;
+        unsigned char *bin_data = enif_make_new_binary(env, size, &bin_term);
+        if (bin_data == NULL) {
+            enif_free(data);
+            return make_error(env, "alloc_failed");
+        }
+        memcpy(bin_data, data, size);
+        enif_free(data);
+        return enif_make_tuple2(env, ATOM_OK, bin_term);
+    } else if (result == 1) {
+        /* Empty */
+        return enif_make_tuple2(env, ATOM_ERROR, ATOM_EMPTY);
+    } else {
+        /* Closed */
+        return enif_make_tuple2(env, ATOM_ERROR, ATOM_CLOSED);
+    }
+}
+
+/**
+ * @brief Register an async waiter for raw bytes from a channel
+ *
+ * nif_byte_channel_wait_bytes(ChannelRef, CallbackId, LoopRef) -> ok | {ok, Binary} | {error, ...}
+ *
+ * If data is available, returns immediately with raw binary data.
+ * If empty, registers the callback_id and loop for dispatch when data arrives.
+ * Same as nif_channel_wait but returns raw bytes instead of terms.
+ */
+ERL_NIF_TERM nif_byte_channel_wait_bytes(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_channel_t *channel;
+    erlang_event_loop_t *loop;
+    ErlNifUInt64 callback_id;
+
+    if (!enif_get_resource(env, argv[0], CHANNEL_RESOURCE_TYPE, (void **)&channel)) {
+        return make_error(env, "invalid_channel");
+    }
+
+    if (!enif_get_uint64(env, argv[1], &callback_id)) {
+        return make_error(env, "invalid_callback_id");
+    }
+
+    if (!enif_get_resource(env, argv[2], EVENT_LOOP_RESOURCE_TYPE, (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    pthread_mutex_lock(&channel->mutex);
+
+    /* Check if channel is closed */
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "closed"));
+    }
+
+    /* Reject if any waiter already exists */
+    if (channel->has_waiter || channel->has_sync_waiter) {
+        pthread_mutex_unlock(&channel->mutex);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "waiter_exists"));
+    }
+
+    /* Check if data already available */
+    size_t queue_size = enif_ioq_size(channel->queue);
+    if (queue_size > 0) {
+        /* Data available - dequeue and return immediately as raw binary */
+        SysIOVec *iov;
+        int iovcnt;
+        iov = enif_ioq_peek(channel->queue, &iovcnt);
+
+        if (iovcnt > 0 && iov != NULL && iov[0].iov_len > 0) {
+            size_t msg_size = iov[0].iov_len;
+
+            /* Create result binary before dequeuing */
+            ERL_NIF_TERM bin_term;
+            unsigned char *bin_data = enif_make_new_binary(env, msg_size, &bin_term);
+            if (bin_data == NULL) {
+                pthread_mutex_unlock(&channel->mutex);
+                return make_error(env, "alloc_failed");
+            }
+
+            memcpy(bin_data, iov[0].iov_base, msg_size);
+            enif_ioq_deq(channel->queue, msg_size, NULL);
+            channel->current_size -= msg_size;
+
+            pthread_mutex_unlock(&channel->mutex);
+
+            /* Return raw binary (NO enif_binary_to_term) */
+            return enif_make_tuple2(env, ATOM_OK, bin_term);
+        }
+    }
+
+    /* No data - register waiter */
+    enif_keep_resource(loop);
+
+    channel->waiter_loop = loop;
+    channel->waiter_callback_id = callback_id;
+    channel->has_waiter = true;
+
+    pthread_mutex_unlock(&channel->mutex);
+
+    /* Return ok - Python will await Future */
+    return ATOM_OK;
+}
