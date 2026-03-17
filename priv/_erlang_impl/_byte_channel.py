@@ -168,8 +168,11 @@ class ByteChannel:
     async def async_receive_bytes(self) -> bytes:
         """Async receive - yields to other coroutines while waiting.
 
-        This method integrates with the asyncio event loop, allowing other
-        coroutines to run while waiting for data from Erlang.
+        This method uses event-driven notification when running on ErlangEventLoop.
+        When data arrives, the channel notifies the event loop via timer dispatch,
+        avoiding polling overhead.
+
+        Falls back to polling on non-Erlang event loops.
 
         Returns:
             The received bytes.
@@ -191,14 +194,93 @@ class ByteChannel:
         if self._is_closed():
             raise ByteChannelClosed("Channel has been closed")
 
-        # Poll with short sleeps, yielding to other coroutines
+        # Get the running event loop
+        loop = asyncio.get_running_loop()
+
+        # Check if this is an ErlangEventLoop with native dispatch support
+        if hasattr(loop, '_loop_capsule') and hasattr(loop, '_timers'):
+            return await self._async_receive_event_driven(loop)
+        else:
+            # Fallback for non-Erlang event loops: use polling
+            return await self._async_receive_polling()
+
+    async def _async_receive_event_driven(self, loop) -> bytes:
+        """Event-driven async receive using channel waiter mechanism.
+
+        Registers with the channel and waits for EVENT_TYPE_TIMER dispatch
+        when data arrives. No polling required.
+        """
+        import asyncio
+        from asyncio import events
+        import erlang
+
+        future = loop.create_future()
+        callback_id = id(future)
+
+        # Callback that fires when channel has data
+        def on_channel_ready():
+            if future.done():
+                return
+            try:
+                data = self.try_receive_bytes()
+                if data is not None:
+                    future.set_result(data)
+                elif self._is_closed():
+                    future.set_exception(ByteChannelClosed("Channel closed"))
+                else:
+                    # Data consumed by race - set None to signal retry
+                    future.set_result(None)
+            except Exception as e:
+                future.set_exception(e)
+
+        # Create handle and register in timer dispatch system
+        handle = events.Handle(on_channel_ready, (), loop)
+        loop._timers[callback_id] = handle
+        loop._handle_to_callback_id[id(handle)] = callback_id
+
+        try:
+            # Register waiter with channel (direct C call, no Erlang overhead)
+            result = erlang._byte_channel_wait(self._ref, callback_id, loop._loop_capsule)
+
+            if isinstance(result, tuple):
+                if result[0] == 'ok':
+                    # Data already available - clean up and return
+                    loop._timers.pop(callback_id, None)
+                    loop._handle_to_callback_id.pop(id(handle), None)
+                    return result[1]
+                elif result[0] == 'error':
+                    loop._timers.pop(callback_id, None)
+                    loop._handle_to_callback_id.pop(id(handle), None)
+                    if result[1] == 'closed':
+                        raise ByteChannelClosed("Channel closed")
+                    raise RuntimeError(f"Channel wait failed: {result[1]}")
+
+            # Waiter registered - await notification
+            try:
+                data = await future
+                # Handle race condition (data was None)
+                if data is None:
+                    # Retry with polling fallback for this edge case
+                    return await self._async_receive_polling()
+                return data
+            except asyncio.CancelledError:
+                erlang._byte_channel_cancel_wait(self._ref, callback_id)
+                raise
+        finally:
+            loop._timers.pop(callback_id, None)
+            loop._handle_to_callback_id.pop(id(handle), None)
+
+    async def _async_receive_polling(self) -> bytes:
+        """Fallback async receive using polling."""
+        import asyncio
+
         while True:
-            await asyncio.sleep(0.0001)  # 100us yield to event loop
+            await asyncio.sleep(0.0001)  # 100us yield
             result = self.try_receive_bytes()
             if result is not None:
                 return result
             if self._is_closed():
-                raise ByteChannelClosed("Channel has been closed")
+                raise ByteChannelClosed("Channel closed")
 
     def __aiter__(self):
         """Return async iterator for the byte channel.
