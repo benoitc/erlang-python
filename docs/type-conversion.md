@@ -11,6 +11,7 @@ When calling Python functions or evaluating expressions, Erlang values are autom
 | `integer()` | `int` | Arbitrary precision supported |
 | `float()` | `float` | IEEE 754 double precision |
 | `binary()` | `str` | UTF-8 encoded |
+| `{bytes, binary()}` | `bytes` | Explicit bytes (no UTF-8 decode) |
 | `atom()` | `str` | Converted to string (except special atoms) |
 | `true` | `True` | Boolean |
 | `false` | `False` | Boolean |
@@ -54,6 +55,38 @@ py:call(mymod, func, [{1, 2, 3}]).    %% Python receives: (1, 2, 3)
 
 %% Maps become dicts
 py:call(mymod, func, [#{a => 1, b => 2}]).  %% Python receives: {"a": 1, "b": 2}
+```
+
+### Explicit Bytes Conversion
+
+By default, Erlang binaries are converted to Python `str` using UTF-8 decoding.
+To explicitly send raw bytes without string conversion, use the `{bytes, Binary}` tuple:
+
+```erlang
+%% Default: binary -> str
+py:call(mymod, func, [<<"hello">>]).  %% Python sees: "hello" (str)
+
+%% Explicit: {bytes, binary} -> bytes
+py:call(mymod, func, [{bytes, <<"hello">>}]).  %% Python sees: b"hello" (bytes)
+
+%% Useful for binary protocols, images, compressed data
+py:call(image_processor, load, [{bytes, ImageData}]).
+```
+
+This is useful when you need to ensure binary data is treated as raw bytes in Python,
+for example when working with binary protocols, image data, or compressed content.
+
+Note that on the return path, both Python `str` and `bytes` become Erlang `binary()`:
+
+```erlang
+%% Python str -> Erlang binary
+{ok, <<"hello">>} = py:eval(<<"'hello'">>).
+
+%% Python bytes -> Erlang binary
+{ok, <<"hello">>} = py:eval(<<"b'hello'">>).
+
+%% Non-UTF8 bytes also work
+{ok, <<255, 254>>} = py:eval(<<"b'\\xff\\xfe'">>).
 ```
 
 ## Python to Erlang

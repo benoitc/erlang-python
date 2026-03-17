@@ -29,7 +29,9 @@
     test_context_management/1,
     test_start_stop_contexts/1,
     %% Mixed usage
-    test_mixed_api_usage/1
+    test_mixed_api_usage/1,
+    %% Type conversion
+    test_explicit_bytes/1
 ]).
 
 %% ============================================================================
@@ -52,7 +54,9 @@ all() ->
         test_context_management,
         test_start_stop_contexts,
         %% Mixed usage
-        test_mixed_api_usage
+        test_mixed_api_usage,
+        %% Type conversion
+        test_explicit_bytes
     ].
 
 init_per_suite(Config) ->
@@ -223,3 +227,35 @@ test_mixed_api_usage(_Config) ->
     %% Both should work correctly
     {ok, 6} = py:eval(<<"2 + 4">>),
     {ok, 7} = py:eval(Ctx, <<"3 + 4">>, #{}).
+
+%% ============================================================================
+%% Type Conversion Tests
+%% ============================================================================
+
+%% @doc Test explicit bytes conversion using {bytes, Binary} tuple.
+test_explicit_bytes(_Config) ->
+    Ctx = py:context(1),
+
+    %% Define test functions
+    ok = py:exec(Ctx, <<"
+def check_type(val):
+    return type(val).__name__
+
+def check_bytes_value(val):
+    return val == b'hello'
+">>),
+
+    %% Regular binary -> str (default UTF-8 decoding)
+    {ok, <<"str">>} = py:eval(Ctx, <<"check_type(val)">>, #{<<"val">> => <<"hello">>}),
+
+    %% Explicit bytes tuple -> bytes
+    {ok, <<"bytes">>} = py:eval(Ctx, <<"check_type(val)">>, #{<<"val">> => {bytes, <<"hello">>}}),
+
+    %% Verify value is correct
+    {ok, true} = py:eval(Ctx, <<"check_bytes_value(val)">>, #{<<"val">> => {bytes, <<"hello">>}}),
+
+    %% Test with binary data (non-UTF8)
+    NonUtf8 = <<255, 254, 0, 1>>,
+    {ok, <<"bytes">>} = py:eval(Ctx, <<"check_type(val)">>, #{<<"val">> => {bytes, NonUtf8}}),
+
+    ok.
