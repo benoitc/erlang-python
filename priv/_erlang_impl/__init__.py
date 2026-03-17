@@ -64,7 +64,9 @@ from ._policy import ErlangEventLoopPolicy
 from ._mode import detect_mode, ExecutionMode
 from . import _reactor as reactor
 from . import _channel as channel
+from . import _byte_channel as byte_channel
 from ._channel import Channel, reply, ChannelClosed
+from ._byte_channel import ByteChannel, ByteChannelClosed
 
 __all__ = [
     'run',
@@ -83,6 +85,9 @@ __all__ = [
     'Channel',
     'reply',
     'ChannelClosed',
+    'byte_channel',
+    'ByteChannel',
+    'ByteChannelClosed',
     'atom',
 ]
 

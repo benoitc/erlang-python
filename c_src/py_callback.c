@@ -2856,6 +2856,144 @@ static PyObject *erlang_channel_is_closed_impl(PyObject *self, PyObject *args) {
     }
 }
 
+/* ============================================================================
+ * ByteChannel Methods (raw bytes, no term conversion)
+ * ============================================================================ */
+
+/**
+ * @brief ByteChannel try_receive_bytes - non-blocking, returns raw bytes
+ *
+ * Usage: erlang._byte_channel_try_receive_bytes(channel_ref)
+ * Returns: bytes if data available, None if empty
+ * Raises: RuntimeError if channel closed
+ */
+static PyObject *erlang_byte_channel_try_receive_bytes_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+
+    int result = channel_try_receive(channel, &data, &size);
+
+    if (result == 0) {
+        /* Success - return raw bytes (NO term decoding) */
+        PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
+        enif_free(data);
+        return bytes;  /* May be NULL if allocation failed */
+    } else if (result == 1) {
+        /* Empty */
+        Py_RETURN_NONE;
+    } else {
+        /* Closed */
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+}
+
+/**
+ * @brief ByteChannel receive_bytes - blocking with GIL release, returns raw bytes
+ *
+ * Usage: erlang._byte_channel_receive_bytes(channel_ref, timeout_ms)
+ * Returns: bytes when data available
+ * Raises: RuntimeError if channel closed, TimeoutError if timeout
+ *
+ * This function releases the GIL while waiting, allowing other Python
+ * threads to run. Uses polling with short sleeps.
+ */
+static PyObject *erlang_byte_channel_receive_bytes_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    long timeout_ms = -1;  /* -1 = infinite */
+
+    if (!PyArg_ParseTuple(args, "O|l", &capsule, &timeout_ms)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+    int result;
+
+    /* First try without blocking */
+    result = channel_try_receive(channel, &data, &size);
+    if (result == 0) {
+        /* Got data - return raw bytes */
+        PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
+        enif_free(data);
+        return bytes;
+    } else if (result == -1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+
+    /* Need to wait - release GIL and poll */
+    {
+        long elapsed_us = 0;
+        const long poll_interval_us = 100;  /* 100 microseconds */
+        const long timeout_us = timeout_ms >= 0 ? timeout_ms * 1000 : -1;
+
+        Py_BEGIN_ALLOW_THREADS
+
+        while (1) {
+            result = channel_try_receive(channel, &data, &size);
+            if (result != 1) {
+                break;  /* Got data or closed */
+            }
+
+            /* Check timeout */
+            if (timeout_us >= 0 && elapsed_us >= timeout_us) {
+                result = 2;  /* Timeout */
+                break;
+            }
+
+            /* Sleep briefly */
+            usleep(poll_interval_us);
+            elapsed_us += poll_interval_us;
+        }
+
+        Py_END_ALLOW_THREADS
+    }
+
+    if (result == 2) {
+        PyErr_SetString(PyExc_TimeoutError, "channel receive timeout");
+        return NULL;
+    } else if (result == -1) {
+        PyErr_SetString(PyExc_RuntimeError, "channel closed");
+        return NULL;
+    }
+
+    /* Return raw bytes (NO term decoding) */
+    PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
+    enif_free(data);
+    return bytes;
+}
+
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
     {"call", erlang_call_impl, METH_VARARGS,
@@ -2929,6 +3067,15 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Check if channel is closed.\n"
      "Usage: erlang._channel_is_closed(channel_ref)\n"
      "Returns: True if closed, False otherwise."},
+    /* ByteChannel methods (raw bytes, no term conversion) */
+    {"_byte_channel_try_receive_bytes", erlang_byte_channel_try_receive_bytes_impl, METH_VARARGS,
+     "ByteChannel receive (non-blocking, raw bytes).\n"
+     "Usage: erlang._byte_channel_try_receive_bytes(channel_ref)\n"
+     "Returns: bytes if data, None if empty. Raises RuntimeError if closed."},
+    {"_byte_channel_receive_bytes", erlang_byte_channel_receive_bytes_impl, METH_VARARGS,
+     "ByteChannel receive (blocking with GIL release, raw bytes).\n"
+     "Usage: erlang._byte_channel_receive_bytes(channel_ref, timeout_ms=-1)\n"
+     "Returns: bytes. Raises RuntimeError if closed, TimeoutError if timeout."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -3388,10 +3535,15 @@ static int create_erlang_module(void) {
         "        erlang.Channel = _erlang_impl.Channel\n"
         "        erlang.ChannelClosed = _erlang_impl.ChannelClosed\n"
         "        erlang.reply = _erlang_impl.reply\n"
+        "        # ByteChannel for raw bytes streaming\n"
+        "        erlang.byte_channel = _erlang_impl.byte_channel\n"
+        "        erlang.ByteChannel = _erlang_impl.ByteChannel\n"
+        "        erlang.ByteChannelClosed = _erlang_impl.ByteChannelClosed\n"
         "        # Make erlang behave as a package for 'import erlang.reactor' syntax\n"
         "        erlang.__path__ = [priv_dir]\n"
         "        sys.modules['erlang.reactor'] = erlang.reactor\n"
         "        sys.modules['erlang.channel'] = erlang.channel\n"
+        "        sys.modules['erlang.byte_channel'] = erlang.byte_channel\n"
         "        return True\n"
         "    except ImportError as e:\n"
         "        import sys\n"

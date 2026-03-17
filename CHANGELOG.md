@@ -34,6 +34,20 @@
 
 ### Added
 
+- **ByteChannel API** - Raw byte streaming channel without term serialization
+  - `py_byte_channel:new/0,1` - Create byte channel (with optional backpressure)
+  - `py_byte_channel:send/2` - Send raw bytes to Python
+  - `py_byte_channel:recv/1,2` - Blocking receive with optional timeout
+  - `py_byte_channel:try_receive/1` - Non-blocking receive
+  - Python `ByteChannel` class with:
+    - `send_bytes(data)` - Send bytes back to Erlang
+    - `receive_bytes()` - Blocking receive (GIL released)
+    - `try_receive_bytes()` - Non-blocking receive
+    - `async_receive_bytes()` - Asyncio-compatible async receive
+    - Sync and async iteration (`for chunk in ch`, `async for chunk in ch`)
+  - Reuses the same `py_channel_t` infrastructure but skips term encoding/decoding
+  - Suitable for HTTP bodies, file streaming, and binary protocols
+
 - **Automatic Env Reuse for Event Loop Tasks** - Functions defined via `py:exec(Ctx, Code)`
   can now be called directly using `py_event_loop:run/3,4`, `create_task/3,4`, and `spawn_task/3,4`
   without manual env passing. The process-local environment is automatically detected and used

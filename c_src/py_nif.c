@@ -6647,6 +6647,11 @@ static ErlNifFunc nif_funcs[] = {
     {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0},
     {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0},
 
+    /* ByteChannel API - raw bytes, no term conversion */
+    {"byte_channel_send_bytes", 2, nif_byte_channel_send_bytes, 0},
+    {"byte_channel_try_receive_bytes", 1, nif_byte_channel_try_receive_bytes, 0},
+    {"byte_channel_wait_bytes", 3, nif_byte_channel_wait_bytes, 0},
+
     /* PyBuffer API - zero-copy WSGI input */
     {"py_buffer_create", 1, nif_py_buffer_create, 0},
     {"py_buffer_write", 2, nif_py_buffer_write, 0},

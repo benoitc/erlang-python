@@ -221,6 +221,10 @@
     channel_wait/3,
     channel_cancel_wait/2,
     channel_register_sync_waiter/1,
+    %% ByteChannel API - raw bytes, no term conversion
+    byte_channel_send_bytes/2,
+    byte_channel_try_receive_bytes/1,
+    byte_channel_wait_bytes/3,
     %% PyBuffer API - zero-copy WSGI input
     py_buffer_create/1,
     py_buffer_write/2,
@@ -1864,6 +1868,52 @@ channel_cancel_wait(_ChannelRef, _CallbackId) ->
 %% @returns ok | has_data | {error, closed} | {error, waiter_exists}
 -spec channel_register_sync_waiter(reference()) -> ok | has_data | {error, term()}.
 channel_register_sync_waiter(_ChannelRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% ByteChannel API - Raw bytes, no term conversion
+%%%
+%%% ByteChannel provides raw byte streaming without term serialization,
+%%% suitable for HTTP bodies, file transfers, and binary protocols.
+%%% ============================================================================
+
+%% @doc Send raw bytes to a channel (no term serialization).
+%%
+%% Sends binary data directly to the channel without converting to
+%% Erlang external term format.
+%%
+%% @param ChannelRef Channel reference
+%% @param Bytes Binary data to send
+%% @returns ok | busy | {error, closed}
+-spec byte_channel_send_bytes(reference(), binary()) -> ok | busy | {error, term()}.
+byte_channel_send_bytes(_ChannelRef, _Bytes) ->
+    ?NIF_STUB.
+
+%% @doc Try to receive raw bytes from a channel (non-blocking).
+%%
+%% Returns immediately with binary data or empty/closed status.
+%% No term deserialization is performed.
+%%
+%% @param ChannelRef Channel reference
+%% @returns {ok, Binary} | {error, empty} | {error, closed}
+-spec byte_channel_try_receive_bytes(reference()) ->
+    {ok, binary()} | {error, empty | closed | term()}.
+byte_channel_try_receive_bytes(_ChannelRef) ->
+    ?NIF_STUB.
+
+%% @doc Register an async waiter for raw bytes from a channel.
+%%
+%% If data is available, returns immediately with {ok, Binary}.
+%% If empty, registers the callback_id for dispatch when data arrives.
+%% Same semantics as channel_wait but returns raw binary data.
+%%
+%% @param ChannelRef Channel reference
+%% @param CallbackId Callback ID for timer dispatch
+%% @param LoopRef Event loop reference for dispatching
+%% @returns ok | {ok, Binary} | {error, closed}
+-spec byte_channel_wait_bytes(reference(), non_neg_integer(), reference()) ->
+    ok | {ok, binary()} | {error, term()}.
+byte_channel_wait_bytes(_ChannelRef, _CallbackId, _LoopRef) ->
     ?NIF_STUB.
 
 %%% ============================================================================

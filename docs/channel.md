@@ -346,6 +346,92 @@ py_channel:send(Ch, Term)
 py_channel:close() ───────────────▶ StopIteration
 ```
 
+## ByteChannel - Raw Byte Streaming
+
+For binary protocols and raw byte streaming (e.g., HTTP bodies, file transfers), use `ByteChannel` instead of `Channel`. ByteChannel passes bytes directly without term serialization, avoiding encoding/decoding overhead.
+
+### When to Use ByteChannel
+
+| Use Case | Channel | ByteChannel |
+|----------|---------|-------------|
+| Structured messages | Yes | No |
+| RPC-style communication | Yes | No |
+| HTTP bodies | No | Yes |
+| File streaming | No | Yes |
+| Binary protocols | No | Yes |
+| Raw byte streams | No | Yes |
+
+### Erlang API
+
+```erlang
+%% Create a byte channel
+{ok, Ch} = py_byte_channel:new(),
+
+%% Send raw bytes
+ok = py_byte_channel:send(Ch, <<"HTTP/1.1 200 OK\r\n">>),
+ok = py_byte_channel:send(Ch, BodyBytes),
+
+%% Receive raw bytes
+{ok, Data} = py_byte_channel:recv(Ch),
+
+%% Non-blocking receive
+{ok, Data} = py_byte_channel:try_receive(Ch),
+{error, empty} = py_byte_channel:try_receive(Ch),  %% If no data
+
+%% Close when done
+py_byte_channel:close(Ch).
+```
+
+### Python API
+
+```python
+from erlang import ByteChannel, ByteChannelClosed
+
+def process_bytes(channel_ref):
+    ch = ByteChannel(channel_ref)
+
+    # Blocking receive (releases GIL while waiting)
+    data = ch.receive_bytes()
+
+    # Non-blocking receive
+    data = ch.try_receive_bytes()  # Returns None if empty
+
+    # Iterate over bytes
+    for chunk in ch:
+        process(chunk)
+
+    # Send bytes back
+    ch.send_bytes(b"response data")
+```
+
+### Async Python API
+
+```python
+from erlang import ByteChannel, ByteChannelClosed
+
+async def process_bytes_async(channel_ref):
+    ch = ByteChannel(channel_ref)
+
+    # Async receive (yields to other coroutines)
+    data = await ch.async_receive_bytes()
+
+    # Async iteration
+    async for chunk in ch:
+        process(chunk)
+```
+
+### ByteChannel vs Channel Architecture
+
+```
+Channel (term-based):
+  Erlang:  term_to_binary() ──▶ enif_ioq ──▶ binary_to_term() :Python
+
+ByteChannel (raw bytes):
+  Erlang:  raw bytes ─────────▶ enif_ioq ─────────▶ raw bytes :Python
+```
+
+ByteChannel reuses the same underlying `py_channel_t` structure but skips the term serialization/deserialization steps.
+
 ## See Also
 
 - [Reactor](reactor.md) - FD-based protocol handling for sockets

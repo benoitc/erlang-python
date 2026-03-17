@@ -224,4 +224,32 @@ ERL_NIF_TERM nif_channel_cancel_wait(ErlNifEnv *env, int argc,
 ERL_NIF_TERM nif_channel_register_sync_waiter(ErlNifEnv *env, int argc,
                                                const ERL_NIF_TERM argv[]);
 
+/* ============================================================================
+ * ByteChannel NIF Declarations (raw bytes, no term conversion)
+ * ============================================================================ */
+
+/**
+ * @brief Send raw bytes to a channel (no term_to_binary)
+ *
+ * NIF: byte_channel_send_bytes(ChannelRef, Binary) -> ok | busy | {error, closed}
+ */
+ERL_NIF_TERM nif_byte_channel_send_bytes(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Non-blocking receive raw bytes (no binary_to_term)
+ *
+ * NIF: byte_channel_try_receive_bytes(ChannelRef) -> {ok, Binary} | {error, empty|closed}
+ */
+ERL_NIF_TERM nif_byte_channel_try_receive_bytes(ErlNifEnv *env, int argc,
+                                                 const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Register async waiter for raw bytes
+ *
+ * NIF: byte_channel_wait_bytes(ChannelRef, CallbackId, LoopRef) -> ok | {ok, Binary}
+ */
+ERL_NIF_TERM nif_byte_channel_wait_bytes(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
+
 #endif /* PY_CHANNEL_H */
