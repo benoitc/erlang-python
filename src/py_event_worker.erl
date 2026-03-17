@@ -46,13 +46,13 @@ handle_cast(_Msg, State) -> {noreply, State}.
 handle_info({select, FdRes, _Ref, ready_input}, State) ->
     py_nif:handle_fd_event_and_reselect(FdRes, read),
     %% Trigger event processing after FD event dispatch
-    self() ! task_ready,
+    maybe_send_task_ready(),
     {noreply, State};
 
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
     py_nif:handle_fd_event_and_reselect(FdRes, write),
     %% Trigger event processing after FD event dispatch
-    self() ! task_ready,
+    maybe_send_task_ready(),
     {noreply, State};
 
 handle_info({start_timer, _LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
@@ -86,7 +86,7 @@ handle_info({timeout, TimerRef}, State) ->
             NewTimers = maps:remove(TimerRef, Timers),
             %% Trigger event processing after timer dispatch
             %% This ensures _run_once is called to handle the timer callback
-            self() ! task_ready,
+            maybe_send_task_ready(),
             {noreply, State#state{timers = NewTimers}}
     end;
 
@@ -96,6 +96,8 @@ handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
 %% This is sent via enif_send when a new async task is submitted.
 %% Uses a drain-until-empty loop to handle tasks submitted during processing.
 handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
+    %% Clear the pending flag - we're processing now
+    put(task_ready_pending, false),
     drain_tasks_loop(LoopRef),
     {noreply, State};
 
@@ -121,7 +123,9 @@ drain_tasks_loop(LoopRef) ->
         ok ->
             %% Check if more task_ready messages arrived during processing
             receive
-                task_ready -> drain_tasks_loop(LoopRef)
+                task_ready ->
+                    put(task_ready_pending, false),
+                    drain_tasks_loop(LoopRef)
             after 0 ->
                 ok
             end;
@@ -130,7 +134,7 @@ drain_tasks_loop(LoopRef) ->
             %% Send task_ready to self and return, allowing the gen_server
             %% to process other messages (select, timers) before continuing.
             %% This prevents starvation under sustained task traffic.
-            self() ! task_ready,
+            maybe_send_task_ready(),
             ok;
         {error, py_loop_not_set} ->
             ok;
@@ -139,5 +143,19 @@ drain_tasks_loop(LoopRef) ->
             ok;
         {error, Reason} ->
             error_logger:warning_msg("py_event_worker: task processing failed: ~p~n", [Reason]),
+            ok
+    end.
+
+%% @doc Send task_ready message only if one isn't already pending.
+%% Uses process dictionary to coalesce multiple wakeup requests.
+maybe_send_task_ready() ->
+    case get(task_ready_pending) of
+        true ->
+            %% Already pending, no need to send another
+            ok;
+        _ ->
+            %% No pending message, send one and mark as pending
+            put(task_ready_pending, true),
+            self() ! task_ready,
             ok
     end.

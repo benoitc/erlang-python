@@ -1087,6 +1087,9 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     /* Initialize fields */
     memset(loop, 0, sizeof(erlang_event_loop_t));
 
+    /* Initialize pending_capacity (memset zeros it, but we need the initial value) */
+    loop->pending_capacity = INITIAL_PENDING_CAPACITY;
+
     if (pthread_mutex_init(&loop->mutex, NULL) != 0) {
         enif_release_resource(loop);
         return make_error(env, "mutex_init_failed");
@@ -6410,6 +6413,9 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     /* Initialize fields */
     memset(loop, 0, sizeof(erlang_event_loop_t));
 
+    /* Initialize pending_capacity (memset zeros it, but we need the initial value) */
+    loop->pending_capacity = INITIAL_PENDING_CAPACITY;
+
     if (pthread_mutex_init(&loop->mutex, NULL) != 0) {
         enif_release_resource(loop);
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize mutex");
@@ -7445,6 +7451,9 @@ int create_default_event_loop(ErlNifEnv *env) {
 
     /* Initialize fields */
     memset(loop, 0, sizeof(erlang_event_loop_t));
+
+    /* Initialize pending_capacity (memset zeros it, but we need the initial value) */
+    loop->pending_capacity = INITIAL_PENDING_CAPACITY;
 
     if (pthread_mutex_init(&loop->mutex, NULL) != 0) {
         enif_release_resource(loop);

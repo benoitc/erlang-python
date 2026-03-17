@@ -70,7 +70,14 @@ stop() ->
 
 -spec get_loop() -> {ok, reference()} | {error, not_started}.
 get_loop() ->
-    gen_server:call(?MODULE, get_loop).
+    %% Fast path: check persistent_term cache first (O(1) lookup)
+    case persistent_term:get({?MODULE, loop_ref}, undefined) of
+        undefined ->
+            %% Slow path: loop not cached yet, get from gen_server
+            gen_server:call(?MODULE, get_loop);
+        LoopRef ->
+            {ok, LoopRef}
+    end.
 
 %% @doc Register event loop callbacks for Python access.
 -spec register_callbacks() -> ok.
@@ -332,6 +339,8 @@ init([]) ->
             ok = py_nif:set_python_event_loop(LoopRef),
             %% Set ErlangEventLoop as the default asyncio policy
             ok = set_default_policy(),
+            %% Cache loop reference for fast O(1) lookup
+            persistent_term:put({?MODULE, loop_ref}, LoopRef),
             {ok, #state{
                 loop_ref = LoopRef,
                 worker_pid = WorkerPid,
@@ -393,6 +402,8 @@ handle_call(get_loop, _From, #state{loop_ref = undefined} = State) ->
             {ok, RouterPid} = py_event_router:start_link(LoopRef),
             ok = py_nif:set_shared_router(RouterPid),
             ok = py_nif:set_python_event_loop(LoopRef),
+            %% Cache loop reference for fast O(1) lookup
+            persistent_term:put({?MODULE, loop_ref}, LoopRef),
             NewState = State#state{
                 loop_ref = LoopRef,
                 worker_pid = WorkerPid,
@@ -417,6 +428,8 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{loop_ref = LoopRef, worker_pid = WorkerPid, router_pid = RouterPid}) ->
+    %% Clear persistent_term cache
+    persistent_term:erase({?MODULE, loop_ref}),
     %% Reset asyncio policy back to default before destroying the loop
     reset_default_policy(),
     %% Clean up worker (scalable I/O model)
