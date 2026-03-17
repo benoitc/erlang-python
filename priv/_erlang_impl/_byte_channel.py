@@ -234,9 +234,9 @@ class ByteChannel:
                 future.set_exception(e)
 
         # Create handle and register in timer dispatch system
+        # Only use _timers dict - don't touch _handle_to_callback_id (for timer cancellation only)
         handle = events.Handle(on_channel_ready, (), loop)
         loop._timers[callback_id] = handle
-        loop._handle_to_callback_id[id(handle)] = callback_id
 
         try:
             # Register waiter with channel (direct C call, no Erlang overhead)
@@ -246,11 +246,9 @@ class ByteChannel:
                 if result[0] == 'ok':
                     # Data already available - clean up and return
                     loop._timers.pop(callback_id, None)
-                    loop._handle_to_callback_id.pop(id(handle), None)
                     return result[1]
                 elif result[0] == 'error':
                     loop._timers.pop(callback_id, None)
-                    loop._handle_to_callback_id.pop(id(handle), None)
                     if result[1] == 'closed':
                         raise ByteChannelClosed("Channel closed")
                     raise RuntimeError(f"Channel wait failed: {result[1]}")
@@ -268,7 +266,6 @@ class ByteChannel:
                 raise
         finally:
             loop._timers.pop(callback_id, None)
-            loop._handle_to_callback_id.pop(id(handle), None)
 
     async def _async_receive_polling(self) -> bytes:
         """Fallback async receive using polling."""
