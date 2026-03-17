@@ -69,29 +69,39 @@ class ErlangSocketTransport(transports.Transport):
         self._loop.call_soon(self._protocol.connection_made, self)
         self._loop.add_reader(self._fileno, self._read_ready)
 
+    # Maximum reads per callback to avoid starving other events
+    _max_reads_per_call = 16
+
     def _read_ready(self):
-        """Called when data is available to read."""
+        """Called when data is available to read.
+
+        Drains socket until EAGAIN with a budget to avoid starvation.
+        """
         if self._conn_lost:
             return
-        try:
-            data = self._sock.recv(self.max_size)
-        except (BlockingIOError, InterruptedError):
-            return
-        except Exception as exc:
-            self._fatal_error(exc, 'Fatal read error')
-            return
 
-        if data:
-            self._protocol.data_received(data)
-        else:
-            # Connection closed (EOF received)
-            self._loop.remove_reader(self._fileno)
-            keep_open = self._protocol.eof_received()
-            # If eof_received returns False/None, close the transport
-            if not keep_open:
-                self._closing = True
-                self._conn_lost += 1
-                self._call_connection_lost(None)
+        for _ in range(self._max_reads_per_call):
+            try:
+                data = self._sock.recv(self.max_size)
+            except (BlockingIOError, InterruptedError):
+                # EAGAIN - no more data available
+                return
+            except Exception as exc:
+                self._fatal_error(exc, 'Fatal read error')
+                return
+
+            if data:
+                self._protocol.data_received(data)
+            else:
+                # Connection closed (EOF received)
+                self._loop.remove_reader(self._fileno)
+                keep_open = self._protocol.eof_received()
+                # If eof_received returns False/None, close the transport
+                if not keep_open:
+                    self._closing = True
+                    self._conn_lost += 1
+                    self._call_connection_lost(None)
+                return
 
     def write(self, data):
         """Write data to the transport."""
@@ -122,30 +132,38 @@ class ErlangSocketTransport(transports.Transport):
 
         self._buffer.extend(data)
 
+    # Maximum writes per callback to avoid starving other events
+    _max_writes_per_call = 16
+
     def _write_ready_cb(self):
-        """Called when socket is ready for writing."""
-        remaining = len(self._buffer) - self._buffer_offset
-        if remaining <= 0:
-            self._loop.remove_writer(self._fileno)
-            if self._closing:
-                self._call_connection_lost(None)
-            return
+        """Called when socket is ready for writing.
 
-        try:
-            # Use memoryview with offset for O(1) access to remaining data
-            data_view = memoryview(self._buffer)[self._buffer_offset:]
-            n = self._sock.send(data_view)
-        except (BlockingIOError, InterruptedError):
-            return
-        except Exception as exc:
-            self._loop.remove_writer(self._fileno)
-            self._fatal_error(exc, 'Fatal write error')
-            return
+        Drains buffer until EAGAIN with a budget to avoid starvation.
+        """
+        for _ in range(self._max_writes_per_call):
+            remaining = len(self._buffer) - self._buffer_offset
+            if remaining <= 0:
+                self._loop.remove_writer(self._fileno)
+                if self._closing:
+                    self._call_connection_lost(None)
+                return
 
-        if n:
-            self._buffer_offset += n  # O(1) offset update instead of O(n) deletion
+            try:
+                # Use memoryview with offset for O(1) access to remaining data
+                data_view = memoryview(self._buffer)[self._buffer_offset:]
+                n = self._sock.send(data_view)
+            except (BlockingIOError, InterruptedError):
+                # EAGAIN - socket buffer full
+                return
+            except Exception as exc:
+                self._loop.remove_writer(self._fileno)
+                self._fatal_error(exc, 'Fatal write error')
+                return
 
-        # Check if buffer is fully consumed
+            if n:
+                self._buffer_offset += n  # O(1) offset update instead of O(n) deletion
+
+        # Check if buffer is fully consumed after budget exhausted
         if self._buffer_offset >= len(self._buffer):
             # Reset buffer when fully consumed
             self._buffer = self._buffer_factory()
@@ -258,6 +276,9 @@ class ErlangDatagramTransport(transports.DatagramTransport):
 
     max_size = 256 * 1024  # 256 KB
 
+    # Maximum reads per callback to avoid starving other events
+    _max_reads_per_call = 16
+
     def __init__(self, loop, sock, protocol, address=None, extra=None):
         super().__init__(extra)
         self._loop = loop
@@ -282,21 +303,27 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         self._loop.add_reader(self._fileno, self._read_ready)
 
     def _read_ready(self):
-        """Called when data is available to read."""
+        """Called when data is available to read.
+
+        Drains socket until EAGAIN with a budget to avoid starvation.
+        """
         if self._conn_lost:
             return
-        try:
-            data, addr = self._sock.recvfrom(self.max_size)
-        except (BlockingIOError, InterruptedError):
-            return
-        except OSError as exc:
-            self._protocol.error_received(exc)
-            return
-        except Exception as exc:
-            self._fatal_error(exc, 'Fatal read error on datagram transport')
-            return
 
-        self._protocol.datagram_received(data, addr)
+        for _ in range(self._max_reads_per_call):
+            try:
+                data, addr = self._sock.recvfrom(self.max_size)
+            except (BlockingIOError, InterruptedError):
+                # EAGAIN - no more data available
+                return
+            except OSError as exc:
+                self._protocol.error_received(exc)
+                return
+            except Exception as exc:
+                self._fatal_error(exc, 'Fatal read error on datagram transport')
+                return
+
+            self._protocol.datagram_received(data, addr)
 
     def sendto(self, data, addr=None):
         """Send data to the transport."""

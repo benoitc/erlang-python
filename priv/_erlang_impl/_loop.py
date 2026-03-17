@@ -1339,10 +1339,19 @@ async def _run_and_send(coro, caller_pid, ref):
 
     try:
         result = await coro
-        erlang.send(caller_pid, (async_result, ref, (ok, result)))
+        try:
+            erlang.send(caller_pid, (async_result, ref, (ok, result)))
+        except erlang.ProcessError:
+            pass  # Caller gone, nothing to do
     except asyncio.CancelledError:
-        erlang.send(caller_pid, (async_result, ref, (error, 'cancelled')))
+        try:
+            erlang.send(caller_pid, (async_result, ref, (error, 'cancelled')))
+        except erlang.ProcessError:
+            pass  # Caller gone, nothing to do
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        erlang.send(caller_pid, (async_result, ref, (error, f'{type(e).__name__}: {e}\n{tb}')))
+        try:
+            erlang.send(caller_pid, (async_result, ref, (error, f'{type(e).__name__}: {e}\n{tb}')))
+        except erlang.ProcessError:
+            pass  # Caller gone, nothing to do

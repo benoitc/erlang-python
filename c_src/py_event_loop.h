@@ -345,6 +345,11 @@ typedef struct erlang_event_loop {
     uint32_t interp_id;
 
     /* ========== Async Task Queue (uvloop-inspired) ========== */
+    /*
+     * Future optimization: Replace serialized task queue with native MPSC
+     * ring buffer to avoid enif_term_to_binary/enif_binary_to_term overhead.
+     * See task_entry_t/task_ring_t design in optimization plan.
+     */
 
     /** @brief Python ErlangEventLoop instance (direct ref, no thread-local) */
     PyObject *py_loop;
