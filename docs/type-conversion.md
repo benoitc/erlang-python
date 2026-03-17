@@ -76,6 +76,19 @@ py:call(image_processor, load, [{bytes, ImageData}]).
 This is useful when you need to ensure binary data is treated as raw bytes in Python,
 for example when working with binary protocols, image data, or compressed content.
 
+Note that on the return path, both Python `str` and `bytes` become Erlang `binary()`:
+
+```erlang
+%% Python str -> Erlang binary
+{ok, <<"hello">>} = py:eval(<<"'hello'">>).
+
+%% Python bytes -> Erlang binary
+{ok, <<"hello">>} = py:eval(<<"b'hello'">>).
+
+%% Non-UTF8 bytes also work
+{ok, <<255, 254>>} = py:eval(<<"b'\\xff\\xfe'">>).
+```
+
 ## Python to Erlang
 
 Return values from Python are converted back to Erlang:
