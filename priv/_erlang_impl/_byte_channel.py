@@ -307,5 +307,29 @@ class ByteChannel:
         except Exception:
             return True
 
+    def close(self):
+        """Close the byte channel.
+
+        Closes the channel and wakes any waiting receivers with ByteChannelClosed.
+        Safe to call multiple times - subsequent calls have no effect.
+
+        Example:
+            byte_channel.close()  # Signal no more data
+        """
+        import erlang
+        try:
+            erlang._channel_close(self._ref)
+        except Exception:
+            pass  # Ignore errors on close (may already be closed)
+
+    def __enter__(self):
+        """Context manager entry - returns self."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - closes the channel."""
+        self.close()
+        return False
+
     def __repr__(self):
         return f"<ByteChannel ref={self._ref!r}>"

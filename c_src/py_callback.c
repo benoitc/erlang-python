@@ -2856,6 +2856,38 @@ static PyObject *erlang_channel_is_closed_impl(PyObject *self, PyObject *args) {
     }
 }
 
+/**
+ * @brief Close a channel from Python
+ *
+ * Usage: erlang._channel_close(channel_ref)
+ * Returns: True on success
+ * Raises: TypeError if invalid reference
+ */
+static PyObject *erlang_channel_close_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_SetString(PyExc_TypeError, "expected channel reference");
+        return NULL;
+    }
+
+    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (channel == NULL) {
+        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
+        return NULL;
+    }
+
+    /* Close the channel - this wakes any waiting receivers */
+    channel_close(channel);
+
+    Py_RETURN_TRUE;
+}
+
 /* ============================================================================
  * ByteChannel Methods (raw bytes, no term conversion)
  * ============================================================================ */
@@ -3328,6 +3360,10 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Check if channel is closed.\n"
      "Usage: erlang._channel_is_closed(channel_ref)\n"
      "Returns: True if closed, False otherwise."},
+    {"_channel_close", erlang_channel_close_impl, METH_VARARGS,
+     "Close a channel.\n"
+     "Usage: erlang._channel_close(channel_ref)\n"
+     "Returns: True. Wakes any waiting receivers."},
     /* ByteChannel methods (raw bytes, no term conversion) */
     {"_byte_channel_try_receive_bytes", erlang_byte_channel_try_receive_bytes_impl, METH_VARARGS,
      "ByteChannel receive (non-blocking, raw bytes).\n"
