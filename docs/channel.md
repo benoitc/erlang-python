@@ -172,6 +172,27 @@ msg = await ch.async_receive()
 
 **Raises:** `ChannelClosed` when the channel is closed.
 
+#### `close()`
+
+Close the channel from Python. Wakes any waiting receivers.
+
+```python
+ch.close()  # Signal no more data will be sent
+```
+
+Safe to call multiple times.
+
+#### Context Manager
+
+Channels support the `with` statement for automatic cleanup:
+
+```python
+with Channel(channel_ref) as ch:
+    for msg in ch:
+        process(msg)
+# channel automatically closed on exit
+```
+
 #### Iteration
 
 ```python
@@ -461,6 +482,15 @@ def process_bytes(channel_ref):
 
     # Send bytes back
     ch.send_bytes(b"response data")
+
+    # Close when done
+    ch.close()
+
+# Or use context manager for automatic cleanup
+with ByteChannel(channel_ref) as ch:
+    for chunk in ch:
+        process(chunk)
+# channel automatically closed
 ```
 
 ### Async Python API
