@@ -43,7 +43,11 @@
     %% Async receive with actual waiting
     async_receive_wait_e2e_test/1,
     %% Subinterpreter mode tests
-    subinterp_sync_receive_wait_test/1
+    subinterp_sync_receive_wait_test/1,
+    %% Close and drain tests
+    close_drain_erlang_test/1,
+    close_drain_python_sync_test/1,
+    close_drain_python_async_test/1
 ]).
 
 all() -> [
@@ -76,7 +80,11 @@ all() -> [
     %% Async receive with actual waiting
     async_receive_wait_e2e_test,
     %% Subinterpreter mode tests
-    subinterp_sync_receive_wait_test
+    subinterp_sync_receive_wait_test,
+    %% Close and drain tests
+    close_drain_erlang_test,
+    close_drain_python_sync_test,
+    close_drain_python_async_test
 ].
 
 init_per_suite(Config) ->
@@ -605,3 +613,97 @@ def test_closed(ch_ref):
     ct:pal("Subinterp closed channel detected OK"),
 
     py_context:stop(CtxPid).
+
+%%% ============================================================================
+%%% Close and Drain Tests
+%%% ============================================================================
+
+%% @doc Test that data can be drained from channel after close (Erlang side)
+%% Verifies that closing a channel doesn't prevent reading existing data
+close_drain_erlang_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send multiple messages
+    ok = py_channel:send(Ch, <<"msg1">>),
+    ok = py_channel:send(Ch, <<"msg2">>),
+    ok = py_channel:send(Ch, <<"msg3">>),
+
+    %% Close the channel while data is still in queue
+    ok = py_channel:close(Ch),
+
+    %% Verify channel is marked as closed
+    Info = py_channel:info(Ch),
+    true = maps:get(closed, Info),
+
+    %% Should still be able to drain all data
+    {ok, <<"msg1">>} = py_nif:channel_try_receive(Ch),
+    {ok, <<"msg2">>} = py_nif:channel_try_receive(Ch),
+    {ok, <<"msg3">>} = py_nif:channel_try_receive(Ch),
+
+    %% Only after draining should we get closed error
+    {error, closed} = py_nif:channel_try_receive(Ch),
+
+    ct:pal("Erlang close+drain test passed").
+
+%% @doc Test that Python can drain data from closed channel (sync iteration)
+close_drain_python_sync_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send multiple messages
+    ok = py_channel:send(Ch, <<"first">>),
+    ok = py_channel:send(Ch, <<"second">>),
+    ok = py_channel:send(Ch, <<"third">>),
+
+    %% Close the channel
+    ok = py_channel:close(Ch),
+
+    %% Python should be able to drain all messages via iteration
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+from erlang import Channel, ChannelClosed
+
+def drain_channel(ch_ref):
+    '''Drain all messages from channel, return as list.'''
+    ch = Channel(ch_ref)
+    messages = []
+    for msg in ch:
+        messages.append(msg)
+    return messages
+">>),
+
+    {ok, [<<"first">>, <<"second">>, <<"third">>]} =
+        py:eval(Ctx, <<"drain_channel(ch)">>, #{<<"ch">> => Ch}),
+
+    ct:pal("Python sync close+drain test passed").
+
+%% @doc Test that Python can drain data from closed channel (async iteration)
+close_drain_python_async_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Send multiple messages
+    ok = py_channel:send(Ch, <<"alpha">>),
+    ok = py_channel:send(Ch, <<"beta">>),
+    ok = py_channel:send(Ch, <<"gamma">>),
+
+    %% Close the channel
+    ok = py_channel:close(Ch),
+
+    %% Python should be able to drain all messages via async iteration
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import Channel, ChannelClosed
+
+async def async_drain_channel(ch_ref):
+    '''Async drain all messages from channel, return as list.'''
+    ch = Channel(ch_ref)
+    messages = []
+    async for msg in ch:
+        messages.append(msg)
+    return messages
+">>),
+
+    {ok, [<<"alpha">>, <<"beta">>, <<"gamma">>]} =
+        py:eval(Ctx, <<"erlang.run(async_drain_channel(ch))">>, #{<<"ch">> => Ch}),
+
+    ct:pal("Python async close+drain test passed").

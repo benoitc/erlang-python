@@ -37,7 +37,11 @@
     %% Async event loop dispatch test
     async_receive_bytes_e2e_test/1,
     %% create_task + async receive test
-    create_task_async_receive_test/1
+    create_task_async_receive_test/1,
+    %% Close and drain tests
+    close_drain_bytes_erlang_test/1,
+    close_drain_bytes_python_sync_test/1,
+    close_drain_bytes_python_async_test/1
 ]).
 
 all() -> [
@@ -64,7 +68,11 @@ all() -> [
     %% Async event loop dispatch test
     async_receive_bytes_e2e_test,
     %% create_task + async receive test
-    create_task_async_receive_test
+    create_task_async_receive_test,
+    %% Close and drain tests
+    close_drain_bytes_erlang_test,
+    close_drain_bytes_python_sync_test,
+    close_drain_bytes_python_async_test
 ].
 
 init_per_suite(Config) ->
@@ -428,3 +436,97 @@ async def task_receive_bytes(ch_ref, reply_pid):
     end,
 
     ok = py_byte_channel:close(Ch).
+
+%%% ============================================================================
+%%% Close and Drain Tests
+%%% ============================================================================
+
+%% @doc Test that data can be drained from byte channel after close (Erlang side)
+%% Verifies that closing a channel doesn't prevent reading existing data
+close_drain_bytes_erlang_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send multiple messages
+    ok = py_byte_channel:send(Ch, <<"chunk1">>),
+    ok = py_byte_channel:send(Ch, <<"chunk2">>),
+    ok = py_byte_channel:send(Ch, <<"chunk3">>),
+
+    %% Close the channel while data is still in queue
+    ok = py_byte_channel:close(Ch),
+
+    %% Verify channel is marked as closed
+    Info = py_byte_channel:info(Ch),
+    true = maps:get(closed, Info),
+
+    %% Should still be able to drain all data
+    {ok, <<"chunk1">>} = py_byte_channel:try_receive(Ch),
+    {ok, <<"chunk2">>} = py_byte_channel:try_receive(Ch),
+    {ok, <<"chunk3">>} = py_byte_channel:try_receive(Ch),
+
+    %% Only after draining should we get closed error
+    {error, closed} = py_byte_channel:try_receive(Ch),
+
+    ct:pal("Erlang byte channel close+drain test passed").
+
+%% @doc Test that Python can drain data from closed byte channel (sync iteration)
+close_drain_bytes_python_sync_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send multiple messages
+    ok = py_byte_channel:send(Ch, <<"data1">>),
+    ok = py_byte_channel:send(Ch, <<"data2">>),
+    ok = py_byte_channel:send(Ch, <<"data3">>),
+
+    %% Close the channel
+    ok = py_byte_channel:close(Ch),
+
+    %% Python should be able to drain all messages via iteration
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+from erlang import ByteChannel, ByteChannelClosed
+
+def drain_byte_channel(ch_ref):
+    '''Drain all chunks from byte channel, return as list.'''
+    ch = ByteChannel(ch_ref)
+    chunks = []
+    for chunk in ch:
+        chunks.append(chunk)
+    return chunks
+">>),
+
+    {ok, [<<"data1">>, <<"data2">>, <<"data3">>]} =
+        py:eval(Ctx, <<"drain_byte_channel(ch)">>, #{<<"ch">> => Ch}),
+
+    ct:pal("Python sync byte channel close+drain test passed").
+
+%% @doc Test that Python can drain data from closed byte channel (async iteration)
+close_drain_bytes_python_async_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send multiple messages
+    ok = py_byte_channel:send(Ch, <<"part1">>),
+    ok = py_byte_channel:send(Ch, <<"part2">>),
+    ok = py_byte_channel:send(Ch, <<"part3">>),
+
+    %% Close the channel
+    ok = py_byte_channel:close(Ch),
+
+    %% Python should be able to drain all messages via async iteration
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import ByteChannel, ByteChannelClosed
+
+async def async_drain_byte_channel(ch_ref):
+    '''Async drain all chunks from byte channel, return as list.'''
+    ch = ByteChannel(ch_ref)
+    chunks = []
+    async for chunk in ch:
+        chunks.append(chunk)
+    return chunks
+">>),
+
+    {ok, [<<"part1">>, <<"part2">>, <<"part3">>]} =
+        py:eval(Ctx, <<"erlang.run(async_drain_byte_channel(ch))">>, #{<<"ch">> => Ch}),
+
+    ct:pal("Python async byte channel close+drain test passed").
