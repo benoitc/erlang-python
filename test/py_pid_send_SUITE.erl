@@ -44,7 +44,8 @@
     test_whereis_nonexistent/1,
     test_whereis_with_atom/1,
     test_whereis_with_bytes/1,
-    test_whereis_invalid_type/1
+    test_whereis_invalid_type/1,
+    test_whereis_and_send/1
 ]).
 
 all() ->
@@ -75,7 +76,8 @@ all() ->
         test_whereis_nonexistent,
         test_whereis_with_atom,
         test_whereis_with_bytes,
-        test_whereis_invalid_type
+        test_whereis_invalid_type,
+        test_whereis_and_send
     ].
 
 init_per_suite(Config) ->
@@ -344,6 +346,25 @@ test_whereis_with_bytes(_Config) ->
 %% @doc Test erlang.whereis() with invalid type raises TypeError.
 test_whereis_invalid_type(_Config) ->
     {error, {'TypeError', _}} = py:eval(<<"erlang.whereis(123)">>),
+    ok.
+
+%% @doc Test looking up a process with whereis and sending a message to it.
+test_whereis_and_send(_Config) ->
+    Self = self(),
+    erlang:register(py_whereis_send_test, Self),
+    try
+        %% Use Python helper to look up process and send message
+        {ok, true} = py:call(py_test_pid_send, whereis_and_send,
+                              [<<"py_whereis_send_test">>, {<<"hello_from_whereis">>, 42}]),
+        %% Verify we received the message
+        receive
+            {<<"hello_from_whereis">>, 42} -> ok
+        after 5000 ->
+            ct:fail(timeout_waiting_for_message)
+        end
+    after
+        erlang:unregister(py_whereis_send_test)
+    end,
     ok.
 
 %%% ============================================================================

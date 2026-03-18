@@ -183,3 +183,15 @@ def send_interleaved_with_async(pid, messages):
         return loop.run_until_complete(async_interleaved())
     finally:
         loop.close()
+
+
+def whereis_and_send(name, msg):
+    """Look up a registered process by name and send it a message.
+
+    Returns True if the process was found and message sent, False otherwise.
+    """
+    pid = erlang.whereis(name)
+    if pid is not None:
+        erlang.send(pid, msg)
+        return True
+    return False
