@@ -3287,6 +3287,68 @@ static PyObject *erlang_byte_channel_cancel_wait_impl(PyObject *self, PyObject *
     return erlang_channel_cancel_wait_impl(self, args);
 }
 
+/**
+ * @brief Look up a registered Erlang process by name.
+ *
+ * Usage: erlang.whereis(name)
+ * @param name: str, bytes, or erlang.Atom - the registered name
+ * @return erlang.Pid if found, None if not registered
+ *
+ * This is implemented by calling the '_whereis' Erlang callback which wraps
+ * erlang:whereis/1. This approach is used because calling enif_whereis_pid
+ * directly from Python threads can cause crashes in some OTP configurations.
+ */
+static PyObject *erlang_whereis_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *name_obj;
+
+    if (!PyArg_ParseTuple(args, "O", &name_obj)) {
+        return NULL;
+    }
+
+    /* Convert name to atom object if needed */
+    PyObject *atom_obj = NULL;
+    if (PyUnicode_Check(name_obj) || PyBytes_Check(name_obj)) {
+        /* Create atom from string */
+        PyObject *atom_args = PyTuple_Pack(1, name_obj);
+        if (atom_args == NULL) {
+            return NULL;
+        }
+        atom_obj = erlang_atom_impl(NULL, atom_args);
+        Py_DECREF(atom_args);
+        if (atom_obj == NULL) {
+            return NULL;
+        }
+    } else if (Py_IS_TYPE(name_obj, &ErlangAtomType)) {
+        atom_obj = name_obj;
+        Py_INCREF(atom_obj);
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+            "whereis() argument must be str, bytes, or erlang.Atom");
+        return NULL;
+    }
+
+    /* Build args tuple for erlang.call('_whereis', atom) */
+    PyObject *call_name = PyUnicode_FromString("_whereis");
+    if (call_name == NULL) {
+        Py_DECREF(atom_obj);
+        return NULL;
+    }
+
+    PyObject *call_args = PyTuple_Pack(2, call_name, atom_obj);
+    Py_DECREF(call_name);
+    Py_DECREF(atom_obj);
+    if (call_args == NULL) {
+        return NULL;
+    }
+
+    /* Call through the existing erlang.call mechanism */
+    PyObject *result = erlang_call_impl(NULL, call_args);
+    Py_DECREF(call_args);
+
+    return result;
+}
+
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
     {"call", erlang_call_impl, METH_VARARGS,
@@ -3302,6 +3364,10 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Send a message to an Erlang process (fire-and-forget).\n\n"
      "Usage: erlang.send(pid, term)\n"
      "The pid must be an erlang.Pid object."},
+    {"whereis", erlang_whereis_impl, METH_VARARGS,
+     "Look up a registered Erlang process by name.\n\n"
+     "Usage: erlang.whereis(name)\n"
+     "Returns: erlang.Pid if registered, None otherwise."},
     {"schedule", py_schedule, METH_VARARGS,
      "Schedule Erlang callback continuation (must be returned from handler).\n\n"
      "Usage: return erlang.schedule('callback_name', arg1, arg2, ...)\n"
