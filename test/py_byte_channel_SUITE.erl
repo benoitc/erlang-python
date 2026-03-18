@@ -35,7 +35,9 @@
     %% Large payload test
     large_payload_bytes_test/1,
     %% Async event loop dispatch test
-    async_receive_bytes_e2e_test/1
+    async_receive_bytes_e2e_test/1,
+    %% create_task + async receive test
+    create_task_async_receive_test/1
 ]).
 
 all() -> [
@@ -60,7 +62,9 @@ all() -> [
     %% Large payload test
     large_payload_bytes_test,
     %% Async event loop dispatch test
-    async_receive_bytes_e2e_test
+    async_receive_bytes_e2e_test,
+    %% create_task + async receive test
+    create_task_async_receive_test
 ].
 
 init_per_suite(Config) ->
@@ -365,5 +369,62 @@ async_receive_bytes_e2e_test(_Config) ->
     {ok, <<"async_bytes">>} = py:eval(Ctx, <<"erlang.run(receive_bytes(ch))">>,
                                       #{<<"ch">> => Ch}),
     ct:pal("Async receive via erlang.run() OK"),
+
+    ok = py_byte_channel:close(Ch).
+
+%%% ============================================================================
+%%% create_task + Async ByteChannel Test
+%%% ============================================================================
+
+%% @doc Test async_receive_bytes works correctly with py_event_loop:create_task
+%% This verifies the loop capsule name is correct (erlang_python.event_loop)
+create_task_async_receive_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% First send data so it's available when task starts
+    ok = py_byte_channel:send(Ch, <<"create_task_bytes">>),
+
+    %% Define and run the task - env reuse should make __main__ functions visible
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import ByteChannel
+
+async def task_receive_bytes(ch_ref, reply_pid):
+    '''Task that receives bytes and sends result back to Erlang.'''
+    try:
+        ch = ByteChannel(ch_ref)
+        data = await ch.async_receive_bytes()
+        erlang.send(reply_pid, ('result', data))
+    except Exception as e:
+        erlang.send(reply_pid, ('error', str(e)))
+">>),
+
+    %% Create a task that will await on channel receive
+    %% create_task/3 uses the global event loop internally
+    TaskRef = py_event_loop:create_task(
+        "__main__", "task_receive_bytes", [Ch, self()]),
+
+    %% Wait for result from the task
+    %% Note: Python tuple ('result', data) becomes {<<"result">>, data} in Erlang
+    receive
+        {<<"result">>, <<"create_task_bytes">>} ->
+            ct:pal("create_task + async_receive_bytes OK");
+        {<<"error">>, ErrMsg} ->
+            ct:pal("Task error: ~p", [ErrMsg]),
+            ct:fail({task_error, ErrMsg});
+        Other ->
+            ct:pal("Unexpected message: ~p", [Other]),
+            ct:fail({unexpected_message, Other})
+    after 5000 ->
+        ct:fail("Timeout waiting for task result")
+    end,
+
+    %% Wait for task to complete
+    case py_event_loop:await(TaskRef, 5000) of
+        {ok, _} -> ok;
+        {error, AwaitErr} ->
+            ct:pal("Await error: ~p", [AwaitErr])
+    end,
 
     ok = py_byte_channel:close(Ch).

@@ -3062,7 +3062,7 @@ static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang.event_loop");
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang_python.event_loop");
     if (loop == NULL) {
         PyErr_SetString(PyExc_ValueError, "invalid loop reference");
         return NULL;
@@ -3220,7 +3220,7 @@ static PyObject *erlang_byte_channel_wait_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang.event_loop");
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang_python.event_loop");
     if (loop == NULL) {
         PyErr_SetString(PyExc_ValueError, "invalid loop reference");
         return NULL;
