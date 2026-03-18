@@ -28,7 +28,8 @@
     register/2,
     unregister/1,
     lookup/1,
-    execute/2
+    execute/2,
+    register_callbacks/0
 ]).
 
 %% gen_server callbacks
@@ -133,6 +134,25 @@ handle_info(_Info, State) ->
 
 terminate(_Reason, _State) ->
     ok.
+
+%%% ============================================================================
+%%% System Callbacks Registration
+%%% ============================================================================
+
+%% @doc Register system callbacks used internally by the erlang Python module.
+%% This includes _whereis for process lookup.
+-spec register_callbacks() -> ok.
+register_callbacks() ->
+    ?MODULE:register('_whereis', fun whereis_callback/1),
+    ok.
+
+%% @doc Callback implementation for erlang.whereis().
+%% Wraps erlang:whereis/1 to return the PID or undefined.
+-spec whereis_callback([atom()]) -> pid() | undefined.
+whereis_callback([Name]) when is_atom(Name) ->
+    erlang:whereis(Name);
+whereis_callback(_) ->
+    undefined.
 
 %%% ============================================================================
 %%% Internal Functions

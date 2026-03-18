@@ -38,7 +38,13 @@
     test_send_from_coroutine/1,
     test_send_multiple_from_coroutine/1,
     test_send_is_nonblocking/1,
-    test_send_interleaved_with_async/1
+    test_send_interleaved_with_async/1,
+    %% whereis tests
+    test_whereis_registered_process/1,
+    test_whereis_nonexistent/1,
+    test_whereis_with_atom/1,
+    test_whereis_with_bytes/1,
+    test_whereis_invalid_type/1
 ]).
 
 all() ->
@@ -63,7 +69,13 @@ all() ->
         test_send_from_coroutine,
         test_send_multiple_from_coroutine,
         test_send_is_nonblocking,
-        test_send_interleaved_with_async
+        test_send_interleaved_with_async,
+        %% whereis tests
+        test_whereis_registered_process,
+        test_whereis_nonexistent,
+        test_whereis_with_atom,
+        test_whereis_with_bytes,
+        test_whereis_invalid_type
     ].
 
 init_per_suite(Config) ->
@@ -275,6 +287,64 @@ test_send_interleaved_with_async(_Config) ->
     receive <<"interleaved_1">> -> ok after 5000 -> ct:fail(timeout_interleaved_1) end,
     receive <<"interleaved_2">> -> ok after 5000 -> ct:fail(timeout_interleaved_2) end,
     receive <<"interleaved_3">> -> ok after 5000 -> ct:fail(timeout_interleaved_3) end.
+
+%%% ============================================================================
+%%% erlang.whereis() Tests
+%%% ============================================================================
+
+%% @doc Test erlang.whereis() finds a registered process.
+test_whereis_registered_process(_Config) ->
+    %% Register this process
+    Self = self(),
+    erlang:register(py_whereis_test_proc, Self),
+    try
+        %% Look it up from Python
+        {ok, Pid} = py:eval(<<"erlang.whereis('py_whereis_test_proc')">>),
+        %% Verify we got our PID back
+        true = is_pid(Pid),
+        Self = Pid
+    after
+        erlang:unregister(py_whereis_test_proc)
+    end,
+    ok.
+
+%% @doc Test erlang.whereis() returns None for nonexistent process.
+test_whereis_nonexistent(_Config) ->
+    {ok, none} = py:eval(<<"erlang.whereis('nonexistent_process_12345')">>),
+    ok.
+
+%% @doc Test erlang.whereis() with erlang.Atom type.
+%% Note: Use erlang._atom() since erlang.atom() is a Python wrapper not
+%% available in py:eval context.
+test_whereis_with_atom(_Config) ->
+    Self = self(),
+    erlang:register(py_whereis_atom_test, Self),
+    try
+        {ok, Pid} = py:eval(<<"erlang.whereis(erlang._atom('py_whereis_atom_test'))">>),
+        true = is_pid(Pid),
+        Self = Pid
+    after
+        erlang:unregister(py_whereis_atom_test)
+    end,
+    ok.
+
+%% @doc Test erlang.whereis() with bytes argument.
+test_whereis_with_bytes(_Config) ->
+    Self = self(),
+    erlang:register(py_whereis_bytes_test, Self),
+    try
+        {ok, Pid} = py:eval(<<"erlang.whereis(b'py_whereis_bytes_test')">>),
+        true = is_pid(Pid),
+        Self = Pid
+    after
+        erlang:unregister(py_whereis_bytes_test)
+    end,
+    ok.
+
+%% @doc Test erlang.whereis() with invalid type raises TypeError.
+test_whereis_invalid_type(_Config) ->
+    {error, {'TypeError', _}} = py:eval(<<"erlang.whereis(123)">>),
+    ok.
 
 %%% ============================================================================
 %%% Helper Functions
