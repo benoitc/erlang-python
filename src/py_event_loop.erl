@@ -36,7 +36,9 @@
     spawn_task/3, spawn_task/4,
     %% Per-process namespace API
     exec/1, exec/2,
-    eval/1, eval/2
+    eval/1, eval/2,
+    %% Internal API (used by py_event_loop_pool)
+    get_process_env/0
 ]).
 
 %% gen_server callbacks
