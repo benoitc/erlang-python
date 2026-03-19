@@ -43,6 +43,17 @@
 
 ### Added
 
+- **Event Loop Pool** - Pool of event loops for parallel Python coroutine execution
+  - `py_event_loop_pool:get_loop/0` - Get event loop for current process (process affinity)
+  - `py_event_loop_pool:create_task/3,4` - Submit async task to pool
+  - `py_event_loop_pool:run/3,4` - Blocking call via pool
+  - `py_event_loop_pool:spawn_task/3,4` - Fire-and-forget task
+  - `py_event_loop_pool:await/1,2` - Wait for task result
+  - Process affinity ensures same PID always routes to same loop (ordered execution)
+  - Uses `persistent_term` for O(1) loop access
+  - Configurable via `{event_loop_pool_size, N}` (default: schedulers count)
+  - Benchmarks: 417k tasks/sec (fire-and-collect), 164k tasks/sec (50 concurrent processes)
+
 - **ByteChannel API** - Raw byte streaming channel without term serialization
   - `py_byte_channel:new/0,1` - Create byte channel (with optional backpressure)
   - `py_byte_channel:send/2` - Send raw bytes to Python

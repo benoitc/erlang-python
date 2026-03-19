@@ -1407,6 +1407,93 @@ The async task API is fully thread-safe:
 
 This means you can safely call `py_event_loop:create_task` from within a callback that's already running on a dirty NIF scheduler.
 
+## Event Loop Pool
+
+The `py_event_loop_pool` module provides a pool of event loops for parallel Python coroutine execution. Inspired by libuv's "one loop per thread" model, each loop has its own worker and maintains event ordering.
+
+### Process Affinity
+
+All tasks from the same Erlang process are routed to the same event loop (via PID hash). This guarantees that timers and related async operations from a single process execute in order.
+
+```
+                    ┌─► [loop_1] ──► [worker_1] ──► ordered execution
+[process] ──► [hash(PID)] ─┼─► [loop_2] ──► [worker_2] ──► ordered execution
+                    └─► [loop_N] ──► [worker_N] ──► ordered execution
+```
+
+### API
+
+The pool provides the same API as `py_event_loop`, but with automatic load distribution:
+
+```erlang
+%% Get event loop for current process (always the same loop for same PID)
+{ok, LoopRef} = py_event_loop_pool:get_loop().
+
+%% Submit task and await result
+Ref = py_event_loop_pool:create_task(math, sqrt, [16.0]),
+{ok, 4.0} = py_event_loop_pool:await(Ref).
+
+%% Blocking call
+{ok, 4.0} = py_event_loop_pool:run(math, sqrt, [16.0]).
+
+%% Fire-and-forget
+ok = py_event_loop_pool:spawn_task(logger, info, [<<"message">>]).
+
+%% Pool statistics
+#{num_loops := N, supported := true} = py_event_loop_pool:get_stats().
+```
+
+### Configuration
+
+Configure the pool size via application environment:
+
+```erlang
+%% sys.config
+[
+    {erlang_python, [
+        %% Number of event loops (default: erlang:system_info(schedulers))
+        {event_loop_pool_size, 8}
+    ]}
+].
+```
+
+### When to Use
+
+| Use Case | Module |
+|----------|--------|
+| Single caller, ordered tasks | `py_event_loop` |
+| Multiple callers, parallel execution | `py_event_loop_pool` |
+| High throughput, many concurrent processes | `py_event_loop_pool` |
+
+### Performance
+
+Benchmarks on 14-core system with Python 3.14:
+
+| Pattern | Throughput |
+|---------|------------|
+| Sequential (single loop) | 83k tasks/sec |
+| Sequential (pool) | 150k tasks/sec |
+| Concurrent (50 processes) | 164k tasks/sec |
+| Fire-and-collect (10k tasks) | 417k tasks/sec |
+
+### Example: Parallel Processing
+
+```erlang
+%% Process items in parallel using multiple Erlang processes
+%% Each process gets its own event loop for ordered execution
+process_batch(Items) ->
+    Parent = self(),
+    Pids = [spawn_link(fun() ->
+        Results = [begin
+            Ref = py_event_loop_pool:create_task(processor, handle, [Item]),
+            py_event_loop_pool:await(Ref)
+        end || Item <- Chunk],
+        Parent ! {done, self(), Results}
+    end) || Chunk <- partition(Items, 100)],
+
+    [receive {done, Pid, R} -> R end || Pid <- Pids].
+```
+
 ## See Also
 
 - [Reactor](reactor.md) - Low-level FD-based protocol handling
