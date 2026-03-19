@@ -9,6 +9,10 @@
   worker, not just `pthread_cond_signal`. Also fixed Python 3.9 compatibility in ByteChannel
   (`Optional[bytes]` instead of `bytes | None`)
 
+- **Channel waiter race condition** - Fixed `waiter_exists` errors during fast async iteration.
+  Waiter state is now cleared before releasing mutex, preventing race where callback fires
+  before `channel_send` clears `has_waiter`
+
 - **Event Loop Isolation and Resource Safety** - Three fixes for event loop and atom handling
   - **Single-loop-per-interpreter enforcement** - Prevents multiple `ErlangEventLoop` instances
     from causing event confusion. Added `_has_loop_ref()` check that detects running loops;
