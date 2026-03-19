@@ -3700,6 +3700,25 @@ bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
     }
 
     pthread_mutex_unlock(&loop->mutex);
+
+    /*
+     * Also send task_ready to the worker if one exists.
+     * This is needed for create_task: Python is not waiting on the condition
+     * variable, so we need to notify the Erlang worker to call process_ready_tasks.
+     *
+     * Uses the same coalescing logic as submit_task to avoid message floods.
+     */
+    if (loop->has_worker) {
+        if (!atomic_exchange(&loop->task_wake_pending, true)) {
+            ErlNifEnv *msg_env = enif_alloc_env();
+            if (msg_env != NULL) {
+                ERL_NIF_TERM msg = enif_make_atom(msg_env, "task_ready");
+                enif_send(NULL, &loop->worker_pid, msg_env, msg);
+                enif_free_env(msg_env);
+            }
+        }
+    }
+
     return true;
 }
 

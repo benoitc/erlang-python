@@ -54,6 +54,8 @@ Usage:
     ch.send_bytes(b"HTTP/1.1 200 OK\\r\\n")
 """
 
+from typing import Optional
+
 __all__ = ['ByteChannel', 'ByteChannelClosed']
 
 
@@ -102,7 +104,7 @@ class ByteChannel:
         # Use _channel_send which sends raw bytes
         return erlang._channel_send(self._ref, bytes(data))
 
-    def try_receive_bytes(self) -> bytes | None:
+    def try_receive_bytes(self) -> Optional[bytes]:
         """Try to receive bytes without blocking.
 
         Returns:
