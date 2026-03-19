@@ -47,7 +47,8 @@
     %% Close and drain tests
     close_drain_erlang_test/1,
     close_drain_python_sync_test/1,
-    close_drain_python_async_test/1
+    close_drain_python_async_test/1,
+    close_drain_create_task_async_test/1
 ]).
 
 all() -> [
@@ -84,7 +85,8 @@ all() -> [
     %% Close and drain tests
     close_drain_erlang_test,
     close_drain_python_sync_test,
-    close_drain_python_async_test
+    close_drain_python_async_test,
+    close_drain_create_task_async_test
 ].
 
 init_per_suite(Config) ->
@@ -707,3 +709,63 @@ async def async_drain_channel(ch_ref):
         py:eval(Ctx, <<"erlang.run(async_drain_channel(ch))">>, #{<<"ch">> => Ch}),
 
     ct:pal("Python async close+drain test passed").
+
+%% @doc Test async drain with create_task when data arrives after task starts
+%% This tests the notification callback path: task registers waiter, then data arrives
+close_drain_create_task_async_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+
+    %% Define the async drain task
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import Channel
+
+async def drain_task(ch_ref, reply_pid):
+    '''Task that drains channel and sends results back.'''
+    try:
+        ch = Channel(ch_ref)
+        messages = []
+        async for msg in ch:
+            messages.append(msg)
+        erlang.send(reply_pid, ('result', messages))
+    except Exception as e:
+        erlang.send(reply_pid, ('error', str(e)))
+">>),
+
+    %% Create the task BEFORE sending any data
+    %% This forces the task to register a waiter and wait for notifications
+    TaskRef = py_event_loop:create_task(
+        "__main__", "drain_task", [Ch, self()]),
+
+    %% Give the task time to start and register waiter
+    timer:sleep(100),
+
+    %% Now send data - should trigger notification callback
+    ok = py_channel:send(Ch, <<"msg1">>),
+    ok = py_channel:send(Ch, <<"msg2">>),
+    ok = py_channel:send(Ch, <<"msg3">>),
+
+    %% Close the channel to signal end of stream
+    ok = py_channel:close(Ch),
+
+    %% Wait for result from the task
+    receive
+        {<<"result">>, [<<"msg1">>, <<"msg2">>, <<"msg3">>]} ->
+            ct:pal("create_task async drain with delayed data OK");
+        {<<"result">>, Other} ->
+            ct:pal("Unexpected result: ~p", [Other]),
+            ct:fail({unexpected_result, Other});
+        {<<"error">>, ErrMsg} ->
+            ct:pal("Task error: ~p", [ErrMsg]),
+            ct:fail({task_error, ErrMsg})
+    after 5000 ->
+        ct:fail("Timeout waiting for drain task result")
+    end,
+
+    %% Wait for task to complete
+    case py_event_loop:await(TaskRef, 5000) of
+        {ok, _} -> ok;
+        {error, AwaitErr} ->
+            ct:pal("Await error: ~p", [AwaitErr])
+    end.

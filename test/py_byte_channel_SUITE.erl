@@ -41,7 +41,8 @@
     %% Close and drain tests
     close_drain_bytes_erlang_test/1,
     close_drain_bytes_python_sync_test/1,
-    close_drain_bytes_python_async_test/1
+    close_drain_bytes_python_async_test/1,
+    close_drain_bytes_create_task_async_test/1
 ]).
 
 all() -> [
@@ -72,7 +73,8 @@ all() -> [
     %% Close and drain tests
     close_drain_bytes_erlang_test,
     close_drain_bytes_python_sync_test,
-    close_drain_bytes_python_async_test
+    close_drain_bytes_python_async_test,
+    close_drain_bytes_create_task_async_test
 ].
 
 init_per_suite(Config) ->
@@ -530,3 +532,63 @@ async def async_drain_byte_channel(ch_ref):
         py:eval(Ctx, <<"erlang.run(async_drain_byte_channel(ch))">>, #{<<"ch">> => Ch}),
 
     ct:pal("Python async byte channel close+drain test passed").
+
+%% @doc Test async drain with create_task when data arrives after task starts
+%% This tests the notification callback path: task registers waiter, then data arrives
+close_drain_bytes_create_task_async_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Define the async drain task
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import erlang
+from erlang import ByteChannel
+
+async def drain_task(ch_ref, reply_pid):
+    '''Task that drains byte channel and sends results back.'''
+    try:
+        ch = ByteChannel(ch_ref)
+        chunks = []
+        async for chunk in ch:
+            chunks.append(chunk)
+        erlang.send(reply_pid, ('result', chunks))
+    except Exception as e:
+        erlang.send(reply_pid, ('error', str(e)))
+">>),
+
+    %% Create the task BEFORE sending any data
+    %% This forces the task to register a waiter and wait for notifications
+    TaskRef = py_event_loop:create_task(
+        "__main__", "drain_task", [Ch, self()]),
+
+    %% Give the task time to start and register waiter
+    timer:sleep(100),
+
+    %% Now send data - should trigger notification callback
+    ok = py_byte_channel:send(Ch, <<"chunk1">>),
+    ok = py_byte_channel:send(Ch, <<"chunk2">>),
+    ok = py_byte_channel:send(Ch, <<"chunk3">>),
+
+    %% Close the channel to signal end of stream
+    ok = py_byte_channel:close(Ch),
+
+    %% Wait for result from the task
+    receive
+        {<<"result">>, [<<"chunk1">>, <<"chunk2">>, <<"chunk3">>]} ->
+            ct:pal("create_task async drain with delayed data OK");
+        {<<"result">>, Other} ->
+            ct:pal("Unexpected result: ~p", [Other]),
+            ct:fail({unexpected_result, Other});
+        {<<"error">>, ErrMsg} ->
+            ct:pal("Task error: ~p", [ErrMsg]),
+            ct:fail({task_error, ErrMsg})
+    after 5000 ->
+        ct:fail("Timeout waiting for drain task result")
+    end,
+
+    %% Wait for task to complete
+    case py_event_loop:await(TaskRef, 5000) of
+        {ok, _} -> ok;
+        {error, AwaitErr} ->
+            ct:pal("Await error: ~p", [AwaitErr])
+    end.
