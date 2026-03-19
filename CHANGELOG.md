@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- **Channel notification for create_task** - Fixed async channel receive hanging when using
+  `py_event_loop:create_task`. The `event_loop_add_pending()` now sends `task_ready` to the
+  worker, not just `pthread_cond_signal`. Also fixed Python 3.9 compatibility in ByteChannel
+  (`Optional[bytes]` instead of `bytes | None`)
+
 - **Event Loop Isolation and Resource Safety** - Three fixes for event loop and atom handling
   - **Single-loop-per-interpreter enforcement** - Prevents multiple `ErlangEventLoop` instances
     from causing event confusion. Added `_has_loop_ref()` check that detects running loops;
