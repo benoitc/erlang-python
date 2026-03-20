@@ -6568,7 +6568,6 @@ static ErlNifFunc nif_funcs[] = {
     /* Python event loop integration */
     {"set_python_event_loop", 1, nif_set_python_event_loop, 0},
     {"set_isolation_mode", 1, nif_set_isolation_mode, 0},
-    {"set_shared_router", 1, nif_set_shared_router, 0},
     {"set_shared_worker", 1, nif_set_shared_worker, 0},
 
     /* ASGI optimizations */

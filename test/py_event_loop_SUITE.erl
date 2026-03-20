@@ -16,7 +16,7 @@
 
 -export([
     test_event_loop_create_destroy/1,
-    test_event_loop_set_router/1,
+    test_event_loop_set_worker/1,
     test_add_remove_reader/1,
     test_add_remove_writer/1,
     test_call_later_basic/1,
@@ -42,7 +42,7 @@
 all() ->
     [
         test_event_loop_create_destroy,
-        test_event_loop_set_router,
+        test_event_loop_set_worker,
         test_add_remove_reader,
         test_add_remove_writer,
         test_call_later_basic,
@@ -126,18 +126,18 @@ test_event_loop_create_destroy(_Config) ->
     ok = py_nif:event_loop_destroy(LoopRef),
     ok.
 
-test_event_loop_set_router(_Config) ->
+test_event_loop_set_worker(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
 
-    %% Start a router process
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    true = is_pid(RouterPid),
+    %% Start a worker process
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    true = is_pid(WorkerPid),
 
-    %% Set router
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    %% Set worker
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Cleanup
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
@@ -147,8 +147,8 @@ test_event_loop_set_router(_Config) ->
 
 test_add_remove_reader(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create a pipe for testing (pipes work properly with enif_select)
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
@@ -163,14 +163,14 @@ test_add_remove_reader(_Config) ->
     %% Cleanup
     py_nif:close_test_fd(ReadFd),
     py_nif:close_test_fd(WriteFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_add_remove_writer(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
 
@@ -182,14 +182,14 @@ test_add_remove_writer(_Config) ->
 
     py_nif:close_test_fd(ReadFd),
     py_nif:close_test_fd(WriteFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_fd_read_callback(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create pipe - read end for monitoring, write end for triggering
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
@@ -201,7 +201,7 @@ test_fd_read_callback(_Config) ->
     %% Write data to the write end to trigger read readiness on read end
     ok = py_nif:write_test_fd(WriteFd, <<"hello">>),
 
-    %% Wait for callback dispatch (router receives {select, ...})
+    %% Wait for callback dispatch (worker receives {select, ...})
     timer:sleep(100),
 
     %% Get pending events
@@ -218,7 +218,7 @@ test_fd_read_callback(_Config) ->
     ok = py_nif:remove_reader(LoopRef, FdRef),
     py_nif:close_test_fd(ReadFd),
     py_nif:close_test_fd(WriteFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
@@ -228,8 +228,8 @@ test_fd_read_callback(_Config) ->
 
 test_call_later_basic(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     CallbackId = 100,
     DelayMs = 50,
@@ -255,14 +255,14 @@ test_call_later_basic(_Config) ->
     Elapsed = T2 - T1,
     true = Elapsed >= DelayMs,
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_call_later_cancel(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     CallbackId = 101,
     {ok, TimerRef} = py_nif:call_later(LoopRef, 200, CallbackId),
@@ -281,14 +281,14 @@ test_call_later_cancel(_Config) ->
     ),
     false = HasTimerCallback,
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_multiple_timers(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create timers with different delays
     %% Use larger delays for CI reliability (especially on free-threaded Python)
@@ -307,7 +307,7 @@ test_multiple_timers(_Config) ->
     true = lists:member(2, CallbackIds),
     true = lists:member(3, CallbackIds),
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
@@ -317,8 +317,8 @@ test_multiple_timers(_Config) ->
 
 test_poll_events_timeout(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Poll with short timeout, no events
     T1 = erlang:monotonic_time(millisecond),
@@ -330,14 +330,14 @@ test_poll_events_timeout(_Config) ->
     Elapsed = T2 - T1,
     true = Elapsed >= 40,  %% Allow some tolerance
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_event_loop_wakeup(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Spawn a process to wait
     Self = self(),
@@ -362,14 +362,14 @@ test_event_loop_wakeup(_Config) ->
         ct:fail(poll_not_woken_up)
     end,
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_get_pending_clears_queue(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create a timer that fires quickly
     %% Use 20ms minimum for CI reliability
@@ -384,14 +384,14 @@ test_get_pending_clears_queue(_Config) ->
     Pending2 = py_nif:get_pending(LoopRef),
     0 = length(Pending2),
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_concurrent_fd_and_timer(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Set up pipe and timer
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
@@ -431,7 +431,7 @@ test_concurrent_fd_and_timer(_Config) ->
     ok = py_nif:remove_reader(LoopRef, FdRef),
     py_nif:close_test_fd(ReadFd),
     py_nif:close_test_fd(WriteFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
@@ -474,8 +474,8 @@ test_tcp_connect_accept(_Config) ->
 
 test_tcp_read_write_callback(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create listener and connect
     {ok, {ListenFd, Port}} = py_nif:create_test_tcp_listener(0),
@@ -508,14 +508,14 @@ test_tcp_read_write_callback(_Config) ->
     py_nif:close_test_fd(ServerFd),
     py_nif:close_test_fd(ClientFd),
     py_nif:close_test_fd(ListenFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_tcp_echo(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create listener and connect
     {ok, {ListenFd, Port}} = py_nif:create_test_tcp_listener(0),
@@ -569,7 +569,7 @@ test_tcp_echo(_Config) ->
     py_nif:close_test_fd(ServerFd),
     py_nif:close_test_fd(ClientFd),
     py_nif:close_test_fd(ListenFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
@@ -580,8 +580,8 @@ test_tcp_echo(_Config) ->
 test_cancel_reader_keeps_fd_open(_Config) ->
     %% Test that stop_reader stops monitoring but keeps FD open
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create a pipe
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
@@ -612,15 +612,15 @@ test_cancel_reader_keeps_fd_open(_Config) ->
     %% Cleanup - use close_fd since we stopped (remove_reader won't work)
     ok = py_nif:close_fd(FdRef),
     py_nif:close_test_fd(WriteFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_cancel_writer_keeps_fd_open(_Config) ->
     %% Test that stop_writer stops monitoring but keeps FD open
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create a pipe
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
@@ -642,15 +642,15 @@ test_cancel_writer_keeps_fd_open(_Config) ->
     %% Cleanup
     ok = py_nif:close_fd(FdRef),
     py_nif:close_test_fd(ReadFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_double_close_is_safe(_Config) ->
     %% Test that calling close_fd twice is idempotent (no crash)
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create a pipe
     {ok, {ReadFd, _WriteFd}} = py_nif:create_test_pipe(),
@@ -670,15 +670,15 @@ test_double_close_is_safe(_Config) ->
     %% Note: WriteFd is owned by us and should still work
     %% But we won't test that since the pipe's read end is closed
 
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.
 
 test_cancel_then_reselect(_Config) ->
     %% Test that we can stop and then start (resume) monitoring
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create a pipe
     {ok, {ReadFd, WriteFd}} = py_nif:create_test_pipe(),
@@ -709,6 +709,6 @@ test_cancel_then_reselect(_Config) ->
     ok = py_nif:remove_reader(LoopRef, FdRef),
     py_nif:close_test_fd(ReadFd),
     py_nif:close_test_fd(WriteFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.

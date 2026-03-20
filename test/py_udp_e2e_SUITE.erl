@@ -202,8 +202,8 @@ test_udp_broadcast_option(_Config) ->
 
 test_udp_read_callback(_Config) ->
     {ok, LoopRef} = py_nif:event_loop_new(),
-    {ok, RouterPid} = py_event_router:start_link(LoopRef),
-    ok = py_nif:event_loop_set_router(LoopRef, RouterPid),
+    {ok, WorkerPid} = py_event_worker:start_link(<<"test">>, LoopRef),
+    ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
 
     %% Create UDP sockets
     {ok, {ServerFd, ServerPort}} = py_nif:create_test_udp_socket(0),
@@ -233,6 +233,6 @@ test_udp_read_callback(_Config) ->
     ok = py_nif:remove_reader(LoopRef, FdRef),
     py_nif:close_test_fd(ServerFd),
     py_nif:close_test_fd(ClientFd),
-    py_event_router:stop(RouterPid),
+    py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
     ok.

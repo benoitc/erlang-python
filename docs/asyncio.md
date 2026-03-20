@@ -47,10 +47,10 @@ erlang.run(main())
 │   │  _run_once()     │                └────────────────────────────────────┘ │
 │   │      │           │                                                       │
 │   │      ▼           │                ┌────────────────────────────────────┐ │
-│   │  process pending │                │           py_event_router          │ │
+│   │  process pending │                │                                    │ │
 │   │  callbacks       │                │                                    │ │
-│   └──────────────────┘                │  Routes events to correct loop     │ │
-│                                       │  based on resource backref         │ │
+│   └──────────────────┘                │                                    │ │
+│                                       │                                    │ │
 │   ┌──────────────────┐                └────────────────────────────────────┘ │
 │   │  asyncio (via    │                                                       │
 │   │  erlang.run())   │                ┌────────────────────────────────────┐ │
@@ -68,8 +68,7 @@ erlang.run(main())
 | Component | Role |
 |-----------|------|
 | `ErlangEventLoop` | Python asyncio event loop using Erlang for I/O and timers |
-| `py_event_worker` | Erlang gen_server managing FDs and timers for a Python context |
-| `py_event_router` | Routes timer/FD events to the correct event loop instance |
+| `py_event_worker` | Erlang gen_server handling FDs, timers, and task processing |
 | `erlang.run()` | Entry point to run asyncio code with the Erlang event loop |
 
 ## Usage Patterns
@@ -541,13 +540,13 @@ py_nif:close_test_fd(Fd).
 
 ## Integration with Erlang
 
-The event loop integrates with Erlang's message passing system through a router process:
+The event loop integrates with Erlang's message passing system through a worker process:
 
 ```erlang
-%% Start the event router
+%% Start the event worker
 {ok, LoopRef} = py_nif:event_loop_new(),
-{ok, RouterPid} = py_event_router:start_link(LoopRef),
-ok = py_nif:event_loop_set_router(LoopRef, RouterPid).
+{ok, WorkerPid} = py_event_worker:start_link(<<"worker">>, LoopRef),
+ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid).
 ```
 
 Events are delivered as Erlang messages, enabling the event loop to participate in BEAM's supervision trees and distributed computing capabilities.
@@ -598,27 +597,28 @@ t2.join()
 
 ### Internal Architecture
 
-A shared router process handles timer and FD events for all loops:
+Each event loop has an associated worker process that handles timer and FD events:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     py_event_router (shared)                    │
+│                     py_event_worker                              │
 │                                                                 │
 │  Receives:                                                      │
 │  - Timer expirations from erlang:send_after                    │
 │  - FD ready events from enif_select                            │
+│  - task_ready messages for processing tasks                    │
 │                                                                 │
-│  Dispatches to correct loop via resource backref                │
+│  Dispatches events to the loop's pending queue                  │
 └─────────────────────────────────────────────────────────────────┘
-         ▲                    ▲                    ▲
-         │                    │                    │
-    ┌────┴────┐          ┌────┴────┐          ┌────┴────┐
-    │ Loop A  │          │ Loop B  │          │ Loop C  │
-    │ pending │          │ pending │          │ pending │
-    └─────────┘          └─────────┘          └─────────┘
+                              │
+                              ▼
+                        ┌───────────┐
+                        │   Loop    │
+                        │  pending  │
+                        └───────────┘
 ```
 
-Each loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The shared router dispatches timer and FD events to the correct loop based on the capsule backref.
+Each loop has its own pending queue, ensuring callbacks are processed only by the loop that scheduled them. The worker dispatches timer, FD events, and tasks to the correct loop.
 
 ## Erlang Timer Integration
 
