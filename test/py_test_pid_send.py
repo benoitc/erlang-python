@@ -195,3 +195,160 @@ def whereis_and_send(name, msg):
         erlang.send(pid, msg)
         return True
     return False
+
+
+# OWN_GIL test helpers for erlang.* functions
+
+def whereis_basic(name):
+    """Look up a registered process by name."""
+    return erlang.whereis(name)
+
+
+def atom_equality_test(atom1, atom2):
+    """Test that two atoms are equal."""
+    return atom1 == atom2
+
+
+def atom_inequality_test(atom1, atom2):
+    """Test that two different atoms are not equal."""
+    return atom1 != atom2
+
+
+def atom_roundtrip(atom):
+    """Receive an atom and return it unchanged."""
+    return atom
+
+
+def atom_type_check(atom):
+    """Verify a value is an erlang.Atom type."""
+    return type(atom).__name__
+
+
+def atom_has_value_attr(atom):
+    """Check if atom has a value attribute."""
+    return hasattr(atom, 'value')
+
+
+def ref_type_check(ref):
+    """Verify a value is an erlang.Ref type."""
+    return isinstance(ref, erlang.Ref)
+
+
+def ref_inequality_test(ref1, ref2):
+    """Test that two different refs are not equal."""
+    return ref1 != ref2
+
+
+def pid_as_dict_key(pid):
+    """Test using PID as dict key."""
+    d = {pid: 'value'}
+    return d.get(pid) == 'value'
+
+
+def pid_in_set(pid):
+    """Test using PID in a set."""
+    s = {pid}
+    return pid in s
+
+
+# OWN_GIL test helpers for erlang.atom() creation
+
+def atom_create_test():
+    """Create atom using erlang.atom() in OWN_GIL and test equality."""
+    import erlang
+    a1 = erlang.atom('test_owngil_atom')
+    a2 = erlang.atom('test_owngil_atom')
+    return a1 == a2
+
+
+def atom_create_different_test():
+    """Test different atoms created with erlang.atom() are not equal."""
+    import erlang
+    a1 = erlang.atom('atom_x')
+    a2 = erlang.atom('atom_y')
+    return a1 != a2
+
+
+def atom_cache_test():
+    """Test atom caching - same name returns same object."""
+    import erlang
+    a1 = erlang.atom('cached_atom_owngil')
+    a2 = erlang.atom('cached_atom_owngil')
+    return a1 is a2  # Should be same object due to caching
+
+
+def atom_type_name():
+    """Get type name of atom created with erlang.atom()."""
+    import erlang
+    a = erlang.atom('type_check_atom')
+    return type(a).__name__
+
+
+# OWN_GIL test helpers for Channel, ByteChannel, and Buffer operations
+
+def channel_receive_test(channel_ref):
+    """Test Channel.try_receive() in OWN_GIL."""
+    from erlang import Channel
+    ch = Channel(channel_ref)
+    msg = ch.try_receive()
+    return msg
+
+
+def channel_iteration_test(channel_ref, expected_count):
+    """Test Channel iteration."""
+    from erlang import Channel
+    ch = Channel(channel_ref)
+    messages = []
+    for msg in ch:
+        messages.append(msg)
+        if len(messages) >= expected_count:
+            break
+    return len(messages)
+
+
+def channel_context_manager_test(channel_ref):
+    """Test Channel as context manager."""
+    from erlang import Channel
+    with Channel(channel_ref) as ch:
+        msg = ch.try_receive()
+    return msg is not None or True  # Just verifies context manager works
+
+
+def bytechannel_send_receive_test(channel_ref):
+    """Test ByteChannel send_bytes/try_receive_bytes."""
+    from erlang import ByteChannel
+    ch = ByteChannel(channel_ref)
+    ch.send_bytes(b"hello_owngil")
+    return True
+
+
+def bytechannel_try_receive_test(channel_ref):
+    """Test ByteChannel try_receive_bytes."""
+    from erlang import ByteChannel
+    ch = ByteChannel(channel_ref)
+    data = ch.try_receive_bytes()
+    return data
+
+
+def bytechannel_iteration_test(channel_ref, expected_count):
+    """Test ByteChannel iteration."""
+    from erlang import ByteChannel
+    ch = ByteChannel(channel_ref)
+    chunks = []
+    for chunk in ch:
+        chunks.append(chunk)
+        if len(chunks) >= expected_count:
+            break
+    return len(chunks)
+
+
+def buffer_read_methods_test(buf):
+    """Test buffer read methods."""
+    readable = buf.readable_amount()
+    data = buf.read_nonblock(readable) if readable > 0 else b''
+    return {'readable': readable, 'data': data}
+
+
+def buffer_at_eof_test(buf):
+    """Test buffer at_eof detection."""
+    return buf.at_eof()

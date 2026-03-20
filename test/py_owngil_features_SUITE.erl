@@ -96,6 +96,32 @@
     owngil_local_env_call_test/1
 ]).
 
+%% Erlang API tests (whereis, atom, Ref, Pid)
+-export([
+    owngil_whereis_basic_test/1,
+    owngil_whereis_nonexistent_test/1,
+    owngil_whereis_and_send_test/1,
+    owngil_whereis_parallel_test/1,
+    owngil_atom_basic_test/1,
+    owngil_atom_roundtrip_test/1,
+    owngil_atom_create_test/1,
+    owngil_atom_create_different_test/1,
+    owngil_atom_cache_test/1,
+    owngil_ref_roundtrip_test/1,
+    owngil_pid_operations_test/1,
+    %% Channel class tests
+    owngil_channel_class_test/1,
+    owngil_channel_iteration_test/1,
+    owngil_channel_context_manager_test/1,
+    %% ByteChannel tests
+    owngil_bytechannel_send_receive_test/1,
+    owngil_bytechannel_try_receive_test/1,
+    owngil_bytechannel_iteration_test/1,
+    %% Buffer tests
+    owngil_buffer_read_methods_test/1,
+    owngil_buffer_at_eof_test/1
+]).
+
 all() ->
     [{group, channels},
      {group, buffers},
@@ -104,7 +130,8 @@ all() ->
      {group, reactor},
      {group, async_task},
      {group, asyncio},
-     {group, local_env}].
+     {group, local_env},
+     {group, erlang_api}].
 
 groups() ->
     [{channels, [sequence], [
@@ -166,6 +193,30 @@ groups() ->
      {local_env, [sequence], [
         owngil_local_env_isolation_test,
         owngil_local_env_call_test
+    ]},
+     {erlang_api, [sequence], [
+        owngil_whereis_basic_test,
+        owngil_whereis_nonexistent_test,
+        owngil_whereis_and_send_test,
+        owngil_whereis_parallel_test,
+        owngil_atom_basic_test,
+        owngil_atom_roundtrip_test,
+        owngil_atom_create_test,
+        owngil_atom_create_different_test,
+        owngil_atom_cache_test,
+        owngil_ref_roundtrip_test,
+        owngil_pid_operations_test,
+        %% Channel tests
+        owngil_channel_class_test,
+        owngil_channel_iteration_test,
+        owngil_channel_context_manager_test,
+        %% ByteChannel tests
+        owngil_bytechannel_send_receive_test,
+        owngil_bytechannel_try_receive_test,
+        owngil_bytechannel_iteration_test,
+        %% Buffer tests
+        owngil_buffer_read_methods_test,
+        owngil_buffer_at_eof_test
     ]}].
 
 init_per_suite(Config) ->
@@ -1403,6 +1454,18 @@ drain_tuple_messages(N) ->
         ok
     end.
 
+collect_from_ctx_messages(0, Acc) ->
+    Acc;
+collect_from_ctx_messages(N, Acc) ->
+    receive
+        %% Atom key (direct from Erlang)
+        {from_ctx, CtxNum} -> collect_from_ctx_messages(N - 1, [CtxNum | Acc]);
+        %% Binary key (roundtripped through Python)
+        {<<"from_ctx">>, CtxNum} -> collect_from_ctx_messages(N - 1, [CtxNum | Acc])
+    after 5000 ->
+        ct:fail({timeout_collecting_messages, got, length(Acc), expected, N + length(Acc)})
+    end.
+
 create_socketpair() ->
     {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
     {ok, Port} = inet:port(LSock),
@@ -1476,5 +1539,422 @@ def greet(name):
 
     %% Test calling imported module function
     {ok, 2.0} = py_nif:context_call(CtxRef, <<"math">>, <<"sqrt">>, [4.0], #{}, Env),
+
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% Erlang API Tests (whereis, atom, Ref, Pid)
+%%% ============================================================================
+
+%% @doc Basic whereis lookup in owngil context
+owngil_whereis_basic_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Register self under a name
+    true = register(owngil_whereis_test_proc, self()),
+
+    %% Look up the process from Python
+    {ok, FoundPid} = py_context:call(Ctx, py_test_pid_send, whereis_basic,
+        [owngil_whereis_test_proc], #{}),
+
+    %% Verify it matches
+    Self = self(),
+    Self = FoundPid,
+
+    unregister(owngil_whereis_test_proc),
+    py_context:stop(Ctx).
+
+%% @doc Lookup non-existent name returns None in owngil context
+owngil_whereis_nonexistent_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Look up a name that doesn't exist
+    {ok, none} = py_context:call(Ctx, py_test_pid_send, whereis_basic,
+        [nonexistent_proc_name_xyz], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc Combined whereis + send pattern in owngil context
+owngil_whereis_and_send_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Register self under a name
+    true = register(owngil_whereis_send_test, self()),
+
+    %% Use whereis_and_send from Python
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, whereis_and_send,
+        [owngil_whereis_send_test, <<"hello_from_whereis">>], #{}),
+
+    %% Verify message received
+    receive <<"hello_from_whereis">> -> ok
+    after 5000 -> ct:fail(timeout)
+    end,
+
+    unregister(owngil_whereis_send_test),
+    py_context:stop(Ctx).
+
+%% @doc Parallel whereis + send from multiple owngil contexts
+owngil_whereis_parallel_test(Config) ->
+    NumContexts = 4,
+    TestDir = proplists:get_value(test_dir, Config),
+
+    %% Register self
+    true = register(owngil_parallel_whereis_test, self()),
+
+    Contexts = [begin
+        {ok, Ctx} = py_context:start_link(N, owngil),
+        ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+            "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+        Ctx
+    end || N <- lists:seq(1, NumContexts)],
+
+    Parent = self(),
+
+    %% Parallel whereis + send
+    [spawn_link(fun() ->
+        {ok, true} = py_context:call(Ctx, py_test_pid_send, whereis_and_send,
+            [owngil_parallel_whereis_test, {from_ctx, N}], #{}),
+        Parent ! {sender_done, N}
+    end) || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+
+    %% Wait for senders to complete
+    [receive {sender_done, _} -> ok end || _ <- lists:seq(1, NumContexts)],
+
+    %% Verify all messages received (order may vary)
+    Messages = collect_from_ctx_messages(NumContexts, []),
+    NumContexts = length(Messages),
+
+    %% Verify we got all expected context numbers
+    Expected = lists:sort(lists:seq(1, NumContexts)),
+    Expected = lists:sort(Messages),
+
+    unregister(owngil_parallel_whereis_test),
+    [py_context:stop(Ctx) || Ctx <- Contexts],
+    ok.
+
+%% @doc Basic atom operations in owngil context
+owngil_atom_basic_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test atom type - get the actual type name for debugging
+    {ok, TypeName} = py_context:call(Ctx, py_test_pid_send, atom_type_check,
+        [test_atom], #{}),
+    ct:pal("Atom type name in OWN_GIL: ~p", [TypeName]),
+
+    %% Test same atoms are equal
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_equality_test,
+        [hello, hello], #{}),
+
+    %% Test different atoms are not equal
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_inequality_test,
+        [foo, bar], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc Atom roundtrip through callback in owngil context
+%% Note: In OWN_GIL mode, atoms are converted to Python strings.
+%% On roundtrip, they return as binaries (Erlang strings).
+owngil_atom_roundtrip_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Pass atom to Python and get it back
+    TestAtom = test_atom_owngil,
+    {ok, ReturnedValue} = py_context:call(Ctx, py_test_pid_send, atom_roundtrip,
+        [TestAtom], #{}),
+
+    %% In OWN_GIL mode, atoms become strings, so we get a binary back
+    ExpectedBinary = atom_to_binary(TestAtom),
+    ExpectedBinary = ReturnedValue,
+
+    py_context:stop(Ctx).
+
+%% @doc Test erlang.atom() creates equal atoms in owngil context
+owngil_atom_create_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test that erlang.atom() creates equal atoms for same name
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_create_test, [], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc Test erlang.atom() creates unequal atoms for different names
+owngil_atom_create_different_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test that erlang.atom() creates different atoms for different names
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_create_different_test, [], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc Test erlang.atom() caching - same name returns same object
+owngil_atom_cache_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test atom caching - same object returned for same name
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_cache_test, [], #{}),
+
+    %% Also verify we can get the type name
+    {ok, TypeName} = py_context:call(Ctx, py_test_pid_send, atom_type_name, [], #{}),
+    ct:pal("Atom type name from erlang.atom(): ~p", [TypeName]),
+
+    py_context:stop(Ctx).
+
+%% @doc Ref type check and uniqueness in owngil context
+owngil_ref_roundtrip_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Create refs
+    Ref1 = make_ref(),
+    Ref2 = make_ref(),
+
+    %% Verify type check
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, ref_type_check, [Ref1], #{}),
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, ref_type_check, [Ref2], #{}),
+
+    %% Verify refs are different
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, ref_inequality_test, [Ref1, Ref2], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc PID equality, hashing, and use as dict key in owngil context
+owngil_pid_operations_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    Pid = self(),
+
+    %% Test PID as dict key
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, pid_as_dict_key, [Pid], #{}),
+
+    %% Test PID in set
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, pid_in_set, [Pid], #{}),
+
+    %% Test PID equality (existing function)
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, pid_equality, [Pid, Pid], #{}),
+
+    %% Test PID hash equality (existing function)
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, pid_hash_equal, [Pid, Pid], #{}),
+
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% Channel Class Tests (erlang_api group)
+%%% ============================================================================
+
+%% @doc Test Channel class receive/try_receive in OWN_GIL
+owngil_channel_class_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_channel:new(),
+
+    %% Send message from Erlang
+    ok = py_channel:send(Ch, <<"test_channel_class">>),
+
+    %% Receive via Channel class in Python
+    {ok, <<"test_channel_class">>} = py_context:call(Ctx, py_test_pid_send,
+        channel_receive_test, [Ch], #{}),
+
+    py_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test Channel iteration in OWN_GIL
+owngil_channel_iteration_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_channel:new(),
+
+    %% Send multiple messages
+    ok = py_channel:send(Ch, <<"msg1">>),
+    ok = py_channel:send(Ch, <<"msg2">>),
+    ok = py_channel:send(Ch, <<"msg3">>),
+
+    %% Iterate in Python
+    {ok, 3} = py_context:call(Ctx, py_test_pid_send,
+        channel_iteration_test, [Ch, 3], #{}),
+
+    py_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test Channel as context manager in OWN_GIL
+owngil_channel_context_manager_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_channel:new(),
+
+    %% Send a message for the context manager test to try_receive
+    ok = py_channel:send(Ch, <<"context_msg">>),
+
+    %% Test context manager usage
+    {ok, true} = py_context:call(Ctx, py_test_pid_send,
+        channel_context_manager_test, [Ch], #{}),
+
+    py_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% ByteChannel Tests (erlang_api group)
+%%% ============================================================================
+
+%% @doc Test ByteChannel send_bytes/receive_bytes in OWN_GIL
+owngil_bytechannel_send_receive_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send bytes from Python via ByteChannel
+    {ok, true} = py_context:call(Ctx, py_test_pid_send,
+        bytechannel_send_receive_test, [Ch], #{}),
+
+    %% Receive raw bytes from Erlang using byte channel API
+    {ok, <<"hello_owngil">>} = py_byte_channel:try_receive(Ch),
+
+    py_byte_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test ByteChannel non-blocking try_receive_bytes in OWN_GIL
+owngil_bytechannel_try_receive_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send raw bytes from Erlang using byte channel API
+    ok = py_byte_channel:send(Ch, <<"bytes_data">>),
+
+    %% Receive via ByteChannel in Python
+    {ok, <<"bytes_data">>} = py_context:call(Ctx, py_test_pid_send,
+        bytechannel_try_receive_test, [Ch], #{}),
+
+    py_byte_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test ByteChannel iteration in OWN_GIL
+owngil_bytechannel_iteration_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send multiple byte chunks using byte channel API
+    ok = py_byte_channel:send(Ch, <<"chunk1">>),
+    ok = py_byte_channel:send(Ch, <<"chunk2">>),
+
+    %% Iterate in Python
+    {ok, 2} = py_context:call(Ctx, py_test_pid_send,
+        bytechannel_iteration_test, [Ch, 2], #{}),
+
+    py_byte_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% Buffer Tests (erlang_api group)
+%%% ============================================================================
+
+%% @doc Test buffer read/read_nonblock/readable_amount in OWN_GIL
+owngil_buffer_read_methods_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Buf} = py_buffer:new(),
+
+    %% Write data to buffer
+    ok = py_buffer:write(Buf, <<"test_data">>),
+
+    %% Test read methods from Python
+    {ok, Result} = py_context:call(Ctx, py_test_pid_send,
+        buffer_read_methods_test, [Buf], #{}),
+
+    %% Verify readable amount and data
+    #{<<"readable">> := Readable, <<"data">> := Data} = Result,
+    true = Readable > 0,
+    <<"test_data">> = Data,
+
+    py_buffer:close(Buf),
+    py_context:stop(Ctx).
+
+%% @doc Test buffer at_eof detection in OWN_GIL
+owngil_buffer_at_eof_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Buf} = py_buffer:new(),
+
+    %% Buffer not yet at EOF (not closed)
+    {ok, false} = py_context:call(Ctx, py_test_pid_send,
+        buffer_at_eof_test, [Buf], #{}),
+
+    %% Close buffer
+    ok = py_buffer:close(Buf),
+
+    %% Now at EOF
+    {ok, true} = py_context:call(Ctx, py_test_pid_send,
+        buffer_at_eof_test, [Buf], #{}),
 
     py_context:stop(Ctx).
