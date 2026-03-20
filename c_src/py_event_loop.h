@@ -264,10 +264,10 @@ typedef struct {
  * - Synchronization primitives
  */
 typedef struct erlang_event_loop {
-    /** @brief PID of the py_event_router gen_server (legacy) */
+    /** @brief Legacy field - kept for binary compatibility */
     ErlNifPid router_pid;
 
-    /** @brief Whether router_pid has been set */
+    /** @brief Legacy field - kept for binary compatibility */
     bool has_router;
 
     /** @brief PID of the py_event_worker gen_server (scalable I/O model) */
@@ -594,9 +594,9 @@ ERL_NIF_TERM nif_get_pending(ErlNifEnv *env, int argc,
                              const ERL_NIF_TERM argv[]);
 
 /**
- * @brief Dispatch a callback from the router
+ * @brief Dispatch a callback from the worker
  *
- * Called by py_event_router when an event occurs.
+ * Called by py_event_worker when an event occurs.
  *
  * NIF: dispatch_callback(LoopRef, CallbackId, Type) -> ok
  */
@@ -977,14 +977,6 @@ int py_event_loop_init_python(ErlNifEnv *env, erlang_event_loop_t *loop);
  */
 ERL_NIF_TERM nif_set_python_event_loop(ErlNifEnv *env, int argc,
                                         const ERL_NIF_TERM argv[]);
-
-/**
- * @brief Set the shared router PID for per-loop created loops
- *
- * NIF: set_shared_router(RouterPid) -> ok | {error, Reason}
- */
-ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
-                                    const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Set the shared worker PID for task_ready notifications

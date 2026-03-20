@@ -30,7 +30,7 @@
  * 1. Python calls add_reader(fd, callback) -> enif_select(fd, READ)
  * 2. Erlang scheduler monitors fd
  * 3. When fd is ready, Erlang sends {select, Res, Ref, ready_input}
- * 4. py_event_router receives message, calls dispatch_callback NIF
+ * 4. py_event_worker receives message, calls dispatch_callback NIF
  * 5. Python callback is invoked
  */
 
@@ -108,12 +108,6 @@ typedef struct {
     /** @brief Event loop for this interpreter */
     erlang_event_loop_t *event_loop;
 
-    /** @brief Shared router PID for loops created via _loop_new() */
-    ErlNifPid shared_router;
-
-    /** @brief Whether shared_router has been set */
-    bool shared_router_valid;
-
     /** @brief Isolation mode: 0=global, 1=per_loop */
     int isolation_mode;
 
@@ -133,21 +127,13 @@ typedef struct {
 } py_event_loop_module_state_t;
 
 /* ============================================================================
- * Global Shared Router
+ * Global Shared Worker
  * ============================================================================
  *
- * A global shared router that can be used by all interpreters (main and sub).
- * This is separate from the per-module state to allow subinterpreters to
- * access the router even when their module state doesn't have it set.
- */
-static ErlNifPid g_global_shared_router;
-static bool g_global_shared_router_valid = false;
-static pthread_mutex_t g_global_router_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/* Global shared worker for scalable I/O model.
+ * Global shared worker for scalable I/O model.
  * Used by dispatch_timer to send task_ready, ensuring process_ready_tasks
  * is called after timer events. This centralizes the wakeup mechanism
- * so both router-dispatched and worker-dispatched timers work correctly.
+ * so worker-dispatched timers work correctly.
  */
 static ErlNifPid g_global_shared_worker;
 static bool g_global_shared_worker_valid = false;
@@ -250,34 +236,34 @@ static bool callable_cache_insert(erlang_event_loop_t *loop,
                                    PyObject *callable);
 
 /**
- * Try to acquire a router for the event loop.
+ * Try to acquire a worker for the event loop.
  *
- * If the loop doesn't have a router/worker configured, check the global
- * shared router and use it if available. This allows subinterpreters
- * to use the main interpreter's router.
+ * If the loop doesn't have a worker configured, check the global
+ * shared worker and use it if available. This allows subinterpreters
+ * to use the main interpreter's worker.
  *
  * @param loop Event loop to check/update
- * @return true if a router/worker is available, false otherwise
+ * @return true if a worker is available, false otherwise
  */
-static bool event_loop_ensure_router(erlang_event_loop_t *loop) {
+static bool event_loop_ensure_worker(erlang_event_loop_t *loop) {
     if (loop == NULL) {
         return false;
     }
 
-    /* Already have a router or worker */
-    if (loop->has_router || loop->has_worker) {
+    /* Already have a worker */
+    if (loop->has_worker) {
         return true;
     }
 
-    /* Try to get the global shared router */
-    pthread_mutex_lock(&g_global_router_mutex);
-    if (g_global_shared_router_valid) {
-        loop->router_pid = g_global_shared_router;
-        loop->has_router = true;
+    /* Try to get the global shared worker */
+    pthread_mutex_lock(&g_global_worker_mutex);
+    if (g_global_shared_worker_valid) {
+        loop->worker_pid = g_global_shared_worker;
+        loop->has_worker = true;
     }
-    pthread_mutex_unlock(&g_global_router_mutex);
+    pthread_mutex_unlock(&g_global_worker_mutex);
 
-    return loop->has_router || loop->has_worker;
+    return loop->has_worker;
 }
 
 /**
@@ -1303,10 +1289,10 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     }
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         return make_error(env, "no_router");
     }
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
 
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
@@ -1415,10 +1401,10 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     }
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         return make_error(env, "no_router");
     }
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
 
     /* Allocate fd resource */
     fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
@@ -1529,10 +1515,10 @@ ERL_NIF_TERM nif_call_later(ErlNifEnv *env, int argc,
     }
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         return make_error(env, "no_router");
     }
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
 
     /* Create timer reference */
     ERL_NIF_TERM timer_ref = enif_make_ref(env);
@@ -1569,10 +1555,10 @@ ERL_NIF_TERM nif_cancel_timer(ErlNifEnv *env, int argc,
     ERL_NIF_TERM timer_ref = argv[1];
 
     /* Scalable I/O: prefer worker, fall back to router */
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         return make_error(env, "no_router");
     }
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
 
     /* Send message to target: {cancel_timer, TimerRef} */
     ERL_NIF_TERM msg = enif_make_tuple2(env, ATOM_CANCEL_TIMER, timer_ref);
@@ -1789,7 +1775,7 @@ ERL_NIF_TERM nif_get_pending(ErlNifEnv *env, int argc,
 /**
  * dispatch_callback(LoopRef, CallbackId, Type) -> ok
  *
- * Called by py_event_router when an event occurs.
+ * Called by py_event_worker when an event occurs.
  */
 ERL_NIF_TERM nif_dispatch_callback(ErlNifEnv *env, int argc,
                                    const ERL_NIF_TERM argv[]) {
@@ -1860,7 +1846,7 @@ ERL_NIF_TERM nif_dispatch_timer(ErlNifEnv *env, int argc,
  *
  * Handles a select event by dispatching callback to pending queue.
  * This combines get_fd_callback_id + dispatch_callback into one NIF call.
- * Called by py_event_router when receiving {select, FdRes, Ref, ready_input/output}.
+ * Called by py_event_worker when receiving {select, FdRes, Ref, ready_input/output}.
  *
  * NOTE: Does NOT auto-reselect to avoid infinite loops with level-triggered FDs.
  * Python should call start_reader/start_writer after processing the callback
@@ -1971,7 +1957,7 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
     /* Immediately reselect for next event.
      * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation.
      * The ref is ignored by the worker anyway. */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int select_flags = is_read ? ERL_NIF_SELECT_READ : ERL_NIF_SELECT_WRITE;
     enif_select(env, (ErlNifEvent)fd_res->fd, select_flags,
                 fd_res, target_pid, ATOM_UNDEFINED);
@@ -3809,7 +3795,7 @@ ERL_NIF_TERM nif_reselect_reader(ErlNifEnv *env, int argc,
 
     /* Re-register with Erlang scheduler for read monitoring.
      * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
                           fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -3851,7 +3837,7 @@ ERL_NIF_TERM nif_reselect_writer(ErlNifEnv *env, int argc,
 
     /* Re-register with Erlang scheduler for write monitoring.
      * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
                           fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -3888,13 +3874,13 @@ ERL_NIF_TERM nif_reselect_reader_fd(ErlNifEnv *env, int argc,
 
     /* Use the loop stored in the fd resource */
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !event_loop_ensure_router(loop)) {
+    if (loop == NULL || !event_loop_ensure_worker(loop)) {
         return make_error(env, "no_loop");
     }
 
     /* Re-register with Erlang scheduler for read monitoring.
      * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
                           fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -3931,13 +3917,13 @@ ERL_NIF_TERM nif_reselect_writer_fd(ErlNifEnv *env, int argc,
 
     /* Use the loop stored in the fd resource */
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !event_loop_ensure_router(loop)) {
+    if (loop == NULL || !event_loop_ensure_worker(loop)) {
         return make_error(env, "no_loop");
     }
 
     /* Re-register with Erlang scheduler for write monitoring.
      * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation. */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
                           fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -4004,13 +3990,13 @@ ERL_NIF_TERM nif_start_reader(ErlNifEnv *env, int argc,
     }
 
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !event_loop_ensure_router(loop)) {
+    if (loop == NULL || !event_loop_ensure_worker(loop)) {
         return make_error(env, "no_loop");
     }
 
     /* Register with Erlang scheduler for read monitoring */
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_READ,
                           fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -4079,13 +4065,13 @@ ERL_NIF_TERM nif_start_writer(ErlNifEnv *env, int argc,
     }
 
     erlang_event_loop_t *loop = fd_res->loop;
-    if (loop == NULL || !event_loop_ensure_router(loop)) {
+    if (loop == NULL || !event_loop_ensure_worker(loop)) {
         return make_error(env, "no_loop");
     }
 
     /* Register with Erlang scheduler for write monitoring */
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_WRITE,
                           fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -5756,39 +5742,6 @@ ERL_NIF_TERM nif_set_isolation_mode(ErlNifEnv *env, int argc,
 }
 
 /**
- * Set the shared router PID for per-loop created loops.
- * This router will be used by all loops created via _loop_new().
- * Stores in both module state (for the current interpreter) and
- * global variable (for subinterpreters).
- */
-ERL_NIF_TERM nif_set_shared_router(ErlNifEnv *env, int argc,
-                                    const ERL_NIF_TERM argv[]) {
-    (void)argc;
-
-    ErlNifPid router_pid;
-    if (!enif_get_local_pid(env, argv[0], &router_pid)) {
-        return make_error(env, "invalid_pid");
-    }
-
-    /* Store in global variable (accessible from all interpreters) */
-    pthread_mutex_lock(&g_global_router_mutex);
-    g_global_shared_router = router_pid;
-    g_global_shared_router_valid = true;
-    pthread_mutex_unlock(&g_global_router_mutex);
-
-    /* Also store in module state for backward compatibility */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    py_event_loop_module_state_t *state = get_module_state();
-    if (state != NULL) {
-        state->shared_router = router_pid;
-        state->shared_router_valid = true;
-    }
-    PyGILState_Release(gstate);
-
-    return ATOM_OK;
-}
-
-/**
  * Set the shared worker PID for task_ready notifications.
  * This worker receives task_ready messages from dispatch_timer and other
  * event sources to trigger process_ready_tasks.
@@ -6023,7 +5976,7 @@ static PyObject *py_add_reader(PyObject *self, PyObject *args) {
     fd_res->reader_active = true;
     fd_res->writer_active = false;
     /* Use worker_pid when available for scalable I/O */
-    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
+    fd_res->owner_pid = loop->worker_pid;
 
     /* Initialize lifecycle management fields */
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
@@ -6032,7 +5985,7 @@ static PyObject *py_add_reader(PyObject *self, PyObject *args) {
 
     /* Register with enif_select using the loop's persistent msg_env */
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
                           ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -6099,7 +6052,7 @@ static PyObject *py_add_writer(PyObject *self, PyObject *args) {
     fd_res->reader_active = false;
     fd_res->writer_active = true;
     /* Use worker_pid when available for scalable I/O */
-    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
+    fd_res->owner_pid = loop->worker_pid;
 
     /* Initialize lifecycle management fields */
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
@@ -6108,7 +6061,7 @@ static PyObject *py_add_writer(PyObject *self, PyObject *args) {
 
     /* Register with enif_select using the loop's persistent msg_env */
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
                           ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -6156,7 +6109,7 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
 
     /* Use per-interpreter event loop lookup */
     erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || !event_loop_ensure_router(loop)) {
+    if (loop == NULL || !event_loop_ensure_worker(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop not initialized");
         return NULL;
     }
@@ -6180,7 +6133,7 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
     );
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int send_result = enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
 
@@ -6203,7 +6156,7 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
 
     /* Use per-interpreter event loop lookup */
     erlang_event_loop_t *loop = get_interpreter_event_loop();
-    if (loop == NULL || !event_loop_ensure_router(loop)) {
+    if (loop == NULL || !event_loop_ensure_worker(loop)) {
         Py_RETURN_NONE;
     }
 
@@ -6220,7 +6173,7 @@ static PyObject *py_cancel_timer(PyObject *self, PyObject *args) {
     );
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
     Py_RETURN_NONE;
@@ -6510,13 +6463,6 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
 #else
     loop->interp_id = 0;  /* Main interpreter */
 #endif
-
-    /* Use shared router if available from module state (for per-loop mode) */
-    py_event_loop_module_state_t *state = get_module_state();
-    if (state != NULL && state->shared_router_valid) {
-        loop->router_pid = state->shared_router;
-        loop->has_router = true;
-    }
 
     /* Create a capsule wrapping the loop pointer */
     PyObject *capsule = PyCapsule_New(loop, LOOP_CAPSULE_NAME, loop_capsule_destructor);
@@ -6839,7 +6785,7 @@ static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
@@ -6857,13 +6803,13 @@ static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
     fd_res->reader_active = true;
     fd_res->writer_active = false;
     /* Use worker_pid when available for scalable I/O */
-    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
+    fd_res->owner_pid = loop->worker_pid;
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
     fd_res->monitor_active = false;
     fd_res->owns_fd = false;
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
                           ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -6920,7 +6866,7 @@ static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
@@ -6938,13 +6884,13 @@ static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
     fd_res->reader_active = false;
     fd_res->writer_active = true;
     /* Use worker_pid when available for scalable I/O */
-    fd_res->owner_pid = loop->has_worker ? loop->worker_pid : loop->router_pid;
+    fd_res->owner_pid = loop->worker_pid;
     atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
     fd_res->monitor_active = false;
     fd_res->owns_fd = false;
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     int ret = enif_select(loop->msg_env, (ErlNifEvent)fd,
                           ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
 
@@ -7154,7 +7100,7 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         target_loop = loop;
     }
 
-    if (!event_loop_ensure_router(target_loop)) {
+    if (!event_loop_ensure_worker(target_loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
@@ -7182,7 +7128,7 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
     );
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = target_loop->has_worker ? &target_loop->worker_pid : &target_loop->router_pid;
+    ErlNifPid *target_pid = &target_loop->worker_pid;
     int send_result = enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
 
@@ -7210,7 +7156,7 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
         Py_RETURN_NONE;
     }
 
-    if (!event_loop_ensure_router(loop)) {
+    if (!event_loop_ensure_worker(loop)) {
         Py_RETURN_NONE;
     }
 
@@ -7226,7 +7172,7 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
     );
 
     /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = loop->has_worker ? &loop->worker_pid : &loop->router_pid;
+    ErlNifPid *target_pid = &loop->worker_pid;
     enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
     Py_RETURN_NONE;
@@ -7430,7 +7376,6 @@ int create_py_event_loop_module(void) {
     py_event_loop_module_state_t *state = PyModule_GetState(module);
     if (state != NULL) {
         state->event_loop = NULL;
-        state->shared_router_valid = false;
         state->isolation_mode = 0;  /* global mode by default */
         /* Initialize reactor cache (will be populated lazily) */
         state->reactor_module = NULL;
@@ -7515,13 +7460,13 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->interp_id = 0;  /* Main interpreter */
 #endif
 
-    /* Try to use the global shared router if available (for subinterpreters) */
-    pthread_mutex_lock(&g_global_router_mutex);
-    if (g_global_shared_router_valid) {
-        loop->router_pid = g_global_shared_router;
-        loop->has_router = true;
+    /* Try to use the global shared worker if available (for subinterpreters) */
+    pthread_mutex_lock(&g_global_worker_mutex);
+    if (g_global_shared_worker_valid) {
+        loop->worker_pid = g_global_shared_worker;
+        loop->has_worker = true;
     }
-    pthread_mutex_unlock(&g_global_router_mutex);
+    pthread_mutex_unlock(&g_global_worker_mutex);
 
     /* Store in module state for Python code to access */
     set_interpreter_event_loop(loop);

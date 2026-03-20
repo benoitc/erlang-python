@@ -54,8 +54,7 @@
 -record(state, {
     loop_ref :: reference() | undefined,
     worker_pid :: pid() | undefined,
-    worker_id :: binary(),
-    router_pid :: pid() | undefined
+    worker_id :: binary()
 }).
 
 %% ============================================================================
@@ -326,10 +325,6 @@ init([]) ->
             %% Set global shared worker for dispatch_timer task_ready notifications
             ok = py_nif:set_shared_worker(WorkerPid),
 
-            %% Also start legacy router for backward compatibility
-            {ok, RouterPid} = py_event_router:start_link(LoopRef),
-            ok = py_nif:set_shared_router(RouterPid),
-
             %% Make the event loop available to Python
             ok = py_nif:set_python_event_loop(LoopRef),
             %% Set ErlangEventLoop as the default asyncio policy
@@ -337,8 +332,7 @@ init([]) ->
             {ok, #state{
                 loop_ref = LoopRef,
                 worker_pid = WorkerPid,
-                worker_id = WorkerId,
-                router_pid = RouterPid
+                worker_id = WorkerId
             }};
         {error, Reason} ->
             {stop, {event_loop_init_failed, Reason}}
@@ -392,14 +386,11 @@ handle_call(get_loop, _From, #state{loop_ref = undefined} = State) ->
             ok = py_nif:event_loop_set_worker(LoopRef, WorkerPid),
             ok = py_nif:event_loop_set_id(LoopRef, WorkerId),
             ok = py_nif:set_shared_worker(WorkerPid),
-            {ok, RouterPid} = py_event_router:start_link(LoopRef),
-            ok = py_nif:set_shared_router(RouterPid),
             ok = py_nif:set_python_event_loop(LoopRef),
             NewState = State#state{
                 loop_ref = LoopRef,
                 worker_pid = WorkerPid,
-                worker_id = WorkerId,
-                router_pid = RouterPid
+                worker_id = WorkerId
             },
             {reply, {ok, LoopRef}, NewState};
         {error, _} = Error ->
@@ -418,18 +409,13 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{loop_ref = LoopRef, worker_pid = WorkerPid, router_pid = RouterPid}) ->
+terminate(_Reason, #state{loop_ref = LoopRef, worker_pid = WorkerPid}) ->
     %% Reset asyncio policy back to default before destroying the loop
     reset_default_policy(),
-    %% Clean up worker (scalable I/O model)
+    %% Clean up worker
     case WorkerPid of
         undefined -> ok;
         WPid -> py_event_worker:stop(WPid)
-    end,
-    %% Clean up legacy router
-    case RouterPid of
-        undefined -> ok;
-        RPid -> py_event_router:stop(RPid)
     end,
     %% Clean up event loop
     case LoopRef of

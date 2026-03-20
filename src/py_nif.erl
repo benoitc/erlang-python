@@ -152,7 +152,6 @@
     %% Python event loop integration
     set_python_event_loop/1,
     set_isolation_mode/1,
-    set_shared_router/1,
     set_shared_worker/1,
     %% ASGI optimizations
     asgi_build_scope/1,
@@ -913,7 +912,7 @@ reselect_writer_fd(_FdRes) ->
 %%% ============================================================================
 
 %% @doc Handle a select event (dispatch + auto-reselect).
-%% Called by py_event_router when receiving {select, FdRes, Ref, ready_input/output}.
+%% Called by py_event_worker when receiving {select, FdRes, Ref, ready_input/output}.
 %% This combines get_fd_callback_id + dispatch_callback + reselect into one NIF call.
 %% Type: read | write
 -spec handle_fd_event(reference(), read | write) -> ok | {error, term()}.
@@ -1067,13 +1066,6 @@ set_python_event_loop(_LoopRef) ->
 %% - per_loop: each ErlangEventLoop creates its own isolated native loop
 -spec set_isolation_mode(global | per_loop) -> ok | {error, term()}.
 set_isolation_mode(_Mode) ->
-    ?NIF_STUB.
-
-%% @doc Set the shared router PID for per-loop created loops.
-%% All loops created via _loop_new() in Python will use this router
-%% for FD monitoring and timer operations.
--spec set_shared_router(pid()) -> ok | {error, term()}.
-set_shared_router(_RouterPid) ->
     ?NIF_STUB.
 
 %% @doc Set the shared worker PID for task_ready notifications.

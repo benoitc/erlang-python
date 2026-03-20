@@ -41,6 +41,13 @@
     contexts uses `thread_worker_call()` rather than suspension/resume protocol;
     re-entrant calls to the same OWN_GIL context are not supported
 
+### Changed
+
+- **Removed py_event_router** - Removed legacy `py_event_router` module. The `py_event_worker`
+  now handles all event loop functionality including FD events, timers, and task processing.
+  This simplifies the architecture by consolidating event handling into a single worker process.
+  The `py_nif:set_shared_router/1` function has been removed.
+
 ### Added
 
 - **Event Loop Pool** - Pool of event loops for parallel Python coroutine execution
