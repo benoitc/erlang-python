@@ -40,7 +40,10 @@
     create_task/3, create_task/4,
     run/3, run/4,
     spawn_task/3, spawn_task/4,
-    await/1, await/2
+    await/1, await/2,
+    %% Per-process namespace API
+    exec/1, exec/2,
+    eval/1, eval/2
 ]).
 
 %% Legacy API
@@ -271,6 +274,63 @@ await(Ref, Timeout) ->
     after Timeout ->
         {error, timeout}
     end.
+
+%%% ============================================================================
+%%% Per-Process Namespace API
+%%% ============================================================================
+
+%% @doc Execute Python code in the calling process's event loop namespace.
+%%
+%% Each Erlang process gets an isolated Python namespace for its assigned
+%% event loop. Functions defined via exec/1 can be called via create_task/3
+%% with the `__main__' module.
+%%
+%% Example:
+%% <pre>
+%% ok = py_event_loop_pool:exec(&lt;&lt;"
+%%     async def my_async_func(x):
+%%         return x * 2
+%% "&gt;&gt;),
+%% Ref = py_event_loop_pool:create_task('__main__', my_async_func, [21]),
+%% {ok, 42} = py_event_loop_pool:await(Ref)
+%% </pre>
+-spec exec(Code :: binary() | iolist()) -> ok | {error, term()}.
+exec(Code) ->
+    case get_loop() of
+        {ok, LoopRef} ->
+            exec(LoopRef, Code);
+        {error, not_available} ->
+            %% Fallback to default event loop
+            py_event_loop:exec(Code)
+    end.
+
+-spec exec(LoopRef :: reference(), Code :: binary() | iolist()) -> ok | {error, term()}.
+exec(LoopRef, Code) ->
+    py_nif:event_loop_exec(LoopRef, Code).
+
+%% @doc Evaluate a Python expression in the calling process's namespace.
+%%
+%% Returns the result of evaluating the expression.
+%%
+%% Example:
+%% <pre>
+%% ok = py_event_loop_pool:exec(&lt;&lt;"x = 42"&gt;&gt;),
+%% {ok, 42} = py_event_loop_pool:eval(&lt;&lt;"x"&gt;&gt;),
+%% {ok, 84} = py_event_loop_pool:eval(&lt;&lt;"x * 2"&gt;&gt;)
+%% </pre>
+-spec eval(Expr :: binary() | iolist()) -> {ok, term()} | {error, term()}.
+eval(Expr) ->
+    case get_loop() of
+        {ok, LoopRef} ->
+            eval(LoopRef, Expr);
+        {error, not_available} ->
+            %% Fallback to default event loop
+            py_event_loop:eval(Expr)
+    end.
+
+-spec eval(LoopRef :: reference(), Expr :: binary() | iolist()) -> {ok, term()} | {error, term()}.
+eval(LoopRef, Expr) ->
+    py_nif:event_loop_eval(LoopRef, Expr).
 
 %%% ============================================================================
 %%% Legacy API
