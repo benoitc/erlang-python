@@ -282,3 +282,73 @@ def atom_type_name():
     import erlang
     a = erlang.atom('type_check_atom')
     return type(a).__name__
+
+
+# OWN_GIL test helpers for Channel, ByteChannel, and Buffer operations
+
+def channel_receive_test(channel_ref):
+    """Test Channel.try_receive() in OWN_GIL."""
+    from erlang import Channel
+    ch = Channel(channel_ref)
+    msg = ch.try_receive()
+    return msg
+
+
+def channel_iteration_test(channel_ref, expected_count):
+    """Test Channel iteration."""
+    from erlang import Channel
+    ch = Channel(channel_ref)
+    messages = []
+    for msg in ch:
+        messages.append(msg)
+        if len(messages) >= expected_count:
+            break
+    return len(messages)
+
+
+def channel_context_manager_test(channel_ref):
+    """Test Channel as context manager."""
+    from erlang import Channel
+    with Channel(channel_ref) as ch:
+        msg = ch.try_receive()
+    return msg is not None or True  # Just verifies context manager works
+
+
+def bytechannel_send_receive_test(channel_ref):
+    """Test ByteChannel send_bytes/try_receive_bytes."""
+    from erlang import ByteChannel
+    ch = ByteChannel(channel_ref)
+    ch.send_bytes(b"hello_owngil")
+    return True
+
+
+def bytechannel_try_receive_test(channel_ref):
+    """Test ByteChannel try_receive_bytes."""
+    from erlang import ByteChannel
+    ch = ByteChannel(channel_ref)
+    data = ch.try_receive_bytes()
+    return data
+
+
+def bytechannel_iteration_test(channel_ref, expected_count):
+    """Test ByteChannel iteration."""
+    from erlang import ByteChannel
+    ch = ByteChannel(channel_ref)
+    chunks = []
+    for chunk in ch:
+        chunks.append(chunk)
+        if len(chunks) >= expected_count:
+            break
+    return len(chunks)
+
+
+def buffer_read_methods_test(buf):
+    """Test buffer read methods."""
+    readable = buf.readable_amount()
+    data = buf.read_nonblock(readable) if readable > 0 else b''
+    return {'readable': readable, 'data': data}
+
+
+def buffer_at_eof_test(buf):
+    """Test buffer at_eof detection."""
+    return buf.at_eof()

@@ -108,7 +108,18 @@
     owngil_atom_create_different_test/1,
     owngil_atom_cache_test/1,
     owngil_ref_roundtrip_test/1,
-    owngil_pid_operations_test/1
+    owngil_pid_operations_test/1,
+    %% Channel class tests
+    owngil_channel_class_test/1,
+    owngil_channel_iteration_test/1,
+    owngil_channel_context_manager_test/1,
+    %% ByteChannel tests
+    owngil_bytechannel_send_receive_test/1,
+    owngil_bytechannel_try_receive_test/1,
+    owngil_bytechannel_iteration_test/1,
+    %% Buffer tests
+    owngil_buffer_read_methods_test/1,
+    owngil_buffer_at_eof_test/1
 ]).
 
 all() ->
@@ -194,7 +205,18 @@ groups() ->
         owngil_atom_create_different_test,
         owngil_atom_cache_test,
         owngil_ref_roundtrip_test,
-        owngil_pid_operations_test
+        owngil_pid_operations_test,
+        %% Channel tests
+        owngil_channel_class_test,
+        owngil_channel_iteration_test,
+        owngil_channel_context_manager_test,
+        %% ByteChannel tests
+        owngil_bytechannel_send_receive_test,
+        owngil_bytechannel_try_receive_test,
+        owngil_bytechannel_iteration_test,
+        %% Buffer tests
+        owngil_buffer_read_methods_test,
+        owngil_buffer_at_eof_test
     ]}].
 
 init_per_suite(Config) ->
@@ -1751,5 +1773,188 @@ owngil_pid_operations_test(Config) ->
 
     %% Test PID hash equality (existing function)
     {ok, true} = py_context:call(Ctx, py_test_pid_send, pid_hash_equal, [Pid, Pid], #{}),
+
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% Channel Class Tests (erlang_api group)
+%%% ============================================================================
+
+%% @doc Test Channel class receive/try_receive in OWN_GIL
+owngil_channel_class_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_channel:new(),
+
+    %% Send message from Erlang
+    ok = py_channel:send(Ch, <<"test_channel_class">>),
+
+    %% Receive via Channel class in Python
+    {ok, <<"test_channel_class">>} = py_context:call(Ctx, py_test_pid_send,
+        channel_receive_test, [Ch], #{}),
+
+    py_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test Channel iteration in OWN_GIL
+owngil_channel_iteration_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_channel:new(),
+
+    %% Send multiple messages
+    ok = py_channel:send(Ch, <<"msg1">>),
+    ok = py_channel:send(Ch, <<"msg2">>),
+    ok = py_channel:send(Ch, <<"msg3">>),
+
+    %% Iterate in Python
+    {ok, 3} = py_context:call(Ctx, py_test_pid_send,
+        channel_iteration_test, [Ch, 3], #{}),
+
+    py_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test Channel as context manager in OWN_GIL
+owngil_channel_context_manager_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_channel:new(),
+
+    %% Send a message for the context manager test to try_receive
+    ok = py_channel:send(Ch, <<"context_msg">>),
+
+    %% Test context manager usage
+    {ok, true} = py_context:call(Ctx, py_test_pid_send,
+        channel_context_manager_test, [Ch], #{}),
+
+    py_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% ByteChannel Tests (erlang_api group)
+%%% ============================================================================
+
+%% @doc Test ByteChannel send_bytes/receive_bytes in OWN_GIL
+owngil_bytechannel_send_receive_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send bytes from Python via ByteChannel
+    {ok, true} = py_context:call(Ctx, py_test_pid_send,
+        bytechannel_send_receive_test, [Ch], #{}),
+
+    %% Receive raw bytes from Erlang using byte channel API
+    {ok, <<"hello_owngil">>} = py_byte_channel:try_receive(Ch),
+
+    py_byte_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test ByteChannel non-blocking try_receive_bytes in OWN_GIL
+owngil_bytechannel_try_receive_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send raw bytes from Erlang using byte channel API
+    ok = py_byte_channel:send(Ch, <<"bytes_data">>),
+
+    %% Receive via ByteChannel in Python
+    {ok, <<"bytes_data">>} = py_context:call(Ctx, py_test_pid_send,
+        bytechannel_try_receive_test, [Ch], #{}),
+
+    py_byte_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%% @doc Test ByteChannel iteration in OWN_GIL
+owngil_bytechannel_iteration_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Ch} = py_byte_channel:new(),
+
+    %% Send multiple byte chunks using byte channel API
+    ok = py_byte_channel:send(Ch, <<"chunk1">>),
+    ok = py_byte_channel:send(Ch, <<"chunk2">>),
+
+    %% Iterate in Python
+    {ok, 2} = py_context:call(Ctx, py_test_pid_send,
+        bytechannel_iteration_test, [Ch, 2], #{}),
+
+    py_byte_channel:close(Ch),
+    py_context:stop(Ctx).
+
+%%% ============================================================================
+%%% Buffer Tests (erlang_api group)
+%%% ============================================================================
+
+%% @doc Test buffer read/read_nonblock/readable_amount in OWN_GIL
+owngil_buffer_read_methods_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Buf} = py_buffer:new(),
+
+    %% Write data to buffer
+    ok = py_buffer:write(Buf, <<"test_data">>),
+
+    %% Test read methods from Python
+    {ok, Result} = py_context:call(Ctx, py_test_pid_send,
+        buffer_read_methods_test, [Buf], #{}),
+
+    %% Verify readable amount and data
+    #{<<"readable">> := Readable, <<"data">> := Data} = Result,
+    true = Readable > 0,
+    <<"test_data">> = Data,
+
+    py_buffer:close(Buf),
+    py_context:stop(Ctx).
+
+%% @doc Test buffer at_eof detection in OWN_GIL
+owngil_buffer_at_eof_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    {ok, Buf} = py_buffer:new(),
+
+    %% Buffer not yet at EOF (not closed)
+    {ok, false} = py_context:call(Ctx, py_test_pid_send,
+        buffer_at_eof_test, [Buf], #{}),
+
+    %% Close buffer
+    ok = py_buffer:close(Buf),
+
+    %% Now at EOF
+    {ok, true} = py_context:call(Ctx, py_test_pid_send,
+        buffer_at_eof_test, [Buf], #{}),
 
     py_context:stop(Ctx).
