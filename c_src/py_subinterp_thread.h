@@ -129,6 +129,8 @@ typedef struct {
     PyObject *globals;           /**< Global namespace dict */
     PyObject *locals;            /**< Local namespace dict */
     PyObject *module_cache;      /**< Module cache dict */
+    PyObject *asyncio_loop;      /**< Asyncio event loop for this namespace */
+    ErlNifPid owner_pid;         /**< Owner PID for routing callbacks */
     bool initialized;            /**< Whether namespace is ready */
 } subinterp_namespace_t;
 
@@ -147,6 +149,10 @@ typedef struct {
     /* Python state - owned exclusively by this thread */
     PyInterpreterState *interp;  /**< Python interpreter state */
     PyThreadState *tstate;       /**< Thread state for this worker */
+
+    /* Asyncio support */
+    PyObject *asyncio_module;    /**< Cached asyncio import */
+    PyObject *asyncio_loop;      /**< Worker's asyncio event loop */
 
     /* Namespaces for handles bound to this worker */
     subinterp_namespace_t namespaces[MAX_NAMESPACES_PER_WORKER];

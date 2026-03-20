@@ -324,6 +324,28 @@ static void *worker_thread_main(void *arg) {
         }
     }
 
+    /* Initialize asyncio for this worker */
+    w->asyncio_module = PyImport_ImportModule("asyncio");
+    if (w->asyncio_module == NULL) {
+        fprintf(stderr, "worker %d: failed to import asyncio\n", w->worker_id);
+        PyErr_Clear();
+    } else {
+        /* Create a new event loop for this worker */
+        PyObject *new_event_loop = PyObject_CallMethod(w->asyncio_module,
+            "new_event_loop", NULL);
+        if (new_event_loop == NULL) {
+            fprintf(stderr, "worker %d: failed to create asyncio event loop\n", w->worker_id);
+            PyErr_Clear();
+        } else {
+            w->asyncio_loop = new_event_loop;
+            /* Set as the running event loop for this thread */
+            PyObject *result = PyObject_CallMethod(w->asyncio_module,
+                "set_event_loop", "O", w->asyncio_loop);
+            Py_XDECREF(result);
+            PyErr_Clear();
+        }
+    }
+
     /* Release the subinterpreter's GIL (we'll acquire it per-request) */
     PyEval_SaveThread();
 
@@ -449,8 +471,7 @@ static void *worker_thread_main(void *arg) {
 
                     switch (header.req_type) {
                         case REQ_CALL:
-                        case REQ_CAST:
-                        case REQ_ASYNC_CALL: {
+                        case REQ_CAST: {
                             /* Payload: {Module, Func, Args, Kwargs} */
                             if (arity >= 3) {
                                 ErlNifBinary mod_bin, func_bin;
@@ -559,6 +580,162 @@ static void *worker_thread_main(void *arg) {
                                     success = true;
                                 }
                             }
+                            break;
+                        }
+
+                        case REQ_ASYNC_CALL: {
+                            /* Payload: {Module, Func, Args, Kwargs, CallerPid, Ref} */
+                            /* For async calls, we run the coroutine and send result via erlang.send() */
+                            if (arity >= 6) {
+                                ErlNifBinary mod_bin, func_bin;
+                                char mod_str[256], func_str[256];
+
+                                /* Get module name */
+                                if (enif_inspect_binary(tmp_env, elements[0], &mod_bin)) {
+                                    size_t len = mod_bin.size < 255 ? mod_bin.size : 255;
+                                    memcpy(mod_str, mod_bin.data, len);
+                                    mod_str[len] = '\0';
+                                } else if (enif_get_atom(tmp_env, elements[0], mod_str, 256, ERL_NIF_LATIN1)) {
+                                    /* Already filled */
+                                } else {
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
+                                    break;
+                                }
+
+                                /* Get function name */
+                                if (enif_inspect_binary(tmp_env, elements[1], &func_bin)) {
+                                    size_t len = func_bin.size < 255 ? func_bin.size : 255;
+                                    memcpy(func_str, func_bin.data, len);
+                                    func_str[len] = '\0';
+                                } else if (enif_get_atom(tmp_env, elements[1], func_str, 256, ERL_NIF_LATIN1)) {
+                                    /* Already filled */
+                                } else {
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
+                                    break;
+                                }
+
+                                /* Import module */
+                                PyObject *module = NULL;
+                                if (ns && ns->module_cache) {
+                                    PyObject *key = PyUnicode_FromString(mod_str);
+                                    module = PyDict_GetItem(ns->module_cache, key);
+                                    if (module == NULL) {
+                                        module = PyImport_ImportModule(mod_str);
+                                        if (module) {
+                                            PyDict_SetItem(ns->module_cache, key, module);
+                                        }
+                                    } else {
+                                        Py_INCREF(module);
+                                    }
+                                    Py_DECREF(key);
+                                } else {
+                                    module = PyImport_ImportModule(mod_str);
+                                }
+
+                                if (module == NULL) {
+                                    PyErr_Clear();
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
+                                    break;
+                                }
+
+                                /* Get function */
+                                PyObject *func = PyObject_GetAttrString(module, func_str);
+                                Py_DECREF(module);
+
+                                if (func == NULL) {
+                                    PyErr_Clear();
+                                    if (owns_globals) Py_DECREF(globals);
+                                    if (owns_locals) Py_DECREF(locals);
+                                    break;
+                                }
+
+                                /* Convert args list to Python tuple */
+                                ERL_NIF_TERM args_list = elements[2];
+                                unsigned int args_len;
+                                PyObject *py_args = NULL;
+
+                                if (enif_get_list_length(tmp_env, args_list, &args_len)) {
+                                    py_args = PyTuple_New(args_len);
+                                    if (py_args) {
+                                        ERL_NIF_TERM head, tail = args_list;
+                                        for (unsigned int idx = 0; idx < args_len; idx++) {
+                                            if (!enif_get_list_cell(tmp_env, tail, &head, &tail)) {
+                                                Py_DECREF(py_args);
+                                                py_args = NULL;
+                                                break;
+                                            }
+                                            PyObject *py_arg = term_to_py(tmp_env, head);
+                                            if (py_arg == NULL) {
+                                                Py_DECREF(py_args);
+                                                py_args = NULL;
+                                                break;
+                                            }
+                                            PyTuple_SET_ITEM(py_args, idx, py_arg);
+                                        }
+                                    }
+                                }
+
+                                if (py_args == NULL) {
+                                    py_args = PyTuple_New(0);
+                                }
+
+                                /* Call function */
+                                result = PyObject_Call(func, py_args, NULL);
+                                Py_DECREF(py_args);
+                                Py_DECREF(func);
+
+                                if (result == NULL) {
+                                    PyErr_Clear();
+                                } else {
+                                    /* Check if result is a coroutine and run it */
+                                    if (w->asyncio_loop != NULL && PyCoro_CheckExact(result)) {
+                                        PyObject *final_result = PyObject_CallMethod(
+                                            w->asyncio_loop, "run_until_complete", "O", result);
+                                        Py_DECREF(result);
+                                        result = final_result;
+                                        if (result == NULL) {
+                                            PyErr_Clear();
+                                        }
+                                    }
+                                    if (result != NULL) {
+                                        success = true;
+                                    }
+                                }
+
+                                /* Send result via erlang.send() to CallerPid */
+                                /* elements[4] = CallerPid, elements[5] = Ref */
+                                ERL_NIF_TERM result_term;
+                                if (success && result != NULL) {
+                                    ERL_NIF_TERM py_result = py_to_term(tmp_env, result);
+                                    result_term = enif_make_tuple2(tmp_env,
+                                        enif_make_atom(tmp_env, "ok"), py_result);
+                                } else {
+                                    result_term = enif_make_tuple2(tmp_env,
+                                        enif_make_atom(tmp_env, "error"),
+                                        enif_make_atom(tmp_env, "execution_failed"));
+                                }
+
+                                /* Build {async_result, Ref, Result} message */
+                                ERL_NIF_TERM msg = enif_make_tuple3(tmp_env,
+                                    enif_make_atom(tmp_env, "async_result"),
+                                    elements[5],  /* Ref */
+                                    result_term);
+
+                                /* Get CallerPid and send */
+                                ErlNifPid caller_pid;
+                                if (enif_get_local_pid(tmp_env, elements[4], &caller_pid)) {
+                                    enif_send(NULL, &caller_pid, tmp_env, msg);
+                                }
+
+                                Py_XDECREF(result);
+                                result = NULL;  /* Don't process result in normal path */
+                                success = false;  /* Already handled */
+                            }
+                            if (owns_globals) Py_DECREF(globals);
+                            if (owns_locals) Py_DECREF(locals);
                             break;
                         }
 
@@ -690,6 +867,7 @@ static void *worker_thread_main(void *arg) {
     for (int i = 0; i < w->num_namespaces; i++) {
         subinterp_namespace_t *ns = &w->namespaces[i];
         if (ns->initialized) {
+            Py_XDECREF(ns->asyncio_loop);
             Py_XDECREF(ns->module_cache);
             Py_XDECREF(ns->globals);
             Py_XDECREF(ns->locals);
@@ -697,6 +875,12 @@ static void *worker_thread_main(void *arg) {
     }
     w->num_namespaces = 0;
     pthread_mutex_unlock(&w->ns_mutex);
+
+    /* Clean up worker asyncio resources */
+    Py_XDECREF(w->asyncio_loop);
+    w->asyncio_loop = NULL;
+    Py_XDECREF(w->asyncio_module);
+    w->asyncio_module = NULL;
 
     /* End interpreter */
     Py_EndInterpreter(w->tstate);
@@ -744,6 +928,8 @@ static int worker_create_namespace(subinterp_thread_worker_t *w, uint64_t handle
     ns->globals = PyDict_New();
     ns->locals = PyDict_New();
     ns->module_cache = PyDict_New();
+    ns->asyncio_loop = NULL;  /* Uses worker's shared event loop */
+    memset(&ns->owner_pid, 0, sizeof(ns->owner_pid));
 
     if (ns->globals && ns->locals && ns->module_cache) {
         /* Import __builtins__ */
