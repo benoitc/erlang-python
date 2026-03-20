@@ -195,3 +195,57 @@ def whereis_and_send(name, msg):
         erlang.send(pid, msg)
         return True
     return False
+
+
+# OWN_GIL test helpers for erlang.* functions
+
+def whereis_basic(name):
+    """Look up a registered process by name."""
+    return erlang.whereis(name)
+
+
+def atom_equality_test(atom1, atom2):
+    """Test that two atoms are equal."""
+    return atom1 == atom2
+
+
+def atom_inequality_test(atom1, atom2):
+    """Test that two different atoms are not equal."""
+    return atom1 != atom2
+
+
+def atom_roundtrip(atom):
+    """Receive an atom and return it unchanged."""
+    return atom
+
+
+def atom_type_check(atom):
+    """Verify a value is an erlang.Atom type."""
+    return type(atom).__name__
+
+
+def atom_has_value_attr(atom):
+    """Check if atom has a value attribute."""
+    return hasattr(atom, 'value')
+
+
+def ref_type_check(ref):
+    """Verify a value is an erlang.Ref type."""
+    return isinstance(ref, erlang.Ref)
+
+
+def ref_inequality_test(ref1, ref2):
+    """Test that two different refs are not equal."""
+    return ref1 != ref2
+
+
+def pid_as_dict_key(pid):
+    """Test using PID as dict key."""
+    d = {pid: 'value'}
+    return d.get(pid) == 'value'
+
+
+def pid_in_set(pid):
+    """Test using PID in a set."""
+    s = {pid}
+    return pid in s
