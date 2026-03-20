@@ -74,6 +74,10 @@
     subinterp_thread_exec/2,
     subinterp_thread_cast/4,
     subinterp_thread_async_call/6,
+    %% OWN_GIL session management for event loop pool
+    owngil_create_session/1,
+    owngil_submit_task/7,
+    owngil_destroy_session/2,
     %% Execution mode info
     execution_mode/0,
     num_executors/0,
@@ -599,6 +603,35 @@ subinterp_thread_cast(_Handle, _Module, _Func, _Args) ->
 -spec subinterp_thread_async_call(reference(), binary(), binary(), list(), pid(), reference()) ->
     ok | {error, term()}.
 subinterp_thread_async_call(_Handle, _Module, _Func, _Args, _CallerPid, _Ref) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% OWN_GIL Session Management (for event loop pool)
+%%% ============================================================================
+
+%% @doc Create a new OWN_GIL session for event loop pool.
+%% The WorkerHint is used for worker assignment (typically loop index).
+%% Returns {ok, WorkerId, HandleId} where:
+%%   - WorkerId is the assigned worker thread index
+%%   - HandleId is the unique namespace handle within that worker
+-spec owngil_create_session(non_neg_integer()) ->
+    {ok, non_neg_integer(), non_neg_integer()} | {error, term()}.
+owngil_create_session(_WorkerHint) ->
+    ?NIF_STUB.
+
+%% @doc Submit an async task to an OWN_GIL worker.
+%% Args: WorkerId, HandleId, CallerPid, Ref, Module, Func, Args
+%% The task runs in the worker's asyncio event loop.
+%% Result is sent to CallerPid as {async_result, Ref, Result}.
+-spec owngil_submit_task(non_neg_integer(), non_neg_integer(), pid(), reference(),
+                          binary(), binary(), list()) -> ok | {error, term()}.
+owngil_submit_task(_WorkerId, _HandleId, _CallerPid, _Ref, _Module, _Func, _Args) ->
+    ?NIF_STUB.
+
+%% @doc Destroy an OWN_GIL session.
+%% Cleans up the namespace within the worker.
+-spec owngil_destroy_session(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
+owngil_destroy_session(_WorkerId, _HandleId) ->
     ?NIF_STUB.
 
 %%% ============================================================================

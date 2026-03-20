@@ -57,12 +57,24 @@
 
 -record(state, {
     num_loops :: non_neg_integer(),
-    supported :: boolean()
+    supported :: boolean(),
+    owngil_enabled :: boolean(),
+    sessions :: ets:tid() | undefined
+}).
+
+%% OWN_GIL session record - maps {PID, LoopIdx} to worker/handle
+-record(owngil_session, {
+    key :: {pid(), pos_integer()},      %% {CallerPid, LoopIndex}
+    worker_id :: non_neg_integer(),     %% Worker thread index
+    handle_id :: non_neg_integer(),     %% Namespace handle ID
+    monitor_ref :: reference()          %% Process monitor for cleanup
 }).
 
 %% Persistent term keys for O(1) access
 -define(PT_LOOPS, {?MODULE, loops}).
 -define(PT_NUM_LOOPS, {?MODULE, num_loops}).
+-define(PT_OWNGIL_ENABLED, {?MODULE, owngil_enabled}).
+-define(PT_SESSIONS, {?MODULE, sessions}).
 
 %%% ============================================================================
 %%% API
@@ -118,13 +130,38 @@ create_task(Module, Func, Args) ->
 
 -spec create_task(Module :: atom() | binary(), Func :: atom() | binary(),
                   Args :: list(), Kwargs :: map()) -> reference().
-create_task(Module, Func, Args, Kwargs) ->
+create_task(Module, Func, Args, _Kwargs) ->
+    %% Check if OWN_GIL mode is enabled
+    case is_owngil_enabled() of
+        true ->
+            %% OWN_GIL path: route to worker via session
+            case ensure_session() of
+                {ok, {WorkerId, HandleId, _LoopIdx}} ->
+                    Ref = make_ref(),
+                    Caller = self(),
+                    ModuleBin = py_util:to_binary(Module),
+                    FuncBin = py_util:to_binary(Func),
+                    ok = py_nif:owngil_submit_task(WorkerId, HandleId, Caller,
+                                                   Ref, ModuleBin, FuncBin, Args),
+                    Ref;
+                {error, _Reason} ->
+                    %% Fall back to regular path
+                    create_task_regular(Module, Func, Args)
+            end;
+        false ->
+            create_task_regular(Module, Func, Args)
+    end.
+
+%% @private Regular (non-OWN_GIL) task creation
+-spec create_task_regular(Module :: atom() | binary(), Func :: atom() | binary(),
+                          Args :: list()) -> reference().
+create_task_regular(Module, Func, Args) ->
     case get_loop() of
         {ok, LoopRef} ->
-            create_task_on_loop(LoopRef, Module, Func, Args, Kwargs);
+            create_task_on_loop(LoopRef, Module, Func, Args, #{});
         {error, not_available} ->
             %% Fallback to default event loop
-            py_event_loop:create_task(Module, Func, Args, Kwargs)
+            py_event_loop:create_task(Module, Func, Args, #{})
     end.
 
 %% @doc Submit a task to a specific loop.
@@ -166,7 +203,38 @@ spawn_task(Module, Func, Args) ->
 
 -spec spawn_task(Module :: atom() | binary(), Func :: atom() | binary(),
                  Args :: list(), Kwargs :: map()) -> ok.
-spawn_task(Module, Func, Args, Kwargs) ->
+spawn_task(Module, Func, Args, _Kwargs) ->
+    %% Check if OWN_GIL mode is enabled
+    case is_owngil_enabled() of
+        true ->
+            %% OWN_GIL path: route to worker via session
+            case ensure_session() of
+                {ok, {WorkerId, HandleId, _LoopIdx}} ->
+                    Ref = make_ref(),
+                    %% Spawn a receiver that discards the result
+                    Receiver = erlang:spawn(fun() ->
+                        receive
+                            {async_result, _, _} -> ok
+                        after 30000 -> ok
+                        end
+                    end),
+                    ModuleBin = py_util:to_binary(Module),
+                    FuncBin = py_util:to_binary(Func),
+                    ok = py_nif:owngil_submit_task(WorkerId, HandleId, Receiver,
+                                                   Ref, ModuleBin, FuncBin, Args),
+                    ok;
+                {error, _Reason} ->
+                    %% Fall back to regular path
+                    spawn_task_regular(Module, Func, Args)
+            end;
+        false ->
+            spawn_task_regular(Module, Func, Args)
+    end.
+
+%% @private Regular (non-OWN_GIL) spawn_task
+-spec spawn_task_regular(Module :: atom() | binary(), Func :: atom() | binary(),
+                         Args :: list()) -> ok.
+spawn_task_regular(Module, Func, Args) ->
     case get_loop() of
         {ok, LoopRef} ->
             Ref = make_ref(),
@@ -181,13 +249,13 @@ spawn_task(Module, Func, Args, Kwargs) ->
             FuncBin = py_util:to_binary(Func),
             ok = case CallerEnv of
                 undefined ->
-                    py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs);
+                    py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, #{});
                 EnvRef ->
-                    py_nif:submit_task_with_env(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef)
+                    py_nif:submit_task_with_env(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, #{}, EnvRef)
             end,
             ok;
         {error, not_available} ->
-            py_event_loop:spawn_task(Module, Func, Args, Kwargs)
+            py_event_loop:spawn_task(Module, Func, Args, #{})
     end.
 
 %% @doc Wait for an async task result.
@@ -225,6 +293,33 @@ run_async(Request) ->
 init([NumLoops]) ->
     process_flag(trap_exit, true),
 
+    %% Check if OWN_GIL mode is enabled
+    OwnGilEnabled = application:get_env(erlang_python, event_loop_pool_owngil, false),
+
+    %% Initialize OWN_GIL infrastructure if enabled
+    {Sessions, OwnGilReady} = case OwnGilEnabled of
+        true ->
+            %% Start subinterpreter thread pool
+            case py_nif:subinterp_thread_pool_start(NumLoops) of
+                ok ->
+                    %% Create sessions ETS table
+                    Tid = ets:new(?MODULE, [
+                        set, public,
+                        {keypos, #owngil_session.key},
+                        {read_concurrency, true}
+                    ]),
+                    persistent_term:put(?PT_SESSIONS, Tid),
+                    {Tid, true};
+                {error, _} ->
+                    error_logger:warning_msg("py_event_loop_pool: OWN_GIL pool failed to start~n"),
+                    {undefined, false}
+            end;
+        false ->
+            {undefined, false}
+    end,
+
+    persistent_term:put(?PT_OWNGIL_ENABLED, OwnGilReady),
+
     case create_loops(NumLoops, []) of
         {ok, LoopList} ->
             Loops = list_to_tuple(LoopList),
@@ -232,7 +327,9 @@ init([NumLoops]) ->
             persistent_term:put(?PT_NUM_LOOPS, NumLoops),
             {ok, #state{
                 num_loops = NumLoops,
-                supported = true
+                supported = true,
+                owngil_enabled = OwnGilReady,
+                sessions = Sessions
             }};
         {error, Reason} ->
             error_logger:warning_msg("py_event_loop_pool: failed to create loops: ~p~n", [Reason]),
@@ -240,7 +337,9 @@ init([NumLoops]) ->
             persistent_term:put(?PT_NUM_LOOPS, 0),
             {ok, #state{
                 num_loops = 0,
-                supported = false
+                supported = false,
+                owngil_enabled = OwnGilReady,
+                sessions = Sessions
             }}
     end.
 
@@ -264,10 +363,30 @@ create_loops(N, Acc) ->
     end.
 
 handle_call(get_stats, _From, State) ->
-    Stats = #{
+    %% Build base stats
+    BaseStats = #{
         num_loops => State#state.num_loops,
-        supported => State#state.supported
+        supported => State#state.supported,
+        owngil_enabled => State#state.owngil_enabled
     },
+
+    %% Add OWN_GIL-specific stats if enabled
+    Stats = case State#state.owngil_enabled of
+        true ->
+            %% Get pool stats from NIF
+            PoolStats = try py_nif:subinterp_thread_pool_stats() catch _:_ -> #{} end,
+            %% Count active sessions
+            ActiveSessions = case State#state.sessions of
+                undefined -> 0;
+                Tid -> ets:info(Tid, size)
+            end,
+            maps:merge(BaseStats, #{
+                active_sessions => ActiveSessions,
+                pool_stats => PoolStats
+            });
+        false ->
+            BaseStats
+    end,
     {reply, Stats, State};
 
 handle_call(_Request, _From, State) ->
@@ -279,10 +398,54 @@ handle_cast(_Msg, State) ->
 handle_info({'EXIT', _Pid, _Reason}, State) ->
     {noreply, State#state{supported = false}};
 
+handle_info({'DOWN', MonRef, process, Pid, _Reason}, State) ->
+    %% Process died - clean up any OWN_GIL sessions for this process
+    case State#state.sessions of
+        undefined -> ok;
+        Tid ->
+            %% Find and remove all sessions for this PID using ets:foldl
+            %% to avoid dialyzer issues with match specs and record types
+            ets:foldl(fun(#owngil_session{key = {SessionPid, _} = Key,
+                                          worker_id = WorkerId,
+                                          handle_id = HandleId,
+                                          monitor_ref = SessionMonRef}, Acc) ->
+                case SessionPid =:= Pid andalso SessionMonRef =:= MonRef of
+                    true ->
+                        %% Destroy session in worker
+                        catch py_nif:owngil_destroy_session(WorkerId, HandleId),
+                        %% Remove from ETS
+                        ets:delete(Tid, Key);
+                    false ->
+                        ok
+                end,
+                Acc
+            end, ok, Tid)
+    end,
+    {noreply, State};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    %% Clean up OWN_GIL sessions if enabled
+    case State#state.sessions of
+        undefined -> ok;
+        Tid ->
+            %% Destroy all sessions
+            ets:foldl(fun(#owngil_session{worker_id = WorkerId, handle_id = HandleId}, _) ->
+                catch py_nif:owngil_destroy_session(WorkerId, HandleId),
+                ok
+            end, ok, Tid),
+            catch ets:delete(Tid)
+    end,
+
+    %% Stop OWN_GIL thread pool if it was started
+    case State#state.owngil_enabled of
+        true -> catch py_nif:subinterp_thread_pool_stop();
+        false -> ok
+    end,
+
+    %% Clean up regular event loops
     case persistent_term:get(?PT_LOOPS, {}) of
         {} -> ok;
         Loops ->
@@ -291,8 +454,11 @@ terminate(_Reason, _State) ->
                 catch py_nif:event_loop_destroy(LoopRef)
             end, tuple_to_list(Loops))
     end,
+
     catch persistent_term:erase(?PT_LOOPS),
     catch persistent_term:erase(?PT_NUM_LOOPS),
+    catch persistent_term:erase(?PT_OWNGIL_ENABLED),
+    catch persistent_term:erase(?PT_SESSIONS),
     ok.
 
 %%% ============================================================================
@@ -309,3 +475,81 @@ pool_size() ->
 get_loop_by_index(Idx) ->
     Loops = persistent_term:get(?PT_LOOPS),
     element(Idx, Loops).
+
+%% @private Check if OWN_GIL mode is enabled
+-spec is_owngil_enabled() -> boolean().
+is_owngil_enabled() ->
+    persistent_term:get(?PT_OWNGIL_ENABLED, false).
+
+%% @private Get the sessions ETS table
+-spec get_sessions_table() -> ets:tid() | undefined.
+get_sessions_table() ->
+    persistent_term:get(?PT_SESSIONS, undefined).
+
+%% @private Get or create OWN_GIL session for calling process
+%% Returns {ok, {WorkerId, HandleId, LoopIdx}} or {error, Reason}
+-spec ensure_session() -> {ok, {non_neg_integer(), non_neg_integer(), pos_integer()}} | {error, term()}.
+ensure_session() ->
+    Pid = self(),
+    N = pool_size(),
+    case N of
+        0 -> {error, not_available};
+        _ ->
+            %% Hash PID to get consistent loop assignment
+            Hash = erlang:phash2(Pid),
+            LoopIdx = (Hash rem N) + 1,
+            ensure_session(Pid, LoopIdx)
+    end.
+
+%% @private Get or create session for a specific PID and loop index
+-spec ensure_session(pid(), pos_integer()) -> {ok, {non_neg_integer(), non_neg_integer(), pos_integer()}} | {error, term()}.
+ensure_session(Pid, LoopIdx) ->
+    case get_sessions_table() of
+        undefined ->
+            {error, owngil_not_enabled};
+        Tid ->
+            Key = {Pid, LoopIdx},
+            case ets:lookup(Tid, Key) of
+                [#owngil_session{worker_id = WorkerId, handle_id = HandleId}] ->
+                    %% Session exists
+                    {ok, {WorkerId, HandleId, LoopIdx}};
+                [] ->
+                    %% Create new session
+                    create_session(Tid, Pid, LoopIdx)
+            end
+    end.
+
+%% @private Create a new OWN_GIL session
+-spec create_session(ets:tid(), pid(), pos_integer()) -> {ok, {non_neg_integer(), non_neg_integer(), pos_integer()}} | {error, term()}.
+create_session(Tid, Pid, LoopIdx) ->
+    %% Create session via NIF - assigns worker and creates namespace
+    case py_nif:owngil_create_session(LoopIdx - 1) of  %% Convert to 0-based index
+        {ok, WorkerId, HandleId} ->
+            %% Monitor the process for cleanup on exit
+            MonRef = erlang:monitor(process, Pid),
+            Session = #owngil_session{
+                key = {Pid, LoopIdx},
+                worker_id = WorkerId,
+                handle_id = HandleId,
+                monitor_ref = MonRef
+            },
+            %% Use insert_new to handle race conditions
+            case ets:insert_new(Tid, Session) of
+                true ->
+                    {ok, {WorkerId, HandleId, LoopIdx}};
+                false ->
+                    %% Another process created the session first, destroy ours
+                    erlang:demonitor(MonRef, [flush]),
+                    catch py_nif:owngil_destroy_session(WorkerId, HandleId),
+                    %% Retry lookup
+                    case ets:lookup(Tid, {Pid, LoopIdx}) of
+                        [#owngil_session{worker_id = W, handle_id = H}] ->
+                            {ok, {W, H, LoopIdx}};
+                        [] ->
+                            {error, session_conflict}
+                    end
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
