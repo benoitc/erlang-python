@@ -27,7 +27,13 @@
     test_concurrent_tasks/1,
 
     %% Ordering test
-    test_tasks_execute_in_order/1
+    test_tasks_execute_in_order/1,
+
+    %% Exec/Eval tests
+    test_exec_basic/1,
+    test_eval_basic/1,
+    test_exec_eval_namespace/1,
+    test_exec_define_function/1
 ]).
 
 all() ->
@@ -40,7 +46,11 @@ all() ->
         test_run_blocking,
         test_spawn_task,
         test_concurrent_tasks,
-        test_tasks_execute_in_order
+        test_tasks_execute_in_order,
+        test_exec_basic,
+        test_eval_basic,
+        test_exec_eval_namespace,
+        test_exec_define_function
     ].
 
 init_per_suite(Config) ->
@@ -160,4 +170,38 @@ test_tasks_execute_in_order(_Config) ->
 
     %% Results should be in submission order
     [{ok, 1.0}, {ok, 2.0}, {ok, 3.0}, {ok, 4.0}, {ok, 5.0}] = Results,
+    ok.
+
+%% ============================================================================
+%% Exec/Eval Tests
+%% ============================================================================
+
+test_exec_basic(_Config) ->
+    %% Basic exec should succeed
+    ok = py_event_loop_pool:exec(<<"x = 42">>),
+    ok.
+
+test_eval_basic(_Config) ->
+    %% Basic eval of Python expression
+    {ok, 6} = py_event_loop_pool:eval(<<"2 + 4">>),
+    {ok, 10} = py_event_loop_pool:eval(<<"5 * 2">>),
+    ok.
+
+test_exec_eval_namespace(_Config) ->
+    %% Variables defined in exec should be available in eval
+    ok = py_event_loop_pool:exec(<<"pool_test_var = 100">>),
+    {ok, 100} = py_event_loop_pool:eval(<<"pool_test_var">>),
+    {ok, 200} = py_event_loop_pool:eval(<<"pool_test_var * 2">>),
+    ok.
+
+test_exec_define_function(_Config) ->
+    %% Define a function via exec and call it via create_task
+    ok = py_event_loop_pool:exec(<<"
+def pool_test_multiply(a, b):
+    return a * b
+">>),
+
+    %% Call the function via create_task
+    Ref = py_event_loop_pool:create_task('__main__', pool_test_multiply, [7, 6]),
+    {ok, 42} = py_event_loop_pool:await(Ref, 5000),
     ok.
