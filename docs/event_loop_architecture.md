@@ -346,3 +346,101 @@ pthread_mutex_unlock(&loop->namespaces_mutex);
 ```
 
 This design accepts a minor memory leak (Python dicts not decrefd) to avoid the complexity and risk of acquiring a subinterpreter's GIL from an arbitrary thread.
+
+## Event Loop Pool with OWN_GIL Mode
+
+For workloads requiring true parallel Python execution, the event loop pool can be configured to use OWN_GIL subinterpreters. Each worker thread has its own Python GIL, enabling parallel CPU-bound execution.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Main Interpreter                             │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │   Event Loop Pool (coordination only)                   │   │
+│  │   - Session registry (PID -> worker mapping)            │   │
+│  │   - Process monitoring for cleanup                      │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              │ dispatch via pipe
+                              ▼
+┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
+│ OWN_GIL    │ │ OWN_GIL    │ │ OWN_GIL    │ │ OWN_GIL    │
+│ Worker 0   │ │ Worker 1   │ │ Worker 2   │ │ Worker N   │
+│ (GIL_0)    │ │ (GIL_1)    │ │ (GIL_2)    │ │ (GIL_N)    │
+│            │ │            │ │            │ │            │
+│ Sessions:  │ │ Sessions:  │ │ Sessions:  │ │ Sessions:  │
+│ - PID_A    │ │ - PID_B    │ │ - PID_C    │ │ - PID_D    │
+└────────────┘ └────────────┘ └────────────┘ └────────────┘
+```
+
+### Configuration
+
+Enable OWN_GIL mode in sys.config:
+
+```erlang
+{erlang_python, [
+    {event_loop_pool_size, 4},
+    {event_loop_pool_owngil, true}
+]}
+```
+
+### Usage
+
+The API remains unchanged - OWN_GIL mode is transparent:
+
+```erlang
+%% Submit async task (routes to OWN_GIL worker automatically)
+Ref = py_event_loop_pool:create_task(math, sqrt, [16.0]),
+{ok, 4.0} = py_event_loop_pool:await(Ref).
+
+%% Blocking run
+{ok, Result} = py_event_loop_pool:run(my_module, compute, [Args]).
+
+%% Fire-and-forget
+ok = py_event_loop_pool:spawn_task(my_module, background_work, []).
+```
+
+### Process Affinity
+
+Each Erlang process is consistently mapped to the same worker based on PID hash:
+
+```erlang
+%% All tasks from this process go to the same worker
+Ref1 = py_event_loop_pool:create_task(math, sqrt, [4.0]),
+Ref2 = py_event_loop_pool:create_task(math, sqrt, [9.0]),
+Ref3 = py_event_loop_pool:create_task(math, sqrt, [16.0]),
+%% Executes in order on a single worker
+```
+
+### Session Management
+
+Sessions are created automatically on first task submission and cleaned up when the process exits:
+
+1. **Creation**: First `create_task` from a PID creates a session
+2. **Routing**: Session maps PID to specific worker and namespace
+3. **Cleanup**: Process monitor triggers session destruction on exit
+
+### Performance
+
+Benchmark comparison (4 workers):
+
+| Workload | Regular Pool | OWN_GIL Pool | Speedup |
+|----------|--------------|--------------|---------|
+| Sequential | ~64K/sec | ~137K/sec | 2.1x |
+| Concurrent (4 procs) | ~107K/sec | ~196K/sec | 1.8x |
+| CPU-bound parallel | 207ms | 105ms | 2.0x |
+
+Run benchmark: `escript examples/bench_owngil_pool.erl`
+
+### When to Use OWN_GIL Mode
+
+**Use OWN_GIL when:**
+- Running CPU-bound Python code from multiple Erlang processes
+- Need true parallel execution (not just concurrency)
+- Python 3.12+ is available
+
+**Use regular mode when:**
+- Primarily I/O-bound operations
+- Single-process workload
+- Need shared state across all tasks
