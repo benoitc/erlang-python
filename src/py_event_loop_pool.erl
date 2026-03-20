@@ -403,19 +403,23 @@ handle_info({'DOWN', MonRef, process, Pid, _Reason}, State) ->
     case State#state.sessions of
         undefined -> ok;
         Tid ->
-            %% Find and remove all sessions for this PID
-            MatchSpec = [{#owngil_session{key = {Pid, '_'}, monitor_ref = MonRef, _ = '_'}, [], ['$_']}],
-            case ets:select(Tid, MatchSpec) of
-                [] ->
-                    ok;
-                Sessions ->
-                    lists:foreach(fun(#owngil_session{key = Key, worker_id = WorkerId, handle_id = HandleId}) ->
+            %% Find and remove all sessions for this PID using ets:foldl
+            %% to avoid dialyzer issues with match specs and record types
+            ets:foldl(fun(#owngil_session{key = {SessionPid, _} = Key,
+                                          worker_id = WorkerId,
+                                          handle_id = HandleId,
+                                          monitor_ref = SessionMonRef}, Acc) ->
+                case SessionPid =:= Pid andalso SessionMonRef =:= MonRef of
+                    true ->
                         %% Destroy session in worker
                         catch py_nif:owngil_destroy_session(WorkerId, HandleId),
                         %% Remove from ETS
-                        ets:delete(Tid, Key)
-                    end, Sessions)
-            end
+                        ets:delete(Tid, Key);
+                    false ->
+                        ok
+                end,
+                Acc
+            end, ok, Tid)
     end,
     {noreply, State};
 
@@ -549,23 +553,3 @@ create_session(Tid, Pid, LoopIdx) ->
             {error, Reason}
     end.
 
-%% @private Destroy an OWN_GIL session
--spec destroy_session(pid(), pos_integer()) -> ok.
-destroy_session(Pid, LoopIdx) ->
-    case get_sessions_table() of
-        undefined -> ok;
-        Tid ->
-            Key = {Pid, LoopIdx},
-            case ets:lookup(Tid, Key) of
-                [#owngil_session{worker_id = WorkerId, handle_id = HandleId, monitor_ref = MonRef}] ->
-                    %% Demonitor the process
-                    erlang:demonitor(MonRef, [flush]),
-                    %% Destroy session in worker
-                    catch py_nif:owngil_destroy_session(WorkerId, HandleId),
-                    %% Remove from ETS
-                    ets:delete(Tid, Key),
-                    ok;
-                [] ->
-                    ok
-            end
-    end.
