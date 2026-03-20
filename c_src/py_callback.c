@@ -3958,6 +3958,63 @@ static int create_erlang_module(void) {
         Py_DECREF(ext_globals);
     }
 
+    /* Add atom() wrapper with caching for OWN_GIL subinterpreters.
+     * In OWN_GIL mode, the Python package (_erlang_impl) is not imported,
+     * so erlang.atom() isn't available. This adds it directly to the C module.
+     */
+    const char *atom_wrapper_code =
+        "_atom_cache = {}\n"
+        "_MAX_USER_ATOMS = 10000\n"
+        "def atom(name):\n"
+        "    '''Create or retrieve a cached atom.\n"
+        "    \n"
+        "    Args:\n"
+        "        name: String name for the atom\n"
+        "    \n"
+        "    Returns:\n"
+        "        An erlang.Atom object\n"
+        "    \n"
+        "    Raises:\n"
+        "        RuntimeError: If atom limit (10000) is reached\n"
+        "    '''\n"
+        "    if name in _atom_cache:\n"
+        "        return _atom_cache[name]\n"
+        "    if len(_atom_cache) >= _MAX_USER_ATOMS:\n"
+        "        raise RuntimeError('Atom limit reached')\n"
+        "    import erlang\n"
+        "    result = erlang._atom(name)\n"
+        "    _atom_cache[name] = result\n"
+        "    return result\n"
+        "\n"
+        "import erlang\n"
+        "erlang.atom = atom\n"
+        "erlang._atom_cache = _atom_cache\n";
+
+    PyObject *atom_globals = PyDict_New();
+    if (atom_globals != NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(atom_globals, "__builtins__", builtins);
+
+        /* Import erlang module into globals so the code can reference it */
+        PyObject *sys_modules = PySys_GetObject("modules");
+        if (sys_modules != NULL) {
+            PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
+            if (erlang_mod != NULL) {
+                PyDict_SetItemString(atom_globals, "erlang", erlang_mod);
+            }
+        }
+
+        PyObject *result = PyRun_String(atom_wrapper_code, Py_file_input, atom_globals, atom_globals);
+        if (result == NULL) {
+            /* Non-fatal - atom() just won't be available */
+            PyErr_Print();
+            PyErr_Clear();
+        } else {
+            Py_DECREF(result);
+        }
+        Py_DECREF(atom_globals);
+    }
+
     return 0;
 }
 

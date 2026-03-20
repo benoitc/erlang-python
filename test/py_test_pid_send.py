@@ -249,3 +249,36 @@ def pid_in_set(pid):
     """Test using PID in a set."""
     s = {pid}
     return pid in s
+
+
+# OWN_GIL test helpers for erlang.atom() creation
+
+def atom_create_test():
+    """Create atom using erlang.atom() in OWN_GIL and test equality."""
+    import erlang
+    a1 = erlang.atom('test_owngil_atom')
+    a2 = erlang.atom('test_owngil_atom')
+    return a1 == a2
+
+
+def atom_create_different_test():
+    """Test different atoms created with erlang.atom() are not equal."""
+    import erlang
+    a1 = erlang.atom('atom_x')
+    a2 = erlang.atom('atom_y')
+    return a1 != a2
+
+
+def atom_cache_test():
+    """Test atom caching - same name returns same object."""
+    import erlang
+    a1 = erlang.atom('cached_atom_owngil')
+    a2 = erlang.atom('cached_atom_owngil')
+    return a1 is a2  # Should be same object due to caching
+
+
+def atom_type_name():
+    """Get type name of atom created with erlang.atom()."""
+    import erlang
+    a = erlang.atom('type_check_atom')
+    return type(a).__name__

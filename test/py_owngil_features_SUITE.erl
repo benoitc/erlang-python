@@ -104,6 +104,9 @@
     owngil_whereis_parallel_test/1,
     owngil_atom_basic_test/1,
     owngil_atom_roundtrip_test/1,
+    owngil_atom_create_test/1,
+    owngil_atom_create_different_test/1,
+    owngil_atom_cache_test/1,
     owngil_ref_roundtrip_test/1,
     owngil_pid_operations_test/1
 ]).
@@ -187,6 +190,9 @@ groups() ->
         owngil_whereis_parallel_test,
         owngil_atom_basic_test,
         owngil_atom_roundtrip_test,
+        owngil_atom_create_test,
+        owngil_atom_create_different_test,
+        owngil_atom_cache_test,
         owngil_ref_roundtrip_test,
         owngil_pid_operations_test
     ]}].
@@ -1657,6 +1663,49 @@ owngil_atom_roundtrip_test(Config) ->
     %% In OWN_GIL mode, atoms become strings, so we get a binary back
     ExpectedBinary = atom_to_binary(TestAtom),
     ExpectedBinary = ReturnedValue,
+
+    py_context:stop(Ctx).
+
+%% @doc Test erlang.atom() creates equal atoms in owngil context
+owngil_atom_create_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test that erlang.atom() creates equal atoms for same name
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_create_test, [], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc Test erlang.atom() creates unequal atoms for different names
+owngil_atom_create_different_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test that erlang.atom() creates different atoms for different names
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_create_different_test, [], #{}),
+
+    py_context:stop(Ctx).
+
+%% @doc Test erlang.atom() caching - same name returns same object
+owngil_atom_cache_test(Config) ->
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    TestDir = proplists:get_value(test_dir, Config),
+
+    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+
+    %% Test atom caching - same object returned for same name
+    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_cache_test, [], #{}),
+
+    %% Also verify we can get the type name
+    {ok, TypeName} = py_context:call(Ctx, py_test_pid_send, atom_type_name, [], #{}),
+    ct:pal("Atom type name from erlang.atom(): ~p", [TypeName]),
 
     py_context:stop(Ctx).
 
