@@ -6764,6 +6764,12 @@ static ErlNifFunc nif_funcs[] = {
     /* Per-process namespace NIFs */
     {"event_loop_exec", 2, nif_event_loop_exec, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"event_loop_eval", 2, nif_event_loop_eval, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    /* Module import caching NIFs */
+    {"loop_import_module", 2, nif_loop_import_module, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"loop_import_function", 3, nif_loop_import_function, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"loop_flush_import_cache", 1, nif_loop_flush_import_cache, 0},
+    {"loop_import_stats", 1, nif_loop_import_stats, 0},
+    {"loop_import_list", 1, nif_loop_import_list, 0},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},

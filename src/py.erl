@@ -56,6 +56,12 @@
     stream/4,
     stream_eval/1,
     stream_eval/2,
+    %% Module import caching
+    import/1,
+    import/2,
+    flush_imports/0,
+    import_stats/0,
+    import_list/0,
     version/0,
     memory_stats/0,
     gc/0,
@@ -326,6 +332,93 @@ exec(Code) ->
 exec(Ctx, Code) when is_pid(Ctx) ->
     EnvRef = get_local_env(Ctx),
     py_context:exec(Ctx, Code, EnvRef).
+
+%%% ============================================================================
+%%% Module Import Caching
+%%% ============================================================================
+
+%% @doc Import and cache a module in the current interpreter.
+%%
+%% The module is imported in the interpreter handling this process (via affinity).
+%% The `__main__' module is never cached in the interpreter cache.
+%%
+%% This is useful for pre-warming imports before making calls, ensuring the
+%% first call doesn't pay the import penalty.
+%%
+%% Example:
+%% ```
+%% ok = py:import(json),
+%% {ok, Result} = py:call(json, dumps, [Data]).  %% Uses cached module
+%% '''
+%%
+%% @param Module Python module name
+%% @returns ok | {error, Reason}
+-spec import(py_module()) -> ok | {error, term()}.
+import(Module) ->
+    py_event_loop_pool:import(Module).
+
+%% @doc Import and cache a module function in the current interpreter.
+%%
+%% Pre-imports the module and caches the function reference for faster
+%% subsequent calls. The `__main__' module is never cached.
+%%
+%% Example:
+%% ```
+%% ok = py:import(json, dumps),
+%% {ok, Result} = py:call(json, dumps, [Data]).  %% Uses cached function
+%% '''
+%%
+%% @param Module Python module name
+%% @param Func Function name to cache
+%% @returns ok | {error, Reason}
+-spec import(py_module(), py_func()) -> ok | {error, term()}.
+import(Module, Func) ->
+    py_event_loop_pool:import(Module, Func).
+
+%% @doc Flush import caches across all interpreters.
+%%
+%% Clears the module/function cache in all interpreters. Use this after
+%% modifying Python modules on disk to force re-import.
+%%
+%% @returns ok
+-spec flush_imports() -> ok.
+flush_imports() ->
+    py_event_loop_pool:flush_imports().
+
+%% @doc Get import cache statistics for the current interpreter.
+%%
+%% Returns a map with cache metrics for the interpreter handling this process.
+%%
+%% Example:
+%% ```
+%% {ok, #{count => 5}} = py:import_stats().
+%% '''
+%%
+%% @returns {ok, Stats} where Stats is a map with cache metrics
+-spec import_stats() -> {ok, map()} | {error, term()}.
+import_stats() ->
+    py_event_loop_pool:import_stats().
+
+%% @doc List all cached imports in the current interpreter.
+%%
+%% Returns a map of modules to their cached functions.
+%% Module names are binary keys, function lists are the values.
+%% An empty list means only the module is cached (no specific functions).
+%%
+%% Example:
+%% ```
+%% ok = py:import(json),
+%% ok = py:import(json, dumps),
+%% ok = py:import(json, loads),
+%% ok = py:import(math),
+%% {ok, #{<<"json">> => [<<"dumps">>, <<"loads">>],
+%%        <<"math">> => []}} = py:import_list().
+%% '''
+%%
+%% @returns {ok, #{Module => [Func]}} map of modules to functions
+-spec import_list() -> {ok, #{binary() => [binary()]}} | {error, term()}.
+import_list() ->
+    py_event_loop_pool:import_list().
 
 %%% ============================================================================
 %%% Asynchronous API

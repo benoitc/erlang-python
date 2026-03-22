@@ -3475,6 +3475,503 @@ ERL_NIF_TERM nif_event_loop_eval(ErlNifEnv *env, int argc,
 }
 
 /* ============================================================================
+ * Module Import Caching NIFs
+ * ============================================================================ */
+
+/**
+ * @brief Import and cache a module in the event loop's interpreter
+ *
+ * Pre-imports the module and caches it for faster subsequent calls.
+ * The __main__ module is never cached (returns error).
+ *
+ * NIF: loop_import_module(LoopRef, Module) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_module(ErlNifEnv *env, int argc,
+                                     const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get module name binary */
+    ErlNifBinary module_bin;
+    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
+        return make_error(env, "invalid_module");
+    }
+
+    /* Convert to C string */
+    char *module_name = enif_alloc(module_bin.size + 1);
+    if (module_name == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(module_name, module_bin.data, module_bin.size);
+    module_name[module_bin.size] = '\0';
+
+    /* Never cache __main__ */
+    if (strcmp(module_name, "__main__") == 0) {
+        enif_free(module_name);
+        return make_error(env, "main_not_cacheable");
+    }
+
+    /* Get caller PID for namespace lookup */
+    ErlNifPid caller_pid;
+    if (enif_self(env, &caller_pid) == NULL) {
+        enif_free(module_name);
+        return make_error(env, "no_self");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Get or create namespace for this process */
+    process_namespace_t *ns = ensure_process_namespace(env, loop, &caller_pid);
+    if (ns == NULL) {
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        return make_error(env, "namespace_failed");
+    }
+
+    /* Check if already cached */
+    PyObject *cached = PyDict_GetItemString(ns->module_cache, module_name);
+    if (cached != NULL) {
+        /* Already cached, nothing to do */
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        return ATOM_OK;
+    }
+
+    /* Import the module */
+    PyObject *module = PyImport_ImportModule(module_name);
+    if (module == NULL) {
+        PyObject *exc_type, *exc_value, *exc_tb;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+        ERL_NIF_TERM error_term;
+        if (exc_value != NULL) {
+            PyObject *str = PyObject_Str(exc_value);
+            if (str != NULL) {
+                const char *err_str = PyUnicode_AsUTF8(str);
+                if (err_str != NULL) {
+                    error_term = enif_make_string(env, err_str, ERL_NIF_LATIN1);
+                } else {
+                    error_term = enif_make_atom(env, "import_failed");
+                }
+                Py_DECREF(str);
+            } else {
+                error_term = enif_make_atom(env, "import_failed");
+            }
+        } else {
+            error_term = enif_make_atom(env, "import_failed");
+        }
+
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+
+        return enif_make_tuple2(env, enif_make_atom(env, "error"), error_term);
+    }
+
+    /* Cache the module */
+    PyDict_SetItemString(ns->module_cache, module_name, module);
+    Py_DECREF(module);  /* Dict now owns the reference */
+
+    PyGILState_Release(gstate);
+    enif_free(module_name);
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief Import a module and cache a specific function
+ *
+ * Pre-imports the module and caches the function reference.
+ * The __main__ module is never cached (returns error).
+ *
+ * NIF: loop_import_function(LoopRef, Module, Func) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_function(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get module name binary */
+    ErlNifBinary module_bin;
+    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
+        return make_error(env, "invalid_module");
+    }
+
+    /* Get function name binary */
+    ErlNifBinary func_bin;
+    if (!enif_inspect_binary(env, argv[2], &func_bin)) {
+        return make_error(env, "invalid_func");
+    }
+
+    /* Convert to C strings */
+    char *module_name = enif_alloc(module_bin.size + 1);
+    char *func_name = enif_alloc(func_bin.size + 1);
+    if (module_name == NULL || func_name == NULL) {
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(module_name, module_bin.data, module_bin.size);
+    module_name[module_bin.size] = '\0';
+    memcpy(func_name, func_bin.data, func_bin.size);
+    func_name[func_bin.size] = '\0';
+
+    /* Never cache __main__ */
+    if (strcmp(module_name, "__main__") == 0) {
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "main_not_cacheable");
+    }
+
+    /* Get caller PID for namespace lookup */
+    ErlNifPid caller_pid;
+    if (enif_self(env, &caller_pid) == NULL) {
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "no_self");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Get or create namespace for this process */
+    process_namespace_t *ns = ensure_process_namespace(env, loop, &caller_pid);
+    if (ns == NULL) {
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "namespace_failed");
+    }
+
+    /* Build cache key "module.func" */
+    size_t key_len = module_bin.size + 1 + func_bin.size + 1;
+    char *cache_key = enif_alloc(key_len);
+    if (cache_key == NULL) {
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "alloc_failed");
+    }
+    snprintf(cache_key, key_len, "%s.%s", module_name, func_name);
+
+    /* Check if function already cached */
+    PyObject *cached_func = PyDict_GetItemString(ns->module_cache, cache_key);
+    if (cached_func != NULL) {
+        /* Already cached, nothing to do */
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        enif_free(func_name);
+        enif_free(cache_key);
+        return ATOM_OK;
+    }
+
+    /* Get module (from cache or import) */
+    PyObject *module = PyDict_GetItemString(ns->module_cache, module_name);
+    if (module == NULL) {
+        /* Not cached, import it */
+        module = PyImport_ImportModule(module_name);
+        if (module == NULL) {
+            PyObject *exc_type, *exc_value, *exc_tb;
+            PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+            ERL_NIF_TERM error_term;
+            if (exc_value != NULL) {
+                PyObject *str = PyObject_Str(exc_value);
+                if (str != NULL) {
+                    const char *err_str = PyUnicode_AsUTF8(str);
+                    if (err_str != NULL) {
+                        error_term = enif_make_string(env, err_str, ERL_NIF_LATIN1);
+                    } else {
+                        error_term = enif_make_atom(env, "import_failed");
+                    }
+                    Py_DECREF(str);
+                } else {
+                    error_term = enif_make_atom(env, "import_failed");
+                }
+            } else {
+                error_term = enif_make_atom(env, "import_failed");
+            }
+
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_value);
+            Py_XDECREF(exc_tb);
+            PyGILState_Release(gstate);
+            enif_free(module_name);
+            enif_free(func_name);
+            enif_free(cache_key);
+
+            return enif_make_tuple2(env, enif_make_atom(env, "error"), error_term);
+        }
+        /* Cache the module too */
+        PyDict_SetItemString(ns->module_cache, module_name, module);
+        Py_DECREF(module);
+        module = PyDict_GetItemString(ns->module_cache, module_name);
+    }
+
+    /* Get the function attribute */
+    PyObject *func = PyObject_GetAttrString(module, func_name);
+    if (func == NULL) {
+        PyObject *exc_type, *exc_value, *exc_tb;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+        ERL_NIF_TERM error_term;
+        if (exc_value != NULL) {
+            PyObject *str = PyObject_Str(exc_value);
+            if (str != NULL) {
+                const char *err_str = PyUnicode_AsUTF8(str);
+                if (err_str != NULL) {
+                    error_term = enif_make_string(env, err_str, ERL_NIF_LATIN1);
+                } else {
+                    error_term = enif_make_atom(env, "getattr_failed");
+                }
+                Py_DECREF(str);
+            } else {
+                error_term = enif_make_atom(env, "getattr_failed");
+            }
+        } else {
+            error_term = enif_make_atom(env, "getattr_failed");
+        }
+
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        enif_free(func_name);
+        enif_free(cache_key);
+
+        return enif_make_tuple2(env, enif_make_atom(env, "error"), error_term);
+    }
+
+    /* Cache the function with "module.func" key */
+    PyDict_SetItemString(ns->module_cache, cache_key, func);
+    Py_DECREF(func);  /* Dict now owns the reference */
+
+    PyGILState_Release(gstate);
+    enif_free(module_name);
+    enif_free(func_name);
+    enif_free(cache_key);
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief Flush the import cache for an event loop's interpreter
+ *
+ * Clears the module/function cache for all namespaces in this loop.
+ *
+ * NIF: loop_flush_import_cache(LoopRef) -> ok
+ */
+ERL_NIF_TERM nif_loop_flush_import_cache(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Lock namespace registry */
+    pthread_mutex_lock(&loop->namespaces_mutex);
+
+    /* Clear module_cache for all namespaces */
+    process_namespace_t *ns = loop->namespaces_head;
+    while (ns != NULL) {
+        if (ns->module_cache != NULL) {
+            PyDict_Clear(ns->module_cache);
+        }
+        ns = ns->next;
+    }
+
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+    PyGILState_Release(gstate);
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief Get import cache statistics for the calling process's namespace
+ *
+ * Returns a map with count of cached entries.
+ *
+ * NIF: loop_import_stats(LoopRef) -> {ok, #{count => N}} | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_stats(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get caller PID for namespace lookup */
+    ErlNifPid caller_pid;
+    if (enif_self(env, &caller_pid) == NULL) {
+        return make_error(env, "no_self");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Find namespace for this process (don't create if doesn't exist) */
+    pthread_mutex_lock(&loop->namespaces_mutex);
+    process_namespace_t *ns = loop->namespaces_head;
+    while (ns != NULL) {
+        if (enif_compare_pids(&ns->owner_pid, &caller_pid) == 0) {
+            break;
+        }
+        ns = ns->next;
+    }
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+
+    Py_ssize_t count = 0;
+    if (ns != NULL && ns->module_cache != NULL) {
+        count = PyDict_Size(ns->module_cache);
+    }
+
+    PyGILState_Release(gstate);
+
+    /* Build result map */
+    ERL_NIF_TERM map = enif_make_new_map(env);
+    ERL_NIF_TERM key_count = enif_make_atom(env, "count");
+    ERL_NIF_TERM val_count = enif_make_int64(env, (int64_t)count);
+    enif_make_map_put(env, map, key_count, val_count, &map);
+
+    return enif_make_tuple2(env, ATOM_OK, map);
+}
+
+/**
+ * @brief List all cached imports in the calling process's namespace
+ *
+ * Returns a map of modules to their cached functions.
+ * Module names are keys, function lists are values.
+ *
+ * NIF: loop_import_list(LoopRef) -> {ok, #{Module => [Func]}} | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_list(ErlNifEnv *env, int argc,
+                                   const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+
+    /* Get caller PID for namespace lookup */
+    ErlNifPid caller_pid;
+    if (enif_self(env, &caller_pid) == NULL) {
+        return make_error(env, "no_self");
+    }
+
+    /* Acquire GIL */
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    /* Find namespace for this process (don't create if doesn't exist) */
+    pthread_mutex_lock(&loop->namespaces_mutex);
+    process_namespace_t *ns = loop->namespaces_head;
+    while (ns != NULL) {
+        if (enif_compare_pids(&ns->owner_pid, &caller_pid) == 0) {
+            break;
+        }
+        ns = ns->next;
+    }
+    pthread_mutex_unlock(&loop->namespaces_mutex);
+
+    ERL_NIF_TERM result_map = enif_make_new_map(env);
+
+    if (ns != NULL && ns->module_cache != NULL) {
+        PyObject *keys = PyDict_Keys(ns->module_cache);
+        if (keys != NULL) {
+            Py_ssize_t len = PyList_Size(keys);
+
+            /* First pass: collect all module names (keys without dots) */
+            for (Py_ssize_t i = 0; i < len; i++) {
+                PyObject *key = PyList_GetItem(keys, i);
+                if (PyUnicode_Check(key)) {
+                    const char *key_str = PyUnicode_AsUTF8(key);
+                    if (key_str != NULL && strchr(key_str, '.') == NULL) {
+                        /* This is a module (no dot) */
+                        size_t key_len = strlen(key_str);
+                        ERL_NIF_TERM mod_bin;
+                        unsigned char *buf = enif_make_new_binary(env, key_len, &mod_bin);
+                        memcpy(buf, key_str, key_len);
+
+                        /* Start with empty function list */
+                        ERL_NIF_TERM func_list = enif_make_list(env, 0);
+                        enif_make_map_put(env, result_map, mod_bin, func_list, &result_map);
+                    }
+                }
+            }
+
+            /* Second pass: collect functions and add to their module's list */
+            for (Py_ssize_t i = 0; i < len; i++) {
+                PyObject *key = PyList_GetItem(keys, i);
+                if (PyUnicode_Check(key)) {
+                    const char *key_str = PyUnicode_AsUTF8(key);
+                    if (key_str != NULL) {
+                        const char *dot = strchr(key_str, '.');
+                        if (dot != NULL) {
+                            /* This is a function (has dot): "module.func" */
+                            size_t mod_len = dot - key_str;
+                            const char *func_str = dot + 1;
+                            size_t func_len = strlen(func_str);
+
+                            /* Create module binary */
+                            ERL_NIF_TERM mod_bin;
+                            unsigned char *mod_buf = enif_make_new_binary(env, mod_len, &mod_bin);
+                            memcpy(mod_buf, key_str, mod_len);
+
+                            /* Create function binary */
+                            ERL_NIF_TERM func_bin;
+                            unsigned char *func_buf = enif_make_new_binary(env, func_len, &func_bin);
+                            memcpy(func_buf, func_str, func_len);
+
+                            /* Get existing function list for this module */
+                            ERL_NIF_TERM existing_list;
+                            if (enif_get_map_value(env, result_map, mod_bin, &existing_list)) {
+                                /* Prepend function to existing list */
+                                ERL_NIF_TERM new_list = enif_make_list_cell(env, func_bin, existing_list);
+                                enif_make_map_put(env, result_map, mod_bin, new_list, &result_map);
+                            } else {
+                                /* Module not in map yet (function cached without module) */
+                                ERL_NIF_TERM new_list = enif_make_list1(env, func_bin);
+                                enif_make_map_put(env, result_map, mod_bin, new_list, &result_map);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Py_DECREF(keys);
+        }
+    }
+
+    PyGILState_Release(gstate);
+
+    return enif_make_tuple2(env, ATOM_OK, result_map);
+}
+
+/* ============================================================================
  * Helper Functions
  * ============================================================================ */
 

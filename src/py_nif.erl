@@ -112,6 +112,12 @@
     %% Per-process namespace NIFs
     event_loop_exec/2,
     event_loop_eval/2,
+    %% Module import caching NIFs
+    loop_import_module/2,
+    loop_import_function/3,
+    loop_flush_import_cache/1,
+    loop_import_stats/1,
+    loop_import_list/1,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -844,6 +850,67 @@ event_loop_exec(_LoopRef, _Code) ->
 %% Returns the result of the expression.
 -spec event_loop_eval(reference(), binary() | iolist()) -> {ok, term()} | {error, term()}.
 event_loop_eval(_LoopRef, _Expr) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% Module Import Caching
+%%% ============================================================================
+
+%% @doc Import and cache a module in the event loop's interpreter.
+%%
+%% Pre-imports the module and caches it for faster subsequent calls.
+%% The `__main__' module is never cached (returns error).
+%%
+%% @param LoopRef Event loop reference
+%% @param Module Module name as binary
+%% @returns ok | {error, Reason}
+-spec loop_import_module(reference(), binary()) -> ok | {error, term()}.
+loop_import_module(_LoopRef, _Module) ->
+    ?NIF_STUB.
+
+%% @doc Import a module and cache a specific function.
+%%
+%% Pre-imports the module and caches the function reference for faster
+%% subsequent calls. The `__main__' module is never cached (returns error).
+%%
+%% @param LoopRef Event loop reference
+%% @param Module Module name as binary
+%% @param Func Function name as binary
+%% @returns ok | {error, Reason}
+-spec loop_import_function(reference(), binary(), binary()) -> ok | {error, term()}.
+loop_import_function(_LoopRef, _Module, _Func) ->
+    ?NIF_STUB.
+
+%% @doc Flush the import cache for an event loop's interpreter.
+%%
+%% Clears the module/function cache. Use this after modifying Python
+%% modules on disk to force re-import.
+%%
+%% @param LoopRef Event loop reference
+%% @returns ok
+-spec loop_flush_import_cache(reference()) -> ok.
+loop_flush_import_cache(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Get import cache statistics for an event loop's interpreter.
+%%
+%% Returns a map with cache metrics for the calling process's namespace.
+%%
+%% @param LoopRef Event loop reference
+%% @returns {ok, Stats} where Stats is a map with count
+-spec loop_import_stats(reference()) -> {ok, map()} | {error, term()}.
+loop_import_stats(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc List all cached imports in an event loop's interpreter.
+%%
+%% Returns a map of modules to their cached functions for the calling
+%% process's namespace.
+%%
+%% @param LoopRef Event loop reference
+%% @returns {ok, #{Module => [Func]}} map of modules to functions
+-spec loop_import_list(reference()) -> {ok, #{binary() => [binary()]}} | {error, term()}.
+loop_import_list(_LoopRef) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.

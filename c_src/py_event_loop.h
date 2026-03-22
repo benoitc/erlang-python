@@ -691,6 +691,62 @@ ERL_NIF_TERM nif_event_loop_set_py_loop(ErlNifEnv *env, int argc,
                                          const ERL_NIF_TERM argv[]);
 
 /* ============================================================================
+ * Module Import Caching
+ * ============================================================================ */
+
+/**
+ * @brief Import and cache a module in the event loop's interpreter
+ *
+ * Pre-imports the module and caches it for faster subsequent calls.
+ * The __main__ module is never cached (returns error).
+ *
+ * NIF: loop_import_module(LoopRef, Module) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_module(ErlNifEnv *env, int argc,
+                                     const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Import a module and cache a specific function
+ *
+ * Pre-imports the module and caches the function reference.
+ * The __main__ module is never cached (returns error).
+ *
+ * NIF: loop_import_function(LoopRef, Module, Func) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_function(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Flush the import cache for an event loop's interpreter
+ *
+ * Clears the module/function cache for all namespaces in this loop.
+ *
+ * NIF: loop_flush_import_cache(LoopRef) -> ok
+ */
+ERL_NIF_TERM nif_loop_flush_import_cache(ErlNifEnv *env, int argc,
+                                          const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief Get import cache statistics for the calling process's namespace
+ *
+ * Returns a map with count of cached entries.
+ *
+ * NIF: loop_import_stats(LoopRef) -> {ok, #{count => N}} | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_stats(ErlNifEnv *env, int argc,
+                                    const ERL_NIF_TERM argv[]);
+
+/**
+ * @brief List all cached imports in the calling process's namespace
+ *
+ * Returns a list of binary strings with cached module and function names.
+ *
+ * NIF: loop_import_list(LoopRef) -> {ok, [binary()]} | {error, Reason}
+ */
+ERL_NIF_TERM nif_loop_import_list(ErlNifEnv *env, int argc,
+                                   const ERL_NIF_TERM argv[]);
+
+/* ============================================================================
  * Internal Helper Functions
  * ============================================================================ */
 
