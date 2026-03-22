@@ -888,6 +888,9 @@ typedef struct {
 
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
+
+    /** @brief Cache generation for staleness detection (main interpreter contexts) */
+    uint64_t cache_generation;
 } py_context_t;
 
 /* ============================================================================

@@ -4124,6 +4124,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
+    ctx->cache_generation = 0;
 
     /* Create callback pipe for blocking callback responses */
     if (pipe(ctx->callback_pipe) < 0) {
@@ -4236,6 +4237,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         ctx->globals = PyDict_New();
         ctx->locals = PyDict_New();
         ctx->module_cache = PyDict_New();
+        ctx->cache_generation = import_cache_get_generation();
 
         /* Import __builtins__ into globals */
         PyObject *builtins = PyEval_GetBuiltins();
@@ -4368,6 +4370,25 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
  * Helper function - no mutex needed since context is process-owned.
  */
 static PyObject *context_get_module(py_context_t *ctx, const char *module_name) {
+    /* Check for stale cache (main interpreter contexts only) */
+    if (ctx->module_cache != NULL) {
+#ifdef HAVE_SUBINTERPRETERS
+        /* Pool-backed contexts get fresh interpreters on flush, so only check
+         * for non-pool contexts (main interpreter or OWN_GIL) */
+        bool is_main_interp = (ctx->pool_slot < 0 && !ctx->uses_own_gil);
+#else
+        bool is_main_interp = true;  /* All contexts use main interpreter */
+#endif
+        if (is_main_interp) {
+            uint64_t current_gen = import_cache_get_generation();
+            if (ctx->cache_generation != current_gen) {
+                /* Cache is stale - clear it and update generation */
+                PyDict_Clear(ctx->module_cache);
+                ctx->cache_generation = current_gen;
+            }
+        }
+    }
+
     /* Check cache first */
     if (ctx->module_cache != NULL) {
         PyObject *cached = PyDict_GetItemString(ctx->module_cache, module_name);
@@ -5103,12 +5124,11 @@ static ERL_NIF_TERM nif_subinterp_pool_flush_generation(ErlNifEnv *env, int argc
     (void)argc;
     (void)argv;
 
-#ifdef HAVE_SUBINTERPRETERS
-    uint64_t new_gen = subinterp_pool_flush_generation();
+    /* Use the unconditional version that works with or without subinterpreters.
+     * This increments the generation counter (used by main interpreter contexts)
+     * and also marks pool slots stale when subinterpreters are available. */
+    uint64_t new_gen = import_cache_flush_generation();
     return enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, new_gen));
-#else
-    return enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, 0));
-#endif
 }
 
 /**
