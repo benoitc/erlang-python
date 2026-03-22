@@ -64,10 +64,12 @@ groups() ->
     ]}].
 
 init_per_suite(Config) ->
+    %% Start application first (loads NIF)
+    {ok, _} = application:ensure_all_started(erlang_python),
+    timer:sleep(500),
+    %% Then check if subinterpreters are supported
     case py_nif:subinterp_supported() of
         true ->
-            {ok, _} = application:ensure_all_started(erlang_python),
-            timer:sleep(500),
             Config;
         false ->
             {skip, "Requires Python 3.12+"}

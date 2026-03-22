@@ -62,6 +62,12 @@
     flush_imports/0,
     import_stats/0,
     import_list/0,
+    %% Import registry (global list applied to all interpreters)
+    init_import_registry/0,
+    get_imports/0,
+    del_import/1,
+    del_import/2,
+    clear_imports/0,
     version/0,
     memory_stats/0,
     gc/0,
@@ -163,6 +169,9 @@
 
 %% Process dictionary key for local Python environment
 -define(LOCAL_ENV_KEY, py_local_env).
+
+%% ETS table for global import registry
+-define(IMPORT_REGISTRY, py_import_registry).
 
 %% @doc Get or create a process-local Python environment for a context.
 %%
@@ -337,73 +346,200 @@ exec(Ctx, Code) when is_pid(Ctx) ->
 %%% Module Import Caching
 %%% ============================================================================
 
-%% @doc Import and cache a module in the current interpreter.
+%% @doc Initialize the import registry ETS table.
 %%
-%% The module is imported in the interpreter handling this process (via affinity).
-%% The `__main__' module is never cached in the interpreter cache.
+%% This is called automatically during application startup.
+%% Safe to call multiple times - does nothing if already initialized.
 %%
-%% This is useful for pre-warming imports before making calls, ensuring the
-%% first call doesn't pay the import penalty.
+%% @returns ok
+-spec init_import_registry() -> ok.
+init_import_registry() ->
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined ->
+            %% Use bag type to allow multiple entries with same module name
+            %% e.g., {<<"json">>, all} and {<<"json">>, <<"dumps">>}
+            ets:new(?IMPORT_REGISTRY, [bag, public, named_table]),
+            ok;
+        _ ->
+            ok
+    end.
+
+%% @doc Register a module for import in all interpreters.
+%%
+%% Adds the module to the global import registry. When new interpreters
+%% are created, they will automatically import all registered modules.
+%% The module will be imported lazily when first used.
+%%
+%% The `__main__' module is never cached.
 %%
 %% Example:
 %% ```
 %% ok = py:import(json),
-%% {ok, Result} = py:call(json, dumps, [Data]).  %% Uses cached module
+%% {ok, Result} = py:call(json, dumps, [Data]).  %% Module imported on first use
 %% '''
 %%
 %% @param Module Python module name
 %% @returns ok | {error, Reason}
 -spec import(py_module()) -> ok | {error, term()}.
 import(Module) ->
-    py_event_loop_pool:import(Module).
+    ModuleBin = ensure_binary(Module),
+    %% Reject __main__
+    case ModuleBin of
+        <<"__main__">> ->
+            {error, main_not_cacheable};
+        _ ->
+            %% Add to global registry - module will be imported lazily
+            case ets:info(?IMPORT_REGISTRY) of
+                undefined -> ok;
+                _ -> ets:insert(?IMPORT_REGISTRY, {ModuleBin, all})
+            end,
+            ok
+    end.
 
-%% @doc Import and cache a module function in the current interpreter.
+%% @doc Register a module/function for import in all interpreters.
 %%
-%% Pre-imports the module and caches the function reference for faster
-%% subsequent calls. The `__main__' module is never cached.
+%% Adds the module/function to the global import registry. When new
+%% interpreters are created, they will automatically import the module.
+%% The module will be imported lazily when first used.
+%%
+%% The `__main__' module is never cached.
 %%
 %% Example:
 %% ```
 %% ok = py:import(json, dumps),
-%% {ok, Result} = py:call(json, dumps, [Data]).  %% Uses cached function
+%% {ok, Result} = py:call(json, dumps, [Data]).  %% Module imported on first use
 %% '''
 %%
 %% @param Module Python module name
-%% @param Func Function name to cache
+%% @param Func Function name to register
 %% @returns ok | {error, Reason}
 -spec import(py_module(), py_func()) -> ok | {error, term()}.
 import(Module, Func) ->
-    py_event_loop_pool:import(Module, Func).
+    ModuleBin = ensure_binary(Module),
+    FuncBin = ensure_binary(Func),
+    %% Reject __main__
+    case ModuleBin of
+        <<"__main__">> ->
+            {error, main_not_cacheable};
+        _ ->
+            %% Add to global registry - module will be imported lazily
+            case ets:info(?IMPORT_REGISTRY) of
+                undefined -> ok;
+                _ -> ets:insert(?IMPORT_REGISTRY, {ModuleBin, FuncBin})
+            end,
+            ok
+    end.
 
-%% @doc Flush import caches across all interpreters.
+%% @doc Get all registered imports from the global registry.
 %%
-%% Clears the module/function cache in all interpreters. Use this after
-%% modifying Python modules on disk to force re-import.
+%% Returns a list of {Module, Func | all} tuples representing all
+%% modules/functions registered for automatic import.
+%%
+%% Example:
+%% ```
+%% ok = py:import(json),
+%% ok = py:import(math, sqrt),
+%% [{<<"json">>, all}, {<<"math">>, <<"sqrt">>}] = py:get_imports().
+%% '''
+%%
+%% @returns List of {Module, Func | all} tuples
+-spec get_imports() -> [{binary(), binary() | all}].
+get_imports() ->
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined -> [];
+        _ -> ets:tab2list(?IMPORT_REGISTRY)
+    end.
+
+%% @doc Remove a module from the global import registry.
+%%
+%% Removes all entries for the specified module from the registry.
+%% Does not affect already-running interpreters.
+%%
+%% @param Module Python module name
+%% @returns ok
+-spec del_import(py_module()) -> ok.
+del_import(Module) ->
+    ModuleBin = ensure_binary(Module),
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined -> ok;
+        _ -> ets:match_delete(?IMPORT_REGISTRY, {ModuleBin, '_'})
+    end,
+    ok.
+
+%% @doc Remove a specific module/function from the global import registry.
+%%
+%% Removes the specific entry from the registry.
+%% Does not affect already-running interpreters.
+%%
+%% @param Module Python module name
+%% @param Func Function name
+%% @returns ok
+-spec del_import(py_module(), py_func()) -> ok.
+del_import(Module, Func) ->
+    ModuleBin = ensure_binary(Module),
+    FuncBin = ensure_binary(Func),
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined -> ok;
+        %% Use delete_object to delete the specific tuple (not all objects with same key)
+        _ -> ets:delete_object(?IMPORT_REGISTRY, {ModuleBin, FuncBin})
+    end,
+    ok.
+
+%% @doc Clear all registered imports from the global registry.
+%%
+%% Removes all entries from the registry.
+%% Does not affect already-running interpreters.
+%%
+%% @returns ok
+-spec clear_imports() -> ok.
+clear_imports() ->
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined -> ok;
+        _ -> ets:delete_all_objects(?IMPORT_REGISTRY)
+    end,
+    ok.
+
+%% @doc Flush import caches from all interpreters and clear the registry.
+%%
+%% Clears the global import registry and flushes the module/function cache
+%% in all running interpreters. Use this after modifying Python modules
+%% on disk to force re-import.
 %%
 %% @returns ok
 -spec flush_imports() -> ok.
 flush_imports() ->
-    py_event_loop_pool:flush_imports().
+    %% Get the list of modules BEFORE clearing
+    Imports = get_imports(),
+    Modules = lists:usort([M || {M, _} <- Imports]),
+    %% Clear the global registry
+    clear_imports(),
+    %% Remove modules from sys.modules in all interpreters
+    py_context_router:flush_all_imports(Modules),
+    ok.
 
-%% @doc Get import cache statistics for the current interpreter.
+%% @doc Get import registry statistics.
 %%
-%% Returns a map with cache metrics for the interpreter handling this process.
+%% Returns a map with the count of registered imports.
 %%
 %% Example:
 %% ```
 %% {ok, #{count => 5}} = py:import_stats().
 %% '''
 %%
-%% @returns {ok, Stats} where Stats is a map with cache metrics
+%% @returns {ok, Stats} where Stats is a map with registry metrics
 -spec import_stats() -> {ok, map()} | {error, term()}.
 import_stats() ->
-    py_event_loop_pool:import_stats().
+    Count = case ets:info(?IMPORT_REGISTRY) of
+        undefined -> 0;
+        _ -> ets:info(?IMPORT_REGISTRY, size)
+    end,
+    {ok, #{count => Count}}.
 
-%% @doc List all cached imports in the current interpreter.
+%% @doc List all registered imports.
 %%
-%% Returns a map of modules to their cached functions.
+%% Returns a map of modules to their registered functions.
 %% Module names are binary keys, function lists are the values.
-%% An empty list means only the module is cached (no specific functions).
+%% An empty list means only the module is registered (no specific functions).
 %%
 %% Example:
 %% ```
@@ -418,7 +554,20 @@ import_stats() ->
 %% @returns {ok, #{Module => [Func]}} map of modules to functions
 -spec import_list() -> {ok, #{binary() => [binary()]}} | {error, term()}.
 import_list() ->
-    py_event_loop_pool:import_list().
+    Imports = get_imports(),
+    %% Group by module
+    Map = lists:foldl(fun({Module, FuncOrAll}, Acc) ->
+        Existing = maps:get(Module, Acc, []),
+        case FuncOrAll of
+            all ->
+                %% Module-level import, don't add to function list
+                maps:put(Module, Existing, Acc);
+            Func ->
+                %% Function-level import
+                maps:put(Module, [Func | Existing], Acc)
+        end
+    end, #{}, Imports),
+    {ok, Map}.
 
 %%% ============================================================================
 %%% Asynchronous API

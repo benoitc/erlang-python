@@ -730,7 +730,9 @@ typedef enum {
     CTX_REQ_CALL_WITH_ENV,      /**< Call with process-local environment */
     CTX_REQ_EVAL_WITH_ENV,      /**< Eval with process-local environment */
     CTX_REQ_EXEC_WITH_ENV,      /**< Exec with process-local environment */
-    CTX_REQ_CREATE_LOCAL_ENV    /**< Create process-local env dicts */
+    CTX_REQ_CREATE_LOCAL_ENV,   /**< Create process-local env dicts */
+    CTX_REQ_APPLY_IMPORTS,      /**< Apply imports to module cache */
+    CTX_REQ_FLUSH_IMPORTS       /**< Flush module cache */
 } ctx_request_type_t;
 
 /**
@@ -847,6 +849,9 @@ typedef struct {
 
     /** @brief Request term (copied into shared_env) */
     ERL_NIF_TERM request_term;
+
+    /** @brief Additional request data (e.g., modules list for flush) */
+    ERL_NIF_TERM request_data;
 
     /** @brief Response term (created in shared_env) */
     ERL_NIF_TERM response_term;

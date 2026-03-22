@@ -53,7 +53,8 @@
     get_interp_id/1,
     is_subinterp/1,
     create_local_env/1,
-    get_nif_ref/1
+    get_nif_ref/1,
+    flush_imports/2
 ]).
 
 %% Internal exports
@@ -411,6 +412,26 @@ get_nif_ref(Ctx) when is_pid(Ctx) ->
             error({context_died, Reason})
     end.
 
+%% @doc Flush the module cache from this context's interpreter.
+%%
+%% Clears all cached modules from the interpreter's module_cache.
+%% Removes specified modules from sys.modules in the interpreter.
+%%
+%% @param Ctx Context process
+%% @param Modules List of module names (binaries) to remove
+%% @returns ok
+-spec flush_imports(context(), [binary()]) -> ok.
+flush_imports(Ctx, Modules) when is_pid(Ctx), is_list(Modules) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {flush_imports, self(), MRef, Modules},
+    receive
+        {MRef, ok} ->
+            erlang:demonitor(MRef, [flush]),
+            ok;
+        {'DOWN', MRef, process, Ctx, _Reason} ->
+            ok
+    end.
+
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
@@ -420,6 +441,8 @@ init(Parent, Id, Mode) ->
     process_flag(trap_exit, true),
     case create_context(Mode) of
         {ok, Ref, InterpId} ->
+            %% Apply all registered imports to this interpreter
+            apply_registered_imports(Ref),
             %% For subinterpreters, create a dedicated event worker
             EventState = setup_event_worker(Ref, InterpId),
             %% For thread-model subinterpreters, spawn a dedicated callback handler
@@ -495,6 +518,21 @@ extend_erlang_module_in_context(Ref) ->
             error_logger:warning_msg(
                 "py_context: Failed to extend erlang module: ~p~n", [Reason]),
             ok
+    end.
+
+%% @private Apply all imports from the global registry to this interpreter.
+%%
+%% Called when a new interpreter is created to pre-warm the module cache
+%% with all modules registered via py:import/1,2.
+apply_registered_imports(Ref) ->
+    case ets:info(py_import_registry) of
+        undefined -> ok;
+        _ ->
+            Imports = ets:tab2list(py_import_registry),
+            case Imports of
+                [] -> ok;
+                _ -> py_nif:interp_apply_imports(Ref, Imports)
+            end
     end.
 
 %% @private
@@ -576,6 +614,11 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
 
         {get_nif_ref, From, MRef} ->
             From ! {MRef, Ref},
+            loop(State);
+
+        {flush_imports, From, MRef, Modules} ->
+            py_nif:interp_flush_imports(Ref, Modules),
+            From ! {MRef, ok},
             loop(State);
 
         {stop, From, MRef} ->
