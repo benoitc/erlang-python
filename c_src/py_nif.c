@@ -2475,26 +2475,41 @@ static void owngil_execute_call(py_context_t *ctx) {
         return;
     }
 
-    /* Get or import module */
-    PyObject *module = context_get_module(ctx, module_name);
-    if (module == NULL) {
-        ctx->response_term = make_py_error(ctx->shared_env);
-        ctx->response_ok = false;
-        enif_free(module_name);
-        enif_free(func_name_str);
-        return;
-    }
+    PyObject *module = NULL;
+    PyObject *func = NULL;
 
-    /* Get function */
-    PyObject *func = PyObject_GetAttrString(module, func_name_str);
-    enif_free(module_name);
-    enif_free(func_name_str);
+    /* Special handling for __main__ module - check ctx->globals first */
+    if (strcmp(module_name, "__main__") == 0) {
+        func = PyDict_GetItemString(ctx->globals, func_name_str);  /* Borrowed ref */
+        if (func != NULL) {
+            Py_INCREF(func);
+        }
+    }
 
     if (func == NULL) {
-        ctx->response_term = make_py_error(ctx->shared_env);
-        ctx->response_ok = false;
-        return;
+        /* Get or import module */
+        module = context_get_module(ctx, module_name);
+        if (module == NULL) {
+            ctx->response_term = make_py_error(ctx->shared_env);
+            ctx->response_ok = false;
+            enif_free(module_name);
+            enif_free(func_name_str);
+            return;
+        }
+
+        /* Get function */
+        func = PyObject_GetAttrString(module, func_name_str);
+        if (func == NULL) {
+            ctx->response_term = make_py_error(ctx->shared_env);
+            ctx->response_ok = false;
+            enif_free(module_name);
+            enif_free(func_name_str);
+            return;
+        }
     }
+
+    enif_free(module_name);
+    enif_free(func_name_str);
 
     /* Convert args */
     unsigned int args_len;
@@ -4251,18 +4266,31 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
     bool prev_allow_suspension = tl_allow_suspension;
     tl_allow_suspension = true;
 
-    /* Get or import module */
-    PyObject *module = context_get_module(ctx, module_name);
-    if (module == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
+    PyObject *module = NULL;
+    PyObject *func = NULL;
+
+    /* Special handling for __main__ module - check ctx->globals first */
+    if (strcmp(module_name, "__main__") == 0) {
+        func = PyDict_GetItemString(ctx->globals, func_name);  /* Borrowed ref */
+        if (func != NULL) {
+            Py_INCREF(func);
+        }
     }
 
-    /* Get function */
-    PyObject *func = PyObject_GetAttrString(module, func_name);
     if (func == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
+        /* Get or import module */
+        module = context_get_module(ctx, module_name);
+        if (module == NULL) {
+            result = make_py_error(env);
+            goto cleanup;
+        }
+
+        /* Get function */
+        func = PyObject_GetAttrString(module, func_name);
+        if (func == NULL) {
+            result = make_py_error(env);
+            goto cleanup;
+        }
     }
 
     /* Convert args */
