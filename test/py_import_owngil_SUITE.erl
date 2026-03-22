@@ -323,7 +323,7 @@ owngil_import_concurrent_test(_Config) ->
                     <<"json">> -> py_context:call(Ctx, json, dumps, [[N]]);
                     <<"math">> -> py_context:call(Ctx, math, sqrt, [float(N)]);
                     <<"os">> -> py_context:call(Ctx, os, getcwd, []);
-                    <<"string">> -> py_context:call(Ctx, string, ascii_lowercase, []);
+                    <<"string">> -> py_context:call(Ctx, string, capwords, [<<"hello world">>]);
                     <<"re">> -> py_context:call(Ctx, re, escape, [<<"test">>])
                 end
             end, MyModules),
