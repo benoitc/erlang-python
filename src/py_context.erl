@@ -35,10 +35,14 @@
 
 -export([
     start_link/2,
+    new/1,
     stop/1,
+    destroy/1,
+    call/4,
     call/5,
     call/6,
     call/7,
+    eval/2,
     eval/3,
     eval/4,
     eval/5,
@@ -121,6 +125,38 @@ stop(Ctx) when is_pid(Ctx) ->
         ok
     end.
 
+%% @doc Create a new context with options map.
+%%
+%% Options:
+%% - `mode' - Context mode (auto | subinterp | worker | owngil), default: auto
+%%
+%% @param Opts Options map
+%% @returns {ok, Pid} | {error, Reason}
+-spec new(map()) -> {ok, context()} | {error, term()}.
+new(Opts) when is_map(Opts) ->
+    Mode = maps:get(mode, Opts, auto),
+    Id = erlang:unique_integer([positive]),
+    start_link(Id, Mode).
+
+%% @doc Alias for stop/1 for API consistency.
+-spec destroy(context()) -> ok.
+destroy(Ctx) ->
+    stop(Ctx).
+
+%% @doc Call a Python function with empty kwargs.
+%%
+%% This is a convenience wrapper for call/5 that defaults Kwargs to #{}.
+%%
+%% @param Ctx Context process
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @returns {ok, Result} | {error, Reason}
+-spec call(context(), atom() | binary(), atom() | binary(), list()) ->
+    {ok, term()} | {error, term()}.
+call(Ctx, Module, Func, Args) ->
+    call(Ctx, Module, Func, Args, #{}).
+
 %% @doc Call a Python function.
 %%
 %% @param Ctx Context process
@@ -180,6 +216,18 @@ call(Ctx, Module, Func, Args, Kwargs, Timeout, EnvRef) when is_pid(Ctx), is_refe
         erlang:demonitor(MRef, [flush]),
         {error, timeout}
     end.
+
+%% @doc Evaluate a Python expression with empty locals.
+%%
+%% This is a convenience wrapper for eval/3 that defaults Locals to #{}.
+%%
+%% @param Ctx Context process
+%% @param Code Python code to evaluate
+%% @returns {ok, Result} | {error, Reason}
+-spec eval(context(), binary() | string()) ->
+    {ok, term()} | {error, term()}.
+eval(Ctx, Code) ->
+    eval(Ctx, Code, #{}).
 
 %% @doc Evaluate a Python expression.
 %%
