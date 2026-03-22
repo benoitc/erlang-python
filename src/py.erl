@@ -65,8 +65,6 @@
     %% Import registry (global list applied to all interpreters)
     init_import_registry/0,
     get_imports/0,
-    del_import/1,
-    del_import/2,
     clear_imports/0,
     version/0,
     memory_stats/0,
@@ -450,41 +448,6 @@ get_imports() ->
         _ -> ets:tab2list(?IMPORT_REGISTRY)
     end.
 
-%% @doc Remove a module from the global import registry.
-%%
-%% Removes all entries for the specified module from the registry.
-%% Does not affect already-running interpreters.
-%%
-%% @param Module Python module name
-%% @returns ok
--spec del_import(py_module()) -> ok.
-del_import(Module) ->
-    ModuleBin = ensure_binary(Module),
-    case ets:info(?IMPORT_REGISTRY) of
-        undefined -> ok;
-        _ -> ets:match_delete(?IMPORT_REGISTRY, {ModuleBin, '_'})
-    end,
-    ok.
-
-%% @doc Remove a specific module/function from the global import registry.
-%%
-%% Removes the specific entry from the registry.
-%% Does not affect already-running interpreters.
-%%
-%% @param Module Python module name
-%% @param Func Function name
-%% @returns ok
--spec del_import(py_module(), py_func()) -> ok.
-del_import(Module, Func) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    case ets:info(?IMPORT_REGISTRY) of
-        undefined -> ok;
-        %% Use delete_object to delete the specific tuple (not all objects with same key)
-        _ -> ets:delete_object(?IMPORT_REGISTRY, {ModuleBin, FuncBin})
-    end,
-    ok.
-
 %% @doc Clear all registered imports from the global registry.
 %%
 %% Removes all entries from the registry.
@@ -499,22 +462,25 @@ clear_imports() ->
     end,
     ok.
 
-%% @doc Flush import caches from all interpreters and clear the registry.
+%% @doc Flush import caches and trigger subinterpreter replacement.
 %%
-%% Clears the global import registry and flushes the module/function cache
-%% in all running interpreters. Use this after modifying Python modules
-%% on disk to force re-import.
+%% Clears the global import registry and marks all shared-GIL pool
+%% subinterpreters as stale. When existing contexts using those
+%% subinterpreters are destroyed, Python GC handles cleanup via
+%% Py_EndInterpreter. New contexts will get fresh subinterpreters
+%% with the updated import registry.
+%%
+%% OWN_GIL contexts each have their own subinterpreter which is
+%% destroyed when the context is destroyed.
 %%
 %% @returns ok
 -spec flush_imports() -> ok.
 flush_imports() ->
-    %% Get the list of modules BEFORE clearing
-    Imports = get_imports(),
-    Modules = lists:usort([M || {M, _} <- Imports]),
     %% Clear the global registry
     clear_imports(),
-    %% Remove modules from sys.modules in all interpreters
-    py_context_router:flush_all_imports(Modules),
+    %% Mark all pool slots as stale - they will be destroyed when
+    %% usage count drops to 0 (all contexts using them are destroyed)
+    py_nif:subinterp_pool_flush_generation(),
     ok.
 
 %% @doc Get import registry statistics.

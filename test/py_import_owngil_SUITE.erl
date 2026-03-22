@@ -67,6 +67,9 @@ init_per_suite(Config) ->
     %% Start application first (loads NIF)
     {ok, _} = application:ensure_all_started(erlang_python),
     timer:sleep(500),
+    %% Clear any imports from previous test suites to avoid
+    %% importing C extensions that crash in OWN_GIL subinterpreters
+    py:clear_imports(),
     %% Then check if subinterpreters are supported
     case py_nif:subinterp_supported() of
         true ->

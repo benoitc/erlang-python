@@ -84,6 +84,15 @@ typedef struct {
 
     /** @brief Whether this slot is initialized and ready for use */
     bool initialized;
+
+    /** @brief Number of contexts currently using this slot */
+    _Atomic int usage_count;
+
+    /** @brief Marked for destruction when usage_count reaches 0 */
+    _Atomic bool marked_stale;
+
+    /** @brief Import generation when slot was created */
+    uint64_t generation;
 } subinterp_slot_t;
 
 /**
@@ -162,6 +171,43 @@ void subinterp_pool_shutdown(void);
  * @return true if pool is initialized and ready for use
  */
 bool subinterp_pool_is_initialized(void);
+
+/**
+ * @brief Increment usage count for a slot
+ *
+ * Called when a context starts using a pool slot.
+ *
+ * @param slot Slot index
+ */
+void subinterp_pool_acquire(int slot);
+
+/**
+ * @brief Decrement usage count for a slot
+ *
+ * Called when a context stops using a pool slot.
+ * If the slot is marked stale and usage_count reaches 0,
+ * the subinterpreter is destroyed and the slot is cleared.
+ *
+ * @param slot Slot index
+ */
+void subinterp_pool_release(int slot);
+
+/**
+ * @brief Increment import generation and mark all pool slots stale
+ *
+ * Called by flush_imports to trigger subinterpreter replacement.
+ * Stale slots will be destroyed when their usage_count reaches 0.
+ *
+ * @return The new generation number
+ */
+uint64_t subinterp_pool_flush_generation(void);
+
+/**
+ * @brief Get the current import generation
+ *
+ * @return Current generation number
+ */
+uint64_t subinterp_pool_get_generation(void);
 
 #endif /* HAVE_SUBINTERPRETERS */
 

@@ -31,9 +31,6 @@
     %% Import registry tests
     import_registry_test/1,
     import_applied_to_new_context_test/1,
-    del_import_test/1,
-    del_import_func_test/1,
-    del_import_reimport_test/1,
     clear_imports_test/1,
     get_imports_test/1,
     flush_clears_registry_test/1,
@@ -69,9 +66,6 @@ groups() ->
         %% Import registry tests
         import_registry_test,
         import_applied_to_new_context_test,
-        del_import_test,
-        del_import_func_test,
-        del_import_reimport_test,
         clear_imports_test,
         get_imports_test,
         flush_clears_registry_test,
@@ -93,6 +87,8 @@ init_per_suite(Config) ->
     Config.
 
 end_per_suite(_Config) ->
+    %% Clean up imports to avoid affecting subsequent test suites
+    py:clear_imports(),
     ok.
 
 init_per_group(_Group, Config) ->
@@ -160,9 +156,6 @@ import_nonexistent_module_test(_Config) ->
     {error, Reason} = py:call(nonexistent_module_xyz, some_func, []),
     ?assert(is_tuple(Reason) orelse is_list(Reason) orelse is_binary(Reason) orelse is_atom(Reason)),
 
-    %% Clean up
-    ok = py:del_import(nonexistent_module_xyz),
-
     ct:pal("Nonexistent module error at call time: ~p", [Reason]).
 
 %% @doc Test importing with nonexistent function name still imports the module
@@ -180,9 +173,6 @@ import_nonexistent_function_test(_Config) ->
 
     %% But calling the nonexistent function will fail
     {error, _Reason} = py:call(json, nonexistent_function_xyz, []),
-
-    %% Clean up the registry entry
-    ok = py:del_import(json, nonexistent_function_xyz),
 
     ct:pal("Import with invalid function succeeds (validation at call time)").
 
@@ -473,94 +463,6 @@ import_applied_to_new_context_test(_Config) ->
     %% Clean up
     py_context:destroy(Ctx),
     ok = py:clear_imports().
-
-%% @doc Test removing a module from the registry
-del_import_test(_Config) ->
-    %% Clear and add some imports
-    ok = py:clear_imports(),
-    ok = py:import(json),
-    ok = py:import(math),
-    ok = py:import(json, dumps),
-
-    %% Verify they're in the registry
-    Imports1 = py:get_imports(),
-    ?assert(length(Imports1) >= 2),
-
-    %% Remove json (should remove both json and json.dumps)
-    ok = py:del_import(json),
-
-    %% Verify json entries are gone but math remains
-    Imports2 = py:get_imports(),
-    ?assertEqual(false, lists:member({<<"json">>, all}, Imports2)),
-    ?assertEqual(false, lists:member({<<"json">>, <<"dumps">>}, Imports2)),
-    ?assert(lists:member({<<"math">>, all}, Imports2)),
-
-    ct:pal("Registry after del_import: ~p", [Imports2]).
-
-%% @doc Test removing a specific module/function from the registry
-del_import_func_test(_Config) ->
-    %% Clear and add some imports
-    ok = py:clear_imports(),
-    ok = py:import(json),
-    ok = py:import(json, dumps),
-    ok = py:import(json, loads),
-
-    %% Verify they're in the registry
-    Imports1 = py:get_imports(),
-    ?assert(lists:member({<<"json">>, all}, Imports1)),
-    ?assert(lists:member({<<"json">>, <<"dumps">>}, Imports1)),
-    ?assert(lists:member({<<"json">>, <<"loads">>}, Imports1)),
-
-    %% Remove just json.dumps
-    ok = py:del_import(json, dumps),
-
-    %% Verify dumps is gone but all and loads remain
-    Imports2 = py:get_imports(),
-    ?assert(lists:member({<<"json">>, all}, Imports2)),
-    ?assertEqual(false, lists:member({<<"json">>, <<"dumps">>}, Imports2)),
-    ?assert(lists:member({<<"json">>, <<"loads">>}, Imports2)),
-
-    ct:pal("Registry after del_import/2: ~p", [Imports2]).
-
-%% @doc Test removing import and reimporting works correctly
-%%
-%% Verifies that:
-%% 1. After importing, the module is available
-%% 2. After removing and flushing, new subinterpreters don't have the module
-%% 3. After reimporting, new subinterpreters have the module again
-del_import_reimport_test(_Config) ->
-    %% Clear registry
-    ok = py:clear_imports(),
-
-    %% Use 'plistlib' module - pure Python, obscure, not loaded by default
-    ok = py:import(plistlib),
-    ?assert(lists:member({<<"plistlib">>, all}, py:get_imports())),
-
-    %% Create a subinterpreter and verify plistlib is available
-    {ok, Ctx1} = py_context:new(#{mode => owngil}),
-    {ok, true} = py_context:eval(Ctx1, <<"'plistlib' in __import__('sys').modules">>),
-    py_context:destroy(Ctx1),
-
-    %% Remove from registry and flush all interpreters
-    ok = py:del_import(plistlib),
-    ok = py:flush_imports(),
-    ?assertEqual([], py:get_imports()),
-
-    %% Create a new subinterpreter - plistlib should NOT be pre-imported
-    {ok, Ctx2} = py_context:new(#{mode => owngil}),
-    {ok, false} = py_context:eval(Ctx2, <<"'plistlib' in __import__('sys').modules">>),
-    py_context:destroy(Ctx2),
-
-    %% Re-import plistlib
-    ok = py:import(plistlib),
-    ?assert(lists:member({<<"plistlib">>, all}, py:get_imports())),
-
-    %% Create another subinterpreter - plistlib should be pre-imported again
-    {ok, Ctx3} = py_context:new(#{mode => owngil}),
-    {ok, true} = py_context:eval(Ctx3, <<"'plistlib' in __import__('sys').modules">>),
-    py_context:destroy(Ctx3),
-
-    ct:pal("del_import + reimport test passed").
 
 %% @doc Test clearing all imports from the registry
 clear_imports_test(_Config) ->

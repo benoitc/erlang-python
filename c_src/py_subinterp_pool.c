@@ -47,6 +47,9 @@ static int g_pool_size = 0;
 /** @brief Pool initialized flag */
 static _Atomic bool g_pool_initialized = false;
 
+/** @brief Global import generation counter */
+static _Atomic uint64_t g_import_generation = 0;
+
 /* ============================================================================
  * Forward declarations for functions defined in other modules
  * ============================================================================ */
@@ -196,6 +199,9 @@ int subinterp_pool_init(int size) {
         }
 
         slot->initialized = true;
+        atomic_store(&slot->usage_count, 0);
+        atomic_store(&slot->marked_stale, false);
+        slot->generation = atomic_load(&g_import_generation);
 
         /* Swap back to main thread state before creating next subinterpreter */
         PyThreadState_Swap(main_tstate);
@@ -343,6 +349,195 @@ void subinterp_pool_shutdown(void) {
 
 bool subinterp_pool_is_initialized(void) {
     return atomic_load(&g_pool_initialized);
+}
+
+void subinterp_pool_acquire(int slot) {
+    if (slot < 0 || slot >= g_pool_size) {
+        return;
+    }
+
+    subinterp_slot_t *s = &g_subinterp_pool[slot];
+    if (!s->initialized) {
+        return;
+    }
+
+    atomic_fetch_add(&s->usage_count, 1);
+}
+
+/**
+ * @brief Reinitialize a pool slot with a fresh subinterpreter
+ *
+ * Called after destroying a stale subinterpreter to create a fresh one.
+ * Assumes GIL is already held.
+ *
+ * @param slot_idx Slot index
+ * @return 0 on success, -1 on failure
+ */
+static int subinterp_pool_reinit_slot(int slot_idx) {
+    subinterp_slot_t *slot = &g_subinterp_pool[slot_idx];
+
+    /* Save main thread state */
+    PyThreadState *main_tstate = PyThreadState_Get();
+
+    /* Configure subinterpreter with SHARED GIL */
+    PyInterpreterConfig config = {
+        .use_main_obmalloc = 0,
+        .allow_fork = 0,
+        .allow_exec = 0,
+        .allow_threads = 1,
+        .allow_daemon_threads = 0,
+        .check_multi_interp_extensions = 1,
+        .gil = PyInterpreterConfig_SHARED_GIL,
+    };
+
+    PyThreadState *tstate = NULL;
+    PyStatus status = Py_NewInterpreterFromConfig(&tstate, &config);
+
+    if (PyStatus_Exception(status) || tstate == NULL) {
+        fprintf(stderr, "subinterp_pool_reinit_slot: failed to create subinterp for slot %d\n", slot_idx);
+        PyThreadState_Swap(main_tstate);
+        return -1;
+    }
+
+    /* tstate is now the current thread state for the new interpreter */
+    slot->interp = PyThreadState_GetInterpreter(tstate);
+    slot->tstate = tstate;
+
+    /* Initialize globals/locals */
+    slot->globals = PyDict_New();
+    slot->locals = PyDict_New();
+    slot->module_cache = PyDict_New();
+
+    if (slot->globals == NULL || slot->locals == NULL || slot->module_cache == NULL) {
+        Py_XDECREF(slot->module_cache);
+        Py_XDECREF(slot->globals);
+        Py_XDECREF(slot->locals);
+        Py_EndInterpreter(tstate);
+        PyThreadState_Swap(main_tstate);
+        return -1;
+    }
+
+    /* Import __builtins__ into globals */
+    PyObject *builtins = PyEval_GetBuiltins();
+    PyDict_SetItemString(slot->globals, "__builtins__", builtins);
+
+    /* Create erlang module in this subinterpreter */
+    if (create_erlang_module() >= 0) {
+        /* Register ReactorBuffer and PyBuffer */
+        ReactorBuffer_register_with_reactor();
+        PyBuffer_register_with_module();
+
+        /* Import erlang module into globals */
+        PyObject *erlang_module = PyImport_ImportModule("erlang");
+        if (erlang_module != NULL) {
+            PyDict_SetItemString(slot->globals, "erlang", erlang_module);
+            Py_DECREF(erlang_module);
+        }
+    }
+
+    /* Initialize event loop for this subinterpreter */
+    init_subinterpreter_event_loop(NULL);
+
+    slot->initialized = true;
+    atomic_store(&slot->usage_count, 0);
+    atomic_store(&slot->marked_stale, false);
+    slot->generation = atomic_load(&g_import_generation);
+
+    /* Swap back to main thread state */
+    PyThreadState_Swap(main_tstate);
+
+#ifdef DEBUG
+    fprintf(stderr, "subinterp_pool_reinit_slot: reinitialized slot %d\n", slot_idx);
+#endif
+
+    return 0;
+}
+
+void subinterp_pool_release(int slot) {
+    if (slot < 0 || slot >= g_pool_size) {
+        return;
+    }
+
+    subinterp_slot_t *s = &g_subinterp_pool[slot];
+    if (!s->initialized) {
+        return;
+    }
+
+    int prev_count = atomic_fetch_sub(&s->usage_count, 1);
+
+    /* If usage drops to 0 and slot is marked stale, destroy and reinitialize
+     * the subinterpreter. We need the GIL to safely do Python operations. */
+    if (prev_count == 1 && atomic_load(&s->marked_stale)) {
+        /* Acquire the GIL */
+        PyGILState_STATE gstate = PyGILState_Ensure();
+
+        /* Save current thread state and swap to the subinterpreter */
+        PyThreadState *saved = PyThreadState_Swap(s->tstate);
+
+        /* Clean up Python objects */
+        Py_XDECREF(s->module_cache);
+        Py_XDECREF(s->globals);
+        Py_XDECREF(s->locals);
+
+        /* End the interpreter - this frees s->tstate */
+        Py_EndInterpreter(s->tstate);
+
+        /* Clear slot state */
+        s->interp = NULL;
+        s->tstate = NULL;
+        s->globals = NULL;
+        s->locals = NULL;
+        s->module_cache = NULL;
+        s->initialized = false;
+        atomic_store(&s->marked_stale, false);
+
+        /* Swap back to saved thread state (may be NULL if we didn't have one) */
+        PyThreadState_Swap(saved);
+
+        /* Reinitialize the slot with a fresh subinterpreter */
+        if (subinterp_pool_reinit_slot(slot) < 0) {
+            /* Reinit failed - clear allocation bit so slot is skipped */
+            uint64_t mask = ~(1ULL << slot);
+            atomic_fetch_and(&g_pool_allocation, mask);
+            fprintf(stderr, "subinterp_pool_release: failed to reinit slot %d\n", slot);
+        }
+        /* If reinit succeeded, slot stays allocated but now has fresh interp */
+
+        /* Release the GIL */
+        PyGILState_Release(gstate);
+
+#ifdef DEBUG
+        fprintf(stderr, "subinterp_pool_release: recycled stale slot %d\n", slot);
+#endif
+    }
+}
+
+uint64_t subinterp_pool_flush_generation(void) {
+    if (!atomic_load(&g_pool_initialized)) {
+        return 0;
+    }
+
+    /* Increment generation */
+    uint64_t new_gen = atomic_fetch_add(&g_import_generation, 1) + 1;
+
+    /* Mark all initialized slots as stale */
+    for (int i = 0; i < g_pool_size; i++) {
+        subinterp_slot_t *slot = &g_subinterp_pool[i];
+        if (slot->initialized) {
+            atomic_store(&slot->marked_stale, true);
+        }
+    }
+
+#ifdef DEBUG
+    fprintf(stderr, "subinterp_pool_flush_generation: incremented to %llu, marked all slots stale\n",
+            (unsigned long long)new_gen);
+#endif
+
+    return new_gen;
+}
+
+uint64_t subinterp_pool_get_generation(void) {
+    return atomic_load(&g_import_generation);
 }
 
 #endif /* HAVE_SUBINTERPRETERS */

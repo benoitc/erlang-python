@@ -441,6 +441,9 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
         ctx->globals = NULL;
         ctx->locals = NULL;
 
+        /* Release usage count - if slot is stale and count drops to 0,
+         * the subinterpreter will be destroyed automatically */
+        subinterp_pool_release(ctx->pool_slot);
         subinterp_pool_free(ctx->pool_slot);
         ctx->pool_slot = -1;
         ctx->destroyed = true;
@@ -4157,9 +4160,13 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
         ctx->pool_slot = slot;
 
+        /* Acquire usage count for the pool slot */
+        subinterp_pool_acquire(slot);
+
         /* Get the pool slot for interpreter access */
         subinterp_slot_t *pool_slot = subinterp_pool_get(slot);
         if (pool_slot == NULL || !pool_slot->initialized) {
+            subinterp_pool_release(slot);  /* Release usage count */
             subinterp_pool_free(slot);
             close(ctx->callback_pipe[0]);
             close(ctx->callback_pipe[1]);
@@ -4183,6 +4190,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
             Py_XDECREF(ctx->module_cache);
             PyThreadState_Swap(saved);
             PyGILState_Release(gstate);
+            subinterp_pool_release(slot);  /* Release usage count */
             subinterp_pool_free(slot);
             close(ctx->callback_pipe[0]);
             close(ctx->callback_pipe[1]);
@@ -4313,7 +4321,11 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
         ctx->locals = NULL;
         ctx->module_cache = NULL;
 
-        /* Release the pool slot back to the pool */
+        /* Release the pool slot back to the pool.
+         * subinterp_pool_release decrements usage count and may destroy
+         * the subinterpreter if it's marked stale and count drops to 0.
+         * subinterp_pool_free marks the slot as available for new contexts. */
+        subinterp_pool_release(ctx->pool_slot);
         subinterp_pool_free(ctx->pool_slot);
         ctx->pool_slot = -1;
 
@@ -5072,6 +5084,31 @@ static ERL_NIF_TERM nif_interp_flush_imports(ErlNifEnv *env, int argc, const ERL
 
     py_context_release(&guard);
     return ATOM_OK;
+}
+
+/**
+ * @brief Flush import generation and mark all pool slots stale
+ *
+ * nif_subinterp_pool_flush_generation() -> {ok, NewGeneration}
+ *
+ * Increments the global import generation counter and marks all initialized
+ * pool slots as stale. When a stale slot's usage count drops to 0, the
+ * subinterpreter is automatically destroyed and the slot becomes available
+ * for a fresh subinterpreter.
+ *
+ * This enables flush_imports to work by replacing subinterpreters rather
+ * than trying to manipulate sys.modules directly (which can crash C extensions).
+ */
+static ERL_NIF_TERM nif_subinterp_pool_flush_generation(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+#ifdef HAVE_SUBINTERPRETERS
+    uint64_t new_gen = subinterp_pool_flush_generation();
+    return enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, new_gen));
+#else
+    return enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, 0));
+#endif
 }
 
 /**
@@ -7205,6 +7242,7 @@ static ErlNifFunc nif_funcs[] = {
     {"create_local_env", 1, nif_create_local_env, 0},
     {"interp_apply_imports", 2, nif_interp_apply_imports, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"interp_flush_imports", 2, nif_interp_flush_imports, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"subinterp_pool_flush_generation", 0, nif_subinterp_pool_flush_generation, 0},
     {"context_call_method", 4, nif_context_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_to_term", 1, nif_context_to_term, 0},
     {"context_interp_id", 1, nif_context_interp_id, 0},
