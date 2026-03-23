@@ -1503,7 +1503,10 @@ static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     }
 
     /* Submit to executor and wait */
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1535,7 +1538,10 @@ static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM
         enif_get_ulong(env, argv[3], &req.timeout_ms);
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1562,7 +1568,10 @@ static ERL_NIF_TERM nif_worker_exec(ErlNifEnv *env, int argc, const ERL_NIF_TERM
         return make_error(env, "invalid_code");
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1589,7 +1598,10 @@ static ERL_NIF_TERM nif_worker_next(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     req.env = env;
     req.gen_wrapper = gen_wrapper;
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1616,7 +1628,10 @@ static ERL_NIF_TERM nif_import_module(ErlNifEnv *env, int argc, const ERL_NIF_TE
         return make_error(env, "invalid_module");
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1648,7 +1663,10 @@ static ERL_NIF_TERM nif_get_attr(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return make_error(env, "invalid_attr");
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1686,7 +1704,10 @@ static ERL_NIF_TERM nif_memory_stats(ErlNifEnv *env, int argc, const ERL_NIF_TER
     req.type = PY_REQ_MEMORY_STATS;
     req.env = env;
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1763,7 +1784,10 @@ static ERL_NIF_TERM nif_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
         enif_get_int(env, argv[0], &req.gc_generation);
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
