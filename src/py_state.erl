@@ -100,6 +100,14 @@ register_callbacks() ->
     py_callback:register(state_clear, fun state_clear_callback/1),
     py_callback:register(state_incr, fun state_incr_callback/1),
     py_callback:register(state_decr, fun state_decr_callback/1),
+    %% Internal callback for stream_start to fetch stored values
+    py_callback:register(<<"_py_state_fetch">>, fun state_fetch_internal/1),
+    %% Check if stream is cancelled
+    py_callback:register(<<"_py_stream_cancelled">>, fun stream_cancelled_callback/1),
+    %% Send stream event to owner
+    py_callback:register(<<"_py_stream_send">>, fun stream_send_callback/1),
+    %% Clean up stream state
+    py_callback:register(<<"_py_stream_cleanup">>, fun stream_cleanup_callback/1),
     ok.
 
 %% @doc Fetch a value from the shared state.
@@ -206,3 +214,68 @@ state_decr_callback([Key]) ->
     decr(Key);
 state_decr_callback([Key, Amount]) ->
     decr(Key, Amount).
+
+%% @private Internal fetch for stream_start to pass args/pid/ref to Python
+state_fetch_internal([{Type, Key}]) ->
+    case fetch({Type, Key}) of
+        {ok, Value} ->
+            %% Clean up after fetching (one-time use)
+            remove({Type, Key}),
+            Value;
+        {error, not_found} ->
+            none
+    end;
+state_fetch_internal([Type, Key]) ->
+    state_fetch_internal([{Type, Key}]).
+
+%% @private Check if a stream has been cancelled
+stream_cancelled_callback([RefHash]) ->
+    %% Use binary key because Python strings become binaries
+    case fetch({<<"stream_cancelled_hash">>, RefHash}) of
+        {ok, true} ->
+            %% Clean up the cancellation flag
+            remove({<<"stream_cancelled_hash">>, RefHash}),
+            true;
+        {error, not_found} ->
+            false
+    end.
+
+%% @private Send a stream event to the owner process
+%% Called from Python as erlang.call('_py_stream_send', [RefHash, EventType, Value])
+%% EventType: 'data' | 'done' | 'error' (may come as binary from Python)
+stream_send_callback([RefHash, EventType, Value]) ->
+    %% Use binary keys because Python strings become binaries
+    case fetch({<<"stream_owner">>, RefHash}) of
+        {ok, Owner} ->
+            case fetch({<<"stream_ref">>, RefHash}) of
+                {ok, Ref} ->
+                    Event = case normalize_event_type(EventType) of
+                        done -> done;
+                        data -> {data, Value};
+                        error -> {error, Value};
+                        Other -> {error, {unknown_event, Other, Value}}
+                    end,
+                    Owner ! {py_stream, Ref, Event},
+                    ok;
+                {error, not_found} ->
+                    {error, ref_not_found}
+            end;
+        {error, not_found} ->
+            {error, owner_not_found}
+    end.
+
+%% @private Normalize event type from Python (may come as binary or atom)
+normalize_event_type(done) -> done;
+normalize_event_type(data) -> data;
+normalize_event_type(error) -> error;
+normalize_event_type(<<"done">>) -> done;
+normalize_event_type(<<"data">>) -> data;
+normalize_event_type(<<"error">>) -> error;
+normalize_event_type(Other) -> Other.
+
+%% @private Clean up stream state entries
+stream_cleanup_callback([RefHash]) ->
+    remove({<<"stream_owner">>, RefHash}),
+    remove({<<"stream_ref">>, RefHash}),
+    remove({<<"stream_args">>, RefHash}),
+    ok.

@@ -26,8 +26,8 @@
 %%% %% Send messages to Python
 %%% ok = py_channel:send(Ch, {request, self(), <<"data">>}),
 %%%
-%%% %% Python receives via channel.receive()
-%%% %% Python sends back via erlang.channel_reply(pid, term)
+%%% %% Python: ch = Channel(ref); msg = ch.receive()
+%%% %% Python: reply(pid, term)
 %%%
 %%% %% Close when done
 %%% py_channel:close(Ch).
