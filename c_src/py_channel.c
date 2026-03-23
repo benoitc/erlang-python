@@ -69,6 +69,9 @@ void channel_resource_dtor(ErlNifEnv *env, void *obj) {
         channel->queue = NULL;
     }
 
+    /* Wake any threads waiting on the condition before destroying */
+    pthread_cond_broadcast(&channel->data_cond);
+    pthread_cond_destroy(&channel->data_cond);
     pthread_mutex_destroy(&channel->mutex);
 }
 
@@ -91,8 +94,6 @@ py_channel_t *channel_alloc(size_t max_size) {
 
     channel->max_size = max_size;
     channel->current_size = 0;
-    channel->waiting = NULL;
-    channel->waiting_callback_id = 0;
     channel->waiter_loop = NULL;
     channel->waiter_callback_id = 0;
     channel->has_waiter = false;
@@ -102,6 +103,13 @@ py_channel_t *channel_alloc(size_t max_size) {
     channel->channel_id = atomic_fetch_add(&g_channel_id_counter, 1);
 
     if (pthread_mutex_init(&channel->mutex, NULL) != 0) {
+        enif_ioq_destroy(channel->queue);
+        enif_release_resource(channel);
+        return NULL;
+    }
+
+    if (pthread_cond_init(&channel->data_cond, NULL) != 0) {
+        pthread_mutex_destroy(&channel->mutex);
         enif_ioq_destroy(channel->queue);
         enif_release_resource(channel);
         return NULL;
@@ -141,9 +149,6 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
 
     channel->current_size += size;
 
-    /* Check if there's a waiting context to resume */
-    bool should_resume = (channel->waiting != NULL);
-
     /* Check if there's an async waiter to dispatch.
      * IMPORTANT: Clear waiter state BEFORE releasing mutex to avoid race condition.
      * With task_ready notification, the callback can fire before we re-acquire the mutex.
@@ -171,12 +176,10 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
         channel->has_sync_waiter = false;
     }
 
-    pthread_mutex_unlock(&channel->mutex);
+    /* Signal any threads waiting on the condition variable */
+    pthread_cond_signal(&channel->data_cond);
 
-    /* Resume happens outside the lock to avoid deadlocks */
-    if (should_resume) {
-        channel_resume_waiting(channel);
-    }
+    pthread_mutex_unlock(&channel->mutex);
 
     /* Dispatch async waiter via timer dispatch (same path as timers) */
     if (loop_to_wake != NULL) {
@@ -225,9 +228,6 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
 
     channel->current_size += msg_size;
 
-    /* Check if there's a waiting context to resume */
-    bool should_resume = (channel->waiting != NULL);
-
     /* Check if there's an async waiter to dispatch.
      * IMPORTANT: Clear waiter state BEFORE releasing mutex to avoid race condition.
      * With task_ready notification, the callback can fire before we re-acquire the mutex.
@@ -255,11 +255,10 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
         channel->has_sync_waiter = false;
     }
 
-    pthread_mutex_unlock(&channel->mutex);
+    /* Signal any threads waiting on the condition variable */
+    pthread_cond_signal(&channel->data_cond);
 
-    if (should_resume) {
-        channel_resume_waiting(channel);
-    }
+    pthread_mutex_unlock(&channel->mutex);
 
     /* Dispatch async waiter via timer dispatch (same path as timers) */
     if (loop_to_wake != NULL) {
@@ -326,10 +325,80 @@ int channel_try_receive(py_channel_t *channel, unsigned char **out_data, size_t 
     return 0;
 }
 
+int channel_receive_blocking(py_channel_t *channel, unsigned char **out_data,
+                             size_t *out_size, long timeout_ms) {
+    pthread_mutex_lock(&channel->mutex);
+
+    /* Calculate deadline for timed wait */
+    struct timespec deadline;
+    if (timeout_ms > 0) {
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += timeout_ms / 1000;
+        deadline.tv_nsec += (timeout_ms % 1000) * 1000000;
+        if (deadline.tv_nsec >= 1000000000) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000;
+        }
+    }
+
+    /* Wait for data or close */
+    while (enif_ioq_size(channel->queue) == 0 && !channel->closed) {
+        if (timeout_ms == 0) {
+            /* Non-blocking: return immediately if no data */
+            pthread_mutex_unlock(&channel->mutex);
+            return 1;  /* Empty/timeout */
+        } else if (timeout_ms < 0) {
+            /* Infinite wait */
+            pthread_cond_wait(&channel->data_cond, &channel->mutex);
+        } else {
+            /* Timed wait */
+            int rc = pthread_cond_timedwait(&channel->data_cond, &channel->mutex, &deadline);
+            if (rc == ETIMEDOUT) {
+                pthread_mutex_unlock(&channel->mutex);
+                return 1;  /* Timeout */
+            }
+        }
+    }
+
+    /* Check if closed with no data */
+    if (channel->closed && enif_ioq_size(channel->queue) == 0) {
+        pthread_mutex_unlock(&channel->mutex);
+        return -1;  /* Closed */
+    }
+
+    /* We have data - dequeue it */
+    SysIOVec *iov;
+    int iovcnt;
+    iov = enif_ioq_peek(channel->queue, &iovcnt);
+
+    if (iovcnt == 0 || iov == NULL || iov[0].iov_len == 0) {
+        pthread_mutex_unlock(&channel->mutex);
+        return 1;  /* Spurious wakeup, no data */
+    }
+
+    size_t msg_size = iov[0].iov_len;
+
+    /* Allocate output buffer */
+    *out_data = enif_alloc(msg_size);
+    if (*out_data == NULL) {
+        pthread_mutex_unlock(&channel->mutex);
+        return -1;  /* Allocation error */
+    }
+
+    /* Copy data and dequeue */
+    memcpy(*out_data, iov[0].iov_base, msg_size);
+    *out_size = msg_size;
+
+    enif_ioq_deq(channel->queue, msg_size, NULL);
+    channel->current_size -= msg_size;
+
+    pthread_mutex_unlock(&channel->mutex);
+    return 0;
+}
+
 void channel_close(py_channel_t *channel) {
     pthread_mutex_lock(&channel->mutex);
     channel->closed = true;
-    bool should_resume = (channel->waiting != NULL);
 
     /* Check if there's an async waiter to dispatch.
      * For close, we unconditionally clear the waiter since the channel
@@ -354,11 +423,10 @@ void channel_close(py_channel_t *channel) {
         channel->has_sync_waiter = false;
     }
 
-    pthread_mutex_unlock(&channel->mutex);
+    /* Wake all threads waiting on the condition variable */
+    pthread_cond_broadcast(&channel->data_cond);
 
-    if (should_resume) {
-        channel_resume_waiting(channel);
-    }
+    pthread_mutex_unlock(&channel->mutex);
 
     /* Dispatch async waiter to signal closure */
     if (loop_to_wake != NULL) {
@@ -375,13 +443,6 @@ void channel_close(py_channel_t *channel) {
             enif_free_env(msg_env);
         }
     }
-}
-
-void channel_resume_waiting(py_channel_t *channel) {
-    /* This function would trigger resume of the suspended context.
-     * For now, the actual resume logic is handled in the NIF receive function
-     * by checking if data is available before suspending. */
-    (void)channel;
 }
 
 int channel_init(ErlNifEnv *env) {

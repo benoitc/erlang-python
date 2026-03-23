@@ -211,13 +211,16 @@ int subinterp_pool_init(int size) {
     return 0;
 }
 
+#define POOL_ALLOC_MAX_RETRIES 100
+
 int subinterp_pool_alloc(void) {
     if (!atomic_load(&g_pool_initialized)) {
         return -1;
     }
 
-    /* Try to find and allocate a free slot using CAS */
-    while (1) {
+    /* Try to find and allocate a free slot using CAS with bounded retries */
+    int retries = 0;
+    while (retries < POOL_ALLOC_MAX_RETRIES) {
         uint64_t current = atomic_load(&g_pool_allocation);
 
         /* Find first free bit (0 bit) */
@@ -239,8 +242,16 @@ int subinterp_pool_alloc(void) {
         if (atomic_compare_exchange_weak(&g_pool_allocation, &current, new_val)) {
             return slot;
         }
-        /* CAS failed, retry */
+
+        /* CAS failed, back off briefly after initial fast retries */
+        retries++;
+        if (retries > 10) {
+            usleep(1);
+        }
     }
+
+    /* Too much contention, give up */
+    return -1;
 }
 
 void subinterp_pool_free(int slot) {

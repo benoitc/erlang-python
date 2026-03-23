@@ -1503,7 +1503,10 @@ static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     }
 
     /* Submit to executor and wait */
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1535,7 +1538,10 @@ static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM
         enif_get_ulong(env, argv[3], &req.timeout_ms);
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1562,7 +1568,10 @@ static ERL_NIF_TERM nif_worker_exec(ErlNifEnv *env, int argc, const ERL_NIF_TERM
         return make_error(env, "invalid_code");
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1589,7 +1598,10 @@ static ERL_NIF_TERM nif_worker_next(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     req.env = env;
     req.gen_wrapper = gen_wrapper;
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1616,7 +1628,10 @@ static ERL_NIF_TERM nif_import_module(ErlNifEnv *env, int argc, const ERL_NIF_TE
         return make_error(env, "invalid_module");
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1648,7 +1663,10 @@ static ERL_NIF_TERM nif_get_attr(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         return make_error(env, "invalid_attr");
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1686,7 +1704,10 @@ static ERL_NIF_TERM nif_memory_stats(ErlNifEnv *env, int argc, const ERL_NIF_TER
     req.type = PY_REQ_MEMORY_STATS;
     req.env = env;
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -1763,7 +1784,10 @@ static ERL_NIF_TERM nif_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
         enif_get_int(env, argv[0], &req.gc_generation);
     }
 
-    executor_enqueue(&req);
+    if (executor_enqueue(&req) != 0) {
+        request_cleanup(&req);
+        return make_error(env, "runtime_shutting_down");
+    }
     executor_wait(&req);
 
     ERL_NIF_TERM result = req.result;
@@ -4091,8 +4115,12 @@ static int owngil_context_init(py_context_t *ctx) {
 /**
  * @brief Shutdown OWN_GIL context and clean up resources
  *
+ * Uses a timeout to avoid hanging forever if the Python thread is stuck.
+ *
  * @param ctx Context to shutdown
  */
+#define OWNGIL_SHUTDOWN_TIMEOUT_SECS 30
+
 static void owngil_context_shutdown(py_context_t *ctx) {
     if (!ctx->uses_own_gil) {
         return;
@@ -4106,8 +4134,33 @@ static void owngil_context_shutdown(py_context_t *ctx) {
     pthread_cond_signal(&ctx->request_ready);
     pthread_mutex_unlock(&ctx->request_mutex);
 
-    /* Wait for thread to exit */
-    pthread_join(ctx->own_gil_thread, NULL);
+    /* Wait for thread to exit with timeout */
+#if defined(__linux__)
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_SHUTDOWN_TIMEOUT_SECS;
+    int rc = pthread_timedjoin_np(ctx->own_gil_thread, NULL, &deadline);
+    if (rc == ETIMEDOUT) {
+        fprintf(stderr, "OWN_GIL shutdown timeout after %d seconds, detaching thread\n",
+                OWNGIL_SHUTDOWN_TIMEOUT_SECS);
+        pthread_detach(ctx->own_gil_thread);
+    }
+#else
+    /* macOS/other: poll thread_running flag with timeout */
+    int wait_ms = 0;
+    while (atomic_load(&ctx->thread_running) &&
+           wait_ms < OWNGIL_SHUTDOWN_TIMEOUT_SECS * 1000) {
+        usleep(100000);  /* 100ms */
+        wait_ms += 100;
+    }
+    if (atomic_load(&ctx->thread_running)) {
+        fprintf(stderr, "OWN_GIL shutdown timeout after %d seconds, detaching thread\n",
+                OWNGIL_SHUTDOWN_TIMEOUT_SECS);
+        pthread_detach(ctx->own_gil_thread);
+    } else {
+        pthread_join(ctx->own_gil_thread, NULL);
+    }
+#endif
 
     /* Clean up resources */
     if (ctx->shared_env != NULL) {

@@ -86,11 +86,8 @@ typedef struct {
     /** @brief Mutex for thread-safe queue access */
     pthread_mutex_t mutex;
 
-    /** @brief Suspended Python context waiting on this channel */
-    struct suspended_context_state *waiting;
-
-    /** @brief Callback ID for the waiting context */
-    uint64_t waiting_callback_id;
+    /** @brief Condition variable for blocking receives */
+    pthread_cond_t data_cond;
 
     /** @brief Event loop for async waiter (ref-counted via enif_keep_resource) */
     struct erlang_event_loop *waiter_loop;
@@ -175,6 +172,21 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin);
 int channel_try_receive(py_channel_t *channel, unsigned char **out_data, size_t *out_size);
 
 /**
+ * @brief Receive a message from a channel (blocking with timeout)
+ *
+ * Blocks on a condition variable until data is available, channel is closed,
+ * or timeout expires. This is more efficient than polling.
+ *
+ * @param channel Channel to receive from
+ * @param out_data Output: message data (caller must free with enif_free)
+ * @param out_size Output: message size
+ * @param timeout_ms Timeout in milliseconds (-1 for infinite, 0 for non-blocking)
+ * @return 0 on success, 1 if timeout, -1 if closed
+ */
+int channel_receive_blocking(py_channel_t *channel, unsigned char **out_data,
+                             size_t *out_size, long timeout_ms);
+
+/**
  * @brief Close a channel
  *
  * Closes the channel and wakes any waiting receivers with StopIteration.
@@ -182,15 +194,6 @@ int channel_try_receive(py_channel_t *channel, unsigned char **out_data, size_t 
  * @param channel Channel to close
  */
 void channel_close(py_channel_t *channel);
-
-/**
- * @brief Resume a waiting Python context with channel data
- *
- * Called when data becomes available for a suspended receive.
- *
- * @param channel Channel with waiting context
- */
-void channel_resume_waiting(py_channel_t *channel);
 
 /* ============================================================================
  * Channel NIF Declarations
