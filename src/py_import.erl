@@ -43,7 +43,6 @@
     is_imported/2,
     all_imports/0,
     clear_imports/0,
-    import_stats/0,
     import_list/0,
     %% Path registry
     add_path/1,
@@ -228,24 +227,6 @@ clear_imports() ->
         _ -> ets:delete_all_objects(?IMPORT_REGISTRY)
     end,
     ok.
-
-%% @doc Get import registry statistics.
-%%
-%% Returns a map with the count of registered imports.
-%%
-%% Example:
-%% ```
-%% {ok, #{count => 5}} = py_import:import_stats().
-%% '''
-%%
-%% @returns {ok, Stats} where Stats is a map with registry metrics
--spec import_stats() -> {ok, map()} | {error, term()}.
-import_stats() ->
-    Count = case ets:info(?IMPORT_REGISTRY) of
-        undefined -> 0;
-        _ -> ets:info(?IMPORT_REGISTRY, size)
-    end,
-    {ok, #{count => Count}}.
 
 %% @doc List all registered imports.
 %%

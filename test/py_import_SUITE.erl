@@ -22,7 +22,6 @@
     import_nonexistent_module_test/1,
     import_nonexistent_function_test/1,
     import_idempotent_test/1,
-    import_stats_test/1,
     import_list_test/1,
     import_speeds_up_calls_test/1,
     import_multiprocess_test/1,
@@ -55,7 +54,6 @@ groups() ->
         import_nonexistent_module_test,
         import_nonexistent_function_test,
         import_idempotent_test,
-        import_stats_test,
         import_list_test,
         import_speeds_up_calls_test,
         import_multiprocess_test,
@@ -186,34 +184,6 @@ import_idempotent_test(_Config) ->
     %% Still works
     {ok, _} = py:call(json, dumps, [[1]]).
 
-%% @doc Test import stats
-import_stats_test(_Config) ->
-    %% Start fresh
-    ok = py_import:clear_imports(),
-
-    %% Check empty stats
-    {ok, Stats0} = py_import:import_stats(),
-    ?assertEqual(0, maps:get(count, Stats0, 0)),
-
-    %% Import some modules
-    ok = py_import:ensure_imported(json),
-    ok = py_import:ensure_imported(math),
-    ok = py_import:ensure_imported(os),
-
-    %% Check stats
-    {ok, Stats1} = py_import:import_stats(),
-    Count1 = maps:get(count, Stats1, 0),
-    ?assertEqual(3, Count1),
-
-    %% Import functions
-    ok = py_import:ensure_imported(json, dumps),
-    ok = py_import:ensure_imported(json, loads),
-
-    %% Check updated stats (3 modules + 2 functions = 5)
-    {ok, Stats2} = py_import:import_stats(),
-    Count2 = maps:get(count, Stats2, 0),
-    ?assertEqual(5, Count2).
-
 %% @doc Test listing imports
 import_list_test(_Config) ->
     %% Start fresh
@@ -323,11 +293,10 @@ import_multiprocess_test(_Config) ->
     ?assertEqual([done, done, done], Results),
 
     %% Now verify the GLOBAL registry has all entries
-    {ok, Stats} = py_import:import_stats(),
     {ok, List} = py_import:import_list(),
 
     %% Total entries: json, json.dumps, math, math.sqrt, math.floor, os, os.getcwd, string = 8
-    ?assertEqual(8, maps:get(count, Stats)),
+    ?assertEqual(8, length(py_import:all_imports())),
 
     %% Verify all modules are in the shared registry
     ?assert(maps:is_key(<<"json">>, List)),
@@ -383,8 +352,7 @@ import_concurrent_stress_test(_Config) ->
     end, Results),
 
     %% Verify the global registry has all modules
-    {ok, Stats} = py_import:import_stats(),
-    Count = maps:get(count, Stats),
+    Count = length(py_import:all_imports()),
     %% Should have all 10 modules (some may have been imported multiple times but ETS dedupes)
     ?assertEqual(10, Count),
 
