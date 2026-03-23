@@ -639,40 +639,44 @@ _test_textwrap_in_sys = 'textwrap' in sys.modules
 %%
 %% The ETS registry tracks what should be imported, and sys.modules
 %% contains the actual imported modules.
+%%
+%% Note: Avoid modules that import C extensions with global state issues
+%% (e.g., statistics imports _decimal). Use json which has proper
+%% subinterpreter support. See https://github.com/python/cpython/issues/106078
 registry_import_in_sys_modules_test(_Config) ->
     %% Clear registry
     ok = py_import:clear_imports(),
 
     %% Add to registry and import
     ok = py_import:ensure_imported(fractions),
-    ok = py_import:ensure_imported(statistics),
+    ok = py_import:ensure_imported(json),
 
     %% Verify ETS registry has the entries
     Registry = py_import:all_imports(),
     ?assert(lists:member({<<"fractions">>, all}, Registry)),
-    ?assert(lists:member({<<"statistics">>, all}, Registry)),
+    ?assert(lists:member({<<"json">>, all}, Registry)),
 
     %% Use the modules to ensure they're imported
     {ok, _} = py:call(fractions, 'Fraction', [1, 3]),
-    {ok, _} = py:call(statistics, mean, [[1, 2, 3, 4, 5]]),
+    {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
 
     %% Verify both are in sys.modules by checking from Python
     ok = py:exec(<<"
 import sys
 _fractions_in_sys = 'fractions' in sys.modules
-_statistics_in_sys = 'statistics' in sys.modules
+_json_in_sys = 'json' in sys.modules
 _sys_modules_keys = list(sys.modules.keys())
 ">>),
 
     {ok, FractionsInSys} = py:eval(<<"_fractions_in_sys">>),
-    {ok, StatsInSys} = py:eval(<<"_statistics_in_sys">>),
+    {ok, JsonInSys} = py:eval(<<"_json_in_sys">>),
     ?assertEqual(true, FractionsInSys),
-    ?assertEqual(true, StatsInSys),
+    ?assertEqual(true, JsonInSys),
 
     %% Get the list of modules in sys.modules that match our registry
     {ok, SysModulesList} = py:eval(<<"_sys_modules_keys">>),
     ?assert(lists:member(<<"fractions">>, SysModulesList)),
-    ?assert(lists:member(<<"statistics">>, SysModulesList)),
+    ?assert(lists:member(<<"json">>, SysModulesList)),
 
     ct:pal("ETS registry and sys.modules are in sync").
 

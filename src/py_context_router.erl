@@ -184,11 +184,23 @@ get_context(N) when is_integer(N), N > 0 ->
     persistent_term:get(?POOL_CONTEXT_KEY(?DEFAULT_POOL, N));
 get_context(Pool) when is_atom(Pool) ->
     %% Get context from named pool
+    %% Auto-bind on first access to ensure consistent context for a process
     case get(?BOUND_CONTEXT_KEY(Pool)) of
         undefined ->
-            select_by_scheduler(Pool);
+            Ctx = select_by_scheduler(Pool),
+            put(?BOUND_CONTEXT_KEY(Pool), Ctx),
+            Ctx;
         Ctx ->
-            Ctx
+            %% Verify bound context is still alive
+            case is_process_alive(Ctx) of
+                true ->
+                    Ctx;
+                false ->
+                    %% Re-bind to a new context
+                    NewCtx = select_by_scheduler(Pool),
+                    put(?BOUND_CONTEXT_KEY(Pool), NewCtx),
+                    NewCtx
+            end
     end.
 
 %% @doc Bind a context to the current process for the default pool.
