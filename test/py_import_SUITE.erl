@@ -40,7 +40,9 @@
     %% sys.modules verification tests
     import_in_sys_modules_test/1,
     registry_import_in_sys_modules_test/1,
-    context_import_in_sys_modules_test/1
+    context_import_in_sys_modules_test/1,
+    %% Path registry tests
+    add_path_test/1
 ]).
 
 all() ->
@@ -72,7 +74,9 @@ groups() ->
         %% sys.modules verification tests
         import_in_sys_modules_test,
         registry_import_in_sys_modules_test,
-        context_import_in_sys_modules_test
+        context_import_in_sys_modules_test,
+        %% Path registry tests
+        add_path_test
     ]}].
 
 init_per_suite(Config) ->
@@ -705,3 +709,55 @@ _sys_keys = list(sys.modules.keys())
     py_context:destroy(Ctx),
 
     ct:pal("Context imports correctly populate sys.modules").
+
+%% ============================================================================
+%% Path Registry Tests
+%% ============================================================================
+
+%% @doc Test that add_path registers a path and makes modules importable
+%%
+%% This test creates a custom module in priv_dir, adds its path via add_path,
+%% then verifies the module can be imported and called.
+add_path_test(Config) ->
+    %% Clear any existing paths
+    ok = py_import:clear_paths(),
+
+    %% Create test module in priv_dir (guaranteed writable during tests)
+    PrivDir = ?config(priv_dir, Config),
+    ModuleDir = filename:join(PrivDir, "custom_modules"),
+    ok = filelib:ensure_dir(filename:join(ModuleDir, "dummy")),
+
+    %% Write a simple Python module
+    ModulePath = filename:join(ModuleDir, "sample_module.py"),
+    ModuleContent = <<"def greet(name):\n"
+                      "    return f\"Hello, {name}!\"\n"
+                      "\n"
+                      "def add(a, b):\n"
+                      "    return a + b\n"
+                      "\n"
+                      "VERSION = \"1.0.0\"\n">>,
+    ok = file:write_file(ModulePath, ModuleContent),
+
+    %% Add path
+    ok = py_import:add_path(ModuleDir),
+
+    %% Verify path is registered
+    ?assert(py_import:is_path_added(ModuleDir)),
+    Paths = py_import:all_paths(),
+    ?assertEqual(1, length(Paths)),
+
+    %% Create a new context to apply paths
+    {ok, Ctx} = py_context:new(#{mode => auto}),
+
+    %% Import and call the sample module
+    {ok, Greeting} = py_context:call(Ctx, sample_module, greet, [<<"World">>], #{}),
+    ?assertEqual(<<"Hello, World!">>, Greeting),
+
+    {ok, Sum} = py_context:call(Ctx, sample_module, add, [2, 3], #{}),
+    ?assertEqual(5, Sum),
+
+    %% Clean up
+    py_context:destroy(Ctx),
+    ok = py_import:clear_paths(),
+
+    ct:pal("add_path successfully registers paths and enables module imports").
