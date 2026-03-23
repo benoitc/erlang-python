@@ -42,7 +42,10 @@
     registry_import_in_sys_modules_test/1,
     context_import_in_sys_modules_test/1,
     %% Path registry tests
-    add_path_test/1
+    add_path_test/1,
+    %% Immediate application tests
+    import_applies_to_running_interpreter_test/1,
+    path_applies_to_running_interpreter_test/1
 ]).
 
 all() ->
@@ -76,7 +79,10 @@ groups() ->
         registry_import_in_sys_modules_test,
         context_import_in_sys_modules_test,
         %% Path registry tests
-        add_path_test
+        add_path_test,
+        %% Immediate application tests
+        import_applies_to_running_interpreter_test,
+        path_applies_to_running_interpreter_test
     ]}].
 
 init_per_suite(Config) ->
@@ -765,3 +771,77 @@ add_path_test(Config) ->
     ok = py_import:clear_paths(),
 
     ct:pal("add_path successfully registers paths and enables module imports").
+
+%% ============================================================================
+%% Immediate Application Tests
+%% ============================================================================
+
+%% @doc Test that ensure_imported applies immediately to running interpreters
+%%
+%% This verifies that calling ensure_imported on an already-running interpreter
+%% makes the module available without needing to create a new context.
+import_applies_to_running_interpreter_test(_Config) ->
+    %% Clear registry
+    ok = py_import:clear_imports(),
+
+    %% Verify 'zipfile' is NOT in sys.modules yet
+    ok = py:exec(<<"import sys; _zipfile_before = 'zipfile' in sys.modules">>),
+    {ok, BeforeImport} = py:eval(<<"_zipfile_before">>),
+    ?assertEqual(false, BeforeImport),
+
+    %% Now call ensure_imported - should apply immediately
+    ok = py_import:ensure_imported(zipfile),
+
+    %% Verify 'zipfile' IS now in sys.modules (without creating new context)
+    ok = py:exec(<<"import sys; _zipfile_after = 'zipfile' in sys.modules">>),
+    {ok, AfterImport} = py:eval(<<"_zipfile_after">>),
+    ?assertEqual(true, AfterImport),
+
+    %% Verify we can call functions from zipfile
+    {ok, _} = py:call(zipfile, 'is_zipfile', [<<"/nonexistent">>]),
+
+    ct:pal("ensure_imported applies immediately to running interpreter").
+
+%% @doc Test that add_path applies immediately to running interpreters
+%%
+%% This verifies that calling add_path on an already-running interpreter
+%% makes the path available in sys.path without needing to create a new context.
+path_applies_to_running_interpreter_test(Config) ->
+    %% Clear paths
+    ok = py_import:clear_paths(),
+
+    %% Create test module in priv_dir
+    PrivDir = ?config(priv_dir, Config),
+    ModuleDir = filename:join(PrivDir, "immediate_path_test"),
+    ok = filelib:ensure_dir(filename:join(ModuleDir, "dummy")),
+
+    %% Write a simple Python module
+    ModulePath = filename:join(ModuleDir, "immediate_test_mod.py"),
+    ModuleContent = <<"IMMEDIATE_TEST_VALUE = 42\n">>,
+    ok = file:write_file(ModulePath, ModuleContent),
+
+    ModuleDirBin = list_to_binary(ModuleDir),
+
+    %% Verify path is NOT in sys.path yet
+    CheckCode = <<"import sys; _path_before = '", ModuleDirBin/binary, "' in sys.path">>,
+    ok = py:exec(CheckCode),
+    {ok, BeforePath} = py:eval(<<"_path_before">>),
+    ?assertEqual(false, BeforePath),
+
+    %% Now call add_path - should apply immediately
+    ok = py_import:add_path(ModuleDir),
+
+    %% Verify path IS now in sys.path (without creating new context)
+    CheckAfterCode = <<"import sys; _path_after = '", ModuleDirBin/binary, "' in sys.path">>,
+    ok = py:exec(CheckAfterCode),
+    {ok, AfterPath} = py:eval(<<"_path_after">>),
+    ?assertEqual(true, AfterPath),
+
+    %% Verify we can import and use the module
+    {ok, Value} = py:eval(<<"__import__('immediate_test_mod').IMMEDIATE_TEST_VALUE">>),
+    ?assertEqual(42, Value),
+
+    %% Clean up
+    ok = py_import:clear_paths(),
+
+    ct:pal("add_path applies immediately to running interpreter").

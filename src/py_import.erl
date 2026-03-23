@@ -15,17 +15,17 @@
 %%% @doc Import and path registry for Python interpreters.
 %%%
 %%% This module manages the global import and path registries that are
-%%% applied to all Python interpreters. When new interpreters are created,
-%%% they automatically get all registered imports and paths applied.
+%%% applied to all Python interpreters. Imports and paths are applied
+%%% immediately to all running interpreters and stored for new interpreters.
 %%%
 %%% == Examples ==
 %%%
 %%% ```
-%%% %% Register modules for import in all interpreters
+%%% %% Register modules for import in all interpreters (immediate + future)
 %%% ok = py_import:ensure_imported(json).
 %%% ok = py_import:ensure_imported(math, sqrt).
 %%%
-%%% %% Add paths to sys.path in all interpreters
+%%% %% Add paths to sys.path in all interpreters (immediate + future)
 %%% ok = py_import:add_path("/path/to/my/modules").
 %%%
 %%% %% Check registry contents
@@ -99,16 +99,15 @@ init() ->
 
 %% @doc Register a module for import in all interpreters.
 %%
-%% Adds the module to the global import registry. When new interpreters
-%% are created, they will automatically import all registered modules.
-%% The module will be imported lazily when first used.
+%% Imports the module immediately in all running interpreters and adds it
+%% to the registry for future interpreters.
 %%
 %% The `__main__' module is never cached.
 %%
 %% Example:
 %% ```
 %% ok = py_import:ensure_imported(json),
-%% {ok, Result} = py:call(json, dumps, [Data]).  %% Module imported on first use
+%% {ok, Result} = py:call(json, dumps, [Data]).
 %% '''
 %%
 %% @param Module Python module name
@@ -116,31 +115,26 @@ init() ->
 -spec ensure_imported(py_module()) -> ok | {error, term()}.
 ensure_imported(Module) ->
     ModuleBin = ensure_binary(Module),
-    %% Reject __main__
     case ModuleBin of
         <<"__main__">> ->
             {error, main_not_cacheable};
         _ ->
-            %% Add to global registry - module will be imported lazily
-            case ets:info(?IMPORT_REGISTRY) of
-                undefined -> ok;
-                _ -> ets:insert(?IMPORT_REGISTRY, {ModuleBin, all})
-            end,
+            ets:insert(?IMPORT_REGISTRY, {ModuleBin, all}),
+            apply_import_to_interpreters(ModuleBin),
             ok
     end.
 
 %% @doc Register a module/function for import in all interpreters.
 %%
-%% Adds the module/function to the global import registry. When new
-%% interpreters are created, they will automatically import the module.
-%% The module will be imported lazily when first used.
+%% Imports the module immediately in all running interpreters and adds it
+%% to the registry for future interpreters.
 %%
 %% The `__main__' module is never cached.
 %%
 %% Example:
 %% ```
 %% ok = py_import:ensure_imported(json, dumps),
-%% {ok, Result} = py:call(json, dumps, [Data]).  %% Module imported on first use
+%% {ok, Result} = py:call(json, dumps, [Data]).
 %% '''
 %%
 %% @param Module Python module name
@@ -150,16 +144,12 @@ ensure_imported(Module) ->
 ensure_imported(Module, Func) ->
     ModuleBin = ensure_binary(Module),
     FuncBin = ensure_binary(Func),
-    %% Reject __main__
     case ModuleBin of
         <<"__main__">> ->
             {error, main_not_cacheable};
         _ ->
-            %% Add to global registry - module will be imported lazily
-            case ets:info(?IMPORT_REGISTRY) of
-                undefined -> ok;
-                _ -> ets:insert(?IMPORT_REGISTRY, {ModuleBin, FuncBin})
-            end,
+            ets:insert(?IMPORT_REGISTRY, {ModuleBin, FuncBin}),
+            apply_import_to_interpreters(ModuleBin),
             ok
     end.
 
@@ -268,9 +258,8 @@ import_list() ->
 
 %% @doc Add a path to sys.path in all interpreters.
 %%
-%% Adds the path to the global path registry. When new interpreters
-%% are created, they will automatically have this path in sys.path.
-%% The path is inserted at the beginning of sys.path to take precedence.
+%% Adds the path immediately to sys.path in all running interpreters
+%% (contexts and event loops) and stores it for future interpreters.
 %%
 %% Example:
 %% ```
@@ -283,13 +272,9 @@ import_list() ->
 -spec add_path(string() | binary() | atom()) -> ok.
 add_path(Path) ->
     PathBin = ensure_binary(Path),
-    case ets:info(?PATH_REGISTRY) of
-        undefined -> ok;
-        _ ->
-            %% Use monotonic time as key to preserve insertion order
-            Key = erlang:monotonic_time(),
-            ets:insert(?PATH_REGISTRY, {Key, PathBin})
-    end,
+    Key = erlang:monotonic_time(),
+    ets:insert(?PATH_REGISTRY, {Key, PathBin}),
+    apply_path_to_interpreters(PathBin),
     ok.
 
 %% @doc Add multiple paths to sys.path in all interpreters.
@@ -367,3 +352,75 @@ is_path_added(Path) ->
 %% @private
 ensure_binary(S) ->
     py_util:to_binary(S).
+
+%% @private Apply import to all running interpreters (contexts + event loops)
+apply_import_to_interpreters(ModuleBin) ->
+    Imports = [{ModuleBin, all}],
+    %% Apply to all contexts
+    lists:foreach(
+        fun(Ctx) ->
+            try
+                Ref = py_context:get_nif_ref(Ctx),
+                py_nif:interp_apply_imports(Ref, Imports)
+            catch _:_ -> ok
+            end
+        end,
+        get_all_contexts()
+    ),
+    %% Apply to main event loop
+    case py_event_loop:get_loop() of
+        {ok, LoopRef} ->
+            catch py_nif:interp_apply_imports(LoopRef, Imports);
+        _ -> ok
+    end,
+    %% Apply to all pool event loops
+    case py_event_loop_pool:get_all_loops() of
+        {ok, Loops} ->
+            lists:foreach(
+                fun({LoopRef, _WorkerPid}) ->
+                    catch py_nif:interp_apply_imports(LoopRef, Imports)
+                end,
+                Loops
+            );
+        _ -> ok
+    end,
+    ok.
+
+%% @private Apply path to all running interpreters (contexts + event loops)
+apply_path_to_interpreters(PathBin) ->
+    Paths = [PathBin],
+    %% Apply to all contexts
+    lists:foreach(
+        fun(Ctx) ->
+            try
+                Ref = py_context:get_nif_ref(Ctx),
+                py_nif:interp_apply_paths(Ref, Paths)
+            catch _:_ -> ok
+            end
+        end,
+        get_all_contexts()
+    ),
+    %% Apply to main event loop
+    case py_event_loop:get_loop() of
+        {ok, LoopRef} ->
+            catch py_nif:interp_apply_paths(LoopRef, Paths);
+        _ -> ok
+    end,
+    %% Apply to all pool event loops
+    case py_event_loop_pool:get_all_loops() of
+        {ok, Loops} ->
+            lists:foreach(
+                fun({LoopRef, _WorkerPid}) ->
+                    catch py_nif:interp_apply_paths(LoopRef, Paths)
+                end,
+                Loops
+            );
+        _ -> ok
+    end,
+    ok.
+
+%% @private Get all context pids from all pools
+get_all_contexts() ->
+    DefaultCtxs = try py_context_router:contexts() catch _:_ -> [] end,
+    %% Could add other pools here if needed
+    DefaultCtxs.
