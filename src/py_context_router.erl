@@ -76,8 +76,6 @@
     start_pool/3,
     stop_pool/1,
     pool_started/1,
-    %% Import cache management
-    flush_all_imports/1,
     %% Pool registration (route module/func to specific pools)
     register_pool/2,
     register_pool/3,
@@ -380,38 +378,6 @@ pool_started(Pool) when is_atom(Pool) ->
                 _ -> false
             end
     end.
-
-%% @doc Flush import caches from all contexts in all pools.
-%%
-%% Iterates through all pools (default and registered) and removes
-%% specified modules from sys.modules in each context's interpreter.
-%%
-%% @param Modules List of module names (binaries) to remove
-%% @returns ok
--spec flush_all_imports([binary()]) -> ok.
-flush_all_imports(Modules) ->
-    %% Get all pool names from the registry
-    RegisteredPools = case persistent_term:get(?POOL_REGISTRY_KEY, undefined) of
-        undefined -> [];
-        Registry when is_map(Registry) ->
-            %% Extract unique pool names from registry values
-            lists:usort(maps:values(Registry))
-    end,
-    %% Always include default pool, plus any registered pools
-    AllPools = lists:usort([default | RegisteredPools]),
-    %% Flush each pool
-    lists:foreach(fun(Pool) ->
-        case pool_started(Pool) of
-            true ->
-                Ctxs = contexts(Pool),
-                lists:foreach(fun(Ctx) ->
-                    catch py_context:flush_imports(Ctx, Modules)
-                end, Ctxs);
-            false ->
-                ok
-        end
-    end, AllPools),
-    ok.
 
 %% ============================================================================
 %% Pool Registration (route module/func to specific pools)
