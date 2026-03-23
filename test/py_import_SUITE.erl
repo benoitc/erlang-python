@@ -1,4 +1,4 @@
-%%% @doc Test suite for py:import/1,2
+%%% @doc Test suite for py:ensure_imported/1,2
 -module(py_import_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -104,40 +104,40 @@ end_per_testcase(_TestCase, _Config) ->
 %% @doc Test importing a module
 import_module_test(_Config) ->
     %% Import json module
-    ok = py:import(json),
+    ok = py:ensure_imported(json),
 
     %% Verify it works by calling a function
     {ok, Result} = py:call(json, dumps, [[1, 2, 3]]),
     ?assertEqual(<<"[1, 2, 3]">>, Result),
 
     %% Import with binary name
-    ok = py:import(<<"math">>),
+    ok = py:ensure_imported(<<"math">>),
     {ok, Pi} = py:call(math, sqrt, [4.0]),
     ?assertEqual(2.0, Pi).
 
 %% @doc Test importing a specific function
 import_function_test(_Config) ->
     %% Import json.dumps
-    ok = py:import(json, dumps),
+    ok = py:ensure_imported(json, dumps),
 
     %% Verify it works
     {ok, Result} = py:call(json, dumps, [#{a => 1}]),
     ?assert(is_binary(Result)),
 
     %% Import with binary names
-    ok = py:import(<<"os">>, <<"getcwd">>),
+    ok = py:ensure_imported(<<"os">>, <<"getcwd">>),
     {ok, Cwd} = py:call(os, getcwd, []),
     ?assert(is_binary(Cwd)).
 
 %% @doc Test that __main__ cannot be imported
 import_main_rejected_test(_Config) ->
     %% __main__ should be rejected
-    {error, main_not_cacheable} = py:import('__main__'),
-    {error, main_not_cacheable} = py:import(<<"__main__">>),
+    {error, main_not_cacheable} = py:ensure_imported('__main__'),
+    {error, main_not_cacheable} = py:ensure_imported(<<"__main__">>),
 
     %% Also for function import
-    {error, main_not_cacheable} = py:import('__main__', some_func),
-    {error, main_not_cacheable} = py:import(<<"__main__">>, <<"some_func">>).
+    {error, main_not_cacheable} = py:ensure_imported('__main__', some_func),
+    {error, main_not_cacheable} = py:ensure_imported(<<"__main__">>, <<"some_func">>).
 
 %% @doc Test importing nonexistent module - registry accepts it but call fails
 %%
@@ -145,7 +145,7 @@ import_main_rejected_test(_Config) ->
 %% when trying to use the module.
 import_nonexistent_module_test(_Config) ->
     %% Import succeeds (just adds to registry)
-    ok = py:import(nonexistent_module_xyz),
+    ok = py:ensure_imported(nonexistent_module_xyz),
 
     %% But trying to use it fails
     %% Error format is {error, {ExceptionType, Message}} or {error, atom()}
@@ -162,7 +162,7 @@ import_nonexistent_module_test(_Config) ->
 import_nonexistent_function_test(_Config) ->
     %% Module exists but function doesn't - import still succeeds
     %% because we're importing the MODULE, not the function
-    ok = py:import(json, nonexistent_function_xyz),
+    ok = py:ensure_imported(json, nonexistent_function_xyz),
 
     %% The module is imported and usable
     {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
@@ -175,13 +175,13 @@ import_nonexistent_function_test(_Config) ->
 %% @doc Test that importing same module/function twice is idempotent
 import_idempotent_test(_Config) ->
     %% Import multiple times - should all succeed
-    ok = py:import(json),
-    ok = py:import(json),
-    ok = py:import(json),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(json),
 
-    ok = py:import(json, dumps),
-    ok = py:import(json, dumps),
-    ok = py:import(json, dumps),
+    ok = py:ensure_imported(json, dumps),
+    ok = py:ensure_imported(json, dumps),
+    ok = py:ensure_imported(json, dumps),
 
     %% Still works
     {ok, _} = py:call(json, dumps, [[1]]).
@@ -196,9 +196,9 @@ import_stats_test(_Config) ->
     ?assertEqual(0, maps:get(count, Stats0, 0)),
 
     %% Import some modules
-    ok = py:import(json),
-    ok = py:import(math),
-    ok = py:import(os),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(math),
+    ok = py:ensure_imported(os),
 
     %% Check stats
     {ok, Stats1} = py:import_stats(),
@@ -206,8 +206,8 @@ import_stats_test(_Config) ->
     ?assertEqual(3, Count1),
 
     %% Import functions
-    ok = py:import(json, dumps),
-    ok = py:import(json, loads),
+    ok = py:ensure_imported(json, dumps),
+    ok = py:ensure_imported(json, loads),
 
     %% Check updated stats (3 modules + 2 functions = 5)
     {ok, Stats2} = py:import_stats(),
@@ -224,10 +224,10 @@ import_list_test(_Config) ->
     ?assertEqual(#{}, Map0),
 
     %% Import some modules and functions
-    ok = py:import(json),
-    ok = py:import(math),
-    ok = py:import(json, dumps),
-    ok = py:import(json, loads),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(math),
+    ok = py:ensure_imported(json, dumps),
+    ok = py:ensure_imported(json, loads),
 
     %% Get map
     {ok, Map1} = py:import_list(),
@@ -260,8 +260,8 @@ import_speeds_up_calls_test(_Config) ->
     end),
 
     %% Pre-import the module and function
-    ok = py:import(json),
-    ok = py:import(json, dumps),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(json, dumps),
 
     %% Time a warm call (module already imported)
     {WarmTime, {ok, _}} = timer:tc(fun() ->
@@ -287,26 +287,26 @@ import_multiprocess_test(_Config) ->
     %% Spawn 3 processes, each importing different modules
     %% They all contribute to the same global registry
     Pid1 = spawn_link(fun() ->
-        ok = py:import(json),
-        ok = py:import(json, dumps),
+        ok = py:ensure_imported(json),
+        ok = py:ensure_imported(json, dumps),
         %% Verify we can use the import
         {ok, _} = py:call(json, dumps, [[1,2,3]]),
         Parent ! {self(), done}
     end),
 
     Pid2 = spawn_link(fun() ->
-        ok = py:import(math),
-        ok = py:import(math, sqrt),
-        ok = py:import(math, floor),
+        ok = py:ensure_imported(math),
+        ok = py:ensure_imported(math, sqrt),
+        ok = py:ensure_imported(math, floor),
         %% Verify we can use the import
         {ok, _} = py:call(math, sqrt, [16.0]),
         Parent ! {self(), done}
     end),
 
     Pid3 = spawn_link(fun() ->
-        ok = py:import(os),
-        ok = py:import(os, getcwd),
-        ok = py:import(string),
+        ok = py:ensure_imported(os),
+        ok = py:ensure_imported(os, getcwd),
+        ok = py:ensure_imported(string),
         %% Verify we can use the import
         {ok, _} = py:call(os, getcwd, []),
         Parent ! {self(), done}
@@ -359,7 +359,7 @@ import_concurrent_stress_test(_Config) ->
     Pids = [spawn_link(fun() ->
         %% Each process imports a random subset of modules
         MyModules = lists:sublist(Modules, 1 + (N rem length(Modules))),
-        Results = [{M, py:import(M)} || M <- MyModules],
+        Results = [{M, py:ensure_imported(M)} || M <- MyModules],
 
         %% All imports should succeed
         AllOk = lists:all(fun({_, R}) -> R =:= ok end, Results),
@@ -400,20 +400,20 @@ import_registry_test(_Config) ->
     ok = py:clear_imports(),
 
     %% Verify registry is empty
-    [] = py:get_imports(),
+    [] = py:all_imports(),
 
     %% Import a module
-    ok = py:import(json),
+    ok = py:ensure_imported(json),
 
     %% Verify it's in the registry
-    Imports1 = py:get_imports(),
+    Imports1 = py:all_imports(),
     ?assert(lists:member({<<"json">>, all}, Imports1)),
 
     %% Import a function
-    ok = py:import(math, sqrt),
+    ok = py:ensure_imported(math, sqrt),
 
     %% Verify both are in the registry
-    Imports2 = py:get_imports(),
+    Imports2 = py:all_imports(),
     ?assert(lists:member({<<"json">>, all}, Imports2)),
     ?assert(lists:member({<<"math">>, <<"sqrt">>}, Imports2)),
 
@@ -423,7 +423,7 @@ import_registry_test(_Config) ->
 import_applied_to_new_context_test(_Config) ->
     %% Clear and add an import
     ok = py:clear_imports(),
-    ok = py:import(json),
+    ok = py:ensure_imported(json),
 
     %% Create a new context
     {ok, Ctx} = py_context:new(#{mode => auto}),
@@ -440,30 +440,30 @@ import_applied_to_new_context_test(_Config) ->
 %% @doc Test clearing all imports from the registry
 clear_imports_test(_Config) ->
     %% Add some imports
-    ok = py:import(json),
-    ok = py:import(math),
-    ok = py:import(os),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(math),
+    ok = py:ensure_imported(os),
 
     %% Verify they're in the registry
-    Imports1 = py:get_imports(),
+    Imports1 = py:all_imports(),
     ?assert(length(Imports1) >= 3),
 
     %% Clear all
     ok = py:clear_imports(),
 
     %% Verify registry is empty
-    Imports2 = py:get_imports(),
+    Imports2 = py:all_imports(),
     ?assertEqual([], Imports2).
 
 %% @doc Test get_imports returns the correct format
 get_imports_test(_Config) ->
     %% Clear and add imports
     ok = py:clear_imports(),
-    ok = py:import(json),
-    ok = py:import(math, sqrt),
+    ok = py:ensure_imported(json),
+    ok = py:ensure_imported(math, sqrt),
 
     %% Get imports
-    Imports = py:get_imports(),
+    Imports = py:all_imports(),
 
     %% Verify format
     ?assert(is_list(Imports)),
@@ -517,14 +517,14 @@ event_loop_pool_import_test(_Config) ->
     ok = py:clear_imports(),
 
     %% Import via py:import (goes to event loop pool's interpreter)
-    ok = py:import(collections),
+    ok = py:ensure_imported(collections),
 
     %% Verify we can use it via py:call (uses event loop pool)
     {ok, Result} = py:call(collections, 'Counter', [[a, b, a, c, a, b]]),
     ?assert(is_map(Result) orelse is_tuple(Result)),
 
     %% Import another module
-    ok = py:import(itertools),
+    ok = py:ensure_imported(itertools),
 
     %% Use it
     {ok, _} = py:call(itertools, chain, [[[1, 2], [3, 4]]]),
@@ -540,7 +540,7 @@ spawn_task_uses_import_test(_Config) ->
     ok = py:clear_imports(),
 
     %% Import base64 module
-    ok = py:import(base64),
+    ok = py:ensure_imported(base64),
 
     %% Define a simple function that uses base64
     Code = <<"
@@ -613,7 +613,7 @@ registry_applied_to_subinterp_test(_Config) ->
         true ->
             %% Clear registry and add an import
             ok = py:clear_imports(),
-            ok = py:import(uuid),
+            ok = py:ensure_imported(uuid),
 
             %% Create a new subinterp context
             {ok, Ctx} = py_context:new(#{mode => subinterp}),
@@ -643,7 +643,7 @@ import_in_sys_modules_test(_Config) ->
     ok = py:clear_imports(),
 
     %% Import a module
-    ok = py:import(decimal),
+    ok = py:ensure_imported(decimal),
 
     %% Verify the import worked by calling a function
     {ok, _} = py:call(decimal, 'Decimal', [<<"3.14">>]),
@@ -668,11 +668,11 @@ registry_import_in_sys_modules_test(_Config) ->
     ok = py:clear_imports(),
 
     %% Add to registry and import
-    ok = py:import(fractions),
-    ok = py:import(statistics),
+    ok = py:ensure_imported(fractions),
+    ok = py:ensure_imported(statistics),
 
     %% Verify ETS registry has the entries
-    Registry = py:get_imports(),
+    Registry = py:all_imports(),
     ?assert(lists:member({<<"fractions">>, all}, Registry)),
     ?assert(lists:member({<<"statistics">>, all}, Registry)),
 

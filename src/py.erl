@@ -57,13 +57,15 @@
     stream_eval/1,
     stream_eval/2,
     %% Module import caching
-    import/1,
-    import/2,
+    ensure_imported/1,
+    ensure_imported/2,
+    is_imported/1,
+    is_imported/2,
     import_stats/0,
     import_list/0,
     %% Import registry (global list applied to all interpreters)
     init_import_registry/0,
-    get_imports/0,
+    all_imports/0,
     clear_imports/0,
     version/0,
     memory_stats/0,
@@ -371,14 +373,14 @@ init_import_registry() ->
 %%
 %% Example:
 %% ```
-%% ok = py:import(json),
+%% ok = py:ensure_imported(json),
 %% {ok, Result} = py:call(json, dumps, [Data]).  %% Module imported on first use
 %% '''
 %%
 %% @param Module Python module name
 %% @returns ok | {error, Reason}
--spec import(py_module()) -> ok | {error, term()}.
-import(Module) ->
+-spec ensure_imported(py_module()) -> ok | {error, term()}.
+ensure_imported(Module) ->
     ModuleBin = ensure_binary(Module),
     %% Reject __main__
     case ModuleBin of
@@ -403,15 +405,15 @@ import(Module) ->
 %%
 %% Example:
 %% ```
-%% ok = py:import(json, dumps),
+%% ok = py:ensure_imported(json, dumps),
 %% {ok, Result} = py:call(json, dumps, [Data]).  %% Module imported on first use
 %% '''
 %%
 %% @param Module Python module name
 %% @param Func Function name to register
 %% @returns ok | {error, Reason}
--spec import(py_module(), py_func()) -> ok | {error, term()}.
-import(Module, Func) ->
+-spec ensure_imported(py_module(), py_func()) -> ok | {error, term()}.
+ensure_imported(Module, Func) ->
     ModuleBin = ensure_binary(Module),
     FuncBin = ensure_binary(Func),
     %% Reject __main__
@@ -427,6 +429,37 @@ import(Module, Func) ->
             ok
     end.
 
+%% @doc Check if a module is registered in the import registry.
+%%
+%% @param Module Python module name
+%% @returns true if module is registered, false otherwise
+-spec is_imported(py_module()) -> boolean().
+is_imported(Module) ->
+    ModuleBin = ensure_binary(Module),
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined -> false;
+        _ -> ets:member(?IMPORT_REGISTRY, ModuleBin)
+    end.
+
+%% @doc Check if a module/function is registered in the import registry.
+%%
+%% @param Module Python module name
+%% @param Func Function name
+%% @returns true if module/function is registered, false otherwise
+-spec is_imported(py_module(), py_func()) -> boolean().
+is_imported(Module, Func) ->
+    ModuleBin = ensure_binary(Module),
+    FuncBin = ensure_binary(Func),
+    case ets:info(?IMPORT_REGISTRY) of
+        undefined -> false;
+        _ ->
+            case ets:lookup(?IMPORT_REGISTRY, ModuleBin) of
+                [{_, all}] -> true;
+                [{_, FuncBin}] -> true;
+                _ -> false
+            end
+    end.
+
 %% @doc Get all registered imports from the global registry.
 %%
 %% Returns a list of {Module, Func | all} tuples representing all
@@ -434,14 +467,14 @@ import(Module, Func) ->
 %%
 %% Example:
 %% ```
-%% ok = py:import(json),
-%% ok = py:import(math, sqrt),
-%% [{<<"json">>, all}, {<<"math">>, <<"sqrt">>}] = py:get_imports().
+%% ok = py:ensure_imported(json),
+%% ok = py:ensure_imported(math, sqrt),
+%% [{<<"json">>, all}, {<<"math">>, <<"sqrt">>}] = py:all_imports().
 %% '''
 %%
 %% @returns List of {Module, Func | all} tuples
--spec get_imports() -> [{binary(), binary() | all}].
-get_imports() ->
+-spec all_imports() -> [{binary(), binary() | all}].
+all_imports() ->
     case ets:info(?IMPORT_REGISTRY) of
         undefined -> [];
         _ -> ets:tab2list(?IMPORT_REGISTRY)
@@ -498,7 +531,7 @@ import_stats() ->
 %% @returns {ok, #{Module => [Func]}} map of modules to functions
 -spec import_list() -> {ok, #{binary() => [binary()]}} | {error, term()}.
 import_list() ->
-    Imports = get_imports(),
+    Imports = all_imports(),
     %% Group by module
     Map = lists:foldl(fun({Module, FuncOrAll}, Acc) ->
         Existing = maps:get(Module, Acc, []),
