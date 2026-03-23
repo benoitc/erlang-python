@@ -1,4 +1,4 @@
-%%% @doc Test suite for py:import with OWN_GIL subinterpreters.
+%%% @doc Test suite for py_import with OWN_GIL subinterpreters.
 %%%
 %%% Tests the import caching functionality with Python 3.12+ OWN_GIL mode,
 %%% which creates dedicated pthreads with independent Python GILs.
@@ -67,7 +67,7 @@ init_per_suite(Config) ->
     timer:sleep(500),
     %% Clear any imports from previous test suites to avoid
     %% importing C extensions that crash in OWN_GIL subinterpreters
-    py:clear_imports(),
+    py_import:clear_imports(),
     %% Then check if subinterpreters are supported
     case py_nif:subinterp_supported() of
         true ->

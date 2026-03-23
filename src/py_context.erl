@@ -503,16 +503,11 @@ extend_erlang_module_in_context(Ref) ->
 %% @private Apply all imports from the global registry to this interpreter.
 %%
 %% Called when a new interpreter is created to pre-warm the module cache
-%% with all modules registered via py:import/1,2.
+%% with all modules registered via py_import:ensure_imported/1,2.
 apply_registered_imports(Ref) ->
-    case ets:info(py_import_registry) of
-        undefined -> ok;
-        _ ->
-            Imports = ets:tab2list(py_import_registry),
-            case Imports of
-                [] -> ok;
-                _ -> py_nif:interp_apply_imports(Ref, Imports)
-            end
+    case py_import:all_imports() of
+        [] -> ok;
+        Imports -> py_nif:interp_apply_imports(Ref, Imports)
     end.
 
 %% @private Apply all paths from the global registry to this interpreter.
@@ -520,15 +515,9 @@ apply_registered_imports(Ref) ->
 %% Called when a new interpreter is created to add all registered paths
 %% to sys.path.
 apply_registered_paths(Ref) ->
-    case ets:info(py_path_registry) of
-        undefined -> ok;
-        _ ->
-            %% Extract just the path values (keys are monotonic timestamps)
-            Paths = [Path || {_Key, Path} <- ets:tab2list(py_path_registry)],
-            case Paths of
-                [] -> ok;
-                _ -> py_nif:interp_apply_paths(Ref, Paths)
-            end
+    case py_import:all_paths() of
+        [] -> ok;
+        Paths -> py_nif:interp_apply_paths(Ref, Paths)
     end.
 
 %% @private

@@ -20,8 +20,8 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    %% Initialize the import registry ETS table
-    py:init_import_registry(),
+    %% Initialize the import registry ETS tables
+    py_import:init(),
     erlang_python_sup:start_link().
 
 stop(_State) ->
