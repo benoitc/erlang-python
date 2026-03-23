@@ -44,7 +44,7 @@ start_link() ->
 %% @doc Start a new py_context under this supervisor.
 %%
 %% @param Id Unique identifier for the context (integer or {Pool, N} tuple)
-%% @param Mode Context mode (auto | subinterp | worker)
+%% @param Mode Context mode (worker | subinterp | owngil)
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_context(term(), py_context:context_mode()) ->
     {ok, pid()} | {error, term()}.

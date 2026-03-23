@@ -124,8 +124,7 @@
 
 %% @doc Start the context router with default settings.
 %%
-%% Creates one context per scheduler, using auto mode (subinterp on
-%% Python 3.12+, worker otherwise).
+%% Creates one context per scheduler using worker mode.
 %%
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start() -> {ok, [pid()]} | {error, term()}.
@@ -136,14 +135,14 @@ start() ->
 %%
 %% Options:
 %% - `contexts' - Number of contexts to create (default: number of schedulers)
-%% - `mode' - Context mode: `auto', `subinterp', or `worker' (default: `auto')
+%% - `mode' - Context mode: `worker', `subinterp', or `owngil' (default: `worker')
 %%
 %% @param Opts Start options
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start(start_opts()) -> {ok, [pid()]} | {error, term()}.
 start(Opts) ->
     NumContexts = maps:get(contexts, Opts, erlang:system_info(schedulers)),
-    Mode = maps:get(mode, Opts, auto),
+    Mode = maps:get(mode, Opts, worker),
     %% Delegate to start_pool for the default pool
     start_pool(?DEFAULT_POOL, NumContexts, Mode).
 
@@ -274,13 +273,13 @@ contexts(Pool) when is_atom(Pool) ->
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start_pool(pool_name(), pos_integer()) -> {ok, [pid()]} | {error, term()}.
 start_pool(Pool, Size) ->
-    start_pool(Pool, Size, auto).
+    start_pool(Pool, Size, worker).
 
 %% @doc Start a named pool with given size and mode.
 %%
 %% @param Pool Pool name (default, io, or custom)
 %% @param Size Number of contexts in the pool
-%% @param Mode Context mode (auto, subinterp, worker)
+%% @param Mode Context mode (worker, subinterp, owngil)
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start_pool(pool_name(), pos_integer(), py_context:context_mode()) ->
     {ok, [pid()]} | {error, term()}.

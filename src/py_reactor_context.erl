@@ -79,7 +79,7 @@
 %% @doc Start a new py_reactor_context process.
 %%
 %% @param Id Unique identifier for this context
-%% @param Mode Context mode (auto, subinterp, worker)
+%% @param Mode Context mode (worker, subinterp, owngil)
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_link(pos_integer(), atom()) -> {ok, pid()} | {error, term()}.
 start_link(Id, Mode) ->
@@ -95,7 +95,7 @@ start_link(Id, Mode) ->
 %%               (useful for setting up protocol factory)
 %%
 %% @param Id Unique identifier for this context
-%% @param Mode Context mode (auto, subinterp, worker)
+%% @param Mode Context mode (worker, subinterp, owngil)
 %% @param Opts Options map
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_link(pos_integer(), atom(), map()) -> {ok, pid()} | {error, term()}.
@@ -180,18 +180,8 @@ handoff(Ctx, Fd, ClientInfo) when is_pid(Ctx), is_integer(Fd), is_map(ClientInfo
 init(Parent, Id, Mode, Opts) ->
     process_flag(trap_exit, true),
 
-    %% Determine mode
-    ActualMode = case Mode of
-        auto ->
-            case py_nif:subinterp_supported() of
-                true -> subinterp;
-                false -> worker
-            end;
-        _ -> Mode
-    end,
-
     %% Create Python context
-    case py_nif:context_create(ActualMode) of
+    case py_nif:context_create(Mode) of
         {ok, Ref, _InterpId} ->
             %% Set up callback handler
             py_nif:context_set_callback_handler(Ref, self()),

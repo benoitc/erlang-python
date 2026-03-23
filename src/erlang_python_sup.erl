@@ -34,7 +34,7 @@ start_link() ->
 init([]) ->
     NumContexts = application:get_env(erlang_python, num_contexts,
                                        erlang:system_info(schedulers)),
-    ContextMode = application:get_env(erlang_python, context_mode, auto),
+    ContextMode = application:get_env(erlang_python, context_mode, worker),
     NumAsyncWorkers = application:get_env(erlang_python, num_async_workers, 2),
 
     %% Default executors: 4 (benchmarked sweet spot for most workloads)

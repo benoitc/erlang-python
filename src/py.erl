@@ -1319,8 +1319,7 @@ clear_traces() ->
 
 %% @doc Start the process-per-context system with default settings.
 %%
-%% Creates one context per scheduler, using auto mode (subinterp on
-%% Python 3.12+, worker otherwise).
+%% Creates one context per scheduler using worker mode.
 %%
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start_contexts() -> {ok, [pid()]} | {error, term()}.
@@ -1331,7 +1330,7 @@ start_contexts() ->
 %%
 %% Options:
 %% - `contexts' - Number of contexts to create (default: number of schedulers)
-%% - `mode' - Context mode: `auto', `subinterp', or `worker' (default: `auto')
+%% - `mode' - Context mode: `worker', `subinterp', or `owngil' (default: `worker')
 %%
 %% @param Opts Start options
 %% @returns {ok, [Context]} | {error, Reason}

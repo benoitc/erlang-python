@@ -62,7 +62,7 @@
 %% Exported for py_reactor_context
 -export([extend_erlang_module_in_context/1]).
 
--type context_mode() :: auto | subinterp | worker | owngil.
+-type context_mode() :: worker | subinterp | owngil.
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
@@ -82,14 +82,12 @@
 %% @doc Start a new py_context process.
 %%
 %% The process creates a Python context based on the mode:
-%% - `auto' - Detect best mode (subinterp on Python 3.12+, worker otherwise)
-%% - `subinterp' - Create a sub-interpreter with shared GIL (uses pool)
 %% - `worker' - Create a thread-state worker (main interpreter namespace)
-%% - `owngil' - Create a sub-interpreter with its own GIL (true parallelism)
+%% - `subinterp' - Create a sub-interpreter with shared GIL (Python 3.12+)
+%% - `owngil' - Create a sub-interpreter with its own GIL (Python 3.14+)
 %%
 %% The `owngil' mode creates a dedicated pthread for each context, allowing
-%% true parallel Python execution. This is useful for CPU-bound workloads.
-%% Requires Python 3.12+.
+%% true parallel Python execution. Requires Python 3.14+.
 %%
 %% @param Id Unique identifier for this context
 %% @param Mode Context mode
@@ -128,13 +126,13 @@ stop(Ctx) when is_pid(Ctx) ->
 %% @doc Create a new context with options map.
 %%
 %% Options:
-%% - `mode' - Context mode (auto | subinterp | worker | owngil), default: auto
+%% - `mode' - Context mode (worker | subinterp | owngil), default: worker
 %%
 %% @param Opts Options map
 %% @returns {ok, Pid} | {error, Reason}
 -spec new(map()) -> {ok, context()} | {error, term()}.
 new(Opts) when is_map(Opts) ->
-    Mode = maps:get(mode, Opts, auto),
+    Mode = maps:get(mode, Opts, worker),
     Id = erlang:unique_integer([positive]),
     start_link(Id, Mode).
 
@@ -521,19 +519,10 @@ apply_registered_paths(Ref) ->
     end.
 
 %% @private
-%% Auto mode uses subinterpreters only on Python 3.14+ where C extension
-%% global state bugs (e.g., _decimal) are fixed. On Python 3.12/3.13,
-%% use worker mode to avoid crashes from C extensions like _decimal.
-%% Users can still explicitly use subinterp mode if needed.
-create_context(auto) ->
-    case py_nif:owngil_supported() of
-        true -> create_context(subinterp);
-        false -> create_context(worker)
-    end;
-create_context(subinterp) ->
-    py_nif:context_create(subinterp);
 create_context(worker) ->
     py_nif:context_create(worker);
+create_context(subinterp) ->
+    py_nif:context_create(subinterp);
 create_context(owngil) ->
     %% OWN_GIL mode requires Python 3.14+ due to C extension bugs in earlier versions
     case py_nif:owngil_supported() of

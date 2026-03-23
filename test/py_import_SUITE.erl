@@ -398,7 +398,7 @@ import_applied_to_new_context_test(_Config) ->
     ok = py_import:ensure_imported(json),
 
     %% Create a new context
-    {ok, Ctx} = py_context:new(#{mode => auto}),
+    {ok, Ctx} = py_context:new(#{mode => worker}),
 
     %% The json module should already be cached in the new context
     %% We can verify by calling a function from it
@@ -689,7 +689,7 @@ context_import_in_sys_modules_test(_Config) ->
     ok = py_import:clear_imports(),
 
     %% Create a context
-    {ok, Ctx} = py_context:new(#{mode => auto}),
+    {ok, Ctx} = py_context:new(#{mode => worker}),
 
     %% Call a function from a module (this imports it)
     {ok, _} = py_context:call(Ctx, textwrap, fill, [<<"Hello world this is a test">>, 10], #{}),
@@ -751,7 +751,7 @@ add_path_test(Config) ->
     ?assertEqual(1, length(Paths)),
 
     %% Create a new context to apply paths
-    {ok, Ctx} = py_context:new(#{mode => auto}),
+    {ok, Ctx} = py_context:new(#{mode => worker}),
 
     %% Import and call the sample module
     {ok, Greeting} = py_context:call(Ctx, sample_module, greet, [<<"World">>], #{}),
