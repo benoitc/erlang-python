@@ -638,26 +638,30 @@ registry_applied_to_subinterp_test(_Config) ->
 %% After calling py:import, the module should be in the interpreter's
 %% sys.modules dictionary. We verify this by checking that calling
 %% a function from the module works (which requires it to be imported).
+%%
+%% Note: We use textwrap (pure Python) instead of decimal because the
+%% _decimal C extension has global state that crashes in subinterpreters.
 import_in_sys_modules_test(_Config) ->
     %% Clear registry
     ok = py_import:clear_imports(),
 
-    %% Import a module
-    ok = py_import:ensure_imported(decimal),
+    %% Import a pure Python module (avoid C extensions like decimal
+    %% which have global state that crashes in subinterpreters)
+    ok = py_import:ensure_imported(textwrap),
 
     %% Verify the import worked by calling a function
-    {ok, _} = py:call(decimal, 'Decimal', [<<"3.14">>]),
+    {ok, _} = py:call(textwrap, fill, [<<"Hello world">>, 5]),
 
     %% Now check sys.modules using the same process (important!)
     %% We use exec to define a helper, then eval to check
     ok = py:exec(<<"
 import sys
-_test_decimal_in_sys = 'decimal' in sys.modules
+_test_textwrap_in_sys = 'textwrap' in sys.modules
 ">>),
-    {ok, InSysModules} = py:eval(<<"_test_decimal_in_sys">>),
+    {ok, InSysModules} = py:eval(<<"_test_textwrap_in_sys">>),
     ?assertEqual(true, InSysModules),
 
-    ct:pal("py:import correctly adds module to sys.modules").
+    ct:pal("py_import:ensure_imported correctly adds module to sys.modules").
 
 %% @doc Test that ETS registry and sys.modules stay in sync
 %%
