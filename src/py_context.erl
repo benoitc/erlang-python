@@ -420,8 +420,9 @@ init(Parent, Id, Mode) ->
     process_flag(trap_exit, true),
     case create_context(Mode) of
         {ok, Ref, InterpId} ->
-            %% Apply all registered imports to this interpreter
+            %% Apply all registered imports and paths to this interpreter
             apply_registered_imports(Ref),
+            apply_registered_paths(Ref),
             %% For subinterpreters, create a dedicated event worker
             EventState = setup_event_worker(Ref, InterpId),
             %% For thread-model subinterpreters, spawn a dedicated callback handler
@@ -511,6 +512,22 @@ apply_registered_imports(Ref) ->
             case Imports of
                 [] -> ok;
                 _ -> py_nif:interp_apply_imports(Ref, Imports)
+            end
+    end.
+
+%% @private Apply all paths from the global registry to this interpreter.
+%%
+%% Called when a new interpreter is created to add all registered paths
+%% to sys.path.
+apply_registered_paths(Ref) ->
+    case ets:info(py_path_registry) of
+        undefined -> ok;
+        _ ->
+            %% Extract just the path values (keys are monotonic timestamps)
+            Paths = [Path || {_Key, Path} <- ets:tab2list(py_path_registry)],
+            case Paths of
+                [] -> ok;
+                _ -> py_nif:interp_apply_paths(Ref, Paths)
             end
     end.
 

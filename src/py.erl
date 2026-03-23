@@ -67,6 +67,12 @@
     init_import_registry/0,
     all_imports/0,
     clear_imports/0,
+    %% Path registry (sys.path additions applied to all interpreters)
+    add_path/1,
+    add_paths/1,
+    all_paths/0,
+    clear_paths/0,
+    is_path_added/1,
     version/0,
     memory_stats/0,
     gc/0,
@@ -171,6 +177,9 @@
 
 %% ETS table for global import registry
 -define(IMPORT_REGISTRY, py_import_registry).
+
+%% ETS table for global path registry (sys.path additions)
+-define(PATH_REGISTRY, py_path_registry).
 
 %% @doc Get or create a process-local Python environment for a context.
 %%
@@ -345,7 +354,7 @@ exec(Ctx, Code) when is_pid(Ctx) ->
 %%% Module Import Caching
 %%% ============================================================================
 
-%% @doc Initialize the import registry ETS table.
+%% @doc Initialize the import and path registry ETS tables.
 %%
 %% This is called automatically during application startup.
 %% Safe to call multiple times - does nothing if already initialized.
@@ -358,6 +367,14 @@ init_import_registry() ->
             %% Use bag type to allow multiple entries with same module name
             %% e.g., {<<"json">>, all} and {<<"json">>, <<"dumps">>}
             ets:new(?IMPORT_REGISTRY, [bag, public, named_table]),
+            ok;
+        _ ->
+            ok
+    end,
+    case ets:info(?PATH_REGISTRY) of
+        undefined ->
+            %% Use set type - paths are unique, ordered by insertion
+            ets:new(?PATH_REGISTRY, [ordered_set, public, named_table]),
             ok;
         _ ->
             ok
@@ -493,6 +510,104 @@ clear_imports() ->
         _ -> ets:delete_all_objects(?IMPORT_REGISTRY)
     end,
     ok.
+
+%%% ============================================================================
+%%% Path Registry (sys.path additions)
+%%% ============================================================================
+
+%% @doc Add a path to sys.path in all interpreters.
+%%
+%% Adds the path to the global path registry. When new interpreters
+%% are created, they will automatically have this path in sys.path.
+%% The path is inserted at the beginning of sys.path to take precedence.
+%%
+%% Example:
+%% ```
+%% ok = py:add_path("/path/to/my/modules"),
+%% {ok, Result} = py:call(mymodule, myfunc, []).
+%% '''
+%%
+%% @param Path Directory path to add (string, binary, or atom)
+%% @returns ok
+-spec add_path(string() | binary() | atom()) -> ok.
+add_path(Path) ->
+    PathBin = ensure_binary(Path),
+    case ets:info(?PATH_REGISTRY) of
+        undefined -> ok;
+        _ ->
+            %% Use monotonic time as key to preserve insertion order
+            Key = erlang:monotonic_time(),
+            ets:insert(?PATH_REGISTRY, {Key, PathBin})
+    end,
+    ok.
+
+%% @doc Add multiple paths to sys.path in all interpreters.
+%%
+%% Adds all paths to the global path registry. Paths are added in order,
+%% so the first path in the list will be first in sys.path.
+%%
+%% Example:
+%% ```
+%% ok = py:add_paths(["/path/to/lib1", "/path/to/lib2"]),
+%% {ok, Result} = py:call(mymodule, myfunc, []).
+%% '''
+%%
+%% @param Paths List of directory paths to add
+%% @returns ok
+-spec add_paths([string() | binary() | atom()]) -> ok.
+add_paths(Paths) when is_list(Paths) ->
+    lists:foreach(fun add_path/1, Paths),
+    ok.
+
+%% @doc Get all registered paths from the global registry.
+%%
+%% Returns a list of paths in the order they were added.
+%%
+%% Example:
+%% ```
+%% ok = py:add_path("/path/to/modules"),
+%% [<<"/path/to/modules">>] = py:all_paths().
+%% '''
+%%
+%% @returns List of paths as binaries
+-spec all_paths() -> [binary()].
+all_paths() ->
+    case ets:info(?PATH_REGISTRY) of
+        undefined -> [];
+        _ ->
+            %% ordered_set returns in key order (monotonic time = insertion order)
+            [Path || {_Key, Path} <- ets:tab2list(?PATH_REGISTRY)]
+    end.
+
+%% @doc Clear all registered paths from the global registry.
+%%
+%% Removes all entries from the path registry.
+%% Does not affect already-running interpreters.
+%%
+%% @returns ok
+-spec clear_paths() -> ok.
+clear_paths() ->
+    case ets:info(?PATH_REGISTRY) of
+        undefined -> ok;
+        _ -> ets:delete_all_objects(?PATH_REGISTRY)
+    end,
+    ok.
+
+%% @doc Check if a path is registered in the path registry.
+%%
+%% @param Path Directory path to check
+%% @returns true if path is registered, false otherwise
+-spec is_path_added(string() | binary() | atom()) -> boolean().
+is_path_added(Path) ->
+    PathBin = ensure_binary(Path),
+    case ets:info(?PATH_REGISTRY) of
+        undefined -> false;
+        _ ->
+            case ets:match(?PATH_REGISTRY, {'_', PathBin}) of
+                [] -> false;
+                _ -> true
+            end
+    end.
 
 %% @doc Get import registry statistics.
 %%

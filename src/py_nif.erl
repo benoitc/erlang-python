@@ -114,6 +114,7 @@
     event_loop_eval/2,
     %% Per-interpreter import caching NIFs
     interp_apply_imports/2,
+    interp_apply_paths/2,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -862,6 +863,18 @@ event_loop_eval(_LoopRef, _Expr) ->
 %% @returns ok | {error, Reason}
 -spec interp_apply_imports(reference(), [{binary(), binary() | all}]) -> ok | {error, term()}.
 interp_apply_imports(_Ref, _Imports) ->
+    ?NIF_STUB.
+
+%% @doc Apply a list of paths to an interpreter's sys.path.
+%%
+%% Paths are inserted at the beginning of sys.path to take precedence
+%% over system paths. Called when a new context is created.
+%%
+%% @param Ref Context reference (from context_create/1)
+%% @param Paths List of path binaries
+%% @returns ok | {error, Reason}
+-spec interp_apply_paths(reference(), [binary()]) -> ok | {error, term()}.
+interp_apply_paths(_Ref, _Paths) ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.
