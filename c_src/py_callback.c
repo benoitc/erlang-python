@@ -2682,8 +2682,8 @@ static PyObject *erlang_channel_try_receive_impl(PyObject *self, PyObject *args)
  * Returns: Python object when data available
  * Raises: RuntimeError if channel closed, TimeoutError if timeout
  *
- * This function releases the GIL while waiting, allowing other Python
- * threads to run. Uses polling with short sleeps.
+ * This function releases the GIL while waiting on a condition variable,
+ * allowing other Python threads to run efficiently without polling.
  */
 static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
     (void)self;
@@ -2709,44 +2709,12 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
     size_t size = 0;
     int result;
 
-    /* First try without blocking */
-    result = channel_try_receive(channel, &data, &size);
-    if (result == 0) {
-        goto decode_and_return;
-    } else if (result == -1) {
-        PyErr_SetString(PyExc_RuntimeError, "channel closed");
-        return NULL;
-    }
+    /* Block on condition variable until data available, closed, or timeout */
+    Py_BEGIN_ALLOW_THREADS
+    result = channel_receive_blocking(channel, &data, &size, timeout_ms);
+    Py_END_ALLOW_THREADS
 
-    /* Need to wait - release GIL and poll */
-    {
-        long elapsed_us = 0;
-        const long poll_interval_us = 100;  /* 100 microseconds */
-        const long timeout_us = timeout_ms >= 0 ? timeout_ms * 1000 : -1;
-
-        Py_BEGIN_ALLOW_THREADS
-
-        while (1) {
-            result = channel_try_receive(channel, &data, &size);
-            if (result != 1) {
-                break;  /* Got data or closed */
-            }
-
-            /* Check timeout */
-            if (timeout_us >= 0 && elapsed_us >= timeout_us) {
-                result = 2;  /* Timeout */
-                break;
-            }
-
-            /* Sleep briefly */
-            usleep(poll_interval_us);
-            elapsed_us += poll_interval_us;
-        }
-
-        Py_END_ALLOW_THREADS
-    }
-
-    if (result == 2) {
+    if (result == 1) {
         PyErr_SetString(PyExc_TimeoutError, "channel receive timeout");
         return NULL;
     } else if (result == -1) {
@@ -2754,7 +2722,6 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-decode_and_return:
     /* Decode from Erlang external term format to Python */
     {
         ErlNifEnv *tmp_env = enif_alloc_env();
@@ -2945,8 +2912,8 @@ static PyObject *erlang_byte_channel_try_receive_bytes_impl(PyObject *self, PyOb
  * Returns: bytes when data available
  * Raises: RuntimeError if channel closed, TimeoutError if timeout
  *
- * This function releases the GIL while waiting, allowing other Python
- * threads to run. Uses polling with short sleeps.
+ * This function releases the GIL while waiting on a condition variable,
+ * allowing other Python threads to run efficiently without polling.
  */
 static PyObject *erlang_byte_channel_receive_bytes_impl(PyObject *self, PyObject *args) {
     (void)self;
@@ -2972,47 +2939,12 @@ static PyObject *erlang_byte_channel_receive_bytes_impl(PyObject *self, PyObject
     size_t size = 0;
     int result;
 
-    /* First try without blocking */
-    result = channel_try_receive(channel, &data, &size);
-    if (result == 0) {
-        /* Got data - return raw bytes */
-        PyObject *bytes = PyBytes_FromStringAndSize((char *)data, size);
-        enif_free(data);
-        return bytes;
-    } else if (result == -1) {
-        PyErr_SetString(PyExc_RuntimeError, "channel closed");
-        return NULL;
-    }
+    /* Block on condition variable until data available, closed, or timeout */
+    Py_BEGIN_ALLOW_THREADS
+    result = channel_receive_blocking(channel, &data, &size, timeout_ms);
+    Py_END_ALLOW_THREADS
 
-    /* Need to wait - release GIL and poll */
-    {
-        long elapsed_us = 0;
-        const long poll_interval_us = 100;  /* 100 microseconds */
-        const long timeout_us = timeout_ms >= 0 ? timeout_ms * 1000 : -1;
-
-        Py_BEGIN_ALLOW_THREADS
-
-        while (1) {
-            result = channel_try_receive(channel, &data, &size);
-            if (result != 1) {
-                break;  /* Got data or closed */
-            }
-
-            /* Check timeout */
-            if (timeout_us >= 0 && elapsed_us >= timeout_us) {
-                result = 2;  /* Timeout */
-                break;
-            }
-
-            /* Sleep briefly */
-            usleep(poll_interval_us);
-            elapsed_us += poll_interval_us;
-        }
-
-        Py_END_ALLOW_THREADS
-    }
-
-    if (result == 2) {
+    if (result == 1) {
         PyErr_SetString(PyExc_TimeoutError, "channel receive timeout");
         return NULL;
     } else if (result == -1) {

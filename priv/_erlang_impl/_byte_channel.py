@@ -270,16 +270,33 @@ class ByteChannel:
             loop._timers.pop(callback_id, None)
 
     async def _async_receive_polling(self) -> bytes:
-        """Fallback async receive using polling."""
-        import asyncio
+        """Fallback async receive for non-Erlang event loops.
 
+        Uses run_in_executor to run blocking receive in a thread pool,
+        avoiding busy-polling while still releasing the event loop.
+        """
+        import asyncio
+        import erlang
+
+        loop = asyncio.get_running_loop()
+
+        # Run blocking receive in thread pool (releases GIL, waits on condition var)
+        # Use 100ms timeout chunks to allow cancellation checks
         while True:
-            await asyncio.sleep(0.0001)  # 100us yield
-            result = self.try_receive_bytes()
-            if result is not None:
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: erlang._byte_channel_receive_bytes(self._ref, 100)  # 100ms timeout
+                )
                 return result
-            if self._is_closed():
-                raise ByteChannelClosed("Channel closed")
+            except TimeoutError:
+                # Check for cancellation, then retry
+                await asyncio.sleep(0)
+                continue
+            except RuntimeError as e:
+                if "channel closed" in str(e).lower():
+                    raise ByteChannelClosed("Channel closed")
+                raise
 
     def __aiter__(self):
         """Return async iterator for the byte channel.
