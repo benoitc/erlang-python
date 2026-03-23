@@ -43,6 +43,11 @@
 
 ### Changed
 
+- **Removed auto-started io pool** - The io pool is no longer started automatically at
+  application startup to reduce memory usage. Users who need a dedicated I/O pool can
+  create one manually via `py_context_router:start_pool(io, 10, worker)`. The configuration
+  options `io_pool_size` and `io_pool_mode` have been removed.
+
 - **Removed py_event_router** - Removed legacy `py_event_router` module. The `py_event_worker`
   now handles all event loop functionality including FD events, timers, and task processing.
   This simplifies the architecture by consolidating event handling into a single worker process.
@@ -226,17 +231,8 @@
   - `py:dup_fd/1` - Duplicate fd for independent ownership
   - Prevents double-close issues when passing sockets to Python reactor
 
-- **Dual Pool Support** - Separate pools for CPU-bound and I/O-bound operations
-  - `default` pool - For quick CPU-bound operations, sized to number of schedulers
-  - `io` pool - For I/O-bound operations, larger pool (default: 10) for concurrency
-  - `py:call(io, Module, Func, Args)` - Execute on the io pool
-  - `py:call(io, Module, Func, Args, Kwargs)` - Execute with kwargs on io pool
-  - Registration-based routing (no call site changes needed):
-    - `py:register_pool(io, requests)` - Route all `requests.*` calls to io pool
-    - `py:register_pool(io, {aiohttp, get})` - Route specific function to io pool
-    - `py:unregister_pool(Module)` - Remove module registration
-    - `py:unregister_pool({Module, Func})` - Remove function registration
-    - Automatic routing: `py:call(requests, get, [Url])` goes to io pool when registered
+- **Custom Pool Support** - Create pools on demand for CPU-bound and I/O-bound operations
+  - `default` pool - Automatically started, sized to number of schedulers
   - `py_context_router:start_pool/2,3` - Start named pools programmatically
   - `py_context_router:stop_pool/1` - Stop a named pool
   - `py_context_router:pool_started/1` - Check if a pool is running
@@ -244,13 +240,13 @@
   - `py_context_router:num_contexts(Pool)` - Get pool size
   - `py_context_router:contexts(Pool)` - Get all contexts in a pool
   - `py_context_router:lookup_pool(Module, Func)` - Query pool routing
-  - Configuration via application env:
-    ```erlang
-    {erlang_python, [
-        {io_pool_size, 10},      % Size of io pool (default: 10)
-        {io_pool_mode, worker}   % Mode for io pool (default: auto)
-    ]}.
-    ```
+  - `py:call(PoolName, Module, Func, Args)` - Execute on a specific pool
+  - Registration-based routing (no call site changes needed):
+    - `py:register_pool(io, requests)` - Route all `requests.*` calls to io pool
+    - `py:register_pool(io, {aiohttp, get})` - Route specific function to io pool
+    - `py:unregister_pool(Module)` - Remove module registration
+    - `py:unregister_pool({Module, Func})` - Remove function registration
+    - Automatic routing: `py:call(requests, get, [Url])` goes to io pool when registered
   - Backward compatible: existing code using `py:call/3,4,5` works unchanged
   - New test suite: `test/py_pool_SUITE.erl`
 

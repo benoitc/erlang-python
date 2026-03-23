@@ -1,6 +1,6 @@
-%%% @doc Common Test suite for dual pool support.
+%%% @doc Common Test suite for pool support.
 %%%
-%%% Tests the default and io pool separation to ensure:
+%%% Tests the default pool and custom pools to ensure:
 %%% - Pools are independent
 %%% - Pool-based calls work correctly
 %%% - Backward compatibility is maintained
@@ -58,6 +58,8 @@ all() ->
 
 init_per_suite(Config) ->
     application:ensure_all_started(erlang_python),
+    %% Create io pool manually (no longer auto-started)
+    {ok, _} = py_context_router:start_pool(io, 10, worker),
     Config.
 
 end_per_suite(_Config) ->
@@ -73,15 +75,15 @@ end_per_testcase(_TestCase, _Config) ->
 %% Test cases
 %% ============================================================================
 
-%% @doc Verify both pools are started on application start.
+%% @doc Verify pools are started (default auto, io from init_per_suite).
 test_pools_started(_Config) ->
-    %% Default pool should be started
+    %% Default pool should be started automatically
     true = py_context_router:pool_started(default),
     DefaultSize = py_context_router:num_contexts(default),
     true = DefaultSize > 0,
     ct:pal("Default pool size: ~p", [DefaultSize]),
 
-    %% IO pool should be started
+    %% IO pool was started in init_per_suite
     true = py_context_router:pool_started(io),
     IoSize = py_context_router:num_contexts(io),
     true = IoSize > 0,
@@ -191,10 +193,10 @@ test_pool_sizes(_Config) ->
     ExpectedDefault = erlang:system_info(schedulers),
     ct:pal("Default pool: expected ~p, actual ~p", [ExpectedDefault, DefaultSize]),
 
-    %% IO pool should be 10 by default (from py_context_init)
+    %% IO pool was created with size 10 in init_per_suite
     IoSize = py_context_router:num_contexts(io),
     ct:pal("IO pool size: ~p", [IoSize]),
-    true = IoSize > 0,
+    10 = IoSize,
 
     %% Verify we can list all contexts from each pool
     DefaultContexts = py_context_router:contexts(default),

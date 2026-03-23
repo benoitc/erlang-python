@@ -45,7 +45,7 @@ erlang_python integrates with Erlang's distribution to run Python code on remote
 | Async tasks | `rpc:call(Node, py_event_loop, create_task, ...)` |
 | Venv management | `py:ensure_venv/2,3` |
 | Data streaming | `py_channel` API |
-| Pool routing | Dual pool (default/io) |
+| Pool routing | Custom pools on demand |
 
 ## Basic Remote Execution
 
@@ -495,9 +495,6 @@ Configure nodes for distributed Python:
     {erlang_python, [
         %% More contexts for dedicated Python workers
         {num_contexts, 16},
-
-        %% Larger IO pool for network operations
-        {io_pool_size, 20},
 
         %% Higher concurrency limit
         {max_concurrent, 100}

@@ -533,15 +533,16 @@ ok = py:deactivate_venv().
 {ok, #{<<"active">> := true, <<"venv_path">> := Path}} = py:venv_info().
 ```
 
-### Dual Pool Support
+### Custom Pool Support
 
-Separate pools for CPU-bound and I/O-bound operations:
+Create pools on demand for CPU-bound and I/O-bound operations:
 
 ```erlang
 %% Default pool - CPU-bound operations (sized to schedulers)
 {ok, Result} = py:call(math, sqrt, [16]).
 
-%% IO pool - I/O-bound operations (larger pool, default 10)
+%% Create io pool for I/O-bound operations
+{ok, _} = py_context_router:start_pool(io, 10, worker).
 {ok, Response} = py:call(io, requests, get, [Url]).
 
 %% Registration-based routing (no call site changes)
@@ -550,14 +551,6 @@ py:register_pool(io, {aiohttp, get}),        % Route specific function
 
 %% After registration, calls auto-route
 {ok, Response} = py:call(requests, get, [Url]).  % Goes to io pool
-```
-
-Configuration in `sys.config`:
-```erlang
-{erlang_python, [
-    {io_pool_size, 10},     % Size of io pool (default: 10)
-    {io_pool_mode, worker}  % Mode for io pool (default: auto)
-]}.
 ```
 
 ## Performance Improvements
