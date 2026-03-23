@@ -29,7 +29,7 @@
 %%% {erlang_python, [
 %%%     {default_pool_size, 4},        % Number of contexts (default: schedulers)
 %%%     {io_pool_size, 10},            % I/O pool size (default: 10)
-%%%     {io_pool_mode, worker}         % Mode for io pool (default: auto)
+%%%     {io_pool_mode, worker}         % Mode for io pool (default: worker)
 %%% ]}.
 %%% '''
 %%% @private
@@ -49,13 +49,13 @@
 start_link(Opts) ->
     %% Start default pool
     DefaultSize = maps:get(contexts, Opts, erlang:system_info(schedulers)),
-    DefaultMode = maps:get(mode, Opts, auto),
+    DefaultMode = maps:get(mode, Opts, worker),
 
     case py_context_router:start_pool(default, DefaultSize, DefaultMode) of
         {ok, _DefaultContexts} ->
             %% Start I/O pool if configured
             IoSize = application:get_env(erlang_python, io_pool_size, 10),
-            IoMode = application:get_env(erlang_python, io_pool_mode, auto),
+            IoMode = application:get_env(erlang_python, io_pool_mode, worker),
             case py_context_router:start_pool(io, IoSize, IoMode) of
                 {ok, _IoContexts} ->
                     %% The contexts are supervised by py_context_sup

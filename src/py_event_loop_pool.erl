@@ -44,11 +44,6 @@
     %% Per-process namespace API
     exec/1, exec/2,
     eval/1, eval/2,
-    %% Module import caching
-    import/1, import/2,
-    flush_imports/0,
-    import_stats/0,
-    import_list/0,
     get_all_loops/0
 ]).
 
@@ -339,81 +334,8 @@ eval(LoopRef, Expr) ->
     py_nif:event_loop_eval(LoopRef, Expr).
 
 %%% ============================================================================
-%%% Module Import Caching
+%%% Pool Utilities
 %%% ============================================================================
-
-%% @doc Import and cache a module in the current interpreter.
-%%
-%% The module is imported in the interpreter assigned to this process (via
-%% PID hash affinity). The `__main__' module is never cached.
-%%
-%% Example:
-%% <pre>
-%% ok = py_event_loop_pool:import(json),
-%% Ref = py_event_loop_pool:create_task(json, dumps, [[1,2,3]])
-%% </pre>
--spec import(Module :: atom() | binary()) -> ok | {error, term()}.
-import(Module) ->
-    case get_loop() of
-        {ok, LoopRef} ->
-            ModuleBin = py_util:to_binary(Module),
-            py_nif:loop_import_module(LoopRef, ModuleBin);
-        {error, not_available} ->
-            {error, event_loop_not_available}
-    end.
-
-%% @doc Import a module and cache a specific function.
-%%
-%% Pre-imports the module and caches the function reference for faster
-%% subsequent calls. The `__main__' module is never cached.
--spec import(Module :: atom() | binary(), Func :: atom() | binary()) -> ok | {error, term()}.
-import(Module, Func) ->
-    case get_loop() of
-        {ok, LoopRef} ->
-            ModuleBin = py_util:to_binary(Module),
-            FuncBin = py_util:to_binary(Func),
-            py_nif:loop_import_function(LoopRef, ModuleBin, FuncBin);
-        {error, not_available} ->
-            {error, event_loop_not_available}
-    end.
-
-%% @doc Flush import caches across all event loop interpreters.
-%%
-%% Clears the module/function cache in all interpreters. Use this after
-%% modifying Python modules on disk to force re-import.
--spec flush_imports() -> ok.
-flush_imports() ->
-    case get_all_loops() of
-        {ok, Loops} ->
-            [py_nif:loop_flush_import_cache(LoopRef) || {LoopRef, _} <- Loops],
-            ok;
-        {error, _} ->
-            ok
-    end.
-
-%% @doc Get import cache statistics for the current interpreter.
-%%
-%% Returns a map with cache metrics.
--spec import_stats() -> {ok, map()} | {error, term()}.
-import_stats() ->
-    case get_loop() of
-        {ok, LoopRef} ->
-            py_nif:loop_import_stats(LoopRef);
-        {error, not_available} ->
-            {error, event_loop_not_available}
-    end.
-
-%% @doc List all cached imports in the current interpreter.
-%%
-%% Returns a list of cached module and function names.
--spec import_list() -> {ok, [binary()]} | {error, term()}.
-import_list() ->
-    case get_loop() of
-        {ok, LoopRef} ->
-            py_nif:loop_import_list(LoopRef);
-        {error, not_available} ->
-            {error, event_loop_not_available}
-    end.
 
 %% @doc Get all event loop references in the pool.
 %%
@@ -448,8 +370,9 @@ run_async(Request) ->
 init([NumLoops]) ->
     process_flag(trap_exit, true),
 
-    %% Check if OWN_GIL mode is enabled
-    OwnGilEnabled = application:get_env(erlang_python, event_loop_pool_owngil, false),
+    %% Check if OWN_GIL mode is enabled and supported (Python 3.14+)
+    OwnGilConfigured = application:get_env(erlang_python, event_loop_pool_owngil, false),
+    OwnGilEnabled = OwnGilConfigured andalso py_nif:owngil_supported(),
 
     %% Initialize OWN_GIL infrastructure if enabled
     {Sessions, OwnGilReady} = case OwnGilEnabled of

@@ -80,11 +80,22 @@ class ErlangSocketTransport(transports.Transport):
         if self._conn_lost:
             return
 
+        # Guard against closed socket (fd == -1)
+        if self._sock.fileno() == -1:
+            return
+
         for _ in range(self._max_reads_per_call):
             try:
                 data = self._sock.recv(self.max_size)
             except (BlockingIOError, InterruptedError):
                 # EAGAIN - no more data available
+                return
+            except OSError as exc:
+                # Handle bad file descriptor (socket closed)
+                if exc.errno == errno.EBADF:
+                    self._conn_lost += 1
+                    return
+                self._fatal_error(exc, 'Fatal read error')
                 return
             except Exception as exc:
                 self._fatal_error(exc, 'Fatal read error')
@@ -140,6 +151,11 @@ class ErlangSocketTransport(transports.Transport):
 
         Drains buffer until EAGAIN with a budget to avoid starvation.
         """
+        # Guard against closed socket (fd == -1)
+        if self._sock.fileno() == -1:
+            self._conn_lost += 1
+            return
+
         for _ in range(self._max_writes_per_call):
             remaining = len(self._buffer) - self._buffer_offset
             if remaining <= 0:
@@ -154,6 +170,14 @@ class ErlangSocketTransport(transports.Transport):
                 n = self._sock.send(data_view)
             except (BlockingIOError, InterruptedError):
                 # EAGAIN - socket buffer full
+                return
+            except OSError as exc:
+                # Handle bad file descriptor (socket closed)
+                if exc.errno == errno.EBADF:
+                    self._conn_lost += 1
+                    return
+                self._loop.remove_writer(self._fileno)
+                self._fatal_error(exc, 'Fatal write error')
                 return
             except Exception as exc:
                 self._loop.remove_writer(self._fileno)
@@ -198,10 +222,17 @@ class ErlangSocketTransport(transports.Transport):
 
     def _call_connection_lost(self, exc):
         """Call protocol.connection_lost()."""
+        # Guard against double cleanup
+        if self._conn_lost > 1:
+            return
+        self._conn_lost += 1
         try:
             self._protocol.connection_lost(exc)
         finally:
-            self._sock.close()
+            try:
+                self._sock.close()
+            except OSError:
+                pass
 
     def _fatal_error(self, exc, message='Fatal error'):
         """Handle fatal errors."""
@@ -310,6 +341,10 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         if self._conn_lost:
             return
 
+        # Guard against closed socket (fd == -1)
+        if self._sock.fileno() == -1:
+            return
+
         for _ in range(self._max_reads_per_call):
             try:
                 data, addr = self._sock.recvfrom(self.max_size)
@@ -317,6 +352,10 @@ class ErlangDatagramTransport(transports.DatagramTransport):
                 # EAGAIN - no more data available
                 return
             except OSError as exc:
+                # Handle bad file descriptor (socket closed)
+                if exc.errno == errno.EBADF:
+                    self._conn_lost += 1
+                    return
                 self._protocol.error_received(exc)
                 return
             except Exception as exc:
@@ -362,6 +401,11 @@ class ErlangDatagramTransport(transports.DatagramTransport):
 
     def _write_ready(self):
         """Called when socket is ready for writing."""
+        # Guard against closed socket (fd == -1)
+        if self._sock.fileno() == -1:
+            self._conn_lost += 1
+            return
+
         while self._buffer:
             data, addr = self._buffer[0]
             try:
@@ -375,6 +419,10 @@ class ErlangDatagramTransport(transports.DatagramTransport):
             except (BlockingIOError, InterruptedError):
                 return
             except OSError as exc:
+                # Handle bad file descriptor (socket closed)
+                if exc.errno == errno.EBADF:
+                    self._conn_lost += 1
+                    return
                 self._buffer.popleft()
                 self._protocol.error_received(exc)
                 return
@@ -400,10 +448,17 @@ class ErlangDatagramTransport(transports.DatagramTransport):
 
     def _call_connection_lost(self, exc):
         """Call protocol.connection_lost()."""
+        # Guard against double cleanup
+        if self._conn_lost > 1:
+            return
+        self._conn_lost += 1
         try:
             self._protocol.connection_lost(exc)
         finally:
-            self._sock.close()
+            try:
+                self._sock.close()
+            except OSError:
+                pass
 
     def _fatal_error(self, exc, message='Fatal error on datagram transport'):
         """Handle fatal errors."""

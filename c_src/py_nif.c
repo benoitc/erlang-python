@@ -1970,6 +1970,23 @@ static ERL_NIF_TERM nif_subinterp_supported(ErlNifEnv *env, int argc, const ERL_
 #endif
 }
 
+/**
+ * @brief Check if OWN_GIL mode is supported (Python 3.14+)
+ *
+ * OWN_GIL requires Python 3.14+ due to C extension global state bugs
+ * in earlier versions (e.g., _decimal). See gh-106078.
+ */
+static ERL_NIF_TERM nif_owngil_supported(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+#ifdef HAVE_OWNGIL
+    return ATOM_TRUE;
+#else
+    return ATOM_FALSE;
+#endif
+}
+
 #ifdef HAVE_SUBINTERPRETERS
 
 static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
@@ -3169,6 +3186,130 @@ static void owngil_execute_create_local_env(py_context_t *ctx) {
 }
 
 /**
+ * @brief Execute apply_imports in OWN_GIL context
+ *
+ * Applies a list of imports to the interpreter's sys.modules.
+ * The imports list is passed via request_term.
+ *
+ * Note: OWN_GIL contexts have their own dedicated interpreter,
+ * so sys.modules is per-context in this mode.
+ */
+static void owngil_execute_apply_imports(py_context_t *ctx) {
+    /* Process each import from request_term */
+    ERL_NIF_TERM head, tail = ctx->request_term;
+    int arity;
+    const ERL_NIF_TERM *tuple;
+
+    while (enif_get_list_cell(ctx->shared_env, tail, &head, &tail)) {
+        if (!enif_get_tuple(ctx->shared_env, head, &arity, &tuple) || arity != 2) {
+            continue;
+        }
+
+        ErlNifBinary module_bin;
+        if (!enif_inspect_binary(ctx->shared_env, tuple[0], &module_bin)) {
+            continue;
+        }
+
+        /* Convert to C string */
+        char *module_name = enif_alloc(module_bin.size + 1);
+        if (module_name == NULL) continue;
+        memcpy(module_name, module_bin.data, module_bin.size);
+        module_name[module_bin.size] = '\0';
+
+        /* Skip __main__ */
+        if (strcmp(module_name, "__main__") == 0) {
+            enif_free(module_name);
+            continue;
+        }
+
+        /* Import the module - caches in this interpreter's sys.modules */
+        PyObject *mod = PyImport_ImportModule(module_name);
+        if (mod != NULL) {
+            Py_DECREF(mod);  /* sys.modules holds the reference */
+        } else {
+            /* Clear error - import failure is not fatal */
+            PyErr_Clear();
+        }
+
+        enif_free(module_name);
+    }
+
+    ctx->response_term = enif_make_atom(ctx->shared_env, "ok");
+    ctx->response_ok = true;
+}
+
+/**
+ * @brief Apply paths to sys.path in OWN_GIL context
+ *
+ * Paths are inserted at the beginning of sys.path.
+ */
+static void owngil_execute_apply_paths(py_context_t *ctx) {
+    /* Get sys.path */
+    PyObject *sys_module = PyImport_ImportModule("sys");
+    if (sys_module == NULL) {
+        PyErr_Clear();
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "sys_import_failed"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    PyObject *sys_path = PyObject_GetAttrString(sys_module, "path");
+    Py_DECREF(sys_module);
+    if (sys_path == NULL || !PyList_Check(sys_path)) {
+        Py_XDECREF(sys_path);
+        PyErr_Clear();
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "sys_path_not_list"));
+        ctx->response_ok = false;
+        return;
+    }
+
+    /* Count paths first */
+    ERL_NIF_TERM head, tail = ctx->request_term;
+    int path_count = 0;
+    while (enif_get_list_cell(ctx->shared_env, tail, &head, &tail)) {
+        path_count++;
+    }
+
+    /* Insert in reverse order so first path ends up first */
+    for (int i = 0; i < path_count; i++) {
+        /* Skip to the i-th element from the end */
+        ERL_NIF_TERM current = ctx->request_term;
+        for (int j = 0; j < path_count - 1 - i; j++) {
+            enif_get_list_cell(ctx->shared_env, current, &head, &current);
+        }
+        enif_get_list_cell(ctx->shared_env, current, &head, &current);
+
+        ErlNifBinary path_bin;
+        if (!enif_inspect_binary(ctx->shared_env, head, &path_bin)) {
+            continue;
+        }
+
+        /* Convert to Python string */
+        PyObject *path_str = PyUnicode_FromStringAndSize((char *)path_bin.data, path_bin.size);
+        if (path_str == NULL) {
+            PyErr_Clear();
+            continue;
+        }
+
+        /* Check if already in sys.path */
+        int already_present = PySequence_Contains(sys_path, path_str);
+        if (already_present <= 0) {
+            /* Insert at position 0 */
+            PyList_Insert(sys_path, 0, path_str);
+        }
+        Py_DECREF(path_str);
+    }
+
+    Py_DECREF(sys_path);
+    ctx->response_term = enif_make_atom(ctx->shared_env, "ok");
+    ctx->response_ok = true;
+}
+
+/**
  * @brief Execute a request based on its type
  */
 static void owngil_execute_request(py_context_t *ctx) {
@@ -3202,6 +3343,12 @@ static void owngil_execute_request(py_context_t *ctx) {
             break;
         case CTX_REQ_CREATE_LOCAL_ENV:
             owngil_execute_create_local_env(ctx);
+            break;
+        case CTX_REQ_APPLY_IMPORTS:
+            owngil_execute_apply_imports(ctx);
+            break;
+        case CTX_REQ_APPLY_PATHS:
+            owngil_execute_apply_paths(ctx);
             break;
         default:
             ctx->response_term = enif_make_tuple2(ctx->shared_env,
@@ -3768,6 +3915,94 @@ static ERL_NIF_TERM dispatch_create_local_env_to_owngil(
     return result;
 }
 
+/**
+ * @brief Dispatch apply_imports to OWN_GIL worker thread
+ *
+ * @param env NIF environment
+ * @param ctx Context resource
+ * @param imports_term List of {ModuleBin, FuncBin | all} tuples
+ * @return ok | {error, Reason}
+ */
+static ERL_NIF_TERM dispatch_apply_imports_to_owngil(
+    ErlNifEnv *env, py_context_t *ctx, ERL_NIF_TERM imports_term
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_copy(ctx->shared_env, imports_term);
+    ctx->request_type = CTX_REQ_APPLY_IMPORTS;
+
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response with timeout */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
+    while (ctx->request_type != CTX_REQ_NONE) {
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL apply_imports dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
+    }
+
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
+/**
+ * @brief Dispatch apply_paths request to OWN_GIL worker thread
+ *
+ * @param env Current NIF environment
+ * @param ctx OWN_GIL context
+ * @param paths_term List of path binaries
+ * @return ok | {error, Reason}
+ */
+static ERL_NIF_TERM dispatch_apply_paths_to_owngil(
+    ErlNifEnv *env, py_context_t *ctx, ERL_NIF_TERM paths_term
+) {
+    if (!atomic_load(&ctx->thread_running)) {
+        return make_error(env, "thread_not_running");
+    }
+
+    pthread_mutex_lock(&ctx->request_mutex);
+
+    enif_clear_env(ctx->shared_env);
+    ctx->request_term = enif_make_copy(ctx->shared_env, paths_term);
+    ctx->request_type = CTX_REQ_APPLY_PATHS;
+
+    pthread_cond_signal(&ctx->request_ready);
+
+    /* Wait for response with timeout */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
+
+    while (ctx->request_type != CTX_REQ_NONE) {
+        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            atomic_store(&ctx->thread_running, false);
+            pthread_mutex_unlock(&ctx->request_mutex);
+            fprintf(stderr, "OWN_GIL apply_paths dispatch timeout: worker thread unresponsive\n");
+            return make_error(env, "worker_timeout");
+        }
+    }
+
+    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
+    pthread_mutex_unlock(&ctx->request_mutex);
+
+    return result;
+}
+
 #endif /* HAVE_SUBINTERPRETERS */
 
 /**
@@ -3786,6 +4021,9 @@ static int owngil_context_init(py_context_t *ctx) {
     atomic_store(&ctx->init_error, false);
     atomic_store(&ctx->shutdown_requested, false);
     ctx->request_type = CTX_REQ_NONE;
+    ctx->request_term = 0;
+    ctx->request_data = 0;
+    ctx->response_term = 0;
     ctx->response_ok = false;
 
     /* Initialize mutex and condition variables */
@@ -4733,6 +4971,189 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     enif_release_resource(res);  /* Ref now owns it */
 
     return enif_make_tuple2(env, ATOM_OK, ref);
+}
+
+/**
+ * @brief Apply a list of imports to an interpreter's sys.modules
+ *
+ * nif_interp_apply_imports(Ref, Imports) -> ok | {error, Reason}
+ *
+ * Imports: [{ModuleBin, FuncBin | 'all'}, ...]
+ * Imports modules into the interpreter's sys.modules (shared by all
+ * contexts/loops using this interpreter).
+ *
+ * Note: This imports into the INTERPRETER's module cache (sys.modules),
+ * not a per-context cache. All contexts using this interpreter will
+ * see the imported modules.
+ */
+static ERL_NIF_TERM nif_interp_apply_imports(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    if (ctx->destroyed) {
+        return make_error(env, "context_destroyed");
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to the dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_apply_imports_to_owngil(env, ctx, argv[1]);
+    }
+#endif
+
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Process each import - imports go into interpreter's sys.modules */
+    ERL_NIF_TERM head, tail = argv[1];
+    int arity;
+    const ERL_NIF_TERM *tuple;
+
+    while (enif_get_list_cell(env, tail, &head, &tail)) {
+        if (!enif_get_tuple(env, head, &arity, &tuple) || arity != 2) {
+            continue;
+        }
+
+        ErlNifBinary module_bin;
+        if (!enif_inspect_binary(env, tuple[0], &module_bin)) {
+            continue;
+        }
+
+        /* Convert to C string */
+        char *module_name = enif_alloc(module_bin.size + 1);
+        if (module_name == NULL) continue;
+        memcpy(module_name, module_bin.data, module_bin.size);
+        module_name[module_bin.size] = '\0';
+
+        /* Skip __main__ */
+        if (strcmp(module_name, "__main__") == 0) {
+            enif_free(module_name);
+            continue;
+        }
+
+        /* Import the module - this caches in interpreter's sys.modules
+         * which is shared by all contexts using this interpreter */
+        PyObject *mod = PyImport_ImportModule(module_name);
+        if (mod != NULL) {
+            Py_DECREF(mod);  /* sys.modules holds the reference */
+        } else {
+            /* Clear error - import failure is not fatal */
+            PyErr_Clear();
+        }
+
+        enif_free(module_name);
+    }
+
+    py_context_release(&guard);
+    return ATOM_OK;
+}
+
+/**
+ * @brief Apply a list of paths to an interpreter's sys.path
+ *
+ * nif_interp_apply_paths(Ref, Paths) -> ok | {error, Reason}
+ *
+ * Paths: [PathBin, ...]
+ * Inserts paths at the beginning of sys.path so they take precedence.
+ */
+static ERL_NIF_TERM nif_interp_apply_paths(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    if (ctx->destroyed) {
+        return make_error(env, "context_destroyed");
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+    /* OWN_GIL mode: dispatch to the dedicated thread */
+    if (ctx->uses_own_gil) {
+        return dispatch_apply_paths_to_owngil(env, ctx, argv[1]);
+    }
+#endif
+
+    py_context_guard_t guard = py_context_acquire(ctx);
+    if (!guard.acquired) {
+        return make_error(env, "acquire_failed");
+    }
+
+    /* Get sys.path */
+    PyObject *sys_module = PyImport_ImportModule("sys");
+    if (sys_module == NULL) {
+        py_context_release(&guard);
+        return make_error(env, "sys_import_failed");
+    }
+
+    PyObject *sys_path = PyObject_GetAttrString(sys_module, "path");
+    Py_DECREF(sys_module);
+    if (sys_path == NULL || !PyList_Check(sys_path)) {
+        Py_XDECREF(sys_path);
+        py_context_release(&guard);
+        return make_error(env, "sys_path_not_list");
+    }
+
+    /* Process each path - insert at beginning in reverse order */
+    /* First, collect all paths */
+    ERL_NIF_TERM head, tail = argv[1];
+    int path_count = 0;
+    ERL_NIF_TERM paths_list = argv[1];
+
+    /* Count paths */
+    while (enif_get_list_cell(env, tail, &head, &tail)) {
+        path_count++;
+    }
+
+    /* Insert in reverse order so first path ends up first */
+    tail = paths_list;
+    for (int i = 0; i < path_count; i++) {
+        /* Skip to the i-th element from the end */
+        ERL_NIF_TERM current = paths_list;
+        for (int j = 0; j < path_count - 1 - i; j++) {
+            enif_get_list_cell(env, current, &head, &current);
+        }
+        enif_get_list_cell(env, current, &head, &current);
+
+        ErlNifBinary path_bin;
+        if (!enif_inspect_binary(env, head, &path_bin)) {
+            continue;
+        }
+
+        /* Convert to Python string */
+        PyObject *path_str = PyUnicode_FromStringAndSize((char *)path_bin.data, path_bin.size);
+        if (path_str == NULL) {
+            PyErr_Clear();
+            continue;
+        }
+
+        /* Check if already in sys.path */
+        int already_present = PySequence_Contains(sys_path, path_str);
+        if (already_present <= 0) {
+            /* Insert at position 0 */
+            PyList_Insert(sys_path, 0, path_str);
+        }
+        Py_DECREF(path_str);
+    }
+
+    Py_DECREF(sys_path);
+    py_context_release(&guard);
+    return ATOM_OK;
 }
 
 /**
@@ -6726,6 +7147,7 @@ static ErlNifFunc nif_funcs[] = {
 
     /* Sub-interpreter support (shared GIL pool model) */
     {"subinterp_supported", 0, nif_subinterp_supported, 0},
+    {"owngil_supported", 0, nif_owngil_supported, 0},
     {"subinterp_worker_new", 0, nif_subinterp_worker_new, 0},
     {"subinterp_worker_destroy", 1, nif_subinterp_worker_destroy, 0},
     {"subinterp_call", 5, nif_subinterp_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
@@ -6792,12 +7214,6 @@ static ErlNifFunc nif_funcs[] = {
     /* Per-process namespace NIFs */
     {"event_loop_exec", 2, nif_event_loop_exec, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"event_loop_eval", 2, nif_event_loop_eval, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    /* Module import caching NIFs */
-    {"loop_import_module", 2, nif_loop_import_module, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"loop_import_function", 3, nif_loop_import_function, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"loop_flush_import_cache", 1, nif_loop_flush_import_cache, 0},
-    {"loop_import_stats", 1, nif_loop_import_stats, 0},
-    {"loop_import_list", 1, nif_loop_import_list, 0},
     {"add_reader", 3, nif_add_reader, 0},
     {"remove_reader", 2, nif_remove_reader, 0},
     {"add_writer", 3, nif_add_writer, 0},
@@ -6870,6 +7286,8 @@ static ErlNifFunc nif_funcs[] = {
     {"context_eval", 4, nif_context_eval_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_call", 6, nif_context_call_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"create_local_env", 1, nif_create_local_env, 0},
+    {"interp_apply_imports", 2, nif_interp_apply_imports, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"interp_apply_paths", 2, nif_interp_apply_paths, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_call_method", 4, nif_context_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_to_term", 1, nif_context_to_term, 0},
     {"context_interp_id", 1, nif_context_interp_id, 0},

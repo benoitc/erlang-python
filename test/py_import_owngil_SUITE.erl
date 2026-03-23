@@ -1,4 +1,4 @@
-%%% @doc Test suite for py:import with OWN_GIL subinterpreters.
+%%% @doc Test suite for py_import with OWN_GIL subinterpreters.
 %%%
 %%% Tests the import caching functionality with Python 3.12+ OWN_GIL mode,
 %%% which creates dedicated pthreads with independent Python GILs.
@@ -26,8 +26,7 @@
     owngil_import_function_test/1,
     owngil_import_main_rejected_test/1,
     owngil_import_stats_test/1,
-    owngil_import_list_test/1,
-    owngil_flush_imports_test/1
+    owngil_import_list_test/1
 ]).
 
 %% Isolation tests
@@ -52,8 +51,7 @@ groups() ->
         owngil_import_function_test,
         owngil_import_main_rejected_test,
         owngil_import_stats_test,
-        owngil_import_list_test,
-        owngil_flush_imports_test
+        owngil_import_list_test
     ]},
      {isolation, [sequence], [
         owngil_import_isolation_test,
@@ -64,13 +62,18 @@ groups() ->
     ]}].
 
 init_per_suite(Config) ->
-    case py_nif:subinterp_supported() of
+    %% Start application first (loads NIF)
+    {ok, _} = application:ensure_all_started(erlang_python),
+    timer:sleep(500),
+    %% Clear any imports from previous test suites to avoid
+    %% importing C extensions that crash in OWN_GIL subinterpreters
+    py_import:clear_imports(),
+    %% Check if OWN_GIL is supported (requires Python 3.14+)
+    case py_nif:owngil_supported() of
         true ->
-            {ok, _} = application:ensure_all_started(erlang_python),
-            timer:sleep(500),
             Config;
         false ->
-            {skip, "Requires Python 3.12+"}
+            {skip, "OWN_GIL requires Python 3.14+"}
     end.
 
 end_per_suite(_Config) ->
@@ -185,22 +188,6 @@ owngil_import_list_test(_Config) ->
         %% Verify they work
         {ok, _} = py_context:call(Ctx, json, dumps, [[1, 2]]),
         {ok, _} = py_context:call(Ctx, math, floor, [3.7])
-    after
-        py_context:destroy(Ctx)
-    end.
-
-%% @doc Test flush imports functionality
-owngil_flush_imports_test(_Config) ->
-    Ctx = create_owngil_context(),
-    try
-        %% Import a module
-        ok = py_context:exec(Ctx, <<"import json">>),
-        {ok, _} = py_context:call(Ctx, json, dumps, [[1]]),
-
-        %% Module should still work after re-import
-        ok = py_context:exec(Ctx, <<"import json">>),
-        {ok, Result} = py_context:call(Ctx, json, dumps, [[2, 3]]),
-        ?assertEqual(<<"[2, 3]">>, Result)
     after
         py_context:destroy(Ctx)
     end.

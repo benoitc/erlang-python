@@ -220,7 +220,7 @@ groups() ->
     ]}].
 
 init_per_suite(Config) ->
-    case py_nif:subinterp_supported() of
+    case py_nif:owngil_supported() of
         true ->
             {ok, _} = application:ensure_all_started(erlang_python),
             %% Add test directory to Python path
@@ -228,7 +228,7 @@ init_per_suite(Config) ->
             TestDir = filename:join(filename:dirname(PrivDir), "test"),
             Config ++ [{test_dir, TestDir}];
         false ->
-            {skip, "Requires Python 3.12+"}
+            {skip, "OWN_GIL requires Python 3.14+"}
     end.
 
 end_per_suite(_Config) ->
