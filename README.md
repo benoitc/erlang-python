@@ -15,9 +15,10 @@ erlang_python embeds Python into the BEAM VM, letting you call Python functions,
 evaluate expressions, and stream from generators - all without blocking Erlang
 schedulers.
 
-**Three paths to parallelism:**
-- **Sub-interpreters** (Python 3.12+) - Each interpreter has its own GIL
-- **Free-threaded Python** (3.13+) - No GIL at all
+**Parallelism options:**
+- **Worker mode** (default, recommended) - Works with any Python version. With free-threaded Python (3.13t+), provides true parallelism automatically
+- **SHARED_GIL sub-interpreters** (Python 3.12+) - Isolated namespaces, shared GIL (isolation improves in 3.14+)
+- **OWN_GIL sub-interpreters** (Python 3.14+) - Each interpreter has its own GIL, true parallelism
 - **BEAM processes** - Fan out work across lightweight Erlang processes
 
 Key features:
@@ -313,10 +314,11 @@ Ref = py:async_call(aiohttp, get, [<<"https://api.example.com/data">>]),
 
 ## Parallel Execution with Sub-interpreters
 
-True parallelism without GIL contention using Python 3.12+ sub-interpreters:
+True parallelism without GIL contention using Python 3.14+ OWN_GIL sub-interpreters:
 
 ```erlang
-%% Execute multiple calls in parallel across sub-interpreters
+%% Execute multiple calls in parallel across OWN_GIL sub-interpreters
+%% Requires Python 3.14+
 {ok, Results} = py:parallel([
     {math, factorial, [100]},
     {math, factorial, [200]},
@@ -325,6 +327,8 @@ True parallelism without GIL contention using Python 3.12+ sub-interpreters:
 ]).
 %% Each call runs in its own interpreter with its own GIL
 ```
+
+For Python 3.12/3.13, use SHARED_GIL sub-interpreters (`mode => subinterp`) for namespace isolation, but note that parallelism is limited by the shared GIL.
 
 ## Parallel Processing with BEAM Processes
 
@@ -595,18 +599,46 @@ ok = py:clear_traces().
 
 ## Execution Modes
 
-The library auto-detects the best execution mode:
+### Context Modes
+
+When creating Python contexts, you can choose the execution mode:
+
+| Mode | Python Version | Description |
+|------|----------------|-------------|
+| `worker` | Any | Main interpreter, shared namespace (default, recommended) |
+| `subinterp` | 3.12+ | SHARED_GIL sub-interpreter, isolated namespace |
+| `owngil` | 3.14+ | OWN_GIL sub-interpreter, true parallelism |
+
+```erlang
+%% Default: worker mode (recommended)
+%% With free-threaded Python (3.13t+), provides true parallelism automatically
+{ok, Ctx} = py_context:new(#{}).
+
+%% Explicit subinterpreter with shared GIL (Python 3.12+)
+%% Provides namespace isolation but no parallelism
+{ok, Ctx} = py_context:new(#{mode => subinterp}).
+
+%% OWN_GIL mode for true parallelism (Python 3.14+ required)
+%% Each context runs in its own pthread with independent GIL
+{ok, Ctx} = py_context:new(#{mode => owngil}).
+```
+
+**Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available.
+
+**Why OWN_GIL requires Python 3.14+**: Some C extensions (e.g., `_decimal`, `numpy`) have global state bugs in sub-interpreters on Python 3.12/3.13. These are fixed in Python 3.14. SHARED_GIL mode works on 3.12+ but with caveats for C extensions with global state.
+
+### Runtime Detection
+
+Check the current execution mode:
+```erlang
+py:execution_mode().  %% => free_threaded | subinterp | multi_executor
+```
 
 | Mode | Python Version | Parallelism |
 |------|----------------|-------------|
 | Free-threaded | 3.13+ (nogil) | True parallel, no GIL |
 | Sub-interpreter | 3.12+ | Per-interpreter GIL |
 | Multi-executor | Any | GIL contention |
-
-Check current mode:
-```erlang
-py:execution_mode().  %% => free_threaded | subinterp | multi_executor
-```
 
 ## Error Handling
 

@@ -2,12 +2,14 @@
 
 ## Overview
 
-OWN_GIL mode provides true parallel Python execution using Python 3.12+ per-interpreter GIL (`PyInterpreterConfig_OWN_GIL`). Each OWN_GIL context runs in a dedicated pthread with its own subinterpreter and GIL.
+OWN_GIL mode provides true parallel Python execution using Python 3.14+ per-interpreter GIL (`PyInterpreterConfig_OWN_GIL`). Each OWN_GIL context runs in a dedicated pthread with its own subinterpreter and GIL.
+
+**Note**: OWN_GIL requires Python 3.14+ due to C extension global state bugs in earlier versions (e.g., `_decimal`, `numpy`). For Python 3.12/3.13, use SHARED_GIL sub-interpreters (`mode => subinterp`) which provide namespace isolation but share the GIL.
 
 ## Quick Start
 
 ```erlang
-%% Create an OWN_GIL context (requires Python 3.12+)
+%% Create an OWN_GIL context (requires Python 3.14+)
 {ok, Ctx} = py_context:start_link(1, owngil),
 
 %% Basic operations work the same as other modes
@@ -79,11 +81,13 @@ All major erlang_python features work with OWN_GIL mode:
 
 ## Comparison with Other Modes
 
-| Mode | Thread Model | GIL | Parallelism |
-|------|-------------|-----|-------------|
-| `worker` | Dirty scheduler | Main interpreter GIL | None |
-| `subinterp` | Dirty scheduler | Shared GIL | None (isolated namespaces) |
-| `owngil` | Dedicated pthread | Per-interpreter GIL | True parallel |
+| Mode | Python Version | Thread Model | GIL | Parallelism |
+|------|----------------|--------------|-----|-------------|
+| `worker` | Any | Dirty scheduler | Main interpreter GIL | None |
+| `subinterp` | 3.12+ | Dirty scheduler | Shared GIL | None (isolated namespaces) |
+| `owngil` | 3.14+ | Dedicated pthread | Per-interpreter GIL | True parallel |
+
+**Why version requirements differ**: The `subinterp` mode (SHARED_GIL) works on Python 3.12+ for namespace isolation. However, `owngil` mode requires Python 3.14+ because C extensions like `_decimal`, `numpy` have global state that crashes in OWN_GIL sub-interpreters on earlier versions. Python 3.14 includes fixes for these issues (see [cpython#106078](https://github.com/python/cpython/issues/106078)).
 
 ## Key Data Structures
 
