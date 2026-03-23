@@ -130,6 +130,10 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
+    %% Allow time for async FD cleanup (enif_select STOP events)
+    %% to complete before the next test starts. This prevents
+    %% "stealing control" warnings when FDs are reused.
+    timer:sleep(50),
     ok.
 
 %% ============================================================================
