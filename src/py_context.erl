@@ -531,10 +531,10 @@ create_context(subinterp) ->
 create_context(worker) ->
     py_nif:context_create(worker);
 create_context(owngil) ->
-    %% OWN_GIL mode requires Python 3.12+
-    case py_nif:subinterp_supported() of
+    %% OWN_GIL mode requires Python 3.14+ due to C extension bugs in earlier versions
+    case py_nif:owngil_supported() of
         true -> py_nif:context_create(owngil);
-        false -> {error, owngil_requires_python312}
+        false -> {error, owngil_requires_python314}
     end.
 
 %% @private

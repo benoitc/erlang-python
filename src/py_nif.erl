@@ -54,6 +54,7 @@
     async_stream/6,
     %% Sub-interpreters (Python 3.12+) - shared GIL pool model
     subinterp_supported/0,
+    owngil_supported/0,
     subinterp_worker_new/0,
     subinterp_worker_destroy/1,
     subinterp_call/5,
@@ -488,6 +489,13 @@ async_stream(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
 %% Returns true on Python 3.12+, false otherwise.
 -spec subinterp_supported() -> boolean().
 subinterp_supported() ->
+    ?NIF_STUB.
+
+%% @doc Check if OWN_GIL mode is supported (Python 3.14+).
+%% OWN_GIL requires Python 3.14+ due to C extension global state bugs
+%% in earlier versions (e.g., _decimal). See gh-106078.
+-spec owngil_supported() -> boolean().
+owngil_supported() ->
     ?NIF_STUB.
 
 %% @doc Create a new sub-interpreter worker with its own GIL.

@@ -1970,6 +1970,23 @@ static ERL_NIF_TERM nif_subinterp_supported(ErlNifEnv *env, int argc, const ERL_
 #endif
 }
 
+/**
+ * @brief Check if OWN_GIL mode is supported (Python 3.14+)
+ *
+ * OWN_GIL requires Python 3.14+ due to C extension global state bugs
+ * in earlier versions (e.g., _decimal). See gh-106078.
+ */
+static ERL_NIF_TERM nif_owngil_supported(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    (void)argv;
+
+#ifdef HAVE_OWNGIL
+    return ATOM_TRUE;
+#else
+    return ATOM_FALSE;
+#endif
+}
+
 #ifdef HAVE_SUBINTERPRETERS
 
 static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
@@ -7130,6 +7147,7 @@ static ErlNifFunc nif_funcs[] = {
 
     /* Sub-interpreter support (shared GIL pool model) */
     {"subinterp_supported", 0, nif_subinterp_supported, 0},
+    {"owngil_supported", 0, nif_owngil_supported, 0},
     {"subinterp_worker_new", 0, nif_subinterp_worker_new, 0},
     {"subinterp_worker_destroy", 1, nif_subinterp_worker_destroy, 0},
     {"subinterp_call", 5, nif_subinterp_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},

@@ -540,10 +540,10 @@ def encode_test(data):
 %% OWN_GIL contexts each have their own interpreter, so imports in one
 %% should NOT be visible in another (different sys.modules).
 subinterp_isolation_test(_Config) ->
-    %% Skip if subinterpreters not supported
-    case py_nif:subinterp_supported() of
+    %% Skip if OWN_GIL not supported (requires Python 3.14+)
+    case py_nif:owngil_supported() of
         false ->
-            {skip, "Subinterpreters not supported"};
+            {skip, "OWN_GIL requires Python 3.14+"};
         true ->
             %% Clear registry so new contexts don't get pre-imported modules
             ok = py_import:clear_imports(),

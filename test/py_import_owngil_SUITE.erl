@@ -68,12 +68,12 @@ init_per_suite(Config) ->
     %% Clear any imports from previous test suites to avoid
     %% importing C extensions that crash in OWN_GIL subinterpreters
     py_import:clear_imports(),
-    %% Then check if subinterpreters are supported
-    case py_nif:subinterp_supported() of
+    %% Check if OWN_GIL is supported (requires Python 3.14+)
+    case py_nif:owngil_supported() of
         true ->
             Config;
         false ->
-            {skip, "Requires Python 3.12+"}
+            {skip, "OWN_GIL requires Python 3.14+"}
     end.
 
 end_per_suite(_Config) ->

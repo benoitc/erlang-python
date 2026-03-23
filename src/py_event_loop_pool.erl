@@ -370,8 +370,9 @@ run_async(Request) ->
 init([NumLoops]) ->
     process_flag(trap_exit, true),
 
-    %% Check if OWN_GIL mode is enabled
-    OwnGilEnabled = application:get_env(erlang_python, event_loop_pool_owngil, false),
+    %% Check if OWN_GIL mode is enabled and supported (Python 3.14+)
+    OwnGilConfigured = application:get_env(erlang_python, event_loop_pool_owngil, false),
+    OwnGilEnabled = OwnGilConfigured andalso py_nif:owngil_supported(),
 
     %% Initialize OWN_GIL infrastructure if enabled
     {Sessions, OwnGilReady} = case OwnGilEnabled of

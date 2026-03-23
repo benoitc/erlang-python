@@ -159,12 +159,23 @@ int main(void) {
 
     if(HAVE_SUBINTERPRETERS)
         message(STATUS "Subinterpreter API detected (PyInterpreterConfig_OWN_GIL available)")
+        # OWN_GIL mode requires Python 3.14+ due to C extension global state bugs
+        # in 3.12/3.13 (e.g., _decimal). See https://github.com/python/cpython/issues/106078
+        if(Python3_VERSION VERSION_GREATER_EQUAL "3.14")
+            set(HAVE_OWNGIL TRUE)
+            message(STATUS "Python ${Python3_VERSION} >= 3.14, OWN_GIL mode enabled")
+        else()
+            set(HAVE_OWNGIL FALSE)
+            message(STATUS "Python ${Python3_VERSION} < 3.14, OWN_GIL mode disabled (C extension bugs)")
+        endif()
     else()
         message(STATUS "Subinterpreter API compile test failed, using shared GIL fallback")
+        set(HAVE_OWNGIL FALSE)
     endif()
 else()
     message(STATUS "Python ${Python3_VERSION} < 3.12, subinterpreter API not available")
     set(HAVE_SUBINTERPRETERS FALSE)
+    set(HAVE_OWNGIL FALSE)
 endif()
 
 # Check for free-threaded Python (Python 3.13+ with --disable-gil / nogil build)
@@ -200,6 +211,9 @@ endif()
 # Add Python feature compile definitions for worker pool optimization
 if(HAVE_SUBINTERPRETERS)
     target_compile_definitions(py_nif PRIVATE HAVE_SUBINTERPRETERS=1)
+endif()
+if(HAVE_OWNGIL)
+    target_compile_definitions(py_nif PRIVATE HAVE_OWNGIL=1)
 endif()
 if(HAVE_FREE_THREADED)
     target_compile_definitions(py_nif PRIVATE HAVE_FREE_THREADED=1)
