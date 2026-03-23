@@ -1,17 +1,17 @@
-# Dual Pool Support
+# Pool Support
 
-This guide covers erlang_python's dual pool architecture for separating CPU-bound and I/O-bound Python operations.
+This guide covers erlang_python's pool architecture for separating CPU-bound and I/O-bound Python operations.
 
 ## Overview
 
-erlang_python provides two separate pools of Python contexts:
+erlang_python provides a `default` pool that starts automatically, and allows you to create additional pools on demand:
 
 | Pool | Purpose | Default Size | Use Case |
 |------|---------|--------------|----------|
 | `default` | Quick CPU-bound operations | Number of schedulers | Math, string processing, data transformation |
-| `io` | Slow I/O-bound operations | 10 | HTTP requests, database queries, file I/O |
+| custom pools | User-defined pools | User-defined | HTTP requests, database queries, GPU work |
 
-This separation prevents slow I/O operations from blocking quick CPU operations.
+Create pools on demand to separate slow I/O operations from blocking quick CPU operations.
 
 ## Architecture
 
@@ -28,18 +28,30 @@ This separation prevents slow I/O operations from blocking quick CPU operations.
 │              ┌──────────────┴──────────────┐                     │
 │              ▼                              ▼                     │
 │     ┌────────────────┐             ┌────────────────┐            │
-│     │  default pool  │             │    io pool     │            │
-│     │  (N contexts)  │             │  (10 contexts) │            │
+│     │  default pool  │             │  custom pools  │            │
+│     │  (N contexts)  │             │  (on demand)   │            │
 │     └────────────────┘             └────────────────┘            │
 │              │                              │                     │
 │     ┌────────┴────────┐            ┌────────┴────────┐           │
 │     ▼        ▼        ▼            ▼        ▼        ▼           │
-│   Ctx1    Ctx2    CtxN          Ctx1    Ctx2    Ctx10           │
+│   Ctx1    Ctx2    CtxN          Ctx1    Ctx2    CtxN            │
 │   (math)  (json)  (...)         (http)  (db)   (...)            │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Basic Usage
+
+### Creating Custom Pools
+
+Create pools on demand for specific workloads:
+
+```erlang
+%% Create an io pool for I/O-bound operations
+{ok, _Contexts} = py_context_router:start_pool(io, 10, worker).
+
+%% Create a gpu pool for ML workloads
+{ok, _} = py_context_router:start_pool(gpu, 2, worker).
+```
 
 ### Explicit Pool Selection
 
@@ -49,7 +61,7 @@ Specify the pool directly in the call:
 %% Use default pool (quick operations)
 {ok, 4.0} = py:call(default, math, sqrt, [16]).
 
-%% Use io pool (slow operations)
+%% Use io pool (after creating it)
 {ok, Response} = py:call(io, requests, get, [Url]).
 
 %% With keyword arguments
@@ -153,20 +165,14 @@ default = py_context_router:lookup_pool(json, dumps).  %% Function override
 
 ## Configuration
 
-Configure pool sizes via application environment:
+Configure default pool size via application environment:
 
 ```erlang
 %% sys.config
 [
     {erlang_python, [
         %% Default pool size (default: erlang:system_info(schedulers))
-        {default_pool_size, 8},
-
-        %% IO pool size (default: 10)
-        {io_pool_size, 20},
-
-        %% IO pool mode: auto | subinterp | worker (default: auto)
-        {io_pool_mode, worker}
+        {default_pool_size, 8}
     ]}
 ].
 ```
@@ -174,10 +180,15 @@ Configure pool sizes via application environment:
 ### Runtime Configuration
 
 ```erlang
-%% Start additional custom pool
+%% Start io pool for I/O-bound operations
+{ok, _} = py_context_router:start_pool(io, 10, worker).
+
+%% Start GPU pool for ML operations
 {ok, _} = py_context_router:start_pool(gpu, 2, worker).
 
-%% Register GPU operations
+%% Register operations to route to specific pools
+ok = py:register_pool(io, requests).
+ok = py:register_pool(io, psycopg2).
 ok = py:register_pool(gpu, torch).
 ok = py:register_pool(gpu, tensorflow).
 ```
@@ -189,6 +200,9 @@ ok = py:register_pool(gpu, tensorflow).
 ```erlang
 %% At application startup
 init_pools() ->
+    %% Create io pool for I/O-bound operations
+    {ok, _} = py_context_router:start_pool(io, 10, worker),
+
     %% Register I/O-heavy modules
     py:register_pool(io, requests),
     py:register_pool(io, httpx),
@@ -212,7 +226,8 @@ handle_request(UserId) ->
 ### ML Pipeline with I/O
 
 ```erlang
-%% Register I/O operations
+%% Create and configure io pool
+{ok, _} = py_context_router:start_pool(io, 10, worker),
 py:register_pool(io, boto3),        %% S3 access
 py:register_pool(io, requests),      %% API calls
 
@@ -254,11 +269,15 @@ process_batch(Items) ->
 
 ```erlang
 %% Check pool status
-true = py_context_router:pool_started(default),
+true = py_context_router:pool_started(default).
+false = py_context_router:pool_started(io).  %% Not started yet
+
+%% Start io pool
+{ok, _} = py_context_router:start_pool(io, 10, worker).
 true = py_context_router:pool_started(io).
 
 %% Check pool sizes
-DefaultSize = py_context_router:num_contexts(default),
+DefaultSize = py_context_router:num_contexts(default).
 IoSize = py_context_router:num_contexts(io).
 
 %% List all registrations

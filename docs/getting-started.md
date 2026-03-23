@@ -466,11 +466,14 @@ end.
 
 See [Security](security.md) for details on blocked operations and recommended alternatives.
 
-## Dual Pool Support
+## Custom Pool Support
 
-erlang_python provides two pools to separate CPU-bound and I/O-bound operations:
+erlang_python lets you create pools on demand to separate CPU-bound and I/O-bound operations:
 
 ```erlang
+%% Create io pool for I/O-bound operations
+{ok, _} = py_context_router:start_pool(io, 10, worker).
+
 %% Register entire modules to io pool
 py:register_pool(io, requests).
 py:register_pool(io, psycopg2).
@@ -484,7 +487,7 @@ py:register_pool(io, {db, query}).        %% Only db.query goes to io pool
 {ok, Rows} = py:call(db, query, [Sql]).      %% -> io pool (callable registered)
 ```
 
-This prevents slow HTTP requests from blocking quick math operations. See [Dual Pool Support](pools.md) for configuration and advanced usage.
+This prevents slow HTTP requests from blocking quick math operations. See [Pool Support](pools.md) for configuration and advanced usage.
 
 ## Zero-Copy Buffers
 
@@ -517,7 +520,7 @@ See [Buffer API](buffer.md) for zero-copy memoryview access and fast substring s
 
 ## Next Steps
 
-- See [Dual Pool Support](pools.md) for separating CPU and I/O operations
+- See [Pool Support](pools.md) for separating CPU and I/O operations
 - See [Type Conversion](type-conversion.md) for detailed type mapping
 - See [Context Affinity](context-affinity.md) for preserving Python state
 - See [Streaming](streaming.md) for working with generators
