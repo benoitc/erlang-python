@@ -430,6 +430,16 @@ cleanup_native:
         loop->task_queue = NULL;
     }
 
+    /* Clean up ErlNifEnv pool */
+    for (int i = 0; i < loop->env_pool_count; i++) {
+        if (loop->env_pool[i] != NULL) {
+            enif_free_env(loop->env_pool[i]);
+            loop->env_pool[i] = NULL;
+        }
+    }
+    loop->env_pool_count = 0;
+    pthread_mutex_destroy(&loop->env_pool_mutex);
+
     /* Release Python loop reference if held */
     if (loop->py_loop_valid && loop->py_loop != NULL) {
         /* Only decref if Python runtime is still running and we can safely acquire GIL */
@@ -442,8 +452,10 @@ cleanup_native:
             if (loop->py_cache_valid) {
                 Py_XDECREF(loop->cached_asyncio);
                 Py_XDECREF(loop->cached_run_and_send);
+                Py_XDECREF(loop->cached_events_module);
                 loop->cached_asyncio = NULL;
                 loop->cached_run_and_send = NULL;
+                loop->cached_events_module = NULL;
                 loop->py_cache_valid = false;
             }
             /* Clear callable cache */
@@ -1133,16 +1145,31 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     /* Initialize Python cache (uvloop-style optimization) */
     loop->cached_asyncio = NULL;
     loop->cached_run_and_send = NULL;
+    loop->cached_events_module = NULL;
     loop->py_cache_valid = false;
 
     /* Initialize callable cache */
     memset(loop->callable_cache, 0, sizeof(loop->callable_cache));
     loop->callable_cache_count = 0;
 
+    /* Initialize ErlNifEnv pool (empty initially, populated on demand) */
+    memset(loop->env_pool, 0, sizeof(loop->env_pool));
+    loop->env_pool_count = 0;
+    if (pthread_mutex_init(&loop->env_pool_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&loop->task_queue_mutex);
+        enif_ioq_destroy(loop->task_queue);
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_free_env(loop->msg_env);
+        enif_release_resource(loop);
+        return make_error(env, "env_pool_mutex_init_failed");
+    }
+
     /* Initialize per-process namespace registry */
     loop->namespaces_head = NULL;
     loop->pid_env_head = NULL;
     if (pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&loop->env_pool_mutex);
         pthread_mutex_destroy(&loop->task_queue_mutex);
         enif_ioq_destroy(loop->task_queue);
         pthread_cond_destroy(&loop->event_cond);
@@ -2688,6 +2715,40 @@ typedef struct {
 } dequeued_task_t;
 
 /**
+ * Get a pooled ErlNifEnv or allocate a new one.
+ * This amortizes allocation overhead by reusing cleared environments.
+ * Thread-safe via env_pool_mutex.
+ */
+static inline ErlNifEnv *get_pooled_env(erlang_event_loop_t *loop) {
+    ErlNifEnv *env = NULL;
+    pthread_mutex_lock(&loop->env_pool_mutex);
+    if (loop->env_pool_count > 0) {
+        loop->env_pool_count--;
+        env = loop->env_pool[loop->env_pool_count];
+    }
+    pthread_mutex_unlock(&loop->env_pool_mutex);
+    return env ? env : enif_alloc_env();
+}
+
+/**
+ * Return an ErlNifEnv to the pool (or free it if pool is full).
+ * The env is cleared before being returned to the pool.
+ * Thread-safe via env_pool_mutex.
+ */
+static inline void return_pooled_env(erlang_event_loop_t *loop, ErlNifEnv *term_env) {
+    enif_clear_env(term_env);
+    pthread_mutex_lock(&loop->env_pool_mutex);
+    if (loop->env_pool_count < ENV_POOL_SIZE) {
+        loop->env_pool[loop->env_pool_count] = term_env;
+        loop->env_pool_count++;
+        pthread_mutex_unlock(&loop->env_pool_mutex);
+    } else {
+        pthread_mutex_unlock(&loop->env_pool_mutex);
+        enif_free_env(term_env);
+    }
+}
+
+/**
  * process_ready_tasks(LoopRef) -> ok | {error, Reason}
  *
  * Called by the event worker when it receives 'task_ready' message.
@@ -2770,7 +2831,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         task_bin.size = iov[0].iov_len;
 
         /* Deserialize task tuple (NIF operation, no GIL needed) */
-        ErlNifEnv *term_env = enif_alloc_env();
+        ErlNifEnv *term_env = get_pooled_env(loop);
         if (term_env == NULL) {
             break;  /* Will process what we have so far */
         }
@@ -2778,7 +2839,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         ERL_NIF_TERM task_term;
         if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
                                 &task_term, 0) == 0) {
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             /* Dequeue and skip this malformed task */
             enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
             atomic_fetch_sub(&loop->task_count, 1);
@@ -2812,22 +2873,24 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
      * Avoids PyImport_ImportModule on every call */
     PyObject *asyncio;
     PyObject *run_and_send;
+    PyObject *events_module;
 
-    /* For thread-local event loop context (dirty NIF scheduler workaround) */
-    PyObject *events_module = NULL;
+    /* Per-call state for thread-local event loop context */
     PyObject *old_running_loop = NULL;
 
-    if (loop->py_cache_valid && loop->cached_asyncio != NULL && loop->cached_run_and_send != NULL) {
+    if (loop->py_cache_valid && loop->cached_asyncio != NULL &&
+        loop->cached_run_and_send != NULL && loop->cached_events_module != NULL) {
         /* Use cached references */
         asyncio = loop->cached_asyncio;
         run_and_send = loop->cached_run_and_send;
+        events_module = loop->cached_events_module;
     } else {
         /* First call or cache invalidated - populate cache */
         asyncio = PyImport_ImportModule("asyncio");
         if (asyncio == NULL) {
             /* Cleanup dequeued tasks */
             for (int i = 0; i < num_tasks; i++) {
-                enif_free_env(tasks[i].term_env);
+                return_pooled_env(loop, tasks[i].term_env);
             }
             PyGILState_Release(gstate);
             return make_error(env, "asyncio_import_failed");
@@ -2844,7 +2907,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (erlang_loop_mod == NULL) {
             Py_DECREF(asyncio);
             for (int i = 0; i < num_tasks; i++) {
-                enif_free_env(tasks[i].term_env);
+                return_pooled_env(loop, tasks[i].term_env);
             }
             PyGILState_Release(gstate);
             return make_error(env, "erlang_loop_import_failed");
@@ -2855,15 +2918,29 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (run_and_send == NULL) {
             Py_DECREF(asyncio);
             for (int i = 0; i < num_tasks; i++) {
-                enif_free_env(tasks[i].term_env);
+                return_pooled_env(loop, tasks[i].term_env);
             }
             PyGILState_Release(gstate);
             return make_error(env, "run_and_send_not_found");
         }
 
+        /* Import asyncio.events for running loop context management */
+        events_module = PyImport_ImportModule("asyncio.events");
+        if (events_module == NULL) {
+            PyErr_Clear();
+            Py_DECREF(asyncio);
+            Py_DECREF(run_and_send);
+            for (int i = 0; i < num_tasks; i++) {
+                return_pooled_env(loop, tasks[i].term_env);
+            }
+            PyGILState_Release(gstate);
+            return make_error(env, "events_import_failed");
+        }
+
         /* Store in cache */
         loop->cached_asyncio = asyncio;
         loop->cached_run_and_send = run_and_send;
+        loop->cached_events_module = events_module;
         loop->py_cache_valid = true;
     }
 
@@ -2881,7 +2958,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (erlang_loop_mod == NULL) {
             PyErr_Clear();
             for (int i = 0; i < num_tasks; i++) {
-                enif_free_env(tasks[i].term_env);
+                return_pooled_env(loop, tasks[i].term_env);
             }
             PyGILState_Release(gstate);
             return make_error(env, "loop_module_import_failed");
@@ -2892,7 +2969,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (loop_class == NULL) {
             PyErr_Clear();
             for (int i = 0; i < num_tasks; i++) {
-                enif_free_env(tasks[i].term_env);
+                return_pooled_env(loop, tasks[i].term_env);
             }
             PyGILState_Release(gstate);
             return make_error(env, "loop_class_not_found");
@@ -2903,7 +2980,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (new_loop == NULL) {
             PyErr_Clear();
             for (int i = 0; i < num_tasks; i++) {
-                enif_free_env(tasks[i].term_env);
+                return_pooled_env(loop, tasks[i].term_env);
             }
             PyGILState_Release(gstate);
             return make_error(env, "loop_creation_failed");
@@ -2936,22 +3013,20 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
      * and the running loop for this thread.
      *
      * This mirrors what Python's asyncio.run() does internally (see _loop.py).
+     * Note: events_module is already cached, no need to import again.
      * ======================================================================== */
-    events_module = PyImport_ImportModule("asyncio.events");
-    if (events_module != NULL) {
-        /* Set our loop as current event loop for this thread */
-        PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", loop->py_loop);
-        Py_XDECREF(set_result);
+    /* Set our loop as current event loop for this thread */
+    PyObject *set_result = PyObject_CallMethod(asyncio, "set_event_loop", "O", loop->py_loop);
+    Py_XDECREF(set_result);
 
-        /* Save and set running loop (needed for asyncio.Task creation) */
-        old_running_loop = PyObject_CallMethod(events_module, "_get_running_loop", NULL);
-        if (old_running_loop == NULL) {
-            PyErr_Clear();
-            old_running_loop = Py_NewRef(Py_None);
-        }
-        PyObject *set_running = PyObject_CallMethod(events_module, "_set_running_loop", "O", loop->py_loop);
-        Py_XDECREF(set_running);
+    /* Save and set running loop (needed for asyncio.Task creation) */
+    old_running_loop = PyObject_CallMethod(events_module, "_get_running_loop", NULL);
+    if (old_running_loop == NULL) {
+        PyErr_Clear();
+        old_running_loop = Py_NewRef(Py_None);
     }
+    PyObject *set_running = PyObject_CallMethod(events_module, "_set_running_loop", "O", loop->py_loop);
+    Py_XDECREF(set_running);
 
     /* Process all dequeued tasks */
     ERL_NIF_TERM result = ATOM_OK;
@@ -2966,33 +3041,31 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         const ERL_NIF_TERM *tuple_elems;
         if (!enif_get_tuple(term_env, task_term, &arity, &tuple_elems) ||
             arity != 6) {
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
         ErlNifPid caller_pid;
         if (!enif_get_local_pid(term_env, tuple_elems[0], &caller_pid)) {
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
         ErlNifBinary module_bin, func_bin;
         if (!enif_inspect_binary(term_env, tuple_elems[2], &module_bin) ||
             !enif_inspect_binary(term_env, tuple_elems[3], &func_bin)) {
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
         /* Look up env by PID (registered via submit_task_with_env) */
         py_env_resource_t *task_env = (py_env_resource_t *)lookup_pid_env(loop, &caller_pid);
 
-        /* Convert module/func to C strings */
-        char *module_name = enif_alloc(module_bin.size + 1);
-        char *func_name = enif_alloc(func_bin.size + 1);
-        if (module_name == NULL || func_name == NULL) {
-            enif_free(module_name);
-            enif_free(func_name);
-            enif_free_env(term_env);
+        /* Convert module/func to C strings (stack buffers to avoid alloc overhead) */
+        char module_name[CALLABLE_NAME_MAX];
+        char func_name[CALLABLE_NAME_MAX];
+        if (module_bin.size >= CALLABLE_NAME_MAX || func_bin.size >= CALLABLE_NAME_MAX) {
+            return_pooled_env(loop, term_env);
             continue;
         }
         memcpy(module_name, module_bin.data, module_bin.size);
@@ -3022,11 +3095,8 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             func = get_function_for_task(loop, ns, module_name, func_name);
         }
 
-        enif_free(module_name);
-        enif_free(func_name);
-
         if (func == NULL) {
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
@@ -3034,7 +3104,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         unsigned int args_len;
         if (!enif_get_list_length(term_env, tuple_elems[4], &args_len)) {
             Py_DECREF(func);
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
@@ -3055,7 +3125,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (!args_ok) {
             Py_DECREF(args);
             Py_DECREF(func);
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
@@ -3081,21 +3151,19 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
         if (coro == NULL) {
             PyErr_Clear();
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
-        /* Check if result is a coroutine */
-        PyObject *iscoroutine = PyObject_CallMethod(asyncio, "iscoroutine", "O", coro);
-        bool is_coro = iscoroutine != NULL && PyObject_IsTrue(iscoroutine);
-        Py_XDECREF(iscoroutine);
+        /* Check if result is a coroutine (direct C API, avoids method call overhead) */
+        bool is_coro = PyCoro_CheckExact(coro);
 
         /* Create caller PID object */
         extern PyTypeObject ErlangPidType;
         ErlangPidObject *pid_obj = PyObject_New(ErlangPidObject, &ErlangPidType);
         if (pid_obj == NULL) {
             Py_DECREF(coro);
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
         /* Copy PID */
@@ -3107,7 +3175,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             PyErr_Clear();
             Py_DECREF((PyObject *)pid_obj);
             Py_DECREF(coro);
-            enif_free_env(term_env);
+            return_pooled_env(loop, term_env);
             continue;
         }
 
@@ -3155,7 +3223,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
         Py_DECREF(py_ref);
         Py_DECREF((PyObject *)pid_obj);
-        enif_free_env(term_env);
+        return_pooled_env(loop, term_env);
     }
 
     /* NOTE: We don't DECREF asyncio and run_and_send here because they're cached
@@ -3173,11 +3241,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             /* Loop is already running - just signal it and clean up.
              * The pending events were already added by dispatch_timer/handle_fd_event,
              * and the condition variable was signaled. The running loop will wake up
-             * and process them. */
-            if (events_module != NULL) {
-                Py_XDECREF(old_running_loop);
-                Py_DECREF(events_module);
-            }
+             * and process them.
+             * Note: events_module is cached, so we don't DECREF it. */
+            Py_XDECREF(old_running_loop);
             PyGILState_Release(gstate);
             return ATOM_OK;
         }
@@ -3229,14 +3295,12 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         coros_scheduled = 0;  /* Already processed on first iteration */
     }
 
-    /* Restore original event loop context before releasing GIL */
-    if (events_module != NULL) {
-        PyObject *restore = PyObject_CallMethod(events_module, "_set_running_loop", "O",
-                                                old_running_loop ? old_running_loop : Py_None);
-        Py_XDECREF(restore);
-        Py_XDECREF(old_running_loop);
-        Py_DECREF(events_module);
-    }
+    /* Restore original event loop context before releasing GIL.
+     * Note: events_module is cached, so we don't DECREF it here. */
+    PyObject *restore = PyObject_CallMethod(events_module, "_set_running_loop", "O",
+                                            old_running_loop ? old_running_loop : Py_None);
+    Py_XDECREF(restore);
+    Py_XDECREF(old_running_loop);
 
     PyGILState_Release(gstate);
 
@@ -6946,6 +7010,7 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     /* Initialize Python cache (uvloop-style optimization) */
     loop->cached_asyncio = NULL;
     loop->cached_run_and_send = NULL;
+    loop->cached_events_module = NULL;
     loop->py_cache_valid = false;
 
 #ifdef HAVE_SUBINTERPRETERS

@@ -68,6 +68,9 @@ typedef struct _object PyObject;
  *  Note: Must be a power of 2 for efficient bitwise AND indexing */
 #define PENDING_HASH_SIZE 256
 
+/** @brief Size of ErlNifEnv pool for task processing (avoids alloc/free overhead) */
+#define ENV_POOL_SIZE 64
+
 /**
  * @struct cached_callable_t
  * @brief Cache entry for Python module/function lookups
@@ -380,8 +383,22 @@ typedef struct erlang_event_loop {
     /** @brief Cached _run_and_send function */
     PyObject *cached_run_and_send;
 
+    /** @brief Cached asyncio.events module (for running loop context) */
+    PyObject *cached_events_module;
+
     /** @brief Whether Python caches have been initialized */
     bool py_cache_valid;
+
+    /* ========== ErlNifEnv Pool (avoids alloc/free overhead per task) ========== */
+
+    /** @brief Pool of reusable ErlNifEnv for task processing */
+    ErlNifEnv *env_pool[ENV_POOL_SIZE];
+
+    /** @brief Number of environments currently in pool */
+    int env_pool_count;
+
+    /** @brief Mutex protecting env pool operations */
+    pthread_mutex_t env_pool_mutex;
 
     /* ========== Callable Cache (uvloop-style optimization) ========== */
 
