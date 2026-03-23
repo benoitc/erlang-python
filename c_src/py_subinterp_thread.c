@@ -425,6 +425,105 @@ static void *worker_thread_main(void *arg) {
             continue;
         }
 
+        /* Handle apply imports - imports modules into sys.modules */
+        if (header.req_type == REQ_APPLY_IMPORTS) {
+            /* Payload is ETF list of {ModuleBin, FuncBin | all} tuples */
+            if (payload != NULL && header.payload_len > 0) {
+                ErlNifEnv *tmp_env = enif_alloc_env();
+                if (tmp_env != NULL) {
+                    ERL_NIF_TERM imports_list;
+                    if (enif_binary_to_term(tmp_env, payload, header.payload_len,
+                                            &imports_list, 0) != 0) {
+                        ERL_NIF_TERM head, tail = imports_list;
+                        int arity;
+                        const ERL_NIF_TERM *tuple;
+                        while (enif_get_list_cell(tmp_env, tail, &head, &tail)) {
+                            if (enif_get_tuple(tmp_env, head, &arity, &tuple) && arity == 2) {
+                                ErlNifBinary module_bin;
+                                if (enif_inspect_binary(tmp_env, tuple[0], &module_bin)) {
+                                    char *module_name = enif_alloc(module_bin.size + 1);
+                                    if (module_name != NULL) {
+                                        memcpy(module_name, module_bin.data, module_bin.size);
+                                        module_name[module_bin.size] = '\0';
+                                        /* Skip __main__ */
+                                        if (strcmp(module_name, "__main__") != 0) {
+                                            PyObject *mod = PyImport_ImportModule(module_name);
+                                            if (mod != NULL) {
+                                                Py_DECREF(mod);
+                                            } else {
+                                                PyErr_Clear();
+                                            }
+                                        }
+                                        enif_free(module_name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    enif_free_env(tmp_env);
+                }
+            }
+            PyEval_SaveThread();
+            /* Send OK response */
+            owngil_header_t resp = {
+                .magic = OWNGIL_MAGIC,
+                .version = OWNGIL_PROTOCOL_VERSION,
+                .msg_type = MSG_RESPONSE,
+                .request_id = header.request_id,
+                .payload_len = 0,
+            };
+            write_full(w->result_pipe[1], &resp, sizeof(resp));
+            free(payload);
+            continue;
+        }
+
+        /* Handle apply paths - add paths to sys.path */
+        if (header.req_type == REQ_APPLY_PATHS) {
+            /* Payload is ETF list of path binaries */
+            if (payload != NULL && header.payload_len > 0) {
+                ErlNifEnv *tmp_env = enif_alloc_env();
+                if (tmp_env != NULL) {
+                    ERL_NIF_TERM paths_list;
+                    if (enif_binary_to_term(tmp_env, payload, header.payload_len,
+                                            &paths_list, 0) != 0) {
+                        PyObject *sys_path = PySys_GetObject("path");
+                        if (sys_path != NULL && PyList_Check(sys_path)) {
+                            ERL_NIF_TERM head, tail = paths_list;
+                            /* Insert in reverse order so first path ends up first */
+                            while (enif_get_list_cell(tmp_env, tail, &head, &tail)) {
+                                ErlNifBinary path_bin;
+                                if (enif_inspect_binary(tmp_env, head, &path_bin)) {
+                                    PyObject *path_str = PyUnicode_FromStringAndSize(
+                                        (const char *)path_bin.data, path_bin.size);
+                                    if (path_str != NULL) {
+                                        /* Check if path already in sys.path */
+                                        int contains = PySequence_Contains(sys_path, path_str);
+                                        if (contains == 0) {
+                                            PyList_Insert(sys_path, 0, path_str);
+                                        }
+                                        Py_DECREF(path_str);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    enif_free_env(tmp_env);
+                }
+            }
+            PyEval_SaveThread();
+            /* Send OK response */
+            owngil_header_t resp = {
+                .magic = OWNGIL_MAGIC,
+                .version = OWNGIL_PROTOCOL_VERSION,
+                .msg_type = MSG_RESPONSE,
+                .request_id = header.request_id,
+                .payload_len = 0,
+            };
+            write_full(w->result_pipe[1], &resp, sizeof(resp));
+            free(payload);
+            continue;
+        }
+
         /* Find namespace for this handle */
         subinterp_namespace_t *ns = worker_find_namespace(w, header.handle_id);
         if (ns == NULL) {

@@ -44,7 +44,9 @@
     %% Per-process namespace API
     exec/1, exec/2,
     eval/1, eval/2,
-    get_all_loops/0
+    get_all_loops/0,
+    get_all_sessions/0,
+    is_owngil_enabled/0
 ]).
 
 %% Legacy API
@@ -347,6 +349,24 @@ get_all_loops() ->
         N ->
             Loops = persistent_term:get(?PT_LOOPS),
             {ok, [element(Idx, Loops) || Idx <- lists:seq(1, N)]}
+    end.
+
+%% @doc Get all OWN_GIL sessions in the pool.
+%%
+%% Returns a list of {WorkerId, HandleId} tuples for all active sessions.
+%% Used by py_import to apply imports/paths to running OWN_GIL sessions.
+-spec get_all_sessions() -> [{non_neg_integer(), non_neg_integer()}].
+get_all_sessions() ->
+    case get_sessions_table() of
+        undefined -> [];
+        Tid ->
+            ets:foldl(
+                fun(#owngil_session{worker_id = W, handle_id = H}, Acc) ->
+                    [{W, H} | Acc]
+                end,
+                [],
+                Tid
+            )
     end.
 
 %%% ============================================================================

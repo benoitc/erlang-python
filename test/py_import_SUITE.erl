@@ -46,6 +46,9 @@
     %% Immediate application tests
     import_applies_to_running_interpreter_test/1,
     path_applies_to_running_interpreter_test/1,
+    %% OWN_GIL session tests
+    owngil_session_import_test/1,
+    owngil_session_path_test/1,
     %% Config initialization tests
     init_from_config_test/1
 ]).
@@ -85,6 +88,9 @@ groups() ->
         %% Immediate application tests
         import_applies_to_running_interpreter_test,
         path_applies_to_running_interpreter_test,
+        %% OWN_GIL session tests
+        owngil_session_import_test,
+        owngil_session_path_test,
         %% Config initialization tests
         init_from_config_test
     ]}].
@@ -849,6 +855,132 @@ path_applies_to_running_interpreter_test(Config) ->
     ok = py_import:clear_paths(),
 
     ct:pal("add_path applies immediately to running interpreter").
+
+%% ============================================================================
+%% OWN_GIL Session Tests
+%% ============================================================================
+
+%% @doc Test that ensure_imported applies to OWN_GIL sessions
+%%
+%% This verifies that calling ensure_imported on a running OWN_GIL session
+%% makes the module available in the session's interpreter.
+owngil_session_import_test(_Config) ->
+    %% Skip if OWN_GIL not supported (requires Python 3.14+)
+    case py_nif:owngil_supported() of
+        false ->
+            {skip, "OWN_GIL requires Python 3.14+"};
+        true ->
+            %% Enable OWN_GIL pool if not already enabled
+            case py_event_loop_pool:is_owngil_enabled() of
+                true ->
+                    do_owngil_session_import_test();
+                false ->
+                    %% Restart pool with OWN_GIL enabled
+                    ok = application:set_env(erlang_python, event_loop_pool_owngil, true),
+                    ok = supervisor:terminate_child(erlang_python_sup, py_event_loop_pool),
+                    {ok, _} = supervisor:restart_child(erlang_python_sup, py_event_loop_pool),
+                    timer:sleep(500),
+                    try
+                        do_owngil_session_import_test()
+                    after
+                        %% Restore original state
+                        ok = application:set_env(erlang_python, event_loop_pool_owngil, false),
+                        ok = supervisor:terminate_child(erlang_python_sup, py_event_loop_pool),
+                        {ok, _} = supervisor:restart_child(erlang_python_sup, py_event_loop_pool),
+                        timer:sleep(200)
+                    end
+            end
+    end.
+
+do_owngil_session_import_test() ->
+    %% Clear registry
+    ok = py_import:clear_imports(),
+
+    %% First, trigger an OWN_GIL session creation by running a task
+    %% This creates a session in the pool
+    Ref1 = py_event_loop_pool:create_task(builtins, 'len', [[1, 2, 3]]),
+    {ok, 3} = py_event_loop_pool:await(Ref1, 5000),
+
+    %% Verify we have at least one session
+    Sessions = py_event_loop_pool:get_all_sessions(),
+    ?assert(length(Sessions) >= 1),
+
+    %% Now ensure_imported 'zipfile' - should apply to OWN_GIL sessions
+    ok = py_import:ensure_imported(zipfile),
+
+    %% Run a task that uses zipfile in the OWN_GIL session
+    %% If the import was applied, this should work
+    Ref2 = py_event_loop_pool:create_task(zipfile, 'is_zipfile', [<<"/nonexistent">>]),
+    {ok, false} = py_event_loop_pool:await(Ref2, 5000),
+
+    ct:pal("ensure_imported applies to OWN_GIL sessions").
+
+%% @doc Test that add_path applies to OWN_GIL sessions
+%%
+%% This verifies that calling add_path on a running OWN_GIL session
+%% makes the path available in the session's sys.path.
+owngil_session_path_test(Config) ->
+    %% Skip if OWN_GIL not supported (requires Python 3.14+)
+    case py_nif:owngil_supported() of
+        false ->
+            {skip, "OWN_GIL requires Python 3.14+"};
+        true ->
+            %% Enable OWN_GIL pool if not already enabled
+            case py_event_loop_pool:is_owngil_enabled() of
+                true ->
+                    do_owngil_session_path_test(Config);
+                false ->
+                    %% Restart pool with OWN_GIL enabled
+                    ok = application:set_env(erlang_python, event_loop_pool_owngil, true),
+                    ok = supervisor:terminate_child(erlang_python_sup, py_event_loop_pool),
+                    {ok, _} = supervisor:restart_child(erlang_python_sup, py_event_loop_pool),
+                    timer:sleep(500),
+                    try
+                        do_owngil_session_path_test(Config)
+                    after
+                        %% Restore original state
+                        ok = application:set_env(erlang_python, event_loop_pool_owngil, false),
+                        ok = supervisor:terminate_child(erlang_python_sup, py_event_loop_pool),
+                        {ok, _} = supervisor:restart_child(erlang_python_sup, py_event_loop_pool),
+                        timer:sleep(200)
+                    end
+            end
+    end.
+
+do_owngil_session_path_test(Config) ->
+    %% Clear paths
+    ok = py_import:clear_paths(),
+
+    %% Create test module in priv_dir
+    PrivDir = ?config(priv_dir, Config),
+    ModuleDir = filename:join(PrivDir, "owngil_path_test"),
+    ok = filelib:ensure_dir(filename:join(ModuleDir, "dummy")),
+
+    %% Write a simple Python module
+    ModulePath = filename:join(ModuleDir, "owngil_test_mod.py"),
+    ModuleContent = <<"OWNGIL_TEST_VALUE = 999\ndef get_value(): return OWNGIL_TEST_VALUE\n">>,
+    ok = file:write_file(ModulePath, ModuleContent),
+
+    %% First, trigger an OWN_GIL session creation by running a task
+    Ref1 = py_event_loop_pool:create_task(builtins, 'len', [[1, 2]]),
+    {ok, 2} = py_event_loop_pool:await(Ref1, 5000),
+
+    %% Verify we have at least one session
+    Sessions = py_event_loop_pool:get_all_sessions(),
+    ?assert(length(Sessions) >= 1),
+
+    %% Now add_path - should apply to OWN_GIL sessions
+    ok = py_import:add_path(ModuleDir),
+
+    %% Run a task that imports and uses the custom module
+    %% If the path was applied, this should work
+    Ref2 = py_event_loop_pool:create_task(owngil_test_mod, get_value, []),
+    {ok, 999} = py_event_loop_pool:await(Ref2, 5000),
+
+    %% Clean up
+    ok = py_import:clear_paths(),
+
+    ct:pal("add_path applies to OWN_GIL sessions").
 
 %% ============================================================================
 %% Config Initialization Tests

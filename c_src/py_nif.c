@@ -6881,6 +6881,132 @@ static ERL_NIF_TERM nif_owngil_destroy_session(ErlNifEnv *env, int argc,
     return ATOM_OK;
 }
 
+/**
+ * @brief NIF: Apply imports to OWN_GIL session
+ *
+ * Imports modules into the worker's sys.modules.
+ * Args: WorkerId, HandleId, Imports (list of {ModuleBin, FuncBin | all})
+ */
+static ERL_NIF_TERM nif_owngil_apply_imports(ErlNifEnv *env, int argc,
+                                              const ERL_NIF_TERM argv[]) {
+    if (argc != 3) {
+        return enif_make_badarg(env);
+    }
+
+    if (!subinterp_thread_pool_is_ready()) {
+        return ATOM_OK;  /* Silently succeed if pool not ready */
+    }
+
+    unsigned int worker_id;
+    ErlNifUInt64 handle_id;
+
+    if (!enif_get_uint(env, argv[0], &worker_id) ||
+        !enif_get_uint64(env, argv[1], &handle_id)) {
+        return enif_make_badarg(env);
+    }
+
+    if (worker_id >= (unsigned int)g_thread_pool.num_workers) {
+        return ATOM_OK;  /* Invalid worker, silently succeed */
+    }
+
+    /* Serialize imports list to ETF */
+    ErlNifBinary payload_bin;
+    if (!enif_term_to_binary(env, argv[2], &payload_bin)) {
+        return ATOM_OK;  /* Serialization failed, silently succeed */
+    }
+
+    subinterp_thread_worker_t *w = &g_thread_pool.workers[worker_id];
+
+    pthread_mutex_lock(&w->dispatch_mutex);
+
+    uint64_t request_id = atomic_fetch_add(&g_thread_pool.next_request_id, 1);
+    owngil_header_t header = {
+        .magic = OWNGIL_MAGIC,
+        .version = OWNGIL_PROTOCOL_VERSION,
+        .msg_type = MSG_REQUEST,
+        .req_type = REQ_APPLY_IMPORTS,
+        .request_id = request_id,
+        .handle_id = handle_id,
+        .payload_len = payload_bin.size,
+    };
+
+    /* Write header and payload */
+    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
+        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size);
+        /* Wait for response */
+        owngil_header_t resp;
+        read(w->result_pipe[0], &resp, sizeof(resp));
+    }
+
+    enif_release_binary(&payload_bin);
+    pthread_mutex_unlock(&w->dispatch_mutex);
+
+    return ATOM_OK;
+}
+
+/**
+ * @brief NIF: Apply paths to OWN_GIL session
+ *
+ * Adds paths to the worker's sys.path.
+ * Args: WorkerId, HandleId, Paths (list of path binaries)
+ */
+static ERL_NIF_TERM nif_owngil_apply_paths(ErlNifEnv *env, int argc,
+                                            const ERL_NIF_TERM argv[]) {
+    if (argc != 3) {
+        return enif_make_badarg(env);
+    }
+
+    if (!subinterp_thread_pool_is_ready()) {
+        return ATOM_OK;  /* Silently succeed if pool not ready */
+    }
+
+    unsigned int worker_id;
+    ErlNifUInt64 handle_id;
+
+    if (!enif_get_uint(env, argv[0], &worker_id) ||
+        !enif_get_uint64(env, argv[1], &handle_id)) {
+        return enif_make_badarg(env);
+    }
+
+    if (worker_id >= (unsigned int)g_thread_pool.num_workers) {
+        return ATOM_OK;  /* Invalid worker, silently succeed */
+    }
+
+    /* Serialize paths list to ETF */
+    ErlNifBinary payload_bin;
+    if (!enif_term_to_binary(env, argv[2], &payload_bin)) {
+        return ATOM_OK;  /* Serialization failed, silently succeed */
+    }
+
+    subinterp_thread_worker_t *w = &g_thread_pool.workers[worker_id];
+
+    pthread_mutex_lock(&w->dispatch_mutex);
+
+    uint64_t request_id = atomic_fetch_add(&g_thread_pool.next_request_id, 1);
+    owngil_header_t header = {
+        .magic = OWNGIL_MAGIC,
+        .version = OWNGIL_PROTOCOL_VERSION,
+        .msg_type = MSG_REQUEST,
+        .req_type = REQ_APPLY_PATHS,
+        .request_id = request_id,
+        .handle_id = handle_id,
+        .payload_len = payload_bin.size,
+    };
+
+    /* Write header and payload */
+    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
+        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size);
+        /* Wait for response */
+        owngil_header_t resp;
+        read(w->result_pipe[0], &resp, sizeof(resp));
+    }
+
+    enif_release_binary(&payload_bin);
+    pthread_mutex_unlock(&w->dispatch_mutex);
+
+    return ATOM_OK;
+}
+
 #else /* !HAVE_SUBINTERPRETERS */
 
 /* Stub implementations for Python < 3.12 */
@@ -6976,6 +7102,18 @@ static ERL_NIF_TERM nif_owngil_submit_task(ErlNifEnv *env, int argc,
 
 static ERL_NIF_TERM nif_owngil_destroy_session(ErlNifEnv *env, int argc,
                                                 const ERL_NIF_TERM argv[]) {
+    (void)argc; (void)argv;
+    return ATOM_OK;
+}
+
+static ERL_NIF_TERM nif_owngil_apply_imports(ErlNifEnv *env, int argc,
+                                              const ERL_NIF_TERM argv[]) {
+    (void)argc; (void)argv;
+    return ATOM_OK;
+}
+
+static ERL_NIF_TERM nif_owngil_apply_paths(ErlNifEnv *env, int argc,
+                                            const ERL_NIF_TERM argv[]) {
     (void)argc; (void)argv;
     return ATOM_OK;
 }
@@ -7239,6 +7377,8 @@ static ErlNifFunc nif_funcs[] = {
     {"owngil_create_session", 1, nif_owngil_create_session, 0},
     {"owngil_submit_task", 7, nif_owngil_submit_task, 0},
     {"owngil_destroy_session", 2, nif_owngil_destroy_session, 0},
+    {"owngil_apply_imports", 3, nif_owngil_apply_imports, 0},
+    {"owngil_apply_paths", 3, nif_owngil_apply_paths, 0},
 
     /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},

@@ -92,6 +92,8 @@ typedef enum {
     REQ_ASYNC_CALL      = 5,   /**< Async - response via erlang.send() */
     REQ_CREATE_NS       = 10,  /**< Create namespace for handle */
     REQ_DESTROY_NS      = 11,  /**< Destroy namespace for handle */
+    REQ_APPLY_IMPORTS   = 12,  /**< Apply imports to namespace's sys.modules */
+    REQ_APPLY_PATHS     = 13,  /**< Apply paths to namespace's sys.path */
     REQ_SHUTDOWN        = 99,  /**< Shutdown the worker */
 } owngil_req_type_t;
 
