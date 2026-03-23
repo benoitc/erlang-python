@@ -2,6 +2,14 @@
 
 ## 2.2.0 (unreleased)
 
+### Added
+
+- **True streaming API** - New `py:stream_start/3,4` and `py:stream_cancel/1` functions
+  for event-driven streaming from Python generators. Unlike `py:stream/3,4` which
+  collects all values at once, `stream_start` sends `{py_stream, Ref, {data, Value}}`
+  messages as values are yielded. Supports both sync and async generators. Useful for
+  LLM token streaming, real-time data feeds, and processing large sequences incrementally.
+
 ### Fixed
 
 - **Channel notification for create_task** - Fixed async channel receive hanging when using

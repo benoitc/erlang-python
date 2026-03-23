@@ -56,6 +56,9 @@
     stream/4,
     stream_eval/1,
     stream_eval/2,
+    stream_start/3,
+    stream_start/4,
+    stream_cancel/1,
     version/0,
     memory_stats/0,
     gc/0,
@@ -414,13 +417,15 @@ stream(Module, Func, Args) ->
 
 %% @doc Stream results from a Python generator with kwargs.
 -spec stream(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
+stream(Module, Func, Args, Kwargs) when map_size(Kwargs) == 0 ->
+    %% No kwargs - use stream_start and collect results
+    {ok, Ref} = stream_start(Module, Func, Args),
+    collect_stream(Ref, []);
 stream(Module, Func, Args, Kwargs) ->
-    %% Route through the new process-per-context system
-    %% Create the generator and collect all values using list()
+    %% With kwargs - use eval approach
     Ctx = py_context_router:get_context(),
     ModuleBin = ensure_binary(Module),
     FuncBin = ensure_binary(Func),
-    %% Build code that calls the function and collects all yielded values
     KwargsCode = format_kwargs(Kwargs),
     ArgsCode = format_args(Args),
     Code = iolist_to_binary([
@@ -428,6 +433,19 @@ stream(Module, Func, Args, Kwargs) ->
         <<"(">>, ArgsCode, KwargsCode, <<"))">>
     ]),
     py_context:eval(Ctx, Code, #{}).
+
+%% @private Collect all stream events into a list
+collect_stream(Ref, Acc) ->
+    receive
+        {py_stream, Ref, {data, Value}} ->
+            collect_stream(Ref, [Value | Acc]);
+        {py_stream, Ref, done} ->
+            {ok, lists:reverse(Acc)};
+        {py_stream, Ref, {error, Reason}} ->
+            {error, Reason}
+    after 30000 ->
+        {error, timeout}
+    end.
 
 %% @private Format arguments for Python code
 format_args([]) -> <<>>;
@@ -467,6 +485,134 @@ stream_eval(Code, Locals) ->
     CodeBin = ensure_binary(Code),
     WrappedCode = <<"list(", CodeBin/binary, ")">>,
     py_context:eval(Ctx, WrappedCode, Locals).
+
+%%% ============================================================================
+%%% True Streaming API (Event-driven)
+%%% ============================================================================
+
+%% @doc Start a true streaming iteration from a Python generator.
+%%
+%% Unlike stream/3,4 which collects all values at once, this function
+%% returns immediately with a reference and sends values as events
+%% to the calling process as they are yielded.
+%%
+%% Events sent to the owner process:
+%% - `{py_stream, Ref, {data, Value}}' - Each yielded value
+%% - `{py_stream, Ref, done}' - Stream completed
+%% - `{py_stream, Ref, {error, Reason}}' - Stream error
+%%
+%% Supports both sync generators and async generators (coroutines).
+%%
+%% Example:
+%% ```
+%% {ok, Ref} = py:stream_start(builtins, iter, [[1,2,3,4,5]]),
+%% receive_loop(Ref).
+%%
+%% receive_loop(Ref) ->
+%%     receive
+%%         {py_stream, Ref, {data, Value}} ->
+%%             io:format("Got: ~p~n", [Value]),
+%%             receive_loop(Ref);
+%%         {py_stream, Ref, done} ->
+%%             io:format("Complete~n");
+%%         {py_stream, Ref, {error, Reason}} ->
+%%             io:format("Error: ~p~n", [Reason])
+%%     after 30000 ->
+%%         timeout
+%%     end.
+%% '''
+-spec stream_start(py_module(), py_func(), py_args()) -> {ok, reference()}.
+stream_start(Module, Func, Args) ->
+    stream_start(Module, Func, Args, #{}).
+
+%% @doc Start a true streaming iteration with options.
+%%
+%% Options:
+%% - `owner => pid()' - Process to receive events (default: self())
+%%
+%% @param Module Python module name
+%% @param Func Python function name
+%% @param Args Function arguments
+%% @param Opts Options map
+%% @returns {ok, Ref} where Ref is used to identify stream events
+-spec stream_start(py_module(), py_func(), py_args(), map()) -> {ok, reference()}.
+stream_start(Module, Func, Args, Opts) ->
+    Owner = maps:get(owner, Opts, self()),
+    Ref = make_ref(),
+    ModuleBin = ensure_binary(Module),
+    FuncBin = ensure_binary(Func),
+    RefHash = erlang:phash2(Ref),
+    %% Store owner and ref for Python to retrieve
+    %% Use binary keys because Python strings become binaries
+    py_state:store({<<"stream_owner">>, RefHash}, Owner),
+    py_state:store({<<"stream_ref">>, RefHash}, Ref),
+    py_state:store({<<"stream_args">>, RefHash}, Args),
+    %% Spawn an Erlang process to run the streaming iteration
+    spawn(fun() ->
+        stream_run_python(ModuleBin, FuncBin, RefHash)
+    end),
+    {ok, Ref}.
+
+%% @private Run the streaming via Python code
+stream_run_python(ModuleBin, FuncBin, RefHash) ->
+    RefHashBin = integer_to_binary(RefHash),
+    %% Build Python code that streams values using callbacks
+    Code = iolist_to_binary([
+        <<"import erlang\n">>,
+        <<"_rh = ">>, RefHashBin, <<"\n">>,
+        <<"_args = erlang.call('state_get', ('stream_args', _rh))\n">>,
+        <<"if _args is None:\n">>,
+        <<"    _args = []\n">>,
+        <<"try:\n">>,
+        <<"    _mod = __import__('">>, ModuleBin, <<"')\n">>,
+        <<"    _fn = getattr(_mod, '">>, FuncBin, <<"')\n">>,
+        <<"    _gen = _fn(*_args) if _args else _fn()\n">>,
+        <<"    for _val in _gen:\n">>,
+        <<"        if erlang.call('_py_stream_cancelled', _rh):\n">>,
+        <<"            erlang.call('_py_stream_send', _rh, 'error', 'cancelled')\n">>,
+        <<"            break\n">>,
+        <<"        erlang.call('_py_stream_send', _rh, 'data', _val)\n">>,
+        <<"    else:\n">>,
+        <<"        erlang.call('_py_stream_send', _rh, 'done', None)\n">>,
+        <<"except Exception as _e:\n">>,
+        <<"    erlang.call('_py_stream_send', _rh, 'error', str(_e))\n">>,
+        <<"finally:\n">>,
+        <<"    erlang.call('_py_stream_cleanup', _rh)\n">>
+    ]),
+    %% Execute the streaming code
+    case exec(Code) of
+        ok -> ok;
+        {error, Reason} ->
+            %% Try to notify owner of error
+            case py_state:fetch({<<"stream_owner">>, RefHash}) of
+                {ok, Owner} ->
+                    case py_state:fetch({<<"stream_ref">>, RefHash}) of
+                        {ok, Ref} ->
+                            Owner ! {py_stream, Ref, {error, Reason}},
+                            py_state:remove({<<"stream_owner">>, RefHash}),
+                            py_state:remove({<<"stream_ref">>, RefHash}),
+                            py_state:remove({<<"stream_args">>, RefHash});
+                        _ -> ok
+                    end;
+                _ -> ok
+            end
+    end.
+
+%% @doc Cancel an active stream.
+%%
+%% Sends a cancellation signal to stop the stream iteration.
+%% Any pending values may still be delivered before the stream stops.
+%%
+%% @param Ref The stream reference from stream_start/3,4
+%% @returns ok
+-spec stream_cancel(reference()) -> ok.
+stream_cancel(Ref) when is_reference(Ref) ->
+    %% Store cancellation flag that the streaming task checks
+    %% Use hash because we can't pass Erlang refs to Python callbacks easily
+    %% Use binary key because Python strings become binaries
+    RefHash = erlang:phash2(Ref),
+    py_state:store({<<"stream_cancelled_hash">>, RefHash}, true),
+    ok.
 
 %%% ============================================================================
 %%% Info

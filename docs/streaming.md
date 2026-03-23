@@ -6,11 +6,83 @@ This guide covers working with Python generators from Erlang.
 
 Python generators allow processing large datasets or infinite sequences
 efficiently by yielding values one at a time. erlang_python supports
-streaming these values back to Erlang.
+two modes of streaming:
 
-## Generator Expressions
+1. **Batch streaming** (`py:stream/3,4`, `py:stream_eval/1,2`) - Collects all values into a list
+2. **True streaming** (`py:stream_start/3,4`) - Sends events as values are yielded
 
-The simplest way to stream is with generator expressions:
+## True Streaming (Event-driven)
+
+For real-time processing where you need values as they arrive (e.g., LLM tokens,
+live data feeds), use `py:stream_start/3,4`:
+
+```erlang
+%% Start streaming from a Python iterator
+{ok, Ref} = py:stream_start(builtins, iter, [[1,2,3,4,5]]),
+
+%% Receive events as values are yielded
+receive_loop(Ref).
+
+receive_loop(Ref) ->
+    receive
+        {py_stream, Ref, {data, Value}} ->
+            io:format("Got: ~p~n", [Value]),
+            receive_loop(Ref);
+        {py_stream, Ref, done} ->
+            io:format("Complete~n");
+        {py_stream, Ref, {error, Reason}} ->
+            io:format("Error: ~p~n", [Reason])
+    after 30000 ->
+        timeout
+    end.
+```
+
+### Events
+
+The stream sends these messages to the owner process:
+
+- `{py_stream, Ref, {data, Value}}` - Each yielded value
+- `{py_stream, Ref, done}` - Stream completed successfully
+- `{py_stream, Ref, {error, Reason}}` - Stream error
+
+### Options
+
+```erlang
+%% Send events to a different process
+{ok, Ref} = py:stream_start(Module, Func, Args, #{owner => OtherPid}).
+```
+
+### Cancellation
+
+Cancel an active stream:
+
+```erlang
+{ok, Ref} = py:stream_start(my_module, long_generator, []),
+%% ... receive some values ...
+ok = py:stream_cancel(Ref).
+%% Stream will stop on next iteration
+```
+
+### Async Generators
+
+`stream_start` supports both sync and async generators:
+
+```erlang
+%% Async generator (e.g., streaming from an async API)
+ok = py:exec(<<"
+async def async_gen():
+    for i in range(5):
+        await asyncio.sleep(0.1)
+        yield i
+">>),
+{ok, Ref} = py:stream_start('__main__', async_gen, []).
+```
+
+## Batch Streaming (Collecting All Values)
+
+For simpler use cases where you want all values at once:
+
+### Generator Expressions
 
 ```erlang
 %% Stream squares of numbers 0-9
@@ -26,7 +98,7 @@ The simplest way to stream is with generator expressions:
 %% Evens = [0,2,4,6,8,10,12,14,16,18]
 ```
 
-## Iterator Objects
+### Iterator Objects
 
 Any Python iterator can be streamed:
 
@@ -40,7 +112,7 @@ Any Python iterator can be streamed:
 %% Items = [{<<"a">>, 1}, {<<"b">>, 2}]
 ```
 
-## Generator Functions
+### Generator Functions
 
 Define generator functions with `yield`:
 
@@ -69,45 +141,43 @@ For reliable inline generators, use lambda with walrus operator (Python 3.8+):
 %% Fib = [0,1,1,2,3,5,8,13,21,34]
 ```
 
-## Streaming Protocol
+## When to Use Each Mode
 
-Internally, streaming uses these messages:
-
-```erlang
-{py_chunk, Ref, Value}   %% Each yielded value
-{py_end, Ref}            %% Generator exhausted
-{py_error, Ref, Error}   %% Exception occurred
-```
-
-You can build custom streaming consumers:
-
-```erlang
-start_stream(Code) ->
-    Ref = make_ref(),
-    py_pool:request({stream_eval, Ref, self(), Code, #{}}),
-    process_stream(Ref).
-
-process_stream(Ref) ->
-    receive
-        {py_chunk, Ref, Value} ->
-            io:format("Got: ~p~n", [Value]),
-            process_stream(Ref);
-        {py_end, Ref} ->
-            io:format("Done~n");
-        {py_error, Ref, Error} ->
-            io:format("Error: ~p~n", [Error])
-    after 30000 ->
-        io:format("Timeout~n")
-    end.
-```
+| Use Case | Recommended API |
+|----------|-----------------|
+| LLM token streaming | `stream_start/3,4` |
+| Real-time data feeds | `stream_start/3,4` |
+| Live progress updates | `stream_start/3,4` |
+| Batch processing | `stream/3,4` or `stream_eval/1,2` |
+| Small datasets | `stream/3,4` or `stream_eval/1,2` |
+| One-time collection | `stream/3,4` or `stream_eval/1,2` |
 
 ## Memory Considerations
 
-- Values are collected into a list by `stream_eval/1,2`
-- For large datasets, consider processing chunks as they arrive
+- `stream_start`: Low memory - values processed as they arrive
+- `stream/stream_eval`: Values collected into a list - memory grows with output size
 - Generators are garbage collected after exhaustion
 
 ## Use Cases
+
+### LLM Token Streaming
+
+```erlang
+%% Stream tokens from an LLM
+{ok, Ref} = py:stream_start(llm_client, generate_tokens, [Prompt]),
+stream_to_client(Ref, WebSocket).
+
+stream_to_client(Ref, WS) ->
+    receive
+        {py_stream, Ref, {data, Token}} ->
+            websocket:send(WS, Token),
+            stream_to_client(Ref, WS);
+        {py_stream, Ref, done} ->
+            websocket:send(WS, <<"[DONE]">>);
+        {py_stream, Ref, {error, _}} ->
+            websocket:send(WS, <<"[ERROR]">>)
+    end.
+```
 
 ### Data Processing Pipelines
 
@@ -117,22 +187,6 @@ process_stream(Ref) ->
 
 %% Transform each line
 Results = [process_line(L) || L <- Lines].
-```
-
-### Infinite Sequences
-
-```erlang
-%% Define infinite counter
-ok = py:exec(<<"
-def counter():
-    n = 0
-    while True:
-        yield n
-        n += 1
-">>).
-
-%% Take first 100 (use your own take function)
-%% Can't use stream/3 directly for infinite - need custom handling
 ```
 
 ### Batch Processing
