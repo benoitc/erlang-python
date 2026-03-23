@@ -53,6 +53,9 @@ init([]) ->
     %% Initialize shared state ETS table (owned by supervisor for resilience)
     ok = py_state:init_tab(),
 
+    %% Initialize import/path registry and load config (before contexts start)
+    ok = py_import:init(),
+
     %% Register ALL system callbacks early, before any gen_server starts.
     %% This ensures callbacks like _py_sleep and _whereis are available immediately.
     ok = py_callback:register_callbacks(),
