@@ -18,6 +18,17 @@
 %%% applied to all Python interpreters. Imports and paths are applied
 %%% immediately to all running interpreters and stored for new interpreters.
 %%%
+%%% == Configuration ==
+%%%
+%%% Imports and paths can be configured in the application environment:
+%%%
+%%% ```
+%%% {erlang_python, [
+%%%     {imports, [{json, dumps}, {math, sqrt}, {os, getcwd}]},
+%%%     {paths, ["/path/to/modules"]}
+%%% ]}
+%%% '''
+%%%
 %%% == Examples ==
 %%%
 %%% ```
@@ -70,6 +81,7 @@
 %% @doc Initialize the import and path registry ETS tables.
 %%
 %% This is called automatically during application startup.
+%% Also loads imports and paths from application config.
 %% Safe to call multiple times - does nothing if already initialized.
 %%
 %% @returns ok
@@ -77,8 +89,6 @@
 init() ->
     case ets:info(?IMPORT_REGISTRY) of
         undefined ->
-            %% Use bag type to allow multiple entries with same module name
-            %% e.g., {<<"json">>, all} and {<<"json">>, <<"dumps">>}
             ets:new(?IMPORT_REGISTRY, [bag, public, named_table]),
             ok;
         _ ->
@@ -86,12 +96,12 @@ init() ->
     end,
     case ets:info(?PATH_REGISTRY) of
         undefined ->
-            %% Use set type - paths are unique, ordered by insertion
             ets:new(?PATH_REGISTRY, [ordered_set, public, named_table]),
             ok;
         _ ->
             ok
-    end.
+    end,
+    load_config().
 
 %%% ============================================================================
 %%% Module Import Registry
@@ -352,6 +362,30 @@ is_path_added(Path) ->
 %% @private
 ensure_binary(S) ->
     py_util:to_binary(S).
+
+%% @private Load imports and paths from application config
+load_config() ->
+    %% Load imports: [{Module, Func}]
+    Imports = application:get_env(erlang_python, imports, []),
+    lists:foreach(
+        fun({Module, Func}) ->
+            ModuleBin = ensure_binary(Module),
+            FuncBin = ensure_binary(Func),
+            ets:insert(?IMPORT_REGISTRY, {ModuleBin, FuncBin})
+        end,
+        Imports
+    ),
+    %% Load paths
+    Paths = application:get_env(erlang_python, paths, []),
+    lists:foreach(
+        fun(Path) ->
+            PathBin = ensure_binary(Path),
+            Key = erlang:monotonic_time(),
+            ets:insert(?PATH_REGISTRY, {Key, PathBin})
+        end,
+        Paths
+    ),
+    ok.
 
 %% @private Apply import to all running interpreters (contexts + event loops)
 apply_import_to_interpreters(ModuleBin) ->

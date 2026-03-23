@@ -45,7 +45,9 @@
     add_path_test/1,
     %% Immediate application tests
     import_applies_to_running_interpreter_test/1,
-    path_applies_to_running_interpreter_test/1
+    path_applies_to_running_interpreter_test/1,
+    %% Config initialization tests
+    init_from_config_test/1
 ]).
 
 all() ->
@@ -82,7 +84,9 @@ groups() ->
         add_path_test,
         %% Immediate application tests
         import_applies_to_running_interpreter_test,
-        path_applies_to_running_interpreter_test
+        path_applies_to_running_interpreter_test,
+        %% Config initialization tests
+        init_from_config_test
     ]}].
 
 init_per_suite(Config) ->
@@ -845,3 +849,57 @@ path_applies_to_running_interpreter_test(Config) ->
     ok = py_import:clear_paths(),
 
     ct:pal("add_path applies immediately to running interpreter").
+
+%% ============================================================================
+%% Config Initialization Tests
+%% ============================================================================
+
+%% @doc Test that imports and paths are loaded from application config
+init_from_config_test(Config) ->
+    %% Clear existing state
+    ok = py_import:clear_imports(),
+    ok = py_import:clear_paths(),
+
+    %% Create test module in priv_dir
+    PrivDir = ?config(priv_dir, Config),
+    ModuleDir = filename:join(PrivDir, "config_test"),
+    ok = filelib:ensure_dir(filename:join(ModuleDir, "dummy")),
+    ModulePath = filename:join(ModuleDir, "config_test_mod.py"),
+    ok = file:write_file(ModulePath, <<"CONFIG_VALUE = 123\n">>),
+
+    %% Set application config
+    ok = application:set_env(erlang_python, imports, [{json, dumps}, {base64, b64encode}]),
+    ok = application:set_env(erlang_python, paths, [ModuleDir]),
+
+    %% Re-run init to load config
+    ok = py_import:init(),
+
+    %% Verify imports were loaded in registry
+    Imports = py_import:all_imports(),
+    ?assert(lists:member({<<"json">>, <<"dumps">>}, Imports)),
+    ?assert(lists:member({<<"base64">>, <<"b64encode">>}, Imports)),
+
+    %% Verify paths were loaded in registry
+    Paths = py_import:all_paths(),
+    ModuleDirBin = list_to_binary(ModuleDir),
+    ?assert(lists:member(ModuleDirBin, Paths)),
+
+    %% Create a new context and verify imports/paths are applied
+    {ok, Ctx} = py_context:new(#{mode => worker}),
+
+    %% Verify json.dumps works (from config imports)
+    {ok, JsonResult} = py_context:call(Ctx, json, dumps, [[1, 2, 3]], #{}),
+    ?assertEqual(<<"[1, 2, 3]">>, JsonResult),
+
+    %% Verify custom module from config path works
+    {ok, ConfigValue} = py_context:eval(Ctx, <<"__import__('config_test_mod').CONFIG_VALUE">>),
+    ?assertEqual(123, ConfigValue),
+
+    %% Clean up
+    py_context:destroy(Ctx),
+    ok = application:unset_env(erlang_python, imports),
+    ok = application:unset_env(erlang_python, paths),
+    ok = py_import:clear_imports(),
+    ok = py_import:clear_paths(),
+
+    ct:pal("init loads imports and paths from config and applies to new contexts").
