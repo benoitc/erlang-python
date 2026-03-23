@@ -521,8 +521,12 @@ apply_registered_paths(Ref) ->
     end.
 
 %% @private
+%% Auto mode uses subinterpreters only on Python 3.14+ where C extension
+%% global state bugs (e.g., _decimal) are fixed. On Python 3.12/3.13,
+%% use worker mode to avoid crashes from C extensions like _decimal.
+%% Users can still explicitly use subinterp mode if needed.
 create_context(auto) ->
-    case py_nif:subinterp_supported() of
+    case py_nif:owngil_supported() of
         true -> create_context(subinterp);
         false -> create_context(worker)
     end;
