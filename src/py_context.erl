@@ -421,6 +421,8 @@ init(Parent, Id, Mode) ->
             %% Apply all registered imports and paths to this interpreter
             apply_registered_imports(Ref),
             apply_registered_paths(Ref),
+            %% Apply preload code (populates globals for process-local envs)
+            apply_preload(Ref),
             %% For subinterpreters, create a dedicated event worker
             EventState = setup_event_worker(Ref, InterpId),
             %% For thread-model subinterpreters, spawn a dedicated callback handler
@@ -517,6 +519,13 @@ apply_registered_paths(Ref) ->
         [] -> ok;
         Paths -> py_nif:interp_apply_paths(Ref, Paths)
     end.
+
+%% @private Apply preload code to the interpreter's globals.
+%%
+%% Called when a new interpreter is created. The preload code populates
+%% the context's globals dict, which process-local environments inherit.
+apply_preload(Ref) ->
+    py_preload:apply_preload(Ref).
 
 %% @private
 create_context(worker) ->

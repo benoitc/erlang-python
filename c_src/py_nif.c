@@ -3147,34 +3147,40 @@ static void owngil_execute_create_local_env(py_context_t *ctx) {
         res->interp_id = PyInterpreterState_GetID(interp);
     }
 
-    /* Create globals dict with builtins and erlang module */
-    res->globals = PyDict_New();
+    /* Copy globals from context to inherit preloaded code */
+    res->globals = PyDict_Copy(ctx->globals);
     if (res->globals == NULL) {
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
             enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "globals_failed"));
+            enif_make_atom(ctx->shared_env, "globals_copy_failed"));
         ctx->response_ok = false;
         return;
     }
 
-    /* Add __builtins__ */
-    PyObject *builtins = PyEval_GetBuiltins();
-    if (builtins != NULL) {
-        PyDict_SetItemString(res->globals, "__builtins__", builtins);
+    /* Ensure __builtins__ is present */
+    if (PyDict_GetItemString(res->globals, "__builtins__") == NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        if (builtins != NULL) {
+            PyDict_SetItemString(res->globals, "__builtins__", builtins);
+        }
     }
 
-    /* Add __name__ = '__main__' */
-    PyObject *main_name = PyUnicode_FromString("__main__");
-    if (main_name != NULL) {
-        PyDict_SetItemString(res->globals, "__name__", main_name);
-        Py_DECREF(main_name);
+    /* Ensure __name__ = '__main__' is set */
+    if (PyDict_GetItemString(res->globals, "__name__") == NULL) {
+        PyObject *main_name = PyUnicode_FromString("__main__");
+        if (main_name != NULL) {
+            PyDict_SetItemString(res->globals, "__name__", main_name);
+            Py_DECREF(main_name);
+        }
     }
 
-    /* Add erlang module */
-    PyObject *erlang = PyImport_ImportModule("erlang");
-    if (erlang != NULL) {
-        PyDict_SetItemString(res->globals, "erlang", erlang);
-        Py_DECREF(erlang);
+    /* Ensure erlang module is available */
+    if (PyDict_GetItemString(res->globals, "erlang") == NULL) {
+        PyObject *erlang = PyImport_ImportModule("erlang");
+        if (erlang != NULL) {
+            PyDict_SetItemString(res->globals, "erlang", erlang);
+            Py_DECREF(erlang);
+        }
     }
 
     /* Use the same dict for locals (module-level execution) */
@@ -4933,32 +4939,38 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     }
 #endif
 
-    /* Create globals dict with builtins and erlang module */
-    res->globals = PyDict_New();
+    /* Copy globals from context to inherit preloaded code */
+    res->globals = PyDict_Copy(ctx->globals);
     if (res->globals == NULL) {
         py_context_release(&guard);
         enif_release_resource(res);
-        return make_error(env, "globals_failed");
+        return make_error(env, "globals_copy_failed");
     }
 
-    /* Add __builtins__ */
-    PyObject *builtins = PyEval_GetBuiltins();
-    if (builtins != NULL) {
-        PyDict_SetItemString(res->globals, "__builtins__", builtins);
+    /* Ensure __builtins__ is present (may not be in subinterpreter mode) */
+    if (PyDict_GetItemString(res->globals, "__builtins__") == NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        if (builtins != NULL) {
+            PyDict_SetItemString(res->globals, "__builtins__", builtins);
+        }
     }
 
-    /* Add __name__ = '__main__' so defined functions are accessible via __main__ */
-    PyObject *main_name = PyUnicode_FromString("__main__");
-    if (main_name != NULL) {
-        PyDict_SetItemString(res->globals, "__name__", main_name);
-        Py_DECREF(main_name);
+    /* Ensure __name__ = '__main__' is set */
+    if (PyDict_GetItemString(res->globals, "__name__") == NULL) {
+        PyObject *main_name = PyUnicode_FromString("__main__");
+        if (main_name != NULL) {
+            PyDict_SetItemString(res->globals, "__name__", main_name);
+            Py_DECREF(main_name);
+        }
     }
 
-    /* Add erlang module */
-    PyObject *erlang = PyImport_ImportModule("erlang");
-    if (erlang != NULL) {
-        PyDict_SetItemString(res->globals, "erlang", erlang);
-        Py_DECREF(erlang);
+    /* Ensure erlang module is available */
+    if (PyDict_GetItemString(res->globals, "erlang") == NULL) {
+        PyObject *erlang = PyImport_ImportModule("erlang");
+        if (erlang != NULL) {
+            PyDict_SetItemString(res->globals, "erlang", erlang);
+            Py_DECREF(erlang);
+        }
     }
 
     /* Use the same dict for locals (module-level execution) */
