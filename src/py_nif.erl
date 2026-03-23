@@ -114,8 +114,6 @@
     event_loop_eval/2,
     %% Per-interpreter import caching NIFs
     interp_apply_imports/2,
-    interp_flush_imports/2,
-    subinterp_pool_flush_generation/0,
     add_reader/3,
     remove_reader/2,
     add_writer/3,
@@ -864,30 +862,6 @@ event_loop_eval(_LoopRef, _Expr) ->
 %% @returns ok | {error, Reason}
 -spec interp_apply_imports(reference(), [{binary(), binary() | all}]) -> ok | {error, term()}.
 interp_apply_imports(_Ref, _Imports) ->
-    ?NIF_STUB.
-
-%% @doc Flush the module cache from an interpreter.
-%%
-%% Removes specified modules from sys.modules and clears the module_cache.
-%% Used when flushing imports from the global registry.
-%%
-%% @param Ref Context reference (from context_create/1)
-%% @param Modules List of module names (binaries) to remove from sys.modules
-%% @returns ok
--spec interp_flush_imports(reference(), [binary()]) -> ok.
-interp_flush_imports(_Ref, _Modules) ->
-    ?NIF_STUB.
-
-%% @doc Flush import generation and mark all pool slots stale.
-%%
-%% Increments the global import generation counter and marks all initialized
-%% pool slots as stale. When a stale slot's usage count drops to 0, the
-%% subinterpreter is automatically destroyed. New contexts will get fresh
-%% subinterpreters with updated imports from the registry.
-%%
-%% @returns {ok, NewGeneration}
--spec subinterp_pool_flush_generation() -> {ok, non_neg_integer()}.
-subinterp_pool_flush_generation() ->
     ?NIF_STUB.
 
 %% @doc Register a file descriptor for read monitoring.

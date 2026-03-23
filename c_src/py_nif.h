@@ -731,8 +731,7 @@ typedef enum {
     CTX_REQ_EVAL_WITH_ENV,      /**< Eval with process-local environment */
     CTX_REQ_EXEC_WITH_ENV,      /**< Exec with process-local environment */
     CTX_REQ_CREATE_LOCAL_ENV,   /**< Create process-local env dicts */
-    CTX_REQ_APPLY_IMPORTS,      /**< Apply imports to module cache */
-    CTX_REQ_FLUSH_IMPORTS       /**< Flush module cache */
+    CTX_REQ_APPLY_IMPORTS       /**< Apply imports to module cache */
 } ctx_request_type_t;
 
 /**
@@ -888,9 +887,6 @@ typedef struct {
 
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
-
-    /** @brief Cache generation for staleness detection (main interpreter contexts) */
-    uint64_t cache_generation;
 } py_context_t;
 
 /* ============================================================================

@@ -53,8 +53,7 @@
     get_interp_id/1,
     is_subinterp/1,
     create_local_env/1,
-    get_nif_ref/1,
-    flush_imports/2
+    get_nif_ref/1
 ]).
 
 %% Internal exports
@@ -412,26 +411,6 @@ get_nif_ref(Ctx) when is_pid(Ctx) ->
             error({context_died, Reason})
     end.
 
-%% @doc Flush the module cache from this context's interpreter.
-%%
-%% Clears all cached modules from the interpreter's module_cache.
-%% Removes specified modules from sys.modules in the interpreter.
-%%
-%% @param Ctx Context process
-%% @param Modules List of module names (binaries) to remove
-%% @returns ok
--spec flush_imports(context(), [binary()]) -> ok.
-flush_imports(Ctx, Modules) when is_pid(Ctx), is_list(Modules) ->
-    MRef = erlang:monitor(process, Ctx),
-    Ctx ! {flush_imports, self(), MRef, Modules},
-    receive
-        {MRef, ok} ->
-            erlang:demonitor(MRef, [flush]),
-            ok;
-        {'DOWN', MRef, process, Ctx, _Reason} ->
-            ok
-    end.
-
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
@@ -614,11 +593,6 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
 
         {get_nif_ref, From, MRef} ->
             From ! {MRef, Ref},
-            loop(State);
-
-        {flush_imports, From, MRef, Modules} ->
-            py_nif:interp_flush_imports(Ref, Modules),
-            From ! {MRef, ok},
             loop(State);
 
         {stop, From, MRef} ->

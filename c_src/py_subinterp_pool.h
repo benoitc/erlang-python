@@ -211,24 +211,4 @@ uint64_t subinterp_pool_get_generation(void);
 
 #endif /* HAVE_SUBINTERPRETERS */
 
-/**
- * @brief Get the current import generation (always available)
- *
- * This function is available regardless of subinterpreter support.
- * It's used by main interpreter contexts to detect cache staleness.
- *
- * @return Current generation number (0 if never flushed)
- */
-uint64_t import_cache_get_generation(void);
-
-/**
- * @brief Increment the import generation counter (always available)
- *
- * This function is available regardless of subinterpreter support.
- * For systems with subinterpreters, it also marks pool slots stale.
- *
- * @return The new generation number
- */
-uint64_t import_cache_flush_generation(void);
-
 #endif /* PY_SUBINTERP_POOL_H */

@@ -26,8 +26,7 @@
     owngil_import_function_test/1,
     owngil_import_main_rejected_test/1,
     owngil_import_stats_test/1,
-    owngil_import_list_test/1,
-    owngil_flush_imports_test/1
+    owngil_import_list_test/1
 ]).
 
 %% Isolation tests
@@ -52,8 +51,7 @@ groups() ->
         owngil_import_function_test,
         owngil_import_main_rejected_test,
         owngil_import_stats_test,
-        owngil_import_list_test,
-        owngil_flush_imports_test
+        owngil_import_list_test
     ]},
      {isolation, [sequence], [
         owngil_import_isolation_test,
@@ -190,22 +188,6 @@ owngil_import_list_test(_Config) ->
         %% Verify they work
         {ok, _} = py_context:call(Ctx, json, dumps, [[1, 2]]),
         {ok, _} = py_context:call(Ctx, math, floor, [3.7])
-    after
-        py_context:destroy(Ctx)
-    end.
-
-%% @doc Test flush imports functionality
-owngil_flush_imports_test(_Config) ->
-    Ctx = create_owngil_context(),
-    try
-        %% Import a module
-        ok = py_context:exec(Ctx, <<"import json">>),
-        {ok, _} = py_context:call(Ctx, json, dumps, [[1]]),
-
-        %% Module should still work after re-import
-        ok = py_context:exec(Ctx, <<"import json">>),
-        {ok, Result} = py_context:call(Ctx, json, dumps, [[2, 3]]),
-        ?assertEqual(<<"[2, 3]">>, Result)
     after
         py_context:destroy(Ctx)
     end.

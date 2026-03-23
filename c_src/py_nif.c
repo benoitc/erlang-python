@@ -3225,43 +3225,6 @@ static void owngil_execute_apply_imports(py_context_t *ctx) {
 }
 
 /**
- * @brief Execute flush_imports in OWN_GIL context
- *
- * Clears the per-context module cache optimization layer.
- * Does NOT clear sys.modules (that would break Python).
- */
-static void owngil_execute_flush_imports(py_context_t *ctx) {
-    /* Remove specified modules from sys.modules */
-    PyObject *sys_modules = PyImport_GetModuleDict();  /* Borrowed ref */
-    if (sys_modules != NULL) {
-        ERL_NIF_TERM head, tail = ctx->request_data;
-        while (enif_get_list_cell(ctx->shared_env, tail, &head, &tail)) {
-            ErlNifBinary mod_bin;
-            if (enif_inspect_binary(ctx->shared_env, head, &mod_bin)) {
-                char *mod_name = enif_alloc(mod_bin.size + 1);
-                if (mod_name != NULL) {
-                    memcpy(mod_name, mod_bin.data, mod_bin.size);
-                    mod_name[mod_bin.size] = '\0';
-                    /* Remove module from sys.modules if present */
-                    if (PyDict_GetItemString(sys_modules, mod_name) != NULL) {
-                        PyDict_DelItemString(sys_modules, mod_name);
-                    }
-                    enif_free(mod_name);
-                }
-            }
-        }
-    }
-
-    /* Clear the per-context optimization cache if it exists */
-    if (ctx->module_cache != NULL) {
-        PyDict_Clear(ctx->module_cache);
-    }
-
-    ctx->response_term = enif_make_atom(ctx->shared_env, "ok");
-    ctx->response_ok = true;
-}
-
-/**
  * @brief Execute a request based on its type
  */
 static void owngil_execute_request(py_context_t *ctx) {
@@ -3298,9 +3261,6 @@ static void owngil_execute_request(py_context_t *ctx) {
             break;
         case CTX_REQ_APPLY_IMPORTS:
             owngil_execute_apply_imports(ctx);
-            break;
-        case CTX_REQ_FLUSH_IMPORTS:
-            owngil_execute_flush_imports(ctx);
             break;
         default:
             ctx->response_term = enif_make_tuple2(ctx->shared_env,
@@ -3911,50 +3871,6 @@ static ERL_NIF_TERM dispatch_apply_imports_to_owngil(
     return result;
 }
 
-/**
- * @brief Dispatch flush_imports to OWN_GIL worker thread
- *
- * @param env NIF environment
- * @param ctx Context resource
- * @param modules_list List of module names to remove from sys.modules
- * @return ok
- */
-static ERL_NIF_TERM dispatch_flush_imports_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx, ERL_NIF_TERM modules_list
-) {
-    if (!atomic_load(&ctx->thread_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    pthread_mutex_lock(&ctx->request_mutex);
-
-    enif_clear_env(ctx->shared_env);
-    ctx->request_type = CTX_REQ_FLUSH_IMPORTS;
-    ctx->request_data = enif_make_copy(ctx->shared_env, modules_list);
-
-    pthread_cond_signal(&ctx->request_ready);
-
-    /* Wait for response with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    while (ctx->request_type != CTX_REQ_NONE) {
-        int rc = pthread_cond_timedwait(&ctx->response_ready, &ctx->request_mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&ctx->thread_running, false);
-            pthread_mutex_unlock(&ctx->request_mutex);
-            fprintf(stderr, "OWN_GIL flush_imports dispatch timeout: worker thread unresponsive\n");
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    ERL_NIF_TERM result = enif_make_copy(env, ctx->response_term);
-    pthread_mutex_unlock(&ctx->request_mutex);
-
-    return result;
-}
-
 #endif /* HAVE_SUBINTERPRETERS */
 
 /**
@@ -4124,7 +4040,6 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
-    ctx->cache_generation = 0;
 
     /* Create callback pipe for blocking callback responses */
     if (pipe(ctx->callback_pipe) < 0) {
@@ -4237,7 +4152,6 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         ctx->globals = PyDict_New();
         ctx->locals = PyDict_New();
         ctx->module_cache = PyDict_New();
-        ctx->cache_generation = import_cache_get_generation();
 
         /* Import __builtins__ into globals */
         PyObject *builtins = PyEval_GetBuiltins();
@@ -4370,25 +4284,6 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
  * Helper function - no mutex needed since context is process-owned.
  */
 static PyObject *context_get_module(py_context_t *ctx, const char *module_name) {
-    /* Check for stale cache (main interpreter contexts only) */
-    if (ctx->module_cache != NULL) {
-#ifdef HAVE_SUBINTERPRETERS
-        /* Pool-backed contexts get fresh interpreters on flush, so only check
-         * for non-pool contexts (main interpreter or OWN_GIL) */
-        bool is_main_interp = (ctx->pool_slot < 0 && !ctx->uses_own_gil);
-#else
-        bool is_main_interp = true;  /* All contexts use main interpreter */
-#endif
-        if (is_main_interp) {
-            uint64_t current_gen = import_cache_get_generation();
-            if (ctx->cache_generation != current_gen) {
-                /* Cache is stale - clear it and update generation */
-                PyDict_Clear(ctx->module_cache);
-                ctx->cache_generation = current_gen;
-            }
-        }
-    }
-
     /* Check cache first */
     if (ctx->module_cache != NULL) {
         PyObject *cached = PyDict_GetItemString(ctx->module_cache, module_name);
@@ -5038,97 +4933,6 @@ static ERL_NIF_TERM nif_interp_apply_imports(ErlNifEnv *env, int argc, const ERL
 
     py_context_release(&guard);
     return ATOM_OK;
-}
-
-/**
- * @brief Flush imports from an interpreter's sys.modules
- *
- * nif_interp_flush_imports(Ref, Modules) -> ok
- *
- * Removes specified modules from sys.modules and clears the per-context
- * module_cache optimization layer.
- *
- * @param Ref Context reference
- * @param Modules List of binary module names to remove from sys.modules
- */
-static ERL_NIF_TERM nif_interp_flush_imports(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    py_context_t *ctx;
-
-    if (!runtime_is_running()) {
-        return ATOM_OK;  /* Nothing to flush if Python not running */
-    }
-
-    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
-        return make_error(env, "invalid_context");
-    }
-
-    if (ctx->destroyed) {
-        return ATOM_OK;  /* Already destroyed */
-    }
-
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_flush_imports_to_owngil(env, ctx, argv[1]);
-    }
-#endif
-
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        return ATOM_OK;  /* Can't acquire - just return ok */
-    }
-
-    /* Remove specified modules from sys.modules */
-    PyObject *sys_modules = PyImport_GetModuleDict();  /* Borrowed ref */
-    if (sys_modules != NULL) {
-        ERL_NIF_TERM head, tail = argv[1];
-        while (enif_get_list_cell(env, tail, &head, &tail)) {
-            ErlNifBinary mod_bin;
-            if (enif_inspect_binary(env, head, &mod_bin)) {
-                char *mod_name = binary_to_string(&mod_bin);
-                if (mod_name != NULL) {
-                    /* Remove module from sys.modules if present */
-                    if (PyDict_GetItemString(sys_modules, mod_name) != NULL) {
-                        PyDict_DelItemString(sys_modules, mod_name);
-                    }
-                    enif_free(mod_name);
-                }
-            }
-        }
-    }
-
-    /* Clear per-context optimization cache */
-    if (ctx->module_cache != NULL) {
-        PyDict_Clear(ctx->module_cache);
-    }
-
-    py_context_release(&guard);
-    return ATOM_OK;
-}
-
-/**
- * @brief Flush import generation and mark all pool slots stale
- *
- * nif_subinterp_pool_flush_generation() -> {ok, NewGeneration}
- *
- * Increments the global import generation counter and marks all initialized
- * pool slots as stale. When a stale slot's usage count drops to 0, the
- * subinterpreter is automatically destroyed and the slot becomes available
- * for a fresh subinterpreter.
- *
- * This enables flush_imports to work by replacing subinterpreters rather
- * than trying to manipulate sys.modules directly (which can crash C extensions).
- */
-static ERL_NIF_TERM nif_subinterp_pool_flush_generation(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-
-    /* Use the unconditional version that works with or without subinterpreters.
-     * This increments the generation counter (used by main interpreter contexts)
-     * and also marks pool slots stale when subinterpreters are available. */
-    uint64_t new_gen = import_cache_flush_generation();
-    return enif_make_tuple2(env, ATOM_OK, enif_make_uint64(env, new_gen));
 }
 
 /**
@@ -7261,8 +7065,6 @@ static ErlNifFunc nif_funcs[] = {
     {"context_call", 6, nif_context_call_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"create_local_env", 1, nif_create_local_env, 0},
     {"interp_apply_imports", 2, nif_interp_apply_imports, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"interp_flush_imports", 2, nif_interp_flush_imports, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_pool_flush_generation", 0, nif_subinterp_pool_flush_generation, 0},
     {"context_call_method", 4, nif_context_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_to_term", 1, nif_context_to_term, 0},
     {"context_interp_id", 1, nif_context_interp_id, 0},

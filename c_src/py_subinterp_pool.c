@@ -540,30 +540,4 @@ uint64_t subinterp_pool_get_generation(void) {
     return atomic_load(&g_import_generation);
 }
 
-#else /* !HAVE_SUBINTERPRETERS */
-
-/* For systems without subinterpreter support, we still need the generation
- * counter for main interpreter context cache invalidation */
-static _Atomic uint64_t g_import_generation_no_subinterp = 0;
-
 #endif /* HAVE_SUBINTERPRETERS */
-
-/* ============================================================================
- * Unconditional generation functions (work with or without subinterpreters)
- * ============================================================================ */
-
-uint64_t import_cache_get_generation(void) {
-#ifdef HAVE_SUBINTERPRETERS
-    return atomic_load(&g_import_generation);
-#else
-    return atomic_load(&g_import_generation_no_subinterp);
-#endif
-}
-
-uint64_t import_cache_flush_generation(void) {
-#ifdef HAVE_SUBINTERPRETERS
-    return subinterp_pool_flush_generation();
-#else
-    return atomic_fetch_add(&g_import_generation_no_subinterp, 1) + 1;
-#endif
-}

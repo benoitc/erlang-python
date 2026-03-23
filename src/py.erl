@@ -59,7 +59,6 @@
     %% Module import caching
     import/1,
     import/2,
-    flush_imports/0,
     import_stats/0,
     import_list/0,
     %% Import registry (global list applied to all interpreters)
@@ -460,27 +459,6 @@ clear_imports() ->
         undefined -> ok;
         _ -> ets:delete_all_objects(?IMPORT_REGISTRY)
     end,
-    ok.
-
-%% @doc Flush import caches and trigger subinterpreter replacement.
-%%
-%% Clears the global import registry and marks all shared-GIL pool
-%% subinterpreters as stale. When existing contexts using those
-%% subinterpreters are destroyed, Python GC handles cleanup via
-%% Py_EndInterpreter. New contexts will get fresh subinterpreters
-%% with the updated import registry.
-%%
-%% OWN_GIL contexts each have their own subinterpreter which is
-%% destroyed when the context is destroyed.
-%%
-%% @returns ok
--spec flush_imports() -> ok.
-flush_imports() ->
-    %% Clear the global registry
-    clear_imports(),
-    %% Mark all pool slots as stale - they will be destroyed when
-    %% usage count drops to 0 (all contexts using them are destroyed)
-    py_nif:subinterp_pool_flush_generation(),
     ok.
 
 %% @doc Get import registry statistics.

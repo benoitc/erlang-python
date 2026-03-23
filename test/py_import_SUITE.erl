@@ -1,4 +1,4 @@
-%%% @doc Test suite for py:import/1,2 and py:flush_imports/0
+%%% @doc Test suite for py:import/1,2
 -module(py_import_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -22,7 +22,6 @@
     import_nonexistent_module_test/1,
     import_nonexistent_function_test/1,
     import_idempotent_test/1,
-    flush_imports_test/1,
     import_stats_test/1,
     import_list_test/1,
     import_speeds_up_calls_test/1,
@@ -33,7 +32,6 @@
     import_applied_to_new_context_test/1,
     clear_imports_test/1,
     get_imports_test/1,
-    flush_clears_registry_test/1,
     %% Per-interpreter sharing tests
     shared_interpreter_import_test/1,
     event_loop_pool_import_test/1,
@@ -57,7 +55,6 @@ groups() ->
         import_nonexistent_module_test,
         import_nonexistent_function_test,
         import_idempotent_test,
-        flush_imports_test,
         import_stats_test,
         import_list_test,
         import_speeds_up_calls_test,
@@ -68,7 +65,6 @@ groups() ->
         import_applied_to_new_context_test,
         clear_imports_test,
         get_imports_test,
-        flush_clears_registry_test,
         %% Per-interpreter sharing tests
         shared_interpreter_import_test,
         event_loop_pool_import_test,
@@ -99,7 +95,7 @@ end_per_group(_Group, _Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Flush imports before each test for clean state
-    py:flush_imports(),
+    py:clear_imports(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -190,33 +186,10 @@ import_idempotent_test(_Config) ->
     %% Still works
     {ok, _} = py:call(json, dumps, [[1]]).
 
-%% @doc Test flushing imports
-flush_imports_test(_Config) ->
-    %% Import some modules
-    ok = py:import(json),
-    ok = py:import(math),
-    ok = py:import(json, dumps),
-
-    %% Get stats before flush
-    {ok, StatsBefore} = py:import_stats(),
-    CountBefore = maps:get(count, StatsBefore, 0),
-    ?assert(CountBefore >= 3),
-
-    %% Flush
-    ok = py:flush_imports(),
-
-    %% Stats should show empty cache
-    {ok, StatsAfter} = py:import_stats(),
-    CountAfter = maps:get(count, StatsAfter, 0),
-    ?assertEqual(0, CountAfter),
-
-    %% Calls still work (they re-import)
-    {ok, _} = py:call(json, dumps, [[1]]).
-
 %% @doc Test import stats
 import_stats_test(_Config) ->
     %% Start fresh
-    ok = py:flush_imports(),
+    ok = py:clear_imports(),
 
     %% Check empty stats
     {ok, Stats0} = py:import_stats(),
@@ -244,7 +217,7 @@ import_stats_test(_Config) ->
 %% @doc Test listing imports
 import_list_test(_Config) ->
     %% Start fresh
-    ok = py:flush_imports(),
+    ok = py:clear_imports(),
 
     %% Empty map
     {ok, Map0} = py:import_list(),
@@ -278,7 +251,7 @@ import_list_test(_Config) ->
 %% @doc Test that pre-importing speeds up subsequent calls
 import_speeds_up_calls_test(_Config) ->
     %% Flush to ensure cold start
-    ok = py:flush_imports(),
+    ok = py:clear_imports(),
 
     %% Time a cold call (module not imported)
     %% Using json.dumps since hashlib.md5 needs bytes encoding
@@ -503,27 +476,6 @@ get_imports_test(_Config) ->
     ?assertEqual(<<"sqrt">>, MathSpec),
 
     ct:pal("get_imports result: ~p", [Imports]).
-
-%% @doc Test that flush_imports clears the registry
-flush_clears_registry_test(_Config) ->
-    %% Add some imports
-    ok = py:import(json),
-    ok = py:import(math),
-
-    %% Verify they're in the registry
-    Imports1 = py:get_imports(),
-    ?assert(length(Imports1) >= 2),
-
-    %% Flush imports (clears registry + interpreter caches)
-    ok = py:flush_imports(),
-
-    %% Verify registry is empty
-    Imports2 = py:get_imports(),
-    ?assertEqual([], Imports2),
-
-    %% Verify calls still work (modules are re-imported on demand)
-    {ok, _} = py:call(json, dumps, [[1]]),
-    {ok, _} = py:call(math, sqrt, [4.0]).
 
 %% ============================================================================
 %% Per-Interpreter Sharing Tests
