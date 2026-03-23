@@ -441,9 +441,6 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
         ctx->globals = NULL;
         ctx->locals = NULL;
 
-        /* Release usage count - if slot is stale and count drops to 0,
-         * the subinterpreter will be destroyed automatically */
-        subinterp_pool_release(ctx->pool_slot);
         subinterp_pool_free(ctx->pool_slot);
         ctx->pool_slot = -1;
         ctx->destroyed = true;
@@ -4194,13 +4191,9 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
         ctx->pool_slot = slot;
 
-        /* Acquire usage count for the pool slot */
-        subinterp_pool_acquire(slot);
-
         /* Get the pool slot for interpreter access */
         subinterp_slot_t *pool_slot = subinterp_pool_get(slot);
         if (pool_slot == NULL || !pool_slot->initialized) {
-            subinterp_pool_release(slot);  /* Release usage count */
             subinterp_pool_free(slot);
             close(ctx->callback_pipe[0]);
             close(ctx->callback_pipe[1]);
@@ -4224,7 +4217,6 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
             Py_XDECREF(ctx->module_cache);
             PyThreadState_Swap(saved);
             PyGILState_Release(gstate);
-            subinterp_pool_release(slot);  /* Release usage count */
             subinterp_pool_free(slot);
             close(ctx->callback_pipe[0]);
             close(ctx->callback_pipe[1]);
@@ -4355,11 +4347,7 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
         ctx->locals = NULL;
         ctx->module_cache = NULL;
 
-        /* Release the pool slot back to the pool.
-         * subinterp_pool_release decrements usage count and may destroy
-         * the subinterpreter if it's marked stale and count drops to 0.
-         * subinterp_pool_free marks the slot as available for new contexts. */
-        subinterp_pool_release(ctx->pool_slot);
+        /* Release the pool slot back to the pool */
         subinterp_pool_free(ctx->pool_slot);
         ctx->pool_slot = -1;
 
