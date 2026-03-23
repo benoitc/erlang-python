@@ -79,6 +79,8 @@
     owngil_create_session/1,
     owngil_submit_task/7,
     owngil_destroy_session/2,
+    owngil_apply_imports/3,
+    owngil_apply_paths/3,
     %% Execution mode info
     execution_mode/0,
     num_executors/0,
@@ -643,6 +645,18 @@ owngil_submit_task(_WorkerId, _HandleId, _CallerPid, _Ref, _Module, _Func, _Args
 %% Cleans up the namespace within the worker.
 -spec owngil_destroy_session(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
 owngil_destroy_session(_WorkerId, _HandleId) ->
+    ?NIF_STUB.
+
+%% @doc Apply imports to an OWN_GIL session.
+%% Imports modules into the worker's sys.modules.
+-spec owngil_apply_imports(non_neg_integer(), non_neg_integer(), [{binary(), binary() | all}]) -> ok | {error, term()}.
+owngil_apply_imports(_WorkerId, _HandleId, _Imports) ->
+    ?NIF_STUB.
+
+%% @doc Apply paths to an OWN_GIL session.
+%% Adds paths to the worker's sys.path.
+-spec owngil_apply_paths(non_neg_integer(), non_neg_integer(), [binary()]) -> ok | {error, term()}.
+owngil_apply_paths(_WorkerId, _HandleId, _Paths) ->
     ?NIF_STUB.
 
 %%% ============================================================================

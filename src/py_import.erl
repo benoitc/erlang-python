@@ -387,7 +387,7 @@ load_config() ->
     ),
     ok.
 
-%% @private Apply import to all running interpreters (contexts + event loops)
+%% @private Apply import to all running interpreters (contexts + event loops + OWN_GIL sessions)
 apply_import_to_interpreters(ModuleBin) ->
     Imports = [{ModuleBin, all}],
     %% Apply to all contexts
@@ -418,9 +418,21 @@ apply_import_to_interpreters(ModuleBin) ->
             );
         _ -> ok
     end,
+    %% Apply to all OWN_GIL sessions (if enabled)
+    case py_event_loop_pool:is_owngil_enabled() of
+        true ->
+            lists:foreach(
+                fun({WorkerId, HandleId}) ->
+                    catch py_nif:owngil_apply_imports(WorkerId, HandleId, Imports)
+                end,
+                py_event_loop_pool:get_all_sessions()
+            );
+        false ->
+            ok
+    end,
     ok.
 
-%% @private Apply path to all running interpreters (contexts + event loops)
+%% @private Apply path to all running interpreters (contexts + event loops + OWN_GIL sessions)
 apply_path_to_interpreters(PathBin) ->
     Paths = [PathBin],
     %% Apply to all contexts
@@ -450,6 +462,18 @@ apply_path_to_interpreters(PathBin) ->
                 Loops
             );
         _ -> ok
+    end,
+    %% Apply to all OWN_GIL sessions (if enabled)
+    case py_event_loop_pool:is_owngil_enabled() of
+        true ->
+            lists:foreach(
+                fun({WorkerId, HandleId}) ->
+                    catch py_nif:owngil_apply_paths(WorkerId, HandleId, Paths)
+                end,
+                py_event_loop_pool:get_all_sessions()
+            );
+        false ->
+            ok
     end,
     ok.
 
