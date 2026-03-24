@@ -1,14 +1,76 @@
 # Changelog
 
-## 2.2.0 (unreleased)
+## 2.2.0 (2026-03-24)
 
 ### Added
+
+- **OWN_GIL Mode** - True parallel Python execution with Python 3.14+ subinterpreters
+  - Each subinterpreter runs with its own GIL (`Py_GIL_OWN`) in a dedicated thread
+  - Full isolation between interpreters (separate namespaces, modules, state)
+  - `py_context:start_link(N, owngil)` to create OWN_GIL contexts
+  - Enables true parallelism for CPU-bound Python workloads
+  - See [OWN_GIL Internals](docs/owngil_internals.md) for architecture details
+
+- **Process-Bound Python Environments** - Per-Erlang-process Python namespaces
+  - Each Erlang process gets isolated Python globals/locals
+  - State persists across calls within the same process
+  - Automatic cleanup when Erlang process terminates
+  - See [Process-Bound Environments](docs/process-bound-envs.md) for details
+
+- **Event Loop Pool** - Process affinity for parallel async execution
+  - `py_event_loop_pool` distributes async tasks across multiple event loops
+  - Scheduler-affinity routing for cache-friendly execution
+  - Supports worker, subinterp, and owngil modes
+
+- **ByteChannel API** - Raw byte streaming without term serialization
+  - `py_byte_channel:new/0,1` - Create byte channels
+  - `py_byte_channel:send/2` - Send raw bytes
+  - `py_byte_channel:recv/1,2` - Receive bytes
+  - Python `ByteChannel` class with sync/async iteration
+  - Ideal for HTTP bodies, file streaming, binary protocols
+
+- **PyBuffer API** - Zero-copy buffer for WSGI input streams
+  - `py_buffer:new/0,1` - Create buffers with optional max size
+  - `py_buffer:write/2` - Write data to buffer
+  - Python `PyBuffer` class with file-like interface (`read`, `readline`, `readlines`)
+  - Non-blocking reads for async I/O patterns
+  - See [Buffer API](docs/buffer.md) for details
 
 - **True streaming API** - New `py:stream_start/3,4` and `py:stream_cancel/1` functions
   for event-driven streaming from Python generators. Unlike `py:stream/3,4` which
   collects all values at once, `stream_start` sends `{py_stream, Ref, {data, Value}}`
   messages as values are yielded. Supports both sync and async generators. Useful for
   LLM token streaming, real-time data feeds, and processing large sequences incrementally.
+
+- **`erlang.whereis(name)`** - Lookup registered Erlang process PIDs from Python
+  - Returns `erlang.Pid` object or `None` if not registered
+  - Enables Python code to discover and message named processes
+
+- **`erlang.schedule_inline(callback)`** - Inline continuation scheduling
+  - Release dirty scheduler and continue with callback in same context
+  - Preserves globals/locals across the continuation
+  - Useful for cooperative long-running tasks
+
+- **`py:spawn_call/3,4,5`** - Fire-and-forget with result delivery
+  - Executes Python call asynchronously
+  - Sends `{py_result, Ref, Result}` to caller when complete
+  - Non-blocking alternative to `py:call` for async patterns
+
+- **Explicit bytes conversion** - `{bytes, Binary}` tuple for round-trip safety
+  - Erlang binaries convert to Python `str` by default
+  - Use `{bytes, Binary}` to force Python `bytes` type
+  - Ensures correct handling for binary protocols
+
+- **Import caching API** - Lazy module import with caching
+  - `py:import/1,2` - Import and cache modules
+  - `py:add_import/1,2` - Register imports applied to all contexts
+  - `py:add_path/1` - Add to sys.path across all contexts
+  - Per-interpreter caching with generation tracking
+
+- **Per-interpreter preload code** - Execute code in new interpreters
+  - Configure via `{erlang_python, [{preload_code, <<"import mylib">>}]}`
+  - Code runs with inherited globals from main interpreter
+  - Useful for initializing common imports/state
 
 ### Fixed
 
@@ -51,6 +113,13 @@
 
 ### Changed
 
+- **`py:cast` is now fire-and-forget** - `py:cast/3,4,5` no longer returns a reference.
+  For async calls with result delivery, use the new `py:spawn_call/3,4,5` instead.
+
+- **OWN_GIL requires Python 3.14+** - The OWN_GIL subinterpreter mode requires Python 3.14
+  or later due to C extension compatibility issues in earlier versions. Use `worker` or
+  `subinterp` modes for Python 3.12-3.13.
+
 - **Removed auto-started io pool** - The io pool is no longer started automatically at
   application startup to reduce memory usage. Users who need a dedicated I/O pool can
   create one manually via `py_context_router:start_pool(io, 10, worker)`. The configuration
@@ -68,6 +137,9 @@
   - See [Imports documentation](docs/imports.md) for details
 
 ### Performance
+
+- **Direct NIF channel operations** - Channel send/receive bypass `erlang.call()` overhead
+  for up to 1760x speedup in raw throughput benchmarks
 
 - **nif_process_ready_tasks optimization** - ~15% improvement in async task processing
   - Replace `asyncio.iscoroutine()` with `PyCoro_CheckExact` C API
