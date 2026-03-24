@@ -475,5 +475,4 @@ async def read_with_notification(buf, notify_channel):
 
 - [Channel](channel.md) - Bidirectional message passing
 - [Reactor](reactor.md) - FD-based protocol handling
-- [Web Frameworks](web-frameworks.md) - ASGI/WSGI integration
 - [Getting Started](getting-started.md) - Basic usage guide

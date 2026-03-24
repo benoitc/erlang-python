@@ -532,5 +532,4 @@ See [Buffer API](buffer.md) for zero-copy memoryview access and fast substring s
 - See [Buffer API](buffer.md) for zero-copy WSGI input buffers
 - See [Reactor](reactor.md) for FD-based protocol handling
 - See [Security](security.md) for sandbox and blocked operations
-- See [Web Frameworks](web-frameworks.md) for ASGI/WSGI integration
 - See [Distributed Execution](distributed.md) for running Python across Erlang nodes
