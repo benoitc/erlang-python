@@ -9,6 +9,7 @@ else
     CMAKE=cmake
 fi
 
-${CMAKE} "$@" ../../c_src || exit 1
+# Support CMAKE_OPTIONS env variable for additional cmake flags
+${CMAKE} ${CMAKE_OPTIONS:-} "$@" ../../c_src || exit 1
 
 echo done.

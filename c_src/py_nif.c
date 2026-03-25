@@ -296,6 +296,7 @@ static int is_inline_schedule_marker(PyObject *obj);
 #include "py_worker_pool.c"
 #include "py_subinterp_pool.c"
 #include "py_subinterp_thread.c"
+#include "py_parallel_pool.c"
 #include "py_reactor_buffer.c"
 #include "py_channel.c"
 #include "py_buffer.c"
@@ -1216,6 +1217,8 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
 
     /* Initialize subinterpreter pool (Python 3.12+) before starting executors */
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
+    /* Only init shared-GIL pool if not in parallel mode */
     {
         int pool_size = DEFAULT_POOL_SIZE;  /* Default pool size */
         /* Check for config */
@@ -1240,7 +1243,36 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
             return make_error(env, "subinterp_pool_init_failed");
         }
     }
-#endif
+#endif /* !ENABLE_PARALLEL_PYTHON */
+#endif /* HAVE_SUBINTERPRETERS */
+
+    /* Initialize parallel OWN_GIL pool (Python 3.14+) */
+#ifdef ENABLE_PARALLEL_PYTHON
+    {
+        int pool_size = DEFAULT_PARALLEL_SLOTS;  /* Default parallel slots */
+        /* Check for config */
+        if (argc > 0 && enif_is_map(env, argv[0])) {
+            ERL_NIF_TERM key = enif_make_atom(env, "pool_size");
+            ERL_NIF_TERM value;
+            if (enif_get_map_value(env, argv[0], key, &value)) {
+                enif_get_int(env, value, &pool_size);
+            }
+        }
+
+        /* Restore GIL temporarily to create OWN_GIL subinterpreters */
+        PyEval_RestoreThread(g_main_thread_state);
+        int pool_result = parallel_pool_init(pool_size);
+        g_main_thread_state = PyEval_SaveThread();
+
+        if (pool_result < 0) {
+            PyEval_RestoreThread(g_main_thread_state);
+            g_main_thread_state = NULL;
+            Py_Finalize();
+            atomic_store(&g_runtime_state, PY_STATE_STOPPED);
+            return make_error(env, "parallel_pool_init_failed");
+        }
+    }
+#endif /* ENABLE_PARALLEL_PYTHON */
 
     /* Start executors based on execution mode */
     int executor_result = 0;
@@ -1360,8 +1392,14 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         g_numpy_ndarray_type = NULL;
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
         /* Step 4: Shutdown subinterpreter pool - must be done with GIL held */
         subinterp_pool_shutdown();
+#endif
+#endif
+#ifdef ENABLE_PARALLEL_PYTHON
+        /* Step 4: Shutdown parallel OWN_GIL pool */
+        parallel_pool_shutdown();
 #endif
 
         g_main_thread_state = PyEval_SaveThread();
@@ -1373,7 +1411,12 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         Py_XDECREF(g_numpy_ndarray_type);
         g_numpy_ndarray_type = NULL;
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
         subinterp_pool_shutdown();
+#endif
+#endif
+#ifdef ENABLE_PARALLEL_PYTHON
+        parallel_pool_shutdown();
 #endif
         PyGILState_Release(gstate);
     }
@@ -4238,10 +4281,80 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "pipe_create_failed");
     }
 
+#ifdef ENABLE_PARALLEL_PYTHON
+    ctx->parallel_slot = -1;  /* Default: not using parallel pool */
+#endif
+
 #ifdef HAVE_SUBINTERPRETERS
     ctx->pool_slot = -1;  /* Default: not using pool */
     ctx->uses_own_gil = false;
 
+#ifdef ENABLE_PARALLEL_PYTHON
+    /* Parallel mode: use OWN_GIL subinterpreters from parallel pool
+     * Both 'subinterp' and 'owngil' modes use the parallel pool in this build */
+    if (use_subinterp || use_owngil) {
+        /* Assign a parallel slot (round-robin) */
+        int slot = parallel_pool_assign_slot();
+        parallel_slot_t *pslot = parallel_pool_get(slot);
+        if (pslot == NULL || !pslot->initialized) {
+            close(ctx->callback_pipe[0]);
+            close(ctx->callback_pipe[1]);
+            enif_release_resource(ctx);
+            return make_error(env, "parallel_slot_invalid");
+        }
+
+        ctx->parallel_slot = slot;
+        ctx->is_subinterp = true;  /* Mark as subinterpreter mode */
+
+        /* Create context's own namespace dictionaries in the parallel slot.
+         * Acquire the slot's OWN_GIL, create dicts, then release. */
+        parallel_slot_acquire(pslot);
+
+        ctx->globals = PyDict_New();
+        ctx->locals = PyDict_New();
+        ctx->module_cache = PyDict_New();
+
+        if (ctx->globals == NULL || ctx->locals == NULL || ctx->module_cache == NULL) {
+            Py_XDECREF(ctx->globals);
+            Py_XDECREF(ctx->locals);
+            Py_XDECREF(ctx->module_cache);
+            parallel_slot_release(pslot);
+            close(ctx->callback_pipe[0]);
+            close(ctx->callback_pipe[1]);
+            enif_release_resource(ctx);
+            return make_error(env, "dict_alloc_failed");
+        }
+
+        /* Import __builtins__ into globals */
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(ctx->globals, "__builtins__", builtins);
+
+        /* Import erlang module into globals */
+        PyObject *erlang_module = PyImport_ImportModule("erlang");
+        if (erlang_module != NULL) {
+            PyDict_SetItemString(ctx->globals, "erlang", erlang_module);
+            Py_DECREF(erlang_module);
+        } else {
+            PyErr_Clear();
+        }
+
+        parallel_slot_release(pslot);
+
+#ifdef DEBUG
+        fprintf(stderr, "[NIF] Created parallel context %u using slot %d\n",
+                ctx->interp_id, slot);
+        fflush(stderr);
+#endif
+
+        ERL_NIF_TERM ref = enif_make_resource(env, ctx);
+        enif_release_resource(ctx);
+        atomic_fetch_add(&g_counters.ctx_created, 1);
+        return enif_make_tuple3(env, ATOM_OK, ref, enif_make_uint(env, ctx->interp_id));
+    }
+    /* Fall through to worker mode for non-subinterp requests in parallel build */
+#endif /* ENABLE_PARALLEL_PYTHON */
+
+#ifndef ENABLE_PARALLEL_PYTHON
     if (use_owngil) {
         /* OWN_GIL mode: create dedicated pthread with OWN_GIL subinterpreter */
         if (owngil_context_init(ctx) != 0) {
@@ -4322,10 +4435,11 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         fflush(stderr);
 #endif
     } else
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #else
     /* Pre-3.12 Python - ignore subinterp mode request */
     (void)use_subinterp;
-#endif
+#endif /* HAVE_SUBINTERPRETERS */
     {
         /* Worker mode - create a thread state in main interpreter */
         PyGILState_STATE gstate = PyGILState_Ensure();

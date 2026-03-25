@@ -193,6 +193,17 @@ else()
     set(HAVE_FREE_THREADED FALSE)
 endif()
 
+# Parallel Python option (requires Python 3.14+ with OWN_GIL)
+# When enabled, contexts use OWN_GIL subinterpreters for true parallelism
+option(ENABLE_PARALLEL_PYTHON "Enable parallel Python execution via OWN_GIL subinterpreters" OFF)
+
+if(ENABLE_PARALLEL_PYTHON)
+    if(NOT HAVE_OWNGIL)
+        message(FATAL_ERROR "ENABLE_PARALLEL_PYTHON requires Python 3.14+ with OWN_GIL support")
+    endif()
+    message(STATUS "Parallel Python mode enabled - OWN_GIL subinterpreters active")
+endif()
+
 # Create the NIF shared library
 add_library(py_nif MODULE py_nif.c)
 
@@ -217,6 +228,9 @@ if(HAVE_OWNGIL)
 endif()
 if(HAVE_FREE_THREADED)
     target_compile_definitions(py_nif PRIVATE HAVE_FREE_THREADED=1)
+endif()
+if(ENABLE_PARALLEL_PYTHON)
+    target_compile_definitions(py_nif PRIVATE ENABLE_PARALLEL_PYTHON=1)
 endif()
 
 # Set output name

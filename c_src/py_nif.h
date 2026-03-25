@@ -154,6 +154,9 @@ static inline PyObject *Py_NewRef(PyObject *o) {
 /* Include subinterpreter thread pool header for OWN_GIL parallelism */
 #include "py_subinterp_thread.h"
 
+/* Include parallel pool header for transparent OWN_GIL execution */
+#include "py_parallel_pool.h"
+
 /* ============================================================================
  * Execution Mode
  * ============================================================================ */
@@ -813,7 +816,14 @@ typedef struct {
 #ifdef HAVE_SUBINTERPRETERS
     /** @brief Index into subinterpreter pool (-1 = not using pool / worker mode) */
     int pool_slot;
+#endif
 
+#ifdef ENABLE_PARALLEL_PYTHON
+    /** @brief Index into parallel OWN_GIL pool (-1 = not using parallel pool) */
+    int parallel_slot;
+#endif
+
+#ifdef HAVE_SUBINTERPRETERS
     /* ========== OWN_GIL mode fields ========== */
 
     /** @brief Whether this context uses OWN_GIL mode (dedicated pthread) */
@@ -942,7 +952,10 @@ typedef enum {
     PY_GUARD_SUBINTERP,
 
     /** @brief OWN_GIL mode: dispatch to dedicated pthread with its own GIL */
-    PY_GUARD_OWN_GIL
+    PY_GUARD_OWN_GIL,
+
+    /** @brief Parallel mode: direct OWN_GIL acquisition via parallel pool */
+    PY_GUARD_PARALLEL
 } py_guard_mode_t;
 
 /**
@@ -954,6 +967,7 @@ typedef enum {
  *
  * For worker mode: acquires GIL via PyGILState_Ensure
  * For subinterp mode: acquires GIL + swaps to subinterpreter's tstate
+ * For parallel mode: acquires OWN_GIL via parallel_slot_acquire
  */
 typedef struct {
     /** @brief Context being guarded */
@@ -967,6 +981,11 @@ typedef struct {
 
     /** @brief Saved thread state before swap (subinterp mode) */
     PyThreadState *saved_tstate;
+
+#ifdef ENABLE_PARALLEL_PYTHON
+    /** @brief Parallel pool slot (for PY_GUARD_PARALLEL mode) */
+    parallel_slot_t *parallel_slot;
+#endif
 
     /** @brief Success flag: true if acquisition succeeded */
     bool acquired;
@@ -999,6 +1018,9 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
         .mode = PY_GUARD_FAILED,
         .gstate = PyGILState_UNLOCKED,
         .saved_tstate = NULL,
+#ifdef ENABLE_PARALLEL_PYTHON
+        .parallel_slot = NULL,
+#endif
         .acquired = false
     };
 
@@ -1006,10 +1028,28 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
         return guard;
     }
 
+#ifdef ENABLE_PARALLEL_PYTHON
+    /* Parallel mode: use OWN_GIL parallel pool */
+    if (ctx->parallel_slot >= 0) {
+        parallel_slot_t *pslot = parallel_pool_get(ctx->parallel_slot);
+        if (pslot == NULL || !pslot->initialized) {
+            return guard;
+        }
+
+        /* Acquire the slot's OWN_GIL directly */
+        parallel_slot_acquire(pslot);
+        guard.parallel_slot = pslot;
+        guard.mode = PY_GUARD_PARALLEL;
+        guard.acquired = true;
+        return guard;
+    }
+#endif
+
     /* Acquire the GIL first (works for both modes) */
     guard.gstate = PyGILState_Ensure();
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     if (ctx->is_subinterp && ctx->pool_slot >= 0) {
         /* Subinterpreter mode: swap to the pool slot's thread state */
         subinterp_slot_t *slot = subinterp_pool_get(ctx->pool_slot);
@@ -1026,7 +1066,8 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
         guard.acquired = true;
         return guard;
     }
-#endif
+#endif /* !ENABLE_PARALLEL_PYTHON */
+#endif /* HAVE_SUBINTERPRETERS */
 
     /* Worker mode: just use the GIL we acquired */
     guard.mode = PY_GUARD_WORKER;
@@ -1049,11 +1090,22 @@ static inline void py_context_release(py_context_guard_t *guard) {
         return;
     }
 
+#ifdef ENABLE_PARALLEL_PYTHON
+    if (guard->mode == PY_GUARD_PARALLEL) {
+        /* Release the parallel slot's OWN_GIL */
+        parallel_slot_release(guard->parallel_slot);
+        guard->acquired = false;
+        return;
+    }
+#endif
+
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     if (guard->mode == PY_GUARD_SUBINTERP) {
         /* Swap back to saved thread state */
         PyThreadState_Swap(guard->saved_tstate);
     }
+#endif
 #endif
 
     /* Release the GIL */
