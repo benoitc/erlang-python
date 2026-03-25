@@ -1036,8 +1036,11 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
             return guard;
         }
 
-        /* Acquire the slot's OWN_GIL directly */
-        parallel_slot_acquire(pslot);
+        /* Acquire the slot's OWN_GIL directly.
+         * Returns false if shutdown is in progress. */
+        if (!parallel_slot_acquire(pslot)) {
+            return guard;  /* Slot is shutting down */
+        }
         guard.parallel_slot = pslot;
         guard.mode = PY_GUARD_PARALLEL;
         guard.acquired = true;

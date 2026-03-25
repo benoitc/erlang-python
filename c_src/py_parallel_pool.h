@@ -93,6 +93,12 @@ typedef struct {
 
     /** @brief Whether this slot is initialized and ready */
     bool initialized;
+
+    /** @brief Number of threads currently holding this slot's GIL */
+    _Atomic int active_count;
+
+    /** @brief Set to true during shutdown to prevent new acquisitions */
+    _Atomic bool shutdown_requested;
 } parallel_slot_t;
 
 /* ============================================================================
@@ -165,10 +171,11 @@ parallel_slot_t *parallel_pool_get(int slot_id);
  * This acquires the slot's own GIL (not the main interpreter's GIL).
  *
  * @param slot Slot to acquire
+ * @return true if acquired successfully, false if slot is shutting down
  *
- * @note Caller MUST call parallel_slot_release() when done
+ * @note Caller MUST call parallel_slot_release() when done if true is returned
  */
-void parallel_slot_acquire(parallel_slot_t *slot);
+bool parallel_slot_acquire(parallel_slot_t *slot);
 
 /**
  * @brief Release a slot's GIL after Python execution

@@ -420,7 +420,33 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
         return;
     }
 
+#ifdef ENABLE_PARALLEL_PYTHON
+    /* Parallel mode: clean up context's own dictionaries using its parallel slot's GIL */
+    if (ctx->parallel_slot >= 0) {
+        if (runtime_is_running()) {
+            parallel_slot_t *pslot = parallel_pool_get(ctx->parallel_slot);
+            if (pslot != NULL && pslot->initialized && !atomic_load(&pslot->shutdown_requested)) {
+                /* Acquire the parallel slot's OWN_GIL to clean up objects */
+                if (parallel_slot_acquire(pslot)) {
+                    Py_XDECREF(ctx->module_cache);
+                    Py_XDECREF(ctx->globals);
+                    Py_XDECREF(ctx->locals);
+                    parallel_slot_release(pslot);
+                }
+            }
+        }
+        ctx->module_cache = NULL;
+        ctx->globals = NULL;
+        ctx->locals = NULL;
+        ctx->parallel_slot = -1;
+        ctx->destroyed = true;
+        atomic_fetch_add(&g_counters.ctx_destroyed, 1);
+        return;
+    }
+#endif
+
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* For subinterpreter mode: clean up context's own dictionaries and release pool slot */
     if (ctx->is_subinterp && ctx->pool_slot >= 0) {
         /* Clean up Python objects with GIL */
@@ -448,7 +474,8 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
         atomic_fetch_add(&g_counters.ctx_destroyed, 1);
         return;
     }
-#endif
+#endif /* !ENABLE_PARALLEL_PYTHON */
+#endif /* HAVE_SUBINTERPRETERS */
 
     if (!runtime_is_running()) {
         return;
@@ -1381,6 +1408,11 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
      * IMPORTANT: After subinterpreter operations, PyGILState_Ensure may not
      * work correctly on this thread. Use PyEval_RestoreThread with the saved
      * main thread state instead if available. */
+#ifdef ENABLE_PARALLEL_PYTHON
+    /* Parallel mode: shutdown OWN_GIL pool without main GIL */
+    parallel_pool_shutdown();
+    g_main_thread_state = NULL;
+#else
     if (g_main_thread_state != NULL) {
         PyEval_RestoreThread(g_main_thread_state);
 
@@ -1392,16 +1424,9 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         g_numpy_ndarray_type = NULL;
 
 #ifdef HAVE_SUBINTERPRETERS
-#ifndef ENABLE_PARALLEL_PYTHON
         /* Step 4: Shutdown subinterpreter pool - must be done with GIL held */
         subinterp_pool_shutdown();
 #endif
-#endif
-#ifdef ENABLE_PARALLEL_PYTHON
-        /* Step 4: Shutdown parallel OWN_GIL pool */
-        parallel_pool_shutdown();
-#endif
-
         g_main_thread_state = PyEval_SaveThread();
     } else {
         /* Fallback to PyGILState if no main thread state saved */
@@ -1411,15 +1436,11 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         Py_XDECREF(g_numpy_ndarray_type);
         g_numpy_ndarray_type = NULL;
 #ifdef HAVE_SUBINTERPRETERS
-#ifndef ENABLE_PARALLEL_PYTHON
         subinterp_pool_shutdown();
-#endif
-#endif
-#ifdef ENABLE_PARALLEL_PYTHON
-        parallel_pool_shutdown();
 #endif
         PyGILState_Release(gstate);
     }
+#endif
 
     /* Restore main thread state before marking as stopped */
     if (g_main_thread_state != NULL) {

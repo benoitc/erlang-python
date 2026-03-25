@@ -32,6 +32,8 @@
 #include "py_buffer.h"
 #include "py_reactor_buffer.h"
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 /* ============================================================================
  * Pool State
@@ -195,6 +197,8 @@ int parallel_pool_init(int size) {
         }
 
         slot->initialized = true;
+        atomic_store(&slot->active_count, 0);
+        atomic_store(&slot->shutdown_requested, false);
 
         /* Release this slot's GIL (save thread state).
          * After this, we need to re-acquire main GIL to create next subinterpreter. */
@@ -214,6 +218,9 @@ int parallel_pool_init(int size) {
     return 0;
 }
 
+/** @brief Maximum time to wait for active slots during shutdown (seconds) */
+#define SHUTDOWN_TIMEOUT_SECS 5
+
 void parallel_pool_shutdown(void) {
     if (!atomic_load(&g_parallel_pool_initialized)) {
         return;
@@ -222,7 +229,42 @@ void parallel_pool_shutdown(void) {
     /* Mark as not initialized to prevent new assignments */
     atomic_store(&g_parallel_pool_initialized, false);
 
-    /* Clean up each subinterpreter */
+    /* Phase 1: Request shutdown on all slots to prevent new acquisitions */
+    for (int i = 0; i < g_parallel_pool_size; i++) {
+        parallel_slot_t *slot = &g_parallel_pool[i];
+        if (slot->initialized) {
+            atomic_store(&slot->shutdown_requested, true);
+        }
+    }
+
+    /* Phase 2: Wait for all active operations to complete */
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    for (int i = 0; i < g_parallel_pool_size; i++) {
+        parallel_slot_t *slot = &g_parallel_pool[i];
+        if (!slot->initialized) {
+            continue;
+        }
+
+        /* Wait for slot to become idle */
+        while (atomic_load(&slot->active_count) > 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double elapsed = (now.tv_sec - start_time.tv_sec) +
+                           (now.tv_nsec - start_time.tv_nsec) / 1e9;
+
+            if (elapsed > SHUTDOWN_TIMEOUT_SECS) {
+                /* Timeout waiting for slot - force shutdown */
+                break;
+            }
+
+            /* Brief sleep to avoid busy-waiting */
+            usleep(1000);  /* 1ms */
+        }
+    }
+
+    /* Phase 3: Clean up each subinterpreter */
     for (int i = 0; i < g_parallel_pool_size; i++) {
         parallel_slot_t *slot = &g_parallel_pool[i];
 
@@ -230,7 +272,8 @@ void parallel_pool_shutdown(void) {
             continue;
         }
 
-        /* Acquire this slot's GIL */
+        /* Acquire this slot's GIL.
+         * At this point, no other thread should be using it (we waited above). */
         PyEval_RestoreThread(slot->tstate);
 
         /* Clean up Python objects */
@@ -252,10 +295,6 @@ void parallel_pool_shutdown(void) {
     /* Reset pool state */
     g_parallel_pool_size = 0;
     atomic_store(&g_parallel_next_slot, 0);
-
-#ifdef DEBUG
-    fprintf(stderr, "parallel_pool_shutdown: cleaned up all OWN_GIL subinterpreters\n");
-#endif
 }
 
 bool parallel_pool_is_initialized(void) {
@@ -296,14 +335,30 @@ parallel_slot_t *parallel_pool_get(int slot_id) {
  * Execution API
  * ============================================================================ */
 
-void parallel_slot_acquire(parallel_slot_t *slot) {
+bool parallel_slot_acquire(parallel_slot_t *slot) {
     if (slot == NULL || !slot->initialized) {
-        return;
+        return false;
+    }
+
+    /* Check if shutdown is in progress - reject new acquisitions */
+    if (atomic_load(&slot->shutdown_requested)) {
+        return false;
+    }
+
+    /* Increment active count BEFORE acquiring GIL.
+     * This ensures shutdown waits for us. */
+    atomic_fetch_add(&slot->active_count, 1);
+
+    /* Double-check shutdown wasn't requested while we incremented */
+    if (atomic_load(&slot->shutdown_requested)) {
+        atomic_fetch_sub(&slot->active_count, 1);
+        return false;
     }
 
     /* Acquire this slot's GIL by restoring its thread state.
      * This will block if another thread holds this slot's GIL. */
     PyEval_RestoreThread(slot->tstate);
+    return true;
 }
 
 void parallel_slot_release(parallel_slot_t *slot) {
@@ -313,6 +368,10 @@ void parallel_slot_release(parallel_slot_t *slot) {
 
     /* Release this slot's GIL by saving the thread state */
     slot->tstate = PyEval_SaveThread();
+
+    /* Decrement active count AFTER releasing GIL.
+     * This signals to shutdown that we're done. */
+    atomic_fetch_sub(&slot->active_count, 1);
 }
 
 #endif /* ENABLE_PARALLEL_PYTHON */
