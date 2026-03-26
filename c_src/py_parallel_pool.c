@@ -82,9 +82,10 @@ int parallel_pool_init(int size) {
     memset(g_parallel_pool, 0, sizeof(g_parallel_pool));
     atomic_store(&g_parallel_next_slot, 0);
 
-    /* Note: When creating OWN_GIL subinterpreters, the main GIL is released
-     * after each Py_NewInterpreterFromConfig call and we need to re-acquire
-     * it with PyGILState_Ensure() for the next iteration. */
+    /* Save the main thread state. We need to restore this after creating
+     * each OWN_GIL subinterpreter because Py_NewInterpreterFromConfig
+     * releases the main GIL and switches to the new subinterpreter. */
+    PyThreadState *main_tstate = PyThreadState_Get();
 
     for (int i = 0; i < size; i++) {
         parallel_slot_t *slot = &g_parallel_pool[i];
@@ -122,8 +123,8 @@ int parallel_pool_init(int size) {
                 }
             }
 
-            /* Try to restore main thread state */
-            PyGILState_Ensure();
+            /* Restore main thread state */
+            PyEval_RestoreThread(main_tstate);
             return -1;
         }
 
@@ -155,7 +156,8 @@ int parallel_pool_init(int size) {
                 }
             }
 
-            PyGILState_Ensure();
+            /* Restore main thread state */
+            PyEval_RestoreThread(main_tstate);
             return -1;
         }
 
@@ -189,23 +191,25 @@ int parallel_pool_init(int size) {
             }
         }
 
-        /* Initialize event loop for this subinterpreter */
-        if (init_subinterpreter_event_loop(NULL) < 0) {
-            fprintf(stderr, "parallel_pool_init: failed to init event loop in slot %d\n", i);
-            log_and_clear_python_error("parallel_pool event_loop_init");
-            /* Non-fatal - async features won't work */
-        }
+        /* Note: Event loop initialization is deferred until first use.
+         * The init_subinterpreter_event_loop() function requires an ErlNifEnv
+         * which we don't have during pool initialization. Event loops will be
+         * created lazily when async operations are first performed. */
 
         slot->initialized = true;
         atomic_store(&slot->active_count, 0);
         atomic_store(&slot->shutdown_requested, false);
 
         /* Release this slot's GIL (save thread state).
-         * After this, we need to re-acquire main GIL to create next subinterpreter. */
+         * After this, we need to restore the main thread state to create the
+         * next subinterpreter or to return to the caller. */
         PyEval_SaveThread();
 
-        /* Re-acquire main GIL for next iteration */
-        PyGILState_Ensure();
+        /* Restore main interpreter thread state for next iteration.
+         * This is critical: PyGILState_Ensure() doesn't work correctly after
+         * creating OWN_GIL subinterpreters because there's no thread state
+         * associated with the calling thread anymore. */
+        PyEval_RestoreThread(main_tstate);
     }
 
     g_parallel_pool_size = size;

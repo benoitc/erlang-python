@@ -493,12 +493,10 @@ static void *py_pool_worker_thread(void *arg) {
 
         worker->interp = PyThreadState_GetInterpreter(worker->tstate);
 
-        /* Initialize event loop for this subinterpreter */
-        if (init_subinterpreter_event_loop(NULL) < 0) {
-            gil_release(guard);
-            worker->running = false;
-            return NULL;
-        }
+        /* Note: Event loop initialization is deferred until first use.
+         * The init_subinterpreter_event_loop() function requires an ErlNifEnv
+         * which we don't have during worker initialization. Event loops will be
+         * created lazily when async operations are first performed. */
 
         /* Release main GIL - we now have our own */
         gil_release(guard);

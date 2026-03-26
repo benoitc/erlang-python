@@ -187,13 +187,10 @@ int subinterp_pool_init(int size) {
             }
         }
 
-        /* Initialize event loop for this subinterpreter.
-         * This enables asyncio support (sleep, timers, etc.) */
-        if (init_subinterpreter_event_loop(NULL) < 0) {
-            fprintf(stderr, "subinterp_pool_init: failed to init event loop in subinterp %d\n", i);
-            log_and_clear_python_error("subinterp event_loop_init");
-            /* Non-fatal - async features just won't work */
-        }
+        /* Note: Event loop initialization is deferred until first use.
+         * The init_subinterpreter_event_loop() function requires an ErlNifEnv
+         * which we don't have during pool initialization. Event loops will be
+         * created lazily when async operations are first performed. */
 
         slot->initialized = true;
 

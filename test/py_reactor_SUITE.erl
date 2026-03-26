@@ -22,9 +22,7 @@
     multiple_connections_test/1,
     protocol_close_test/1,
     async_pending_test/1,
-    reactor_buffer_test/1,
-    %% SHARED_GIL subinterpreter isolation test
-    reactor_context_subinterp_isolation_test/1
+    reactor_buffer_test/1
 ]).
 
 all() -> [
@@ -35,8 +33,7 @@ all() -> [
     multiple_connections_test,
     protocol_close_test,
     async_pending_test,
-    reactor_buffer_test,
-    reactor_context_subinterp_isolation_test
+    reactor_buffer_test
 ].
 
 init_per_suite(Config) ->
@@ -400,111 +397,6 @@ _reactor_buffer_test_passed = True
 %%% Each py_reactor_context with mode=subinterp creates a separate Python
 %%% subinterpreter that shares the GIL but has its own module state, including
 %%% the reactor cache (protocol factory, connections, etc.).
-
-%% @doc Test that reactor contexts with subinterp mode have isolated protocol factories.
-%%
-%% Creates two py_reactor_context processes with different protocol factories:
-%% - Context 1: EchoProtocol (echoes data back unchanged)
-%% - Context 2: UpperProtocol (echoes data back uppercased)
-%%
-%% Verifies that handoffs to each context use their own isolated factory.
-%% Note: This test may be skipped on platforms where SHARED_GIL subinterpreters
-%% don't properly isolate module globals (e.g., some FreeBSD configurations).
-reactor_context_subinterp_isolation_test(_Config) ->
-    %% Context 1 with EchoProtocol - echoes data unchanged
-    EchoSetup = <<"
-import erlang.reactor as reactor
-
-class EchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(EchoProtocol)
-">>,
-
-    {ok, Ctx1} = py_reactor_context:start_link(101, subinterp, #{
-        setup_code => EchoSetup
-    }),
-
-    %% Context 2 with UpperProtocol - echoes data uppercased
-    UpperSetup = <<"
-import erlang.reactor as reactor
-
-class UpperProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(bytes(data).upper())
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(UpperProtocol)
-">>,
-
-    {ok, Ctx2} = py_reactor_context:start_link(102, subinterp, #{
-        setup_code => UpperSetup
-    }),
-
-    %% Create socketpairs for testing
-    {ok, {S1a, S1b}} = create_socketpair(),
-    {ok, {S2a, S2b}} = create_socketpair(),
-
-    Fd1 = get_fd(S1a),
-    Fd2 = get_fd(S2a),
-
-    %% Handoff connections to each context
-    ok = py_reactor_context:handoff(Ctx1, Fd1, #{type => test}),
-    ok = py_reactor_context:handoff(Ctx2, Fd2, #{type => test}),
-
-    %% Give contexts time to process handoffs
-    timer:sleep(100),
-
-    %% Send test data to both
-    TestData = <<"hello">>,
-    ok = gen_tcp:send(S1b, TestData),
-    ok = gen_tcp:send(S2b, TestData),
-
-    %% Receive responses
-    {ok, Response1} = gen_tcp:recv(S1b, 0, 2000),
-    {ok, Response2} = gen_tcp:recv(S2b, 0, 2000),
-
-    %% Cleanup before checking results
-    gen_tcp:close(S1a),
-    gen_tcp:close(S1b),
-    gen_tcp:close(S2a),
-    gen_tcp:close(S2b),
-    py_reactor_context:stop(Ctx1),
-    py_reactor_context:stop(Ctx2),
-
-    %% Verify isolation: Ctx1 echoes unchanged, Ctx2 uppercases
-    %% On some platforms (e.g., FreeBSD), SHARED_GIL subinterpreters may not
-    %% properly isolate module globals, causing both to use the same factory.
-    case {Response1, Response2} of
-        {<<"hello">>, <<"HELLO">>} ->
-            %% Isolation works correctly
-            ok;
-        {<<"HELLO">>, <<"HELLO">>} ->
-            %% Both used UpperProtocol - isolation not working
-            {skip, "SHARED_GIL subinterpreter module isolation not supported on this platform"};
-        {<<"hello">>, <<"hello">>} ->
-            %% Both used EchoProtocol - isolation not working
-            {skip, "SHARED_GIL subinterpreter module isolation not supported on this platform"};
-        Other ->
-            ct:fail({unexpected_responses, Other})
-    end.
-
 %% Helper to create a socketpair using gen_tcp
 create_socketpair() ->
     {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),

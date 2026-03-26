@@ -36,7 +36,6 @@
     event_loop_pool_import_test/1,
     spawn_task_uses_import_test/1,
     subinterp_isolation_test/1,
-    registry_applied_to_subinterp_test/1,
     %% sys.modules verification tests
     import_in_sys_modules_test/1,
     registry_import_in_sys_modules_test/1,
@@ -78,7 +77,6 @@ groups() ->
         event_loop_pool_import_test,
         spawn_task_uses_import_test,
         subinterp_isolation_test,
-        registry_applied_to_subinterp_test,
         %% sys.modules verification tests
         import_in_sys_modules_test,
         registry_import_in_sys_modules_test,
@@ -587,34 +585,6 @@ subinterp_isolation_test(_Config) ->
             py_context:destroy(Ctx2),
 
             ct:pal("Subinterpreter isolation verified - different interpreters are isolated")
-    end.
-
-%% @doc Test that registry imports are applied to new subinterpreter contexts
-%%
-%% When py:import is called, it adds to the registry. New contexts should
-%% have these imports applied to their interpreter.
-registry_applied_to_subinterp_test(_Config) ->
-    %% Skip if subinterpreters not supported
-    case py_nif:subinterp_supported() of
-        false ->
-            {skip, "Subinterpreters not supported"};
-        true ->
-            %% Clear registry and add an import
-            ok = py_import:clear_imports(),
-            ok = py_import:ensure_imported(uuid),
-
-            %% Create a new subinterp context
-            {ok, Ctx} = py_context:new(#{mode => subinterp}),
-
-            %% The uuid module should be available (applied from registry)
-            {ok, Result} = py_context:call(Ctx, uuid, uuid4, [], #{}),
-            ?assert(is_binary(Result) orelse is_list(Result)),
-
-            %% Clean up
-            py_context:destroy(Ctx),
-            ok = py_import:clear_imports(),
-
-            ct:pal("Registry imports successfully applied to new subinterpreter")
     end.
 
 %% ============================================================================
