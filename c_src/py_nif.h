@@ -148,9 +148,6 @@ static inline PyObject *Py_NewRef(PyObject *o) {
 
 /** @} */
 
-/* Include subinterpreter pool header for shared-GIL pool model */
-#include "py_subinterp_pool.h"
-
 /* Include subinterpreter thread pool header for OWN_GIL parallelism */
 #include "py_subinterp_thread.h"
 
@@ -787,12 +784,11 @@ typedef struct {
  * - Mutex/condvar dispatch overhead
  * - Term copying between environments
  *
- * @note Python 3.12+ uses shared-GIL subinterpreters via pool slots
- * @note Older Python uses worker mode with main interpreter namespace
+ * @note With ENABLE_PARALLEL_PYTHON, uses OWN_GIL subinterpreters via parallel pool
+ * @note Otherwise uses worker mode with main interpreter namespace
  *
  * @see nif_context_create
  * @see nif_context_call
- * @see subinterp_pool_alloc
  */
 typedef struct {
     /** @brief Unique interpreter ID for routing (0 = main, >0 = subinterp) */
@@ -1050,27 +1046,6 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
 
     /* Acquire the GIL first (works for both modes) */
     guard.gstate = PyGILState_Ensure();
-
-#ifdef HAVE_SUBINTERPRETERS
-#ifndef ENABLE_PARALLEL_PYTHON
-    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
-        /* Subinterpreter mode: swap to the pool slot's thread state */
-        subinterp_slot_t *slot = subinterp_pool_get(ctx->pool_slot);
-
-        if (slot == NULL || !slot->initialized) {
-            /* Pool slot invalid - release GIL and fail */
-            PyGILState_Release(guard.gstate);
-            return guard;
-        }
-
-        /* Swap to subinterpreter's thread state */
-        guard.saved_tstate = PyThreadState_Swap(slot->tstate);
-        guard.mode = PY_GUARD_SUBINTERP;
-        guard.acquired = true;
-        return guard;
-    }
-#endif /* !ENABLE_PARALLEL_PYTHON */
-#endif /* HAVE_SUBINTERPRETERS */
 
     /* Worker mode: just use the GIL we acquired */
     guard.mode = PY_GUARD_WORKER;
