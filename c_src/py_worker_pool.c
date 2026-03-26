@@ -420,134 +420,6 @@ static ERL_NIF_TERM py_pool_process_exec(py_pool_worker_t *worker,
 }
 
 /* ============================================================================
- * Request Processing - ASGI
- * ============================================================================ */
-
-static ERL_NIF_TERM py_pool_process_asgi(py_pool_worker_t *worker,
-                                          py_pool_request_t *req) {
-    ErlNifEnv *env = req->msg_env;
-
-    /* Get runner module */
-    PyObject *runner_module = py_pool_get_module(worker, req->runner_name);
-    if (runner_module == NULL) {
-        return make_py_error(env);
-    }
-
-    /* Get 'run_asgi' function from runner (hornbeam interface) */
-    PyObject *run_func = PyObject_GetAttrString(runner_module, "run_asgi");
-    if (run_func == NULL) {
-        return make_py_error(env);
-    }
-
-    /* Create module_name Python string */
-    PyObject *py_module_name = PyUnicode_FromString(req->module_name);
-    if (py_module_name == NULL) {
-        Py_DECREF(run_func);
-        return make_py_error(env);
-    }
-
-    /* Create callable_name Python string */
-    PyObject *py_callable_name = PyUnicode_FromString(req->callable_name);
-    if (py_callable_name == NULL) {
-        Py_DECREF(run_func);
-        Py_DECREF(py_module_name);
-        return make_py_error(env);
-    }
-
-    /* Build scope dict from Erlang term using optimized ASGI conversion */
-    PyObject *scope = asgi_scope_from_map(env, req->scope_term);
-    if (scope == NULL) {
-        Py_DECREF(run_func);
-        Py_DECREF(py_module_name);
-        Py_DECREF(py_callable_name);
-        return make_py_error(env);
-    }
-
-    /* Create body bytes from binary */
-    PyObject *body = PyBytes_FromStringAndSize((const char *)req->body_data,
-                                                req->body_len);
-    if (body == NULL) {
-        Py_DECREF(run_func);
-        Py_DECREF(py_module_name);
-        Py_DECREF(py_callable_name);
-        Py_DECREF(scope);
-        return make_py_error(env);
-    }
-
-    /* Call runner.run_asgi(module_name, callable_name, scope, body) */
-    PyObject *args = PyTuple_Pack(4, py_module_name, py_callable_name, scope, body);
-    Py_DECREF(py_module_name);
-    Py_DECREF(py_callable_name);
-    Py_DECREF(scope);
-    Py_DECREF(body);
-
-    if (args == NULL) {
-        Py_DECREF(run_func);
-        return make_py_error(env);
-    }
-
-    PyObject *result = PyObject_Call(run_func, args, NULL);
-    Py_DECREF(run_func);
-    Py_DECREF(args);
-
-    if (result == NULL) {
-        return make_py_error(env);
-    }
-
-    /* Extract ASGI response using optimized extraction (handles dict or tuple) */
-    ERL_NIF_TERM response = extract_asgi_response(env, result);
-    Py_DECREF(result);
-
-    return enif_make_tuple2(env, ATOM_OK, response);
-}
-
-/* ============================================================================
- * Request Processing - WSGI
- * ============================================================================ */
-
-static ERL_NIF_TERM py_pool_process_wsgi(py_pool_worker_t *worker,
-                                          py_pool_request_t *req) {
-    ErlNifEnv *env = req->msg_env;
-
-    /* Get app module */
-    PyObject *app_module = py_pool_get_module(worker, req->module_name);
-    if (app_module == NULL) {
-        return make_py_error(env);
-    }
-
-    /* Get WSGI callable */
-    PyObject *app_callable = PyObject_GetAttrString(app_module, req->callable_name);
-    if (app_callable == NULL) {
-        return make_py_error(env);
-    }
-
-    /* Build environ dict */
-    PyObject *environ = term_to_py(env, req->environ_term);
-    if (environ == NULL || !PyDict_Check(environ)) {
-        Py_DECREF(app_callable);
-        Py_XDECREF(environ);
-        return make_error(env, "invalid_environ");
-    }
-
-    /* Create start_response callable */
-    /* For simplicity, use a list to collect status/headers */
-    PyObject *response_started = PyList_New(0);
-    if (response_started == NULL) {
-        Py_DECREF(app_callable);
-        Py_DECREF(environ);
-        return make_py_error(env);
-    }
-
-    /* For now, return error asking to use ASGI instead */
-    /* Full WSGI implementation would need a proper start_response callable */
-    Py_DECREF(app_callable);
-    Py_DECREF(environ);
-    Py_DECREF(response_started);
-
-    return make_error(env, "wsgi_not_fully_implemented_use_asgi");
-}
-
-/* ============================================================================
  * Request Processing Dispatcher
  * ============================================================================ */
 
@@ -568,12 +440,6 @@ static void py_pool_process_request(py_pool_worker_t *worker,
             break;
         case PY_POOL_REQ_EXEC:
             result = py_pool_process_exec(worker, req);
-            break;
-        case PY_POOL_REQ_ASGI:
-            result = py_pool_process_asgi(worker, req);
-            break;
-        case PY_POOL_REQ_WSGI:
-            result = py_pool_process_wsgi(worker, req);
             break;
         case PY_POOL_REQ_SHUTDOWN:
             /* Shutdown handled by worker thread */
@@ -661,9 +527,6 @@ static void *py_pool_worker_thread(void *arg) {
     if (builtins != NULL) {
         PyDict_SetItemString(worker->globals, "__builtins__", builtins);
     }
-
-    /* Initialize ASGI state for this interpreter */
-    worker->asgi_state = get_asgi_interp_state();
 
     worker->running = true;
 
@@ -923,10 +786,6 @@ static ERL_NIF_TERM nif_pool_submit(ErlNifEnv *env, int argc,
         type = PY_POOL_REQ_EVAL;
     } else if (strcmp(type_buf, "exec") == 0) {
         type = PY_POOL_REQ_EXEC;
-    } else if (strcmp(type_buf, "asgi") == 0) {
-        type = PY_POOL_REQ_ASGI;
-    } else if (strcmp(type_buf, "wsgi") == 0) {
-        type = PY_POOL_REQ_WSGI;
     } else {
         return make_error(env, "unknown_request_type");
     }
@@ -996,83 +855,6 @@ static ERL_NIF_TERM nif_pool_submit(ErlNifEnv *env, int argc,
             if (!enif_is_atom(env, argv[2])) {
                 req->locals_term = enif_make_copy(req->msg_env, argv[2]);
             }
-            break;
-        }
-
-        case PY_POOL_REQ_ASGI: {
-            /* argv[1] = Runner, argv[2] = Module, argv[3] = Callable, argv[4] = {Scope, Body} */
-            ErlNifBinary runner_bin, module_bin, callable_bin;
-            if (!enif_inspect_binary(env, argv[1], &runner_bin) ||
-                !enif_inspect_binary(env, argv[2], &module_bin) ||
-                !enif_inspect_binary(env, argv[3], &callable_bin)) {
-                py_pool_request_free(req);
-                return enif_make_badarg(env);
-            }
-
-            req->runner_name = enif_alloc(runner_bin.size + 1);
-            req->module_name = enif_alloc(module_bin.size + 1);
-            req->callable_name = enif_alloc(callable_bin.size + 1);
-            if (req->runner_name == NULL || req->module_name == NULL ||
-                req->callable_name == NULL) {
-                py_pool_request_free(req);
-                return make_error(env, "allocation_failed");
-            }
-
-            memcpy(req->runner_name, runner_bin.data, runner_bin.size);
-            req->runner_name[runner_bin.size] = '\0';
-            memcpy(req->module_name, module_bin.data, module_bin.size);
-            req->module_name[module_bin.size] = '\0';
-            memcpy(req->callable_name, callable_bin.data, callable_bin.size);
-            req->callable_name[callable_bin.size] = '\0';
-
-            /* Parse {Scope, Body} tuple */
-            int arity;
-            const ERL_NIF_TERM *tuple;
-            if (!enif_get_tuple(env, argv[4], &arity, &tuple) || arity != 2) {
-                py_pool_request_free(req);
-                return enif_make_badarg(env);
-            }
-
-            req->scope_term = enif_make_copy(req->msg_env, tuple[0]);
-
-            ErlNifBinary body_bin;
-            if (enif_inspect_binary(env, tuple[1], &body_bin)) {
-                req->body_data = enif_alloc(body_bin.size);
-                if (req->body_data == NULL) {
-                    py_pool_request_free(req);
-                    return make_error(env, "allocation_failed");
-                }
-                memcpy(req->body_data, body_bin.data, body_bin.size);
-                req->body_len = body_bin.size;
-            } else {
-                req->body_data = NULL;
-                req->body_len = 0;
-            }
-            break;
-        }
-
-        case PY_POOL_REQ_WSGI: {
-            /* argv[1] = Module, argv[2] = Callable, argv[3] = Environ, argv[4] = unused */
-            ErlNifBinary module_bin, callable_bin;
-            if (!enif_inspect_binary(env, argv[1], &module_bin) ||
-                !enif_inspect_binary(env, argv[2], &callable_bin)) {
-                py_pool_request_free(req);
-                return enif_make_badarg(env);
-            }
-
-            req->module_name = enif_alloc(module_bin.size + 1);
-            req->callable_name = enif_alloc(callable_bin.size + 1);
-            if (req->module_name == NULL || req->callable_name == NULL) {
-                py_pool_request_free(req);
-                return make_error(env, "allocation_failed");
-            }
-
-            memcpy(req->module_name, module_bin.data, module_bin.size);
-            req->module_name[module_bin.size] = '\0';
-            memcpy(req->callable_name, callable_bin.data, callable_bin.size);
-            req->callable_name[callable_bin.size] = '\0';
-
-            req->environ_term = enif_make_copy(req->msg_env, argv[3]);
             break;
         }
 

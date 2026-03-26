@@ -56,8 +56,6 @@
 #define PY_WORKER_POOL_H
 
 #include "py_nif.h"
-#include "py_asgi.h"
-#include "py_wsgi.h"
 
 /* ============================================================================
  * Configuration
@@ -94,8 +92,6 @@ typedef enum {
     PY_POOL_REQ_APPLY,     /**< py:apply(Module, Func, Args, Kwargs) */
     PY_POOL_REQ_EVAL,      /**< py:eval(Code) */
     PY_POOL_REQ_EXEC,      /**< py:exec(Code) */
-    PY_POOL_REQ_ASGI,      /**< ASGI request */
-    PY_POOL_REQ_WSGI,      /**< WSGI request */
     PY_POOL_REQ_SHUTDOWN   /**< Shutdown signal */
 } py_pool_request_type_t;
 
@@ -220,11 +216,6 @@ typedef struct {
 
     /** @brief Local namespace for eval/exec */
     PyObject *locals;
-
-    /* ========== ASGI/WSGI state ========== */
-
-    /** @brief Per-worker ASGI state (interned keys, etc.) */
-    asgi_interp_state_t *asgi_state;
 
     /* ========== Statistics ========== */
 
@@ -443,26 +434,6 @@ static ERL_NIF_TERM py_pool_process_eval(py_pool_worker_t *worker,
  * @return Result term
  */
 static ERL_NIF_TERM py_pool_process_exec(py_pool_worker_t *worker,
-                                          py_pool_request_t *req);
-
-/**
- * @brief Process ASGI request
- *
- * @param worker Worker processing request
- * @param req Request with runner, callable, scope, body
- * @return Result term
- */
-static ERL_NIF_TERM py_pool_process_asgi(py_pool_worker_t *worker,
-                                          py_pool_request_t *req);
-
-/**
- * @brief Process WSGI request
- *
- * @param worker Worker processing request
- * @param req Request with module, callable, environ
- * @return Result term
- */
-static ERL_NIF_TERM py_pool_process_wsgi(py_pool_worker_t *worker,
                                           py_pool_request_t *req);
 
 /* ============================================================================
