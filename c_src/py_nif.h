@@ -2187,9 +2187,11 @@ static inline void log_and_clear_python_error(const char *context) {
  * OWN_GIL Reactor Dispatch
  * ============================================================================
  * Functions for dispatching reactor operations to OWN_GIL threads.
+ * Not used when ENABLE_PARALLEL_PYTHON is defined (parallel pool replaces OWN_GIL).
  */
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
 
 /**
  * @brief Dispatch reactor on_read_ready to OWN_GIL thread
@@ -2226,6 +2228,7 @@ ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
 ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
                                               int fd, ERL_NIF_TERM client_info);
 
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif /* HAVE_SUBINTERPRETERS */
 
 #endif /* PY_NIF_H */

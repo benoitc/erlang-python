@@ -2533,6 +2533,7 @@ static PyObject *context_get_module(py_context_t *ctx, const char *module_name);
  * ============================================================================ */
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
 
 /**
  * @brief Execute a call request in the OWN_GIL thread
@@ -4097,6 +4098,7 @@ static ERL_NIF_TERM dispatch_apply_paths_to_owngil(
     return result;
 }
 
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif /* HAVE_SUBINTERPRETERS */
 
 /**
@@ -4106,6 +4108,7 @@ static ERL_NIF_TERM dispatch_apply_paths_to_owngil(
  * @return 0 on success, -1 on failure
  */
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
 static int owngil_context_init(py_context_t *ctx) {
     ctx->uses_own_gil = true;
     ctx->own_gil_tstate = NULL;
@@ -4239,6 +4242,7 @@ static void owngil_context_shutdown(py_context_t *ctx) {
     ctx->uses_own_gil = false;
 }
 
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif /* HAVE_SUBINTERPRETERS */
 
 /* ============================================================================
@@ -4522,6 +4526,7 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
     ctx->destroyed = true;
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: shutdown the dedicated thread */
     if (ctx->uses_own_gil) {
         owngil_context_shutdown(ctx);
@@ -4537,6 +4542,7 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
         atomic_fetch_add(&g_counters.ctx_destroyed, 1);
         return ATOM_OK;
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 
     if (ctx->is_subinterp && ctx->pool_slot >= 0) {
         /* Clean up context's own namespace dictionaries */
@@ -4647,6 +4653,7 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
         /* Build request tuple: {Module, Func, Args, Kwargs} */
@@ -4659,6 +4666,7 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
             kwargs);
         return dispatch_to_owngil_thread(env, ctx, CTX_REQ_CALL, request);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Both worker mode and subinterpreter mode use py_context_acquire.
@@ -4853,6 +4861,7 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
         /* Build request tuple: {Code, Locals} */
@@ -4861,6 +4870,7 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
         ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
         return dispatch_to_owngil_thread(env, ctx, CTX_REQ_EVAL, request);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Both worker mode and subinterpreter mode use py_context_acquire.
@@ -4994,10 +5004,12 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_to_owngil_thread(env, ctx, CTX_REQ_EXEC, argv[1]);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Both worker mode and subinterpreter mode use py_context_acquire.
@@ -5089,6 +5101,7 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     res->pool_slot = -1;
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to the dedicated thread to create dicts */
     if (ctx->uses_own_gil) {
         ERL_NIF_TERM dispatch_result = dispatch_create_local_env_to_owngil(env, ctx, res);
@@ -5109,6 +5122,7 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
         enif_release_resource(res);  /* Ref now owns it */
         return enif_make_tuple2(env, ATOM_OK, ref);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Acquire context to switch to correct interpreter */
@@ -5203,10 +5217,12 @@ static ERL_NIF_TERM nif_interp_apply_imports(ErlNifEnv *env, int argc, const ERL
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to the dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_apply_imports_to_owngil(env, ctx, argv[1]);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     py_context_guard_t guard = py_context_acquire(ctx);
@@ -5283,10 +5299,12 @@ static ERL_NIF_TERM nif_interp_apply_paths(ErlNifEnv *env, int argc, const ERL_N
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to the dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_apply_paths_to_owngil(env, ctx, argv[1]);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     py_context_guard_t guard = py_context_acquire(ctx);
@@ -5392,10 +5410,12 @@ static ERL_NIF_TERM nif_context_exec_with_env(ErlNifEnv *env, int argc, const ER
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to the dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_exec_with_env_to_owngil(env, ctx, argv[1], penv);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     char *code = binary_to_string(&code_bin);
@@ -5474,10 +5494,12 @@ static ERL_NIF_TERM nif_context_eval_with_env(ErlNifEnv *env, int argc, const ER
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to the dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_eval_with_env_to_owngil(env, ctx, argv[1], argv[2], penv);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     char *code = binary_to_string(&code_bin);
@@ -5632,10 +5654,12 @@ static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ER
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to the dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_call_with_env_to_owngil(env, ctx, argv[1], argv[2], argv[3], argv[4], penv);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     char *module_name = binary_to_string(&module_bin);

@@ -5545,10 +5545,12 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_reactor_read_to_owngil(env, ctx, fd, buffer);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Acquire context (handles both worker mode and subinterpreter mode) */
@@ -5641,10 +5643,12 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_reactor_write_to_owngil(env, ctx, fd);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Acquire context (handles both worker mode and subinterpreter mode) */
@@ -5727,10 +5731,12 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
     }
 
 #ifdef HAVE_SUBINTERPRETERS
+#ifndef ENABLE_PARALLEL_PYTHON
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
         return dispatch_reactor_init_to_owngil(env, ctx, fd, argv[2]);
     }
+#endif /* !ENABLE_PARALLEL_PYTHON */
 #endif
 
     /* Acquire context (handles both worker mode and subinterpreter mode) */
