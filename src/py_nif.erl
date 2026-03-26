@@ -52,6 +52,33 @@
     async_call/6,
     async_gather/3,
     async_stream/6,
+    %% Internal NIFs required for NIF loading (not part of public API)
+    subinterp_supported/0,
+    owngil_supported/0,
+    subinterp_worker_new/0,
+    subinterp_worker_destroy/1,
+    subinterp_call/5,
+    subinterp_asgi_run/6,
+    parallel_execute/2,
+    subinterp_thread_pool_start/0,
+    subinterp_thread_pool_start/1,
+    subinterp_thread_pool_stop/0,
+    subinterp_thread_pool_ready/0,
+    subinterp_thread_pool_stats/0,
+    subinterp_thread_create/0,
+    subinterp_thread_destroy/1,
+    subinterp_thread_call/4,
+    subinterp_thread_call/5,
+    subinterp_thread_eval/2,
+    subinterp_thread_eval/3,
+    subinterp_thread_exec/2,
+    subinterp_thread_cast/4,
+    subinterp_thread_async_call/6,
+    owngil_create_session/1,
+    owngil_submit_task/7,
+    owngil_destroy_session/2,
+    owngil_apply_imports/3,
+    owngil_apply_paths/3,
     %% Execution mode info
     execution_mode/0,
     num_executors/0,
@@ -453,6 +480,63 @@ async_gather(_WorkerRef, _Calls, _CallerPid) ->
     {ok, non_neg_integer()} | {error, term()}.
 async_stream(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
     ?NIF_STUB.
+
+%%% ============================================================================
+%%% Internal NIFs (required for NIF loading, not part of public API)
+%%% ============================================================================
+
+%% @private
+subinterp_supported() -> ?NIF_STUB.
+%% @private
+owngil_supported() -> ?NIF_STUB.
+%% @private
+subinterp_worker_new() -> ?NIF_STUB.
+%% @private
+subinterp_worker_destroy(_) -> ?NIF_STUB.
+%% @private
+subinterp_call(_, _, _, _, _) -> ?NIF_STUB.
+%% @private
+subinterp_asgi_run(_, _, _, _, _, _) -> ?NIF_STUB.
+%% @private
+parallel_execute(_, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_pool_start() -> ?NIF_STUB.
+%% @private
+subinterp_thread_pool_start(_) -> ?NIF_STUB.
+%% @private
+subinterp_thread_pool_stop() -> ?NIF_STUB.
+%% @private
+subinterp_thread_pool_ready() -> ?NIF_STUB.
+%% @private
+subinterp_thread_pool_stats() -> ?NIF_STUB.
+%% @private
+subinterp_thread_create() -> ?NIF_STUB.
+%% @private
+subinterp_thread_destroy(_) -> ?NIF_STUB.
+%% @private
+subinterp_thread_call(_, _, _, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_call(_, _, _, _, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_eval(_, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_eval(_, _, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_exec(_, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_cast(_, _, _, _) -> ?NIF_STUB.
+%% @private
+subinterp_thread_async_call(_, _, _, _, _, _) -> ?NIF_STUB.
+%% @private
+owngil_create_session(_) -> ?NIF_STUB.
+%% @private
+owngil_submit_task(_, _, _, _, _, _, _) -> ?NIF_STUB.
+%% @private
+owngil_destroy_session(_, _) -> ?NIF_STUB.
+%% @private
+owngil_apply_imports(_, _, _) -> ?NIF_STUB.
+%% @private
+owngil_apply_paths(_, _, _) -> ?NIF_STUB.
 
 %%% ============================================================================
 %%% Execution Mode Info

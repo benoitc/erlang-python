@@ -16,9 +16,9 @@ evaluate expressions, and stream from generators - all without blocking Erlang
 schedulers.
 
 **Parallelism options:**
-- **Worker mode** (default, recommended) - Works with any Python version. With free-threaded Python (3.13t+), provides true parallelism automatically
-- **SHARED_GIL sub-interpreters** (Python 3.12+) - Isolated namespaces, shared GIL (isolation improves in 3.14+)
-- **OWN_GIL sub-interpreters** (Python 3.14+) - Each interpreter has its own GIL, true parallelism
+- **Worker mode** (default) - Works with any Python version
+- **Free-threaded Python** (3.13t+) - True parallelism, automatic detection
+- **Parallel pool** (Python 3.14+) - Build with `ENABLE_PARALLEL_PYTHON=ON` for subinterpreter-based parallelism
 - **BEAM processes** - Fan out work across lightweight Erlang processes
 
 Key features:
@@ -312,23 +312,23 @@ Ref = py:async_call(aiohttp, get, [<<"https://api.example.com/data">>]),
 {ok, Chunks} = py:async_stream(mymodule, async_generator, [args]).
 ```
 
-## Parallel Execution with Sub-interpreters
+## Parallel Execution
 
-True parallelism without GIL contention using Python 3.14+ OWN_GIL sub-interpreters:
+Execute multiple Python calls in parallel:
 
 ```erlang
-%% Execute multiple calls in parallel across OWN_GIL sub-interpreters
-%% Requires Python 3.14+
+%% Execute multiple calls in parallel across contexts
 {ok, Results} = py:parallel([
     {math, factorial, [100]},
     {math, factorial, [200]},
     {math, factorial, [300]},
     {math, factorial, [400]}
 ]).
-%% Each call runs in its own interpreter with its own GIL
 ```
 
-For Python 3.12/3.13, use SHARED_GIL sub-interpreters (`mode => subinterp`) for namespace isolation, but note that parallelism is limited by the shared GIL.
+For true parallel Python execution:
+- **Free-threaded Python** (3.13t+): Automatic, no special build needed
+- **Parallel pool** (Python 3.14+): Build with `CMAKE_OPTIONS="-DENABLE_PARALLEL_PYTHON=ON"`
 
 ## Parallel Processing with BEAM Processes
 
