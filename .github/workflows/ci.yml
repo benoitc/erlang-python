@@ -192,6 +192,71 @@ jobs:
           '
     continue-on-error: true  # Free-threading is experimental
 
+  # Test with ENABLE_PARALLEL_PYTHON build flag (Python 3.14+)
+  test-parallel-python:
+    name: Parallel Python / Python 3.14
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set Python library path
+        run: |
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+      - name: Compile with ENABLE_PARALLEL_PYTHON
+        env:
+          CMAKE_OPTIONS: "-DENABLE_PARALLEL_PYTHON=ON"
+        run: |
+          rm -rf _build
+          rebar3 compile
+
+      - name: Run tests
+        run: rebar3 ct --readable=compact
+
+  # Verify ENABLE_PARALLEL_PYTHON fails on Python 3.13
+  test-parallel-python-version-check:
+    name: Parallel Python version check (should fail on 3.13)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.24"
+
+      - name: Verify build fails on Python 3.13
+        run: |
+          mkdir -p _build/cmake && cd _build/cmake
+          if cmake ../../c_src -DENABLE_PARALLEL_PYTHON=ON 2>&1; then
+            echo "ERROR: Build should have failed on Python 3.13"
+            exit 1
+          else
+            echo "SUCCESS: Build correctly failed on Python 3.13"
+          fi
+
   # ASan builds for detecting memory issues
   test-asan:
     name: ASan / Python ${{ matrix.python }}

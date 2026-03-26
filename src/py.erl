@@ -77,26 +77,8 @@
     async_gather/1,
     async_stream/3,
     async_stream/4,
-    %% Parallel execution (Python 3.12+ sub-interpreters)
+    %% Parallel execution
     parallel/1,
-    subinterp_supported/0,
-    %% OWN_GIL subinterpreter API (true parallelism)
-    subinterp_create/0,
-    subinterp_destroy/1,
-    subinterp_call/4,
-    subinterp_call/5,
-    subinterp_eval/2,
-    subinterp_eval/3,
-    subinterp_exec/2,
-    subinterp_cast/4,
-    subinterp_async_call/4,
-    subinterp_await/1,
-    subinterp_await/2,
-    subinterp_pool_start/0,
-    subinterp_pool_start/1,
-    subinterp_pool_stop/0,
-    subinterp_pool_ready/0,
-    subinterp_pool_stats/0,
     %% Virtual environment
     ensure_venv/2,
     ensure_venv/3,
@@ -312,7 +294,6 @@ eval(Code, Locals, Timeout) ->
 %%
 %% In worker mode, the code runs in a process-local Python environment.
 %% Variables defined via exec persist within the calling Erlang process.
-%% In subinterpreter mode, each context has its own isolated namespace.
 -spec exec(string() | binary()) -> ok | {error, term()}.
 exec(Code) ->
     %% Always route through context process - it handles callbacks inline using
@@ -776,32 +757,26 @@ async_stream_collect(Ref, Acc) ->
     end.
 
 %%% ============================================================================
-%%% Parallel Execution (Python 3.12+ Sub-interpreters)
+%%% Parallel Execution
 %%% ============================================================================
 
-%% @doc Check if true parallel execution is supported.
-%% Returns true on Python 3.12+ which supports per-interpreter GIL.
--spec subinterp_supported() -> boolean().
-subinterp_supported() ->
-    py_nif:subinterp_supported().
-
-%% @doc Execute multiple Python calls in true parallel using sub-interpreters.
-%% Each call runs in its own sub-interpreter with its own GIL, allowing
-%% CPU-bound Python code to run in parallel.
+%% @doc Execute multiple Python calls in parallel across available contexts.
 %%
-%% Requires Python 3.12+. Use subinterp_supported/0 to check availability.
+%% Calls are distributed round-robin across contexts, enabling parallel
+%% execution when multiple contexts are available.
+%%
+%% For true parallel Python execution:
+%% - Build with ENABLE_PARALLEL_PYTHON=ON (Python 3.14+)
+%% - Or use free-threaded Python (3.13t+)
 %%
 %% Example:
 %% ```
-%% %% Run numpy matrix operations in parallel
 %% {ok, Results} = py:parallel([
-%%     {numpy, dot, [MatrixA, MatrixB]},
-%%     {numpy, dot, [MatrixC, MatrixD]},
-%%     {numpy, dot, [MatrixE, MatrixF]}
+%%     {math, sqrt, [16.0]},
+%%     {math, sqrt, [25.0]},
+%%     {math, sqrt, [36.0]}
 %% ]).
 %% '''
-%%
-%% On older Python versions, returns {error, subinterpreters_not_supported}.
 -spec parallel([{py_module(), py_func(), py_args()}]) -> py_result().
 parallel(Calls) when is_list(Calls) ->
     %% Distribute calls across available contexts for true parallel execution
@@ -840,126 +815,6 @@ parallel(Calls) when is_list(Calls) ->
                 false -> {ok, SortedResults}
             end
     end.
-
-%%% ============================================================================
-%%% OWN_GIL Subinterpreter API (True Parallelism)
-%%% ============================================================================
-
-%% @doc Create an isolated subinterpreter with OWN_GIL.
-%% Returns a handle for making calls. The subinterpreter runs
-%% in a dedicated pthread with true parallelism.
-%%
-%% Requires the thread pool to be started first via subinterp_pool_start/0.
-%%
-%% Example:
-%% ```
-%% ok = py:subinterp_pool_start().
-%% {ok, Sub} = py:subinterp_create().
-%% {ok, Result} = py:subinterp_call(Sub, math, sqrt, [16.0]).
-%% ok = py:subinterp_destroy(Sub).
-%% '''
--spec subinterp_create() -> {ok, reference()} | {error, term()}.
-subinterp_create() ->
-    py_nif:subinterp_thread_create().
-
-%% @doc Destroy a subinterpreter handle.
-%% Cleans up namespace, releases worker binding.
--spec subinterp_destroy(reference()) -> ok.
-subinterp_destroy(Handle) ->
-    py_nif:subinterp_thread_destroy(Handle),
-    ok.
-
-%% @doc Call a function in a subinterpreter (blocking).
--spec subinterp_call(reference(), py_module(), py_func(), py_args()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(Handle, Module, Func, Args) ->
-    subinterp_call(Handle, Module, Func, Args, #{}).
-
-%% @doc Call a function in a subinterpreter with kwargs (blocking).
--spec subinterp_call(reference(), py_module(), py_func(), py_args(), py_kwargs()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(Handle, Module, Func, Args, Kwargs) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    py_nif:subinterp_thread_call(Handle, ModuleBin, FuncBin, Args, Kwargs).
-
-%% @doc Evaluate expression in subinterpreter (blocking).
--spec subinterp_eval(reference(), binary() | string()) ->
-    {ok, term()} | {error, term()}.
-subinterp_eval(Handle, Code) ->
-    subinterp_eval(Handle, Code, #{}).
-
-%% @doc Evaluate expression with locals in subinterpreter (blocking).
--spec subinterp_eval(reference(), binary() | string(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_eval(Handle, Code, Locals) ->
-    CodeBin = ensure_binary(Code),
-    py_nif:subinterp_thread_eval(Handle, CodeBin, Locals).
-
-%% @doc Execute statements in subinterpreter (blocking, no return).
--spec subinterp_exec(reference(), binary() | string()) -> ok | {error, term()}.
-subinterp_exec(Handle, Code) ->
-    CodeBin = ensure_binary(Code),
-    py_nif:subinterp_thread_exec(Handle, CodeBin).
-
-%% @doc Cast a call to subinterpreter (fire-and-forget, no result).
-%% Returns immediately. Use for side-effects where result is not needed.
--spec subinterp_cast(reference(), py_module(), py_func(), py_args()) -> ok.
-subinterp_cast(Handle, Module, Func, Args) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    py_nif:subinterp_thread_cast(Handle, ModuleBin, FuncBin, Args).
-
-%% @doc Async call - returns immediately with a reference.
-%% Use subinterp_await/1,2 to get the result.
-%% Worker uses erlang.send() to deliver result.
--spec subinterp_async_call(reference(), py_module(), py_func(), py_args()) -> reference().
-subinterp_async_call(Handle, Module, Func, Args) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    Ref = make_ref(),
-    py_nif:subinterp_thread_async_call(Handle, ModuleBin, FuncBin, Args, self(), Ref),
-    Ref.
-
-%% @doc Wait for async call result.
--spec subinterp_await(reference()) -> {ok, term()} | {error, term()}.
-subinterp_await(Ref) ->
-    subinterp_await(Ref, ?DEFAULT_TIMEOUT).
-
-%% @doc Wait for async call result with timeout.
--spec subinterp_await(reference(), timeout()) -> {ok, term()} | {error, term()}.
-subinterp_await(Ref, Timeout) ->
-    receive
-        {py_subinterp_result, Ref, Result} -> Result
-    after Timeout ->
-        {error, timeout}
-    end.
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with default workers.
-%% Must be called before creating subinterpreter handles.
--spec subinterp_pool_start() -> ok | {error, term()}.
-subinterp_pool_start() ->
-    py_nif:subinterp_thread_pool_start().
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with N workers.
--spec subinterp_pool_start(non_neg_integer()) -> ok | {error, term()}.
-subinterp_pool_start(NumWorkers) ->
-    py_nif:subinterp_thread_pool_start(NumWorkers).
-
-%% @doc Stop the OWN_GIL subinterpreter thread pool.
--spec subinterp_pool_stop() -> ok.
-subinterp_pool_stop() ->
-    py_nif:subinterp_thread_pool_stop().
-
-%% @doc Check if the OWN_GIL thread pool is ready.
--spec subinterp_pool_ready() -> boolean().
-subinterp_pool_ready() ->
-    py_nif:subinterp_thread_pool_ready().
-
-%% @doc Get OWN_GIL thread pool statistics.
--spec subinterp_pool_stats() -> map().
-subinterp_pool_stats() ->
-    py_nif:subinterp_thread_pool_stats().
 
 %%% ============================================================================
 %%% Virtual Environment Support
@@ -1249,10 +1104,13 @@ ensure_binary(S) ->
 
 %% @doc Get the current execution mode.
 %% Returns one of:
-%% - `free_threaded': Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - `subinterp': Python 3.12+ with per-interpreter GIL
-%% - `multi_executor': Traditional Python with N executor threads
--spec execution_mode() -> free_threaded | subinterp | multi_executor.
+%% - `free_threaded': Python 3.13t+ with no GIL (Py_GIL_DISABLED)
+%% - `multi_executor': Traditional Python with executor threads
+%%
+%% True parallel Python execution is available with:
+%% - ENABLE_PARALLEL_PYTHON=ON build (Python 3.14+)
+%% - Free-threaded Python (3.13t+)
+-spec execution_mode() -> free_threaded | multi_executor.
 execution_mode() ->
     py_nif:execution_mode().
 
@@ -1443,10 +1301,12 @@ clear_traces() ->
 %%% ============================================================================
 %%% Process-per-context API
 %%%
-%%% This new architecture uses one Erlang process per Python context.
-%%% Each context owns its Python interpreter (subinterpreter on Python 3.12+
-%%% or worker on older versions). This eliminates mutex contention and
-%%% enables true N-way parallelism.
+%%% This architecture uses one Erlang process per Python context.
+%%% Each context manages Python execution with scheduler affinity.
+%%%
+%%% For true parallel Python execution:
+%%% - Build with ENABLE_PARALLEL_PYTHON=ON (Python 3.14+)
+%%% - Or use free-threaded Python (3.13t+)
 %%%
 %%% Usage:
 %%% ```
@@ -1465,7 +1325,7 @@ clear_traces() ->
 
 %% @doc Start the process-per-context system with default settings.
 %%
-%% Creates one context per scheduler using worker mode.
+%% Creates one context per scheduler.
 %%
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start_contexts() -> {ok, [pid()]} | {error, term()}.
@@ -1476,7 +1336,6 @@ start_contexts() ->
 %%
 %% Options:
 %% - `contexts' - Number of contexts to create (default: number of schedulers)
-%% - `mode' - Context mode: `worker', `subinterp', or `owngil' (default: `worker')
 %%
 %% @param Opts Start options
 %% @returns {ok, [Context]} | {error, Reason}

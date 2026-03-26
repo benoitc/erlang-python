@@ -14,9 +14,13 @@
 
 %%% @doc Python context process.
 %%%
-%%% A py_context process owns a Python context (subinterpreter or worker).
+%%% A py_context process owns a Python execution context.
 %%% Each process has exclusive access to its context, eliminating mutex
-%%% contention and enabling true N-way parallelism.
+%%% contention and enabling parallel request handling.
+%%%
+%%% For true parallel Python execution:
+%%% - Build with ENABLE_PARALLEL_PYTHON=ON (Python 3.14+)
+%%% - Or use free-threaded Python (3.13t+)
 %%%
 %%% The context is created when the process starts and destroyed when it
 %%% stops. All Python operations are serialized through message passing.
@@ -62,7 +66,7 @@
 %% Exported for py_reactor_context
 -export([extend_erlang_module_in_context/1]).
 
--type context_mode() :: worker | subinterp | owngil.
+-type context_mode() :: worker.
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
@@ -81,16 +85,12 @@
 
 %% @doc Start a new py_context process.
 %%
-%% The process creates a Python context based on the mode:
-%% - `worker' - Create a thread-state worker (main interpreter namespace)
-%% - `subinterp' - Create a sub-interpreter with shared GIL (Python 3.12+)
-%% - `owngil' - Create a sub-interpreter with its own GIL (Python 3.14+)
-%%
-%% The `owngil' mode creates a dedicated pthread for each context, allowing
-%% true parallel Python execution. Requires Python 3.14+.
+%% Creates a Python execution context. For true parallel execution,
+%% build with ENABLE_PARALLEL_PYTHON=ON (Python 3.14+) or use
+%% free-threaded Python (3.13t+).
 %%
 %% @param Id Unique identifier for this context
-%% @param Mode Context mode
+%% @param Mode Context mode (worker)
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_link(pos_integer(), context_mode()) -> {ok, pid()} | {error, term()}.
 start_link(Id, Mode) ->
@@ -125,14 +125,11 @@ stop(Ctx) when is_pid(Ctx) ->
 
 %% @doc Create a new context with options map.
 %%
-%% Options:
-%% - `mode' - Context mode (worker | subinterp | owngil), default: worker
-%%
-%% @param Opts Options map
+%% @param Opts Options map (currently no options used)
 %% @returns {ok, Pid} | {error, Reason}
 -spec new(map()) -> {ok, context()} | {error, term()}.
 new(Opts) when is_map(Opts) ->
-    Mode = maps:get(mode, Opts, worker),
+    Mode = worker,
     Id = erlang:unique_integer([positive]),
     start_link(Id, Mode).
 
@@ -358,11 +355,10 @@ get_interp_id(Ctx) when is_pid(Ctx) ->
             {error, {context_died, Reason}}
     end.
 
-%% @doc Check if this context is a subinterpreter.
+%% @doc Check if this context uses a separate interpreter.
 %%
-%% Returns true for subinterpreter mode, false for worker mode.
-%% In worker mode, process-local environments are used.
-%% In subinterpreter mode, each context has its own isolated namespace.
+%% Returns true if context has an interpreter ID > 0, false otherwise.
+%% Currently always returns false in worker mode.
 -spec is_subinterp(context()) -> boolean().
 is_subinterp(Ctx) when is_pid(Ctx) ->
     MRef = erlang:monitor(process, Ctx),
@@ -529,15 +525,7 @@ apply_preload(Ref) ->
 
 %% @private
 create_context(worker) ->
-    py_nif:context_create(worker);
-create_context(subinterp) ->
-    py_nif:context_create(subinterp);
-create_context(owngil) ->
-    %% OWN_GIL mode requires Python 3.14+ due to C extension bugs in earlier versions
-    case py_nif:owngil_supported() of
-        true -> py_nif:context_create(owngil);
-        false -> {error, owngil_requires_python314}
-    end.
+    py_nif:context_create(worker).
 
 %% @private
 %% Main context loop. Handles requests and uses suspension-based callback support.

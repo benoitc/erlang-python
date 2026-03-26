@@ -599,46 +599,20 @@ ok = py:clear_traces().
 
 ## Execution Modes
 
-### Context Modes
+By default, erlang_python uses **worker mode** which works with any Python version.
 
-When creating Python contexts, you can choose the execution mode:
+For true parallel Python execution:
 
-| Mode | Python Version | Description |
-|------|----------------|-------------|
-| `worker` | Any | Main interpreter, shared namespace (default, recommended) |
-| `subinterp` | 3.12+ | SHARED_GIL sub-interpreter, isolated namespace |
-| `owngil` | 3.14+ | OWN_GIL sub-interpreter, true parallelism |
+- **Build with parallel pool** (Python 3.14+):
+  ```bash
+  CMAKE_OPTIONS="-DENABLE_PARALLEL_PYTHON=ON" rebar3 compile
+  ```
+- **Free-threaded Python** (3.13t+): Automatic, no special build needed
 
+Check your runtime mode:
 ```erlang
-%% Default: worker mode (recommended)
-%% With free-threaded Python (3.13t+), provides true parallelism automatically
-{ok, Ctx} = py_context:new(#{}).
-
-%% Explicit subinterpreter with shared GIL (Python 3.12+)
-%% Provides namespace isolation but no parallelism
-{ok, Ctx} = py_context:new(#{mode => subinterp}).
-
-%% OWN_GIL mode for true parallelism (Python 3.14+ required)
-%% Each context runs in its own pthread with independent GIL
-{ok, Ctx} = py_context:new(#{mode => owngil}).
+py:execution_mode().  %% Returns: multi_executor | free_threaded
 ```
-
-**Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available.
-
-**Why OWN_GIL requires Python 3.14+**: Some C extensions (e.g., `_decimal`, `numpy`) have global state bugs in sub-interpreters on Python 3.12/3.13. These are fixed in Python 3.14. SHARED_GIL mode works on 3.12+ but with caveats for C extensions with global state.
-
-### Runtime Detection
-
-Check the current execution mode:
-```erlang
-py:execution_mode().  %% => free_threaded | subinterp | multi_executor
-```
-
-| Mode | Python Version | Parallelism |
-|------|----------------|-------------|
-| Free-threaded | 3.13+ (nogil) | True parallel, no GIL |
-| Sub-interpreter | 3.12+ | Per-interpreter GIL |
-| Multi-executor | Any | GIL contention |
 
 ## Error Handling
 

@@ -52,35 +52,6 @@
     async_call/6,
     async_gather/3,
     async_stream/6,
-    %% Sub-interpreters (Python 3.12+) - shared GIL pool model
-    subinterp_supported/0,
-    owngil_supported/0,
-    subinterp_worker_new/0,
-    subinterp_worker_destroy/1,
-    subinterp_call/5,
-    subinterp_asgi_run/6,
-    parallel_execute/2,
-    %% OWN_GIL subinterpreter thread pool (true parallelism)
-    subinterp_thread_pool_start/0,
-    subinterp_thread_pool_start/1,
-    subinterp_thread_pool_stop/0,
-    subinterp_thread_pool_ready/0,
-    subinterp_thread_pool_stats/0,
-    subinterp_thread_create/0,
-    subinterp_thread_destroy/1,
-    subinterp_thread_call/4,
-    subinterp_thread_call/5,
-    subinterp_thread_eval/2,
-    subinterp_thread_eval/3,
-    subinterp_thread_exec/2,
-    subinterp_thread_cast/4,
-    subinterp_thread_async_call/6,
-    %% OWN_GIL session management for event loop pool
-    owngil_create_session/1,
-    owngil_submit_task/7,
-    owngil_destroy_session/2,
-    owngil_apply_imports/3,
-    owngil_apply_paths/3,
     %% Execution mode info
     execution_mode/0,
     num_executors/0,
@@ -484,191 +455,14 @@ async_stream(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
     ?NIF_STUB.
 
 %%% ============================================================================
-%%% Sub-interpreter Support (Python 3.12+)
-%%% ============================================================================
-
-%% @doc Check if sub-interpreters with per-interpreter GIL are supported.
-%% Returns true on Python 3.12+, false otherwise.
--spec subinterp_supported() -> boolean().
-subinterp_supported() ->
-    ?NIF_STUB.
-
-%% @doc Check if OWN_GIL mode is supported (Python 3.14+).
-%% OWN_GIL requires Python 3.14+ due to C extension global state bugs
-%% in earlier versions (e.g., _decimal). See gh-106078.
--spec owngil_supported() -> boolean().
-owngil_supported() ->
-    ?NIF_STUB.
-
-%% @doc Create a new sub-interpreter worker with its own GIL.
-%% Returns an opaque reference to be used with subinterp functions.
--spec subinterp_worker_new() -> {ok, reference()} | {error, term()}.
-subinterp_worker_new() ->
-    ?NIF_STUB.
-
-%% @doc Destroy a sub-interpreter worker.
--spec subinterp_worker_destroy(reference()) -> ok | {error, term()}.
-subinterp_worker_destroy(_WorkerRef) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function in a sub-interpreter.
-%% Args: WorkerRef, Module (binary), Func (binary), Args (list), Kwargs (map)
--spec subinterp_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Run an ASGI application in a sub-interpreter.
-%% This runs ASGI in a subinterpreter with its own GIL for true parallelism.
-%% Args: WorkerRef, Runner (binary), Module (binary), Callable (binary), Scope (map), Body (binary)
--spec subinterp_asgi_run(reference(), binary(), binary(), binary(), map(), binary()) ->
-    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
-subinterp_asgi_run(_WorkerRef, _Runner, _Module, _Callable, _Scope, _Body) ->
-    ?NIF_STUB.
-
-%% @doc Execute multiple calls in parallel across sub-interpreters.
-%% Args: WorkerRefs (list of refs), Calls (list of {Module, Func, Args})
-%% Returns: List of results (one per call)
--spec parallel_execute([reference()], [{binary(), binary(), list()}]) ->
-    {ok, list()} | {error, term()}.
-parallel_execute(_WorkerRefs, _Calls) ->
-    ?NIF_STUB.
-
-%%% ============================================================================
-%%% OWN_GIL Subinterpreter Thread Pool (True Parallelism)
-%%% ============================================================================
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with default workers.
-%% Creates a pool of pthreads, each with an OWN_GIL subinterpreter.
--spec subinterp_thread_pool_start() -> ok | {error, term()}.
-subinterp_thread_pool_start() ->
-    ?NIF_STUB.
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with N workers.
--spec subinterp_thread_pool_start(non_neg_integer()) -> ok | {error, term()}.
-subinterp_thread_pool_start(_NumWorkers) ->
-    ?NIF_STUB.
-
-%% @doc Stop the OWN_GIL subinterpreter thread pool.
--spec subinterp_thread_pool_stop() -> ok.
-subinterp_thread_pool_stop() ->
-    ?NIF_STUB.
-
-%% @doc Check if the OWN_GIL thread pool is ready.
--spec subinterp_thread_pool_ready() -> boolean().
-subinterp_thread_pool_ready() ->
-    ?NIF_STUB.
-
-%% @doc Get OWN_GIL thread pool statistics.
--spec subinterp_thread_pool_stats() -> map().
-subinterp_thread_pool_stats() ->
-    ?NIF_STUB.
-
-%% @doc Create a new OWN_GIL subinterpreter handle.
-%% The handle is bound to a worker thread and has isolated namespace.
--spec subinterp_thread_create() -> {ok, reference()} | {error, term()}.
-subinterp_thread_create() ->
-    ?NIF_STUB.
-
-%% @doc Destroy an OWN_GIL subinterpreter handle.
--spec subinterp_thread_destroy(reference()) -> ok | {error, term()}.
-subinterp_thread_destroy(_Handle) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function through OWN_GIL subinterpreter (blocking).
--spec subinterp_thread_call(reference(), binary(), binary(), list()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_call(_Handle, _Module, _Func, _Args) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function through OWN_GIL subinterpreter with kwargs.
--spec subinterp_thread_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_call(_Handle, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Evaluate Python expression through OWN_GIL subinterpreter.
--spec subinterp_thread_eval(reference(), binary()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_eval(_Handle, _Code) ->
-    ?NIF_STUB.
-
-%% @doc Evaluate Python expression with locals through OWN_GIL subinterpreter.
--spec subinterp_thread_eval(reference(), binary(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_eval(_Handle, _Code, _Locals) ->
-    ?NIF_STUB.
-
-%% @doc Execute Python statements through OWN_GIL subinterpreter (no return).
--spec subinterp_thread_exec(reference(), binary()) -> ok | {error, term()}.
-subinterp_thread_exec(_Handle, _Code) ->
-    ?NIF_STUB.
-
-%% @doc Cast (fire-and-forget) through OWN_GIL subinterpreter.
-%% Returns immediately, result is discarded.
--spec subinterp_thread_cast(reference(), binary(), binary(), list()) -> ok.
-subinterp_thread_cast(_Handle, _Module, _Func, _Args) ->
-    ?NIF_STUB.
-
-%% @doc Async call through OWN_GIL subinterpreter.
-%% Args: Handle, Module, Func, Args, CallerPid, Ref
-%% Result is sent to CallerPid as {py_subinterp_result, Ref, Result}.
--spec subinterp_thread_async_call(reference(), binary(), binary(), list(), pid(), reference()) ->
-    ok | {error, term()}.
-subinterp_thread_async_call(_Handle, _Module, _Func, _Args, _CallerPid, _Ref) ->
-    ?NIF_STUB.
-
-%%% ============================================================================
-%%% OWN_GIL Session Management (for event loop pool)
-%%% ============================================================================
-
-%% @doc Create a new OWN_GIL session for event loop pool.
-%% The WorkerHint is used for worker assignment (typically loop index).
-%% Returns {ok, WorkerId, HandleId} where:
-%%   - WorkerId is the assigned worker thread index
-%%   - HandleId is the unique namespace handle within that worker
--spec owngil_create_session(non_neg_integer()) ->
-    {ok, non_neg_integer(), non_neg_integer()} | {error, term()}.
-owngil_create_session(_WorkerHint) ->
-    ?NIF_STUB.
-
-%% @doc Submit an async task to an OWN_GIL worker.
-%% Args: WorkerId, HandleId, CallerPid, Ref, Module, Func, Args
-%% The task runs in the worker's asyncio event loop.
-%% Result is sent to CallerPid as {async_result, Ref, Result}.
--spec owngil_submit_task(non_neg_integer(), non_neg_integer(), pid(), reference(),
-                          binary(), binary(), list()) -> ok | {error, term()}.
-owngil_submit_task(_WorkerId, _HandleId, _CallerPid, _Ref, _Module, _Func, _Args) ->
-    ?NIF_STUB.
-
-%% @doc Destroy an OWN_GIL session.
-%% Cleans up the namespace within the worker.
--spec owngil_destroy_session(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
-owngil_destroy_session(_WorkerId, _HandleId) ->
-    ?NIF_STUB.
-
-%% @doc Apply imports to an OWN_GIL session.
-%% Imports modules into the worker's sys.modules.
--spec owngil_apply_imports(non_neg_integer(), non_neg_integer(), [{binary(), binary() | all}]) -> ok | {error, term()}.
-owngil_apply_imports(_WorkerId, _HandleId, _Imports) ->
-    ?NIF_STUB.
-
-%% @doc Apply paths to an OWN_GIL session.
-%% Adds paths to the worker's sys.path.
--spec owngil_apply_paths(non_neg_integer(), non_neg_integer(), [binary()]) -> ok | {error, term()}.
-owngil_apply_paths(_WorkerId, _HandleId, _Paths) ->
-    ?NIF_STUB.
-
-%%% ============================================================================
 %%% Execution Mode Info
 %%% ============================================================================
 
 %% @doc Get the current execution mode.
-%% Returns one of: free_threaded | subinterp | multi_executor
-%% - free_threaded: Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - subinterp: Python 3.12+ with per-interpreter GIL
-%% - multi_executor: Traditional Python with N executor threads
--spec execution_mode() -> free_threaded | subinterp | multi_executor.
+%% Returns one of: free_threaded | multi_executor
+%% - free_threaded: Python 3.13t+ with no GIL (Py_GIL_DISABLED)
+%% - multi_executor: Traditional Python with executor threads
+-spec execution_mode() -> free_threaded | multi_executor.
 execution_mode() ->
     ?NIF_STUB.
 
@@ -1357,13 +1151,12 @@ pool_stats() ->
 
 %% @doc Create a new Python context.
 %%
-%% Creates a subinterpreter (Python 3.12+) or worker thread-state based
-%% on the mode parameter. Returns a reference to the context and its
-%% interpreter ID for routing.
+%% Creates a worker thread-state for Python execution.
+%% Returns a reference to the context and its interpreter ID for routing.
 %%
-%% @param Mode `subinterp', `worker', or `owngil'
+%% @param Mode `worker'
 %% @returns {ok, ContextRef, InterpId} | {error, Reason}
--spec context_create(subinterp | worker | owngil) ->
+-spec context_create(worker) ->
     {ok, reference(), non_neg_integer()} | {error, term()}.
 context_create(_Mode) ->
     ?NIF_STUB.
