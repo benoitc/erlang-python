@@ -8,7 +8,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {erlang_python, "2.2.0"}
+    {erlang_python, "3.0.0"}
 ]}.
 ```
 
@@ -424,7 +424,7 @@ async def main():
 erlang.run(main())
 ```
 
-This is especially useful in ASGI handlers where sleep operations are common. See [Asyncio](asyncio.md) for the full API reference.
+This is especially useful in async handlers where sleep operations are common. See [Asyncio](asyncio.md) for the full API reference.
 
 ## Security Considerations
 
@@ -471,28 +471,28 @@ This prevents slow HTTP requests from blocking quick math operations. See [Pool 
 
 ## Zero-Copy Buffers
 
-For WSGI/ASGI applications that need to stream HTTP request bodies, use `py_buffer`:
+For streaming data from Erlang to Python, use `py_buffer`:
 
 ```erlang
-%% Create buffer for HTTP body
+%% Create buffer for streaming data
 {ok, Buf} = py_buffer:new(ContentLength),
 
-%% Write body chunks as they arrive
+%% Write chunks as they arrive
 ok = py_buffer:write(Buf, Chunk1),
 ok = py_buffer:write(Buf, Chunk2),
 ok = py_buffer:close(Buf),
 
-%% Pass to WSGI app as wsgi.input
-py:call(Ctx, myapp, handle, [#{<<"wsgi.input">> => Buf}]).
+%% Pass to Python handler
+py:call(Ctx, myapp, handle, [Buf]).
 ```
 
 Python sees it as a file-like object with blocking reads:
 
 ```python
-def handle(environ):
-    body = environ['wsgi.input'].read()  # Blocks until data ready
+def handle(buf):
+    body = buf.read()  # Blocks until data ready
     # Or iterate lines
-    for line in environ['wsgi.input']:
+    for line in buf:
         process(line)
 ```
 
@@ -509,7 +509,7 @@ See [Buffer API](buffer.md) for zero-copy memoryview access and fast substring s
 - See [Logging and Tracing](logging.md) for Python logging and distributed tracing
 - See [AI Integration](ai-integration.md) for ML/AI examples
 - See [Asyncio Event Loop](asyncio.md) for the Erlang-native asyncio implementation with TCP and UDP support
-- See [Buffer API](buffer.md) for zero-copy WSGI input buffers
+- See [Buffer API](buffer.md) for zero-copy streaming buffers
 - See [Reactor](reactor.md) for FD-based protocol handling
 - See [Security](security.md) for sandbox and blocked operations
 - See [Distributed Execution](distributed.md) for running Python across Erlang nodes

@@ -39,16 +39,18 @@ spawn(fun() ->
 end).
 ```
 
-## OWN_GIL Mode
+## Parallel Pool Mode (Internal)
 
-OWN_GIL contexts (Python 3.12+) provide true parallel execution with dedicated pthreads. Process-bound environments work with OWN_GIL, allowing multiple Erlang processes to share a single OWN_GIL context while maintaining isolated Python namespaces.
+> **Note:** This section describes internal implementation details used when building with `ENABLE_PARALLEL_PYTHON=ON`. Users typically don't need to interact with these APIs directly - parallelism is handled automatically.
 
-### Explicit Environment Creation
+When built with the parallel pool option, erlang_python uses subinterpreters with dedicated threads for true parallel execution. Process-bound environments work with this mode, allowing multiple Erlang processes to share contexts while maintaining isolated Python namespaces.
 
-For OWN_GIL contexts, you can explicitly create and manage environments:
+### Explicit Environment Creation (Advanced)
+
+For advanced use cases requiring fine-grained control:
 
 ```erlang
-%% Create an OWN_GIL context
+%% Create a context (automatic with parallel build)
 {ok, Ctx} = py_context:start_link(1, owngil),
 
 %% Create a process-local environment
@@ -74,12 +76,12 @@ service = MyService()
 {ok, 2} = py_nif:context_eval(CtxRef, <<"service.increment()">>, #{}, Env).
 ```
 
-### Sharing Context, Isolating State
+### Sharing Context, Isolating State (Internal)
 
-Multiple Erlang processes can share an OWN_GIL context while maintaining isolated namespaces:
+Multiple Erlang processes can share a context while maintaining isolated namespaces:
 
 ```erlang
-%% Shared OWN_GIL context
+%% Shared context (created automatically by parallel pool)
 {ok, Ctx} = py_context:start_link(1, owngil),
 CtxRef = py_context:get_nif_ref(Ctx),
 
@@ -96,23 +98,22 @@ spawn(fun() ->
     ok = py_nif:context_exec(CtxRef, <<"x = 'from B'">>, EnvB),
     {ok, <<"from B">>} = py_nif:context_eval(CtxRef, <<"x">>, #{}, EnvB)
 end).
-%% Both execute in parallel on the same OWN_GIL thread, but with isolated state
+%% Both execute in parallel with isolated state
 ```
 
 ### When to Use Explicit vs Implicit Environments
 
 | Approach | API | Use Case |
 |----------|-----|----------|
-| **Implicit** | `py:exec/eval/call` | Simple cases, automatic management |
-| **Explicit** | `create_local_env` + `py_nif:context_*` | OWN_GIL, fine-grained control, multiple envs per process |
+| **Implicit** | `py:exec/eval/call` | Recommended for most cases |
+| **Explicit** | `create_local_env` + `py_nif:context_*` | Fine-grained control, multiple envs per process |
 
 **Use implicit (py:exec)** when:
-- Using worker or subinterp modes
+- Using standard worker mode (recommended)
 - One environment per process is sufficient
 - You want automatic lifecycle management
 
 **Use explicit (create_local_env)** when:
-- Using OWN_GIL mode for parallel execution
 - Need multiple environments in a single process
 - Want to pass environments between processes
 - Need direct NIF-level control
@@ -460,8 +461,7 @@ This design prioritizes safety over avoiding minor memory leaks during edge case
 
 ## See Also
 
-- [OWN_GIL Internals](owngil_internals.md) - Architecture and safety mechanisms for OWN_GIL mode
-- [Scalability](scalability.md) - Mode comparison (owngil vs subinterp vs worker)
+- [Scalability](scalability.md) - Execution modes and performance tuning
 - [Event Loop Architecture](event_loop_architecture.md) - Per-process namespace management
 - [Context Affinity](context-affinity.md) - Context binding and routing
 - [Scheduling](asyncio.md) - Cooperative scheduling for long operations

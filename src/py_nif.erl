@@ -223,7 +223,7 @@
     byte_channel_send_bytes/2,
     byte_channel_try_receive_bytes/1,
     byte_channel_wait_bytes/3,
-    %% PyBuffer API - zero-copy WSGI input
+    %% PyBuffer API - zero-copy streaming buffer
     py_buffer_create/1,
     py_buffer_write/2,
     py_buffer_close/1
@@ -1406,7 +1406,7 @@ ref_call_method(_Ref, _Method, _Args) ->
 %%% Reactor NIFs - Erlang-as-Reactor Architecture
 %%%
 %%% These NIFs support the Erlang-as-Reactor pattern where Erlang handles
-%%% TCP accept/routing and Python handles HTTP parsing and ASGI/WSGI execution.
+%%% TCP accept/routing and Python handles protocol parsing and request handling.
 %%% ============================================================================
 
 %% @doc Register an FD for reactor monitoring.
@@ -1744,13 +1744,13 @@ byte_channel_wait_bytes(_ChannelRef, _CallbackId, _LoopRef) ->
     ?NIF_STUB.
 
 %%% ============================================================================
-%%% PyBuffer API - Zero-copy WSGI Input
+%%% PyBuffer API - Zero-copy Streaming Buffer
 %%% ============================================================================
 
 %% @doc Create a new PyBuffer resource.
 %%
 %% Creates a buffer that can be written by Erlang and read by Python
-%% with zero-copy semantics. The buffer is suitable for use as wsgi.input.
+%% with zero-copy semantics. Supports blocking reads that release the GIL.
 %%
 %% @param ContentLength Expected size in bytes, or `undefined' for chunked
 %% @returns {ok, BufferRef} | {error, Reason}

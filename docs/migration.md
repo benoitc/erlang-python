@@ -16,16 +16,17 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 
 ## Python Version Compatibility
 
-| Python Version | GIL Mode | Notes |
-|---------------|----------|-------|
-| 3.9 - 3.11 | Shared GIL | Multi-executor mode, `py:execution_mode()` returns `multi_executor` |
-| 3.12 - 3.13 | OWN_GIL subinterpreters | True parallelism, `py:execution_mode()` returns `subinterp` |
+| Python Version | Mode | Notes |
+|---------------|------|-------|
+| 3.9 - 3.11 | Multi-executor | Shared GIL, `py:execution_mode()` returns `multi_executor` |
+| 3.12+ | Multi-executor or Parallel | With `ENABLE_PARALLEL_PYTHON=ON`, uses internal parallel pool |
 | 3.13t | Free-threaded | No GIL, `py:execution_mode()` returns `free_threaded` |
-| 3.14+ | SHARED_GIL subinterpreters | Subinterpreters with shared GIL for C extension compatibility |
+
+**Note:** Subinterpreter/OWN_GIL modes are now internal implementation details used by the parallel pool build. Users don't need to select these modes directly.
 
 **Python 3.14 Support**: Full support for Python 3.14 including:
-- SHARED_GIL subinterpreter mode for C extension compatibility
-- Proper `sys.path` initialization in subinterpreters
+- Parallel pool build for true parallelism
+- Proper `sys.path` initialization
 - All asyncio features work correctly
 
 **FreeBSD Support**: Improved fd handling on FreeBSD/kqueue platforms:
@@ -34,18 +35,18 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 
 ## Architecture Changes
 
-### OWN_GIL Subinterpreter Thread Pool (Python 3.12+)
+### Parallel Pool Build
 
-The most significant change in v2.0 is the new execution model. On Python 3.12+, erlang_python now uses **OWN_GIL subinterpreters** for true parallelism:
+The most significant change in v2.0 is the new execution model. When built with `ENABLE_PARALLEL_PYTHON=ON`, erlang_python uses an internal parallel pool for true parallelism:
 
 **v1.8.x Architecture:**
 - Single Python interpreter with shared GIL
 - Worker pool with round-robin dispatch
 - All workers share global state
 
-**v2.0 Architecture:**
-- N subinterpreters, each in its own thread with its own GIL
-- Each subinterpreter has isolated state (no shared globals)
+**v2.0 Architecture (with parallel build):**
+- Internal pool provides true parallelism
+- Each context has isolated state (no shared globals)
 - True parallel execution without GIL contention
 - 25-30% faster cast operations
 
@@ -85,11 +86,10 @@ Check which mode is active:
 ```erlang
 %% Check execution mode
 py:execution_mode().
-%% => subinterp     (Python 3.12+ with OWN_GIL)
-%% => free_threaded (Python 3.13t with --disable-gil)
-%% => multi_executor (Python < 3.12)
+%% => multi_executor (default worker mode)
+%% => free_threaded  (Python 3.13t with --disable-gil)
 
-%% Check if subinterpreters are supported
+%% Check if parallel execution is available
 py:subinterp_supported().
 %% => true | false
 ```

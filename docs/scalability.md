@@ -4,7 +4,7 @@ This guide covers the scalability features of erlang_python, including execution
 
 ## Execution Modes
 
-By default, erlang_python uses worker mode which works with any Python version:
+By default, erlang_python uses **worker mode** which works with any Python version:
 
 ```erlang
 %% Check current execution mode
@@ -31,43 +31,43 @@ For true parallel Python execution, you have two options:
 
 When running on a free-threaded Python build (compiled with `--disable-gil`), erlang_python executes Python calls directly without any executor routing. This provides maximum parallelism for CPU-bound workloads.
 
-**2. Parallel Pool Build (Python 3.14+)**
+**2. Parallel Pool Build**
 
-Build with `ENABLE_PARALLEL_PYTHON=ON` for parallel execution via subinterpreters:
+Build with `ENABLE_PARALLEL_PYTHON=ON` for automatic parallel execution:
 
 ```bash
 CMAKE_OPTIONS="-DENABLE_PARALLEL_PYTHON=ON" rebar3 compile
 ```
 
-This creates a pool of subinterpreters with independent GILs for true parallelism.
+This enables an internal pool that provides true parallelism. The implementation details (subinterpreters with independent GILs) are handled automatically.
 
 ### Multi-Executor Mode (Default)
 
 Runs N executor threads that share the GIL. Requests are distributed round-robin across executors. Good for I/O-bound workloads where Python releases the GIL during I/O operations.
 
-## Choosing the Right Mode
+## Choosing the Right Build
 
-| Aspect | Free-Threaded | Multi-Executor |
-|--------|---------------|----------------|
-| **Parallelism** | True N-way | GIL contention |
-| **State Isolation** | Shared | Shared |
-| **Memory Overhead** | Low | Low |
-| **Module Compatibility** | Limited | All modules |
-| **Python Version** | 3.13t+ (nogil) | Any |
+| Aspect | Free-Threaded | Parallel Build | Standard |
+|--------|---------------|----------------|----------|
+| **Parallelism** | True N-way | True N-way | GIL contention |
+| **State Isolation** | Shared | Isolated | Shared |
+| **Memory Overhead** | Low | Medium | Low |
+| **Module Compatibility** | Limited | Limited | All modules |
+| **Python Version** | 3.13t+ (nogil) | 3.14+ | Any |
 
-### When to Use Each Mode
+### When to Use Each Build
 
-**Use Free-Threaded (Python 3.13t+) when:**
+**Use Free-Threaded Python (3.13t+) when:**
 - You need maximum parallelism with shared state
 - Your libraries are GIL-free compatible
 - You're running CPU-bound workloads
 
-**Use Parallel Pool Build (Python 3.14+) when:**
+**Use Parallel Pool Build when:**
 - You need true CPU parallelism
 - Running long computations (ML inference, data processing)
-- Your libraries support subinterpreters
+- Your libraries support the parallel execution model
 
-**Use Multi-Executor (default) when:**
+**Use Standard Build (default) when:**
 - Running on standard Python versions
 - Your workload is I/O-bound (GIL released during I/O)
 - You need compatibility with all Python modules
@@ -202,7 +202,7 @@ The `py:parallel/1` function distributes calls across available contexts:
 %% => {ok, [{ok, 4.0}, {ok, 5.0}, {ok, 6.0}]}
 ```
 
-For true parallelism, use free-threaded Python (3.13t+) or build with `ENABLE_PARALLEL_PYTHON=ON` (Python 3.14+).
+For true parallelism, use free-threaded Python (3.13t+) or build with `ENABLE_PARALLEL_PYTHON=ON`.
 
 ### Context Router API
 
@@ -276,7 +276,7 @@ free_threaded
 
 ### For CPU-Bound Workloads
 
-- Use `py:parallel/1` with sub-interpreters (Python 3.12+)
+- Use `py:parallel/1` with parallel build (`ENABLE_PARALLEL_PYTHON=ON`)
 - Or use free-threaded Python (3.13+)
 - Increase `max_concurrent` to match available CPU cores
 

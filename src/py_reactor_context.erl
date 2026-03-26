@@ -89,8 +89,8 @@ start_link(Id, Mode) ->
 %%
 %% Options:
 %% - max_connections: Maximum connections per context (default: 100)
-%% - app_module: Python module containing ASGI/WSGI app
-%% - app_callable: Python callable name (e.g., "app", "application")
+%% - app_module: Python module containing the protocol handler
+%% - app_callable: Python callable name (e.g., "app", "handler")
 %% - setup_code: Binary Python code to execute after context creation
 %%               (useful for setting up protocol factory)
 %%
@@ -252,7 +252,7 @@ loop(State) ->
             handle_write_ready(FdRes, State);
 
         %% Async completion signal from Python
-        %% Sent when an async task (e.g., ASGI app) completes and response is ready
+        %% Sent when an async task completes and response is ready
         %% Accept both atom and binary forms since Python sends binaries
         {write_ready, Fd} ->
             handle_async_write_ready(Fd, State);
@@ -386,7 +386,7 @@ handle_read_ready(FdRes, State) ->
                     loop(NewState);
 
                 {ok, Action} when Action =:= <<"async_pending">>; Action =:= async_pending ->
-                    %% Async task submitted (e.g., ASGI app running as task)
+                    %% Async task submitted (handler running as async task)
                     %% Don't reselect - wait for {write_ready, Fd} signal from Python
                     %% Increment request count since task was accepted
                     NewState = State#state{
@@ -451,7 +451,7 @@ handle_write_ready(FdRes, State) ->
 
 %% @private
 %% Handle async completion signal from Python.
-%% This is sent when an async task (like an ASGI app) has completed
+%% This is sent when an async task has completed
 %% and the response buffer is ready to be written.
 handle_async_write_ready(Fd, State) ->
     #state{connections = Conns} = State,

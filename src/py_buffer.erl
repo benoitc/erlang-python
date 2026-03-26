@@ -12,40 +12,39 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
-%%% @doc Zero-copy WSGI input buffer for streaming HTTP bodies.
+%%% @doc Zero-copy streaming buffer for transferring data from Erlang to Python.
 %%%
 %%% This module provides a buffer that can be written by Erlang and read
-%%% by Python with zero-copy semantics. The buffer is suitable for use
-%%% as wsgi.input in WSGI applications.
+%%% by Python with zero-copy semantics. The buffer supports blocking reads
+%%% that release the GIL while waiting for data.
 %%%
 %%% == Usage ==
 %%%
 %%% ```
-%%% %% Create a buffer (chunked encoding - unknown size)
+%%% %% Create a buffer (streaming - unknown size)
 %%% {ok, Buf} = py_buffer:new(),
 %%%
 %%% %% Or with known content length
 %%% {ok, Buf} = py_buffer:new(1024),
 %%%
-%%% %% Write HTTP body chunks
+%%% %% Write data chunks
 %%% ok = py_buffer:write(Buf, <<"chunk1">>),
 %%% ok = py_buffer:write(Buf, <<"chunk2">>),
 %%%
 %%% %% Signal end of data
 %%% ok = py_buffer:close(Buf),
 %%%
-%%% %% Pass to Python WSGI - buffer is automatically converted
-%%% py_context:call(Ctx, <<"myapp">>, <<"handle">>,
-%%%                 [#{<<"wsgi.input">> => Buf}], #{}).
+%%% %% Pass to Python handler
+%%% py_context:call(Ctx, <<"myapp">>, <<"handle">>, [Buf], #{}).
 %%% '''
 %%%
 %%% On the Python side, the buffer provides a file-like interface:
 %%%
 %%% ```python
-%%% def handle(environ):
-%%%     body = environ['wsgi.input'].read()  # Blocks until data ready
+%%% def handle(buf):
+%%%     body = buf.read()  # Blocks until data ready
 %%%     # Or use readline(), readlines(), iteration
-%%%     for line in environ['wsgi.input']:
+%%%     for line in buf:
 %%%         process(line)
 %%% '''
 %%%

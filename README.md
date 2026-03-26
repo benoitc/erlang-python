@@ -18,7 +18,7 @@ schedulers.
 **Parallelism options:**
 - **Worker mode** (default) - Works with any Python version
 - **Free-threaded Python** (3.13t+) - True parallelism, automatic detection
-- **Parallel pool** (Python 3.14+) - Build with `ENABLE_PARALLEL_PYTHON=ON` for subinterpreter-based parallelism
+- **Parallel pool** - Build with `ENABLE_PARALLEL_PYTHON=ON` for automatic parallel execution
 - **BEAM processes** - Fan out work across lightweight Erlang processes
 
 Key features:
@@ -603,7 +603,7 @@ By default, erlang_python uses **worker mode** which works with any Python versi
 
 For true parallel Python execution:
 
-- **Build with parallel pool** (Python 3.14+):
+- **Build with parallel pool**:
   ```bash
   CMAKE_OPTIONS="-DENABLE_PARALLEL_PYTHON=ON" rebar3 compile
   ```
