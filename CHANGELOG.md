@@ -4,6 +4,18 @@
 
 ### Added
 
+- **SharedDict** - Process-scoped shared dictionaries for cross-process state
+  - `py:shared_dict_new/0` - Create a new SharedDict
+  - `py:shared_dict_get/2,3` - Get value with optional default
+  - `py:shared_dict_set/3` - Set key-value pair
+  - `py:shared_dict_del/2` - Delete a key
+  - `py:shared_dict_keys/1` - List all keys
+  - `py:shared_dict_destroy/1` - Explicit cleanup
+  - Python access via `erlang.SharedDict` with dict-like interface
+  - Mutex-protected for concurrent access (~300k ops/sec)
+  - Pickle serialization for complex types
+  - See [SharedDict documentation](docs/shared-dict.md) for details
+
 - **OWN_GIL Mode** - True parallel Python execution with Python 3.14+ subinterpreters
   - Each subinterpreter runs with its own GIL (`Py_GIL_OWN`) in a dedicated thread
   - Full isolation between interpreters (separate namespaces, modules, state)
