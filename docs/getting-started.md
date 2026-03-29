@@ -8,7 +8,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {erlang_python, "2.2.0"}
+    {erlang_python, "2.3.0"}
 ]}.
 ```
 
