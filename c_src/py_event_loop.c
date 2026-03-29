@@ -5338,7 +5338,7 @@ ERL_NIF_TERM nif_context_get_event_loop(ErlNifEnv *env, int argc,
  * These NIFs support the Erlang-as-Reactor pattern where:
  * - Erlang manages TCP accept and routing via gen_tcp
  * - FDs are passed to py_reactor_context processes
- * - Python handles HTTP parsing and ASGI/WSGI execution
+ * - Python handles HTTP parsing and request execution
  * - Erlang handles I/O readiness via enif_select
  * ============================================================================ */
 

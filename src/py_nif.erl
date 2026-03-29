@@ -58,7 +58,6 @@
     subinterp_worker_new/0,
     subinterp_worker_destroy/1,
     subinterp_call/5,
-    subinterp_asgi_run/6,
     parallel_execute/2,
     %% OWN_GIL subinterpreter thread pool (true parallelism)
     subinterp_thread_pool_start/0,
@@ -163,14 +162,6 @@
     set_python_event_loop/1,
     set_isolation_mode/1,
     set_shared_worker/1,
-    %% ASGI optimizations
-    asgi_build_scope/1,
-    asgi_run/5,
-    %% ASGI profiling (only available when compiled with -DASGI_PROFILING)
-    asgi_profile_stats/0,
-    asgi_profile_reset/0,
-    %% WSGI optimizations
-    wsgi_run/4,
     %% Worker pool
     pool_start/1,
     pool_stop/0,
@@ -523,14 +514,6 @@ subinterp_worker_destroy(_WorkerRef) ->
 -spec subinterp_call(reference(), binary(), binary(), list(), map()) ->
     {ok, term()} | {error, term()}.
 subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Run an ASGI application in a sub-interpreter.
-%% This runs ASGI in a subinterpreter with its own GIL for true parallelism.
-%% Args: WorkerRef, Runner (binary), Module (binary), Callable (binary), Scope (map), Body (binary)
--spec subinterp_asgi_run(reference(), binary(), binary(), binary(), map(), binary()) ->
-    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
-subinterp_asgi_run(_WorkerRef, _Runner, _Module, _Callable, _Scope, _Body) ->
     ?NIF_STUB.
 
 %% @doc Execute multiple calls in parallel across sub-interpreters.
@@ -1166,121 +1149,6 @@ set_isolation_mode(_Mode) ->
 %% event sources to trigger process_ready_tasks.
 -spec set_shared_worker(pid()) -> ok | {error, term()}.
 set_shared_worker(_WorkerPid) ->
-    ?NIF_STUB.
-
-%%% ============================================================================
-%%% ASGI Optimizations
-%%% ============================================================================
-
-%% @doc Build an optimized ASGI scope dict from an Erlang map.
-%%
-%% This function converts an Erlang map to a Python dict using
-%% interned keys and cached constant values for maximum performance.
-%% The returned reference wraps a Python dict object.
-%%
-%% Example scope map:
-%% ```
-%% #{
-%%   type => <<"http">>,
-%%   asgi => #{version => <<"3.0">>, spec_version => <<"2.3">>},
-%%   http_version => <<"1.1">>,
-%%   method => <<"GET">>,
-%%   scheme => <<"http">>,
-%%   path => <<"/">>,
-%%   raw_path => <<"/">>,
-%%   query_string => <<>>,
-%%   root_path => <<>>,
-%%   headers => [[<<"host">>, <<"localhost">>]],
-%%   server => {<<"localhost">>, 8080},
-%%   client => {<<"127.0.0.1">>, 54321},
-%%   state => #{}
-%% }
-%% '''
-%%
-%% @param ScopeMap Erlang map containing ASGI scope keys
-%% @returns {ok, ScopeRef} where ScopeRef is a wrapped Python dict,
-%%          or {error, Reason}
--spec asgi_build_scope(map()) -> {ok, reference()} | {error, term()}.
-asgi_build_scope(_ScopeMap) ->
-    ?NIF_STUB.
-
-%% @doc Execute an ASGI application with optimized marshalling.
-%%
-%% This is a direct NIF that bypasses the generic py:call() path:
-%% <ul>
-%% <li>Builds scope dict using interned keys</li>
-%% <li>Uses response pooling</li>
-%% <li>Runs the ASGI app coroutine synchronously</li>
-%% </ul>
-%%
-%% Requires the hornbeam_asgi_runner Python module to be available,
-%% which provides the _run_asgi_sync function that handles the
-%% ASGI receive/send protocol.
-%%
-%% @param Runner Python runner module name
-%% @param Module Application module name
-%% @param Callable ASGI callable name
-%% @param ScopeMap Erlang map containing ASGI scope (see asgi_build_scope/1)
-%% @param Body Request body as binary
-%% @returns {ok, {Status, Headers, Body}} on success, or {error, Reason}
--spec asgi_run(binary(), binary(), binary(), map(), binary()) ->
-    {ok, {integer(), [{binary(), binary()}], binary()}} | {error, term()}.
-asgi_run(_Runner, _Module, _Callable, _ScopeMap, _Body) ->
-    ?NIF_STUB.
-
-%% @doc Get ASGI profiling statistics.
-%%
-%% Only available when NIF is compiled with -DASGI_PROFILING.
-%% Returns timing breakdown for each phase of ASGI request handling:
-%% - gil_acquire_us: Time to acquire Python GIL
-%% - string_conv_us: Time to convert binary strings
-%% - module_import_us: Time to import Python module
-%% - get_callable_us: Time to get ASGI callable
-%% - scope_build_us: Time to build scope dict
-%% - body_conv_us: Time to convert body binary
-%% - runner_import_us: Time to import runner module
-%% - runner_call_us: Time to call the runner (includes Python ASGI execution)
-%% - response_extract_us: Time to extract response
-%% - gil_release_us: Time to release GIL
-%% - total_us: Total time
-%%
-%% @returns {ok, StatsMap} or {error, not_available} if profiling not enabled
--spec asgi_profile_stats() -> {ok, map()} | {error, term()}.
-asgi_profile_stats() ->
-    {error, profiling_not_enabled}.
-
-%% @doc Reset ASGI profiling statistics.
-%%
-%% Only available when NIF is compiled with -DASGI_PROFILING.
--spec asgi_profile_reset() -> ok | {error, term()}.
-asgi_profile_reset() ->
-    {error, profiling_not_enabled}.
-
-%%% ============================================================================
-%%% WSGI Optimizations
-%%% ============================================================================
-
-%% @doc Execute a WSGI application with optimized marshalling.
-%%
-%% This is a direct NIF that bypasses the generic py:call() path:
-%% <ul>
-%% <li>Builds environ dict using interned keys</li>
-%% <li>Uses cached constant values</li>
-%% <li>Runs the WSGI app synchronously</li>
-%% </ul>
-%%
-%% Requires the hornbeam_wsgi_runner Python module to be available,
-%% which provides the _run_wsgi_sync function that handles the
-%% WSGI start_response protocol.
-%%
-%% @param Runner Python runner module name
-%% @param Module Application module name
-%% @param Callable WSGI callable name
-%% @param EnvironMap Erlang map containing WSGI environ
-%% @returns {ok, {Status, Headers, Body}} on success, or {error, Reason}
--spec wsgi_run(binary(), binary(), binary(), map()) ->
-    {ok, {binary(), [{binary(), binary()}], binary()}} | {error, term()}.
-wsgi_run(_Runner, _Module, _Callable, _EnvironMap) ->
     ?NIF_STUB.
 
 %%% ============================================================================

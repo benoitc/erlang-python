@@ -206,17 +206,46 @@ result = erlang.run(handler())  # Run with Erlang event loop
 | `erlang_asyncio.create_task(coro)` | `asyncio.create_task(coro)` inside `erlang.run()` |
 | `erlang_asyncio.new_event_loop()` | `erlang.new_event_loop()` |
 
-## Deprecated APIs
+## Removed APIs
 
-### ASGI/WSGI Modules
+### ASGI/WSGI Modules (Removed)
 
-The `py_asgi` and `py_wsgi` modules are deprecated and will be removed in a future release.
+The `py_asgi` and `py_wsgi` modules have been removed.
 
-**Deprecated:**
-- `py_asgi:run/4,5` - ASGI application runner
-- `py_wsgi:run/3,4` - WSGI application runner
+**Removed modules:**
+- `py_asgi` - ASGI application runner
+- `py_wsgi` - WSGI application runner
 
-For web framework integration, use the [Channel API](channel.md) or [Reactor API](reactor.md) instead.
+**Migration:** Use `py:call` with an event loop context or the [Channel API](channel.md) for web framework integration.
+
+#### ASGI Alternative using py:call
+
+```erlang
+%% Instead of py_asgi:run/4, use py:call with an event loop context
+{ok, Ctx} = py_context:start_link(1, auto),
+Scope = #{
+    type => <<"http">>,
+    method => <<"GET">>,
+    path => <<"/api/users">>
+},
+{ok, Response} = py:call(Ctx, myapp, handle_request, [Scope]).
+```
+
+#### WSGI Alternative using py:call
+
+```erlang
+%% Instead of py_wsgi:run/3, use py:call
+{ok, Ctx} = py_context:start_link(1, auto),
+Environ = #{
+    <<"REQUEST_METHOD">> => <<"GET">>,
+    <<"PATH_INFO">> => <<"/api/users">>,
+    <<"SERVER_NAME">> => <<"localhost">>,
+    <<"SERVER_PORT">> => <<"8080">>
+},
+{ok, Response} = py:call(Ctx, myapp, wsgi_app, [Environ]).
+```
+
+For more sophisticated web framework integration, consider the [Reactor API](reactor.md) or [Channel API](channel.md).
 
 ## Removed Features
 

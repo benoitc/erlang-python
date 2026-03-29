@@ -159,9 +159,9 @@ static inline bool is_numpy_ndarray(PyObject *obj) {
  */
 ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
     /*
-     * Type check ordering optimized for web/ASGI workloads:
+     * Type check ordering optimized for common workloads:
      * 1. Strings (most common in HTTP headers, bodies, JSON)
-     * 2. Dicts (headers, JSON objects, scope)
+     * 2. Dicts (headers, JSON objects)
      * 3. Integers (status codes, content-length)
      * 4. Lists (header lists, JSON arrays)
      * 5. Booleans, None
@@ -664,7 +664,7 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         return capsule;
     }
 
-    /* Check for py_buffer resource - wrap in PyBufferObject for WSGI input */
+    /* Check for py_buffer resource - wrap in PyBufferObject for streaming input */
     py_buffer_resource_t *pybuf;
     if (enif_get_resource(env, term, PY_BUFFER_RESOURCE_TYPE, (void **)&pybuf)) {
         /* Wrap the buffer resource in a PyBufferObject.

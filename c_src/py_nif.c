@@ -37,8 +37,6 @@
  */
 
 #include "py_nif.h"
-#include "py_asgi.h"
-#include "py_wsgi.h"
 #include "py_event_loop.h"
 #include "py_channel.h"
 #include "py_buffer.h"
@@ -294,8 +292,6 @@ static int is_inline_schedule_marker(PyObject *obj);
 #include "py_callback.c"
 #include "py_thread_worker.c"
 #include "py_event_loop.c"
-#include "py_asgi.c"
-#include "py_wsgi.c"
 #include "py_worker_pool.h"
 #include "py_worker_pool.c"
 #include "py_subinterp_pool.c"
@@ -1144,20 +1140,6 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         return make_error(env, "event_loop_module_creation_failed");
     }
 
-    /* Initialize ASGI scope key cache for optimized marshalling */
-    if (asgi_scope_init() < 0) {
-        Py_Finalize();
-        atomic_store(&g_runtime_state, PY_STATE_STOPPED);
-        return make_error(env, "asgi_scope_init_failed");
-    }
-
-    /* Initialize WSGI scope key cache for optimized marshalling */
-    if (wsgi_scope_init() < 0) {
-        Py_Finalize();
-        atomic_store(&g_runtime_state, PY_STATE_STOPPED);
-        return make_error(env, "wsgi_scope_init_failed");
-    }
-
     /* Initialize ReactorBuffer Python type for zero-copy read handling */
     if (ReactorBuffer_init_type() < 0) {
         Py_Finalize();
@@ -1172,7 +1154,7 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         return make_error(env, "reactor_buffer_register_failed");
     }
 
-    /* Initialize PyBuffer Python type for zero-copy WSGI input */
+    /* Initialize PyBuffer Python type for zero-copy input */
     if (PyBuffer_init_type() < 0) {
         Py_Finalize();
         atomic_store(&g_runtime_state, PY_STATE_STOPPED);
@@ -1356,9 +1338,6 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     if (g_main_thread_state != NULL) {
         PyEval_RestoreThread(g_main_thread_state);
 
-        asgi_scope_cleanup();
-        wsgi_scope_cleanup();
-
         /* Clean up numpy type cache */
         Py_XDECREF(g_numpy_ndarray_type);
         g_numpy_ndarray_type = NULL;
@@ -1372,8 +1351,6 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     } else {
         /* Fallback to PyGILState if no main thread state saved */
         PyGILState_STATE gstate = PyGILState_Ensure();
-        asgi_scope_cleanup();
-        wsgi_scope_cleanup();
         Py_XDECREF(g_numpy_ndarray_type);
         g_numpy_ndarray_type = NULL;
 #ifdef HAVE_SUBINTERPRETERS
@@ -2293,124 +2270,6 @@ static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF
     return enif_make_tuple2(env, ATOM_OK, result_list);
 }
 
-/**
- * @brief Run an ASGI application in a subinterpreter
- *
- * Args: WorkerRef, Runner, Module, Callable, ScopeMap, Body
- *
- * This runs ASGI in a subinterpreter with its own GIL for true parallelism.
- */
-static ERL_NIF_TERM nif_subinterp_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    if (argc < 6) {
-        return make_error(env, "badarg");
-    }
-
-    py_subinterp_worker_t *worker;
-    if (!enif_get_resource(env, argv[0], SUBINTERP_WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-
-    ErlNifBinary runner_bin, module_bin, callable_bin, body_bin;
-    if (!enif_inspect_binary(env, argv[1], &runner_bin)) {
-        return make_error(env, "invalid_runner");
-    }
-    if (!enif_inspect_binary(env, argv[2], &module_bin)) {
-        return make_error(env, "invalid_module");
-    }
-    if (!enif_inspect_binary(env, argv[3], &callable_bin)) {
-        return make_error(env, "invalid_callable");
-    }
-    if (!enif_inspect_binary(env, argv[5], &body_bin)) {
-        return make_error(env, "invalid_body");
-    }
-
-    /* Lock mutex for thread-safe access */
-    pthread_mutex_lock(&worker->mutex);
-
-    /* Enter the sub-interpreter with proper GIL acquisition (safe for OWN_GIL) */
-    PyEval_RestoreThread(worker->tstate);
-
-    char *runner_name = binary_to_string(&runner_bin);
-    char *module_name = binary_to_string(&module_bin);
-    char *callable_name = binary_to_string(&callable_bin);
-    if (runner_name == NULL || module_name == NULL || callable_name == NULL) {
-        enif_free(runner_name);
-        enif_free(module_name);
-        enif_free(callable_name);
-        PyEval_SaveThread();
-        pthread_mutex_unlock(&worker->mutex);
-        return make_error(env, "alloc_failed");
-    }
-
-    ERL_NIF_TERM result;
-
-    /* Build scope dict from Erlang map */
-    PyObject *scope = asgi_scope_from_map(env, argv[4]);
-    if (scope == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Convert body binary to Python bytes */
-    PyObject *body = PyBytes_FromStringAndSize((const char *)body_bin.data, body_bin.size);
-    if (body == NULL) {
-        Py_DECREF(scope);
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Import the ASGI runner module */
-    PyObject *runner_module = PyImport_ImportModule(runner_name);
-    if (runner_module == NULL) {
-        Py_DECREF(body);
-        Py_DECREF(scope);
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Call _run_asgi_sync(module_name, callable_name, scope, body)
-     * or run_asgi(module_name, callable_name, scope, body) depending on runner */
-    PyObject *run_result = PyObject_CallMethod(
-        runner_module, "run_asgi", "ssOO",
-        module_name, callable_name, scope, body);
-
-    /* Fallback to _run_asgi_sync if run_asgi doesn't exist */
-    if (run_result == NULL && PyErr_ExceptionMatches(PyExc_AttributeError)) {
-        PyErr_Clear();
-        run_result = PyObject_CallMethod(
-            runner_module, "_run_asgi_sync", "ssOO",
-            module_name, callable_name, scope, body);
-    }
-
-    Py_DECREF(runner_module);
-    Py_DECREF(body);
-    Py_DECREF(scope);
-
-    if (run_result == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Convert result to Erlang term using optimized extraction */
-    ERL_NIF_TERM term_result = extract_asgi_response(env, run_result);
-    Py_DECREF(run_result);
-
-    result = enif_make_tuple2(env, ATOM_OK, term_result);
-
-cleanup:
-    enif_free(runner_name);
-    enif_free(module_name);
-    enif_free(callable_name);
-
-    /* Exit the sub-interpreter with proper GIL release (safe for OWN_GIL) */
-    PyEval_SaveThread();
-
-    /* Unlock mutex */
-    pthread_mutex_unlock(&worker->mutex);
-
-    return result;
-}
-
 #else /* !HAVE_SUBINTERPRETERS */
 
 /* Stub implementations for older Python versions */
@@ -2433,12 +2292,6 @@ static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_T
 }
 
 static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-    return make_error(env, "subinterpreters_not_supported");
-}
-
-static ERL_NIF_TERM nif_subinterp_asgi_run(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     (void)argv;
     return make_error(env, "subinterpreters_not_supported");
@@ -7233,21 +7086,8 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
     ATOM_SPAN_END = enif_make_atom(env, "span_end");
     ATOM_SPAN_EVENT = enif_make_atom(env, "span_event");
 
-    /* ASGI scope atoms */
-    ATOM_ASGI_PATH = enif_make_atom(env, "path");
-    ATOM_ASGI_HEADERS = enif_make_atom(env, "headers");
-    ATOM_ASGI_CLIENT = enif_make_atom(env, "client");
-    ATOM_ASGI_QUERY_STRING = enif_make_atom(env, "query_string");
-    ATOM_ASGI_METHOD = enif_make_atom(env, "method");
-
     /* Worker pool atoms */
     pool_atoms_init(env);
-
-    /* ASGI buffer resource type for zero-copy body handling */
-    ASGI_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
-        env, NULL, "asgi_buffer",
-        asgi_buffer_resource_dtor,
-        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
     /* Reactor buffer resource type for zero-copy read handling */
     REACTOR_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
@@ -7265,7 +7105,7 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         return -1;
     }
 
-    /* PyBuffer resource type for zero-copy WSGI input */
+    /* PyBuffer resource type for zero-copy input */
     PY_BUFFER_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "py_buffer",
         py_buffer_resource_dtor,
@@ -7366,7 +7206,6 @@ static ErlNifFunc nif_funcs[] = {
     {"subinterp_worker_destroy", 1, nif_subinterp_worker_destroy, 0},
     {"subinterp_call", 5, nif_subinterp_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"parallel_execute", 2, nif_parallel_execute, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_asgi_run", 6, nif_subinterp_asgi_run, ERL_NIF_DIRTY_JOB_CPU_BOUND},
 
     /* OWN_GIL subinterpreter thread pool (true parallelism) */
     {"subinterp_thread_pool_start", 0, nif_subinterp_thread_pool_start, 0},
@@ -7475,17 +7314,6 @@ static ErlNifFunc nif_funcs[] = {
     {"set_isolation_mode", 1, nif_set_isolation_mode, 0},
     {"set_shared_worker", 1, nif_set_shared_worker, 0},
 
-    /* ASGI optimizations */
-    {"asgi_build_scope", 1, nif_asgi_build_scope, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"asgi_run", 5, nif_asgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND},
-#ifdef ASGI_PROFILING
-    {"asgi_profile_stats", 0, nif_asgi_profile_stats, 0},
-    {"asgi_profile_reset", 0, nif_asgi_profile_reset, 0},
-#endif
-
-    /* WSGI optimizations */
-    {"wsgi_run", 4, nif_wsgi_run, ERL_NIF_DIRTY_JOB_IO_BOUND},
-
     /* Worker pool */
     {"pool_start", 1, nif_pool_start, 0},
     {"pool_stop", 0, nif_pool_stop, 0},
@@ -7558,7 +7386,7 @@ static ErlNifFunc nif_funcs[] = {
     {"byte_channel_try_receive_bytes", 1, nif_byte_channel_try_receive_bytes, 0},
     {"byte_channel_wait_bytes", 3, nif_byte_channel_wait_bytes, 0},
 
-    /* PyBuffer API - zero-copy WSGI input */
+    /* PyBuffer API - zero-copy input */
     {"py_buffer_create", 1, nif_py_buffer_create, 0},
     {"py_buffer_write", 2, nif_py_buffer_write, 0},
     {"py_buffer_close", 1, nif_py_buffer_close, 0},

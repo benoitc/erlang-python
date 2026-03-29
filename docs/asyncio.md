@@ -915,29 +915,11 @@ erlang.run(main())
 - You need precise sub-millisecond timing
 - Your app makes many small sleep calls
 - You want to eliminate Python event loop overhead
-- Building ASGI handlers that need efficient sleep
 - Your app is running inside erlang_python
 
 **Use standard `asyncio.run()` when:**
 - You're running outside the Erlang VM
 - Testing Python code in isolation
-
-### Integration with ASGI Frameworks
-
-For ASGI applications (FastAPI, Starlette, etc.), you can use the Erlang event loop for better performance:
-
-```python
-from fastapi import FastAPI
-import asyncio
-
-app = FastAPI()
-
-@app.get("/delay")
-async def delay_endpoint(ms: int = 100):
-    # When running via py_asgi, uses Erlang timer
-    await asyncio.sleep(ms / 1000.0)
-    return {"slept_ms": ms}
-```
 
 ## Async Worker Backend (Internal)
 

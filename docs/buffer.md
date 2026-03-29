@@ -1,10 +1,10 @@
 # Buffer API
 
-The Buffer API provides a zero-copy WSGI input buffer for streaming HTTP request bodies from Erlang to Python. Buffers use shared memory with GIL-released blocking reads for efficient data transfer.
+The Buffer API provides a zero-copy input buffer for streaming data from Erlang to Python. Buffers use shared memory with GIL-released blocking reads for efficient data transfer.
 
 ## Overview
 
-Buffers are designed for WSGI/ASGI `wsgi.input` scenarios where Erlang receives HTTP body chunks and Python needs to consume them:
+Buffers are designed for scenarios where Erlang writes data chunks and Python needs to consume them:
 
 - Zero-copy access via Python's buffer protocol (`memoryview`)
 - File-like interface (`read`, `readline`, `readlines`)
@@ -12,9 +12,9 @@ Buffers are designed for WSGI/ASGI `wsgi.input` scenarios where Erlang receives 
 - Fast substring search using `memchr`/`memmem`
 
 Use buffers when you need:
-- WSGI input for HTTP request bodies
 - Streaming data from Erlang to Python
 - Zero-copy access to binary data
+- File-like interface for Python code expecting `read()` methods
 
 ## Quick Start
 
@@ -27,32 +27,32 @@ Use buffers when you need:
 %% Or with known content length (pre-allocates memory)
 {ok, Buf} = py_buffer:new(4096),
 
-%% Write HTTP body chunks
+%% Write data chunks
 ok = py_buffer:write(Buf, <<"chunk1">>),
 ok = py_buffer:write(Buf, <<"chunk2">>),
 
 %% Signal end of data
 ok = py_buffer:close(Buf),
 
-%% Pass to WSGI app
-py:call(Ctx, myapp, handle_request, [#{<<"wsgi.input">> => Buf}]).
+%% Pass to Python handler
+py:call(Ctx, myapp, handle_request, [#{<<"input">> => Buf}]).
 ```
 
 ### Python Side
 
 ```python
 def handle_request(environ):
-    wsgi_input = environ['wsgi.input']
+    input_buf = environ['input']
 
     # Read all data
-    body = wsgi_input.read()
+    body = input_buf.read()
 
     # Or read line by line
-    for line in wsgi_input:
+    for line in input_buf:
         process(line)
 
     # Or read specific amount
-    chunk = wsgi_input.read(1024)
+    chunk = input_buf.read(1024)
 ```
 
 ## Erlang API
@@ -348,24 +348,24 @@ py_buffer_resource_t
 
 ## Examples
 
-### WSGI Input Simulation
+### HTTP Request Body Handling
 
 ```erlang
-%% Simulate receiving HTTP body
+%% Buffer HTTP body
 {ok, Buf} = py_buffer:new(byte_size(Body)),
 ok = py_buffer:write(Buf, Body),
 ok = py_buffer:close(Buf),
 
-%% Build WSGI environ
+%% Build request environ
 Environ = #{
-    <<"REQUEST_METHOD">> => <<"POST">>,
-    <<"PATH_INFO">> => <<"/api/data">>,
-    <<"CONTENT_TYPE">> => <<"application/json">>,
-    <<"CONTENT_LENGTH">> => integer_to_binary(byte_size(Body)),
-    <<"wsgi.input">> => Buf
+    <<"method">> => <<"POST">>,
+    <<"path">> => <<"/api/data">>,
+    <<"content_type">> => <<"application/json">>,
+    <<"content_length">> => byte_size(Body),
+    <<"body">> => Buf
 },
 
-%% Call WSGI app
+%% Call handler
 {ok, Response} = py:call(myapp, handle, [Environ]).
 ```
 
@@ -443,9 +443,9 @@ async def read_buffer_async(buf):
 
     return b''.join(chunks)
 
-async def process_wsgi_body_async(environ):
-    """Process WSGI body in async context."""
-    buf = environ['wsgi.input']
+async def process_body_async(environ):
+    """Process body in async context."""
+    buf = environ['body']
 
     # Read body without blocking
     body = await read_buffer_async(buf)

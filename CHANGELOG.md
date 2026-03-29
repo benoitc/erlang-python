@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4.0 (2026-03-29)
+
+### Removed
+
+- **ASGI/WSGI Support** - The `py_asgi` and `py_wsgi` modules have been removed
+  - `py_asgi:run/4,5` - ASGI application runner
+  - `py_wsgi:run/3,4` - WSGI application runner
+  - For web framework integration, use `py:call` with event loop contexts or the Channel API
+  - See [Migration Guide](docs/migration.md#asgiwsgi-modules-removed) for alternatives
+
 ## 2.3.0 (2026-03-29)
 
 ### Added
@@ -45,7 +55,7 @@
   - Python `ByteChannel` class with sync/async iteration
   - Ideal for HTTP bodies, file streaming, binary protocols
 
-- **PyBuffer API** - Zero-copy buffer for WSGI input streams
+- **PyBuffer API** - Zero-copy buffer for streaming input
   - `py_buffer:new/0,1` - Create buffers with optional max size
   - `py_buffer:write/2` - Write data to buffer
   - Python `PyBuffer` class with file-like interface (`read`, `readline`, `readlines`)

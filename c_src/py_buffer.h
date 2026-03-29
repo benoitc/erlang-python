@@ -16,13 +16,13 @@
 
 /**
  * @file py_buffer.h
- * @brief Zero-copy WSGI input buffer support
+ * @brief Zero-copy input buffer support
  * @author Benoit Chesneau
  *
  * This module provides a PyBuffer Python type that wraps a NIF-allocated
  * buffer resource and exposes it via the buffer protocol. Erlang can write
- * HTTP request body chunks to the buffer while Python reads them with
- * file-like methods (read, readline, readlines) or direct buffer access.
+ * data chunks to the buffer while Python reads them with file-like methods
+ * (read, readline, readlines) or direct buffer access.
  *
  * The buffer supports blocking reads that release the GIL while waiting
  * for data from Erlang.

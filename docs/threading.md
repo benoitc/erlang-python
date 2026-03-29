@@ -220,9 +220,9 @@ async def parallel_queries():
 
 The standard `erlang.call()` uses a suspension mechanism that raises a
 `SuspensionRequired` exception internally. While this works in most contexts,
-it can cause issues with ASGI middleware that catches and handles exceptions:
+it can cause issues with middleware that catches and handles exceptions:
 
-- ASGI middleware (Starlette, FastAPI) catches exceptions during request handling
+- Middleware frameworks may catch exceptions during request handling
 - The `SuspensionRequired` exception propagates through middleware layers
 - asyncio logs "Task exception was never retrieved" warnings
 
@@ -240,8 +240,7 @@ it can cause issues with ASGI middleware that catches and handles exceptions:
 | Threading (`threading.Thread`) | `erlang.call()` |
 | ThreadPoolExecutor | `erlang.call()` |
 | Asyncio (async/await) | `erlang.async_call()` |
-| FastAPI/Starlette | `erlang.async_call()` |
-| ASGI applications | `erlang.async_call()` |
+| Web framework middleware | `erlang.async_call()` |
 
 ## Error Handling
 

@@ -225,24 +225,6 @@ handle_info({nodeup, Node}, #{node := Node} = State) ->
 
 ## Web Applications
 
-### ASGI Frameworks with Erlang Event Loop
-
-Run FastAPI/Starlette with the Erlang-native event loop:
-
-```erlang
-%% Initialize FastAPI
-py:exec(<<"
-from fastapi import FastAPI
-app = FastAPI()
-
-@app.get('/items/{item_id}')
-async def read_item(item_id: int):
-    return {'item_id': item_id}
-">>).
-
-%% Erlang handles the HTTP server, Python handles routes
-```
-
 ### Streaming Responses from Python Generators
 
 ```erlang
