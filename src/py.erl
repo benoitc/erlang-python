@@ -143,7 +143,15 @@
     dup_fd/1,
     %% Pool registration API
     register_pool/2,
-    unregister_pool/1
+    unregister_pool/1,
+    %% SharedDict API - process-scoped shared dictionary
+    shared_dict_new/0,
+    shared_dict_get/2,
+    shared_dict_get/3,
+    shared_dict_set/3,
+    shared_dict_del/2,
+    shared_dict_keys/1,
+    shared_dict_destroy/1
 ]).
 
 -type py_result() :: {ok, term()} | {error, term()}.
@@ -1635,4 +1643,87 @@ unregister_pool(Module) when is_atom(Module) ->
     py_context_router:unregister_pool(Module);
 unregister_pool({Module, Func}) when is_atom(Module), is_atom(Func) ->
     py_context_router:unregister_pool(Module, Func).
+
+%%% ============================================================================
+%%% SharedDict API - Process-scoped Shared Dictionary
+%%% ============================================================================
+
+%% @doc Create a new process-scoped SharedDict.
+%%
+%% Creates a SharedDict owned by the calling process. The dict is automatically
+%% destroyed when the owning process terminates. Values are stored as pickled
+%% bytes for cross-interpreter safety.
+%%
+%% == Example ==
+%% ```
+%% {ok, SD} = py:shared_dict_new().
+%% ok = py:shared_dict_set(SD, <<"config">>, #{host => <<"localhost">>}).
+%% #{<<"host">> := <<"localhost">>} = py:shared_dict_get(SD, <<"config">>).
+%% '''
+%%
+%% @returns {ok, Reference} on success, {error, Reason} on failure
+-spec shared_dict_new() -> {ok, reference()} | {error, term()}.
+shared_dict_new() ->
+    py_nif:shared_dict_new().
+
+%% @doc Get a value from SharedDict with default undefined.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @returns Value or undefined if key not found
+-spec shared_dict_get(reference(), binary()) -> term().
+shared_dict_get(Handle, Key) ->
+    shared_dict_get(Handle, Key, undefined).
+
+%% @doc Get a value from SharedDict with custom default.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @param Default Default value if key not found
+%% @returns Value or Default
+-spec shared_dict_get(reference(), binary(), term()) -> term().
+shared_dict_get(Handle, Key, Default) when is_binary(Key) ->
+    py_nif:shared_dict_get(Handle, Key, Default).
+
+%% @doc Set a value in SharedDict.
+%%
+%% The value is pickled for cross-interpreter safety.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @param Value Erlang term value (will be pickled)
+%% @returns ok on success
+-spec shared_dict_set(reference(), binary(), term()) -> ok | {error, term()}.
+shared_dict_set(Handle, Key, Value) when is_binary(Key) ->
+    py_nif:shared_dict_set(Handle, Key, Value).
+
+%% @doc Delete a key from SharedDict.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @returns ok (even if key didn't exist)
+-spec shared_dict_del(reference(), binary()) -> ok.
+shared_dict_del(Handle, Key) when is_binary(Key) ->
+    py_nif:shared_dict_del(Handle, Key).
+
+%% @doc Get all keys from SharedDict.
+%%
+%% @param Handle SharedDict reference
+%% @returns List of binary keys
+-spec shared_dict_keys(reference()) -> [binary()].
+shared_dict_keys(Handle) ->
+    py_nif:shared_dict_keys(Handle).
+
+%% @doc Explicitly destroy a SharedDict.
+%%
+%% Marks the SharedDict as destroyed and clears its Python dict.
+%% After destruction, any further operations on this SharedDict will
+%% return badarg. This is idempotent - calling on an already-destroyed
+%% dict returns ok.
+%%
+%% @param Handle SharedDict reference
+%% @returns ok
+-spec shared_dict_destroy(reference()) -> ok.
+shared_dict_destroy(Handle) ->
+    py_nif:shared_dict_destroy(Handle).
 

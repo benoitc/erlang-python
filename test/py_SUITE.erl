@@ -62,7 +62,18 @@
     test_process_env_isolation/1,
     test_process_env_main_function/1,
     test_process_env_state_persistence/1,
-    test_process_env_cleanup/1
+    test_process_env_cleanup/1,
+    %% SharedDict tests
+    test_shared_dict_basic/1,
+    test_shared_dict_types/1,
+    test_shared_dict_process_death/1,
+    test_shared_dict_python_access/1,
+    test_shared_dict_destroy/1,
+    %% SharedDict concurrent tests
+    test_shared_dict_concurrent_same_key/1,
+    test_shared_dict_concurrent_different_keys/1,
+    test_shared_dict_concurrent_mixed/1,
+    test_shared_dict_benchmark/1
 ]).
 
 all() ->
@@ -119,7 +130,18 @@ all() ->
         test_process_env_isolation,
         test_process_env_main_function,
         test_process_env_state_persistence,
-        test_process_env_cleanup
+        test_process_env_cleanup,
+        %% SharedDict tests
+        test_shared_dict_basic,
+        test_shared_dict_types,
+        test_shared_dict_process_death,
+        test_shared_dict_python_access,
+        test_shared_dict_destroy,
+        %% SharedDict concurrent tests
+        test_shared_dict_concurrent_same_key,
+        test_shared_dict_concurrent_different_keys,
+        test_shared_dict_concurrent_mixed,
+        test_shared_dict_benchmark
     ].
 
 init_per_suite(Config) ->
@@ -1352,4 +1374,466 @@ test_process_env_cleanup(_Config) ->
     ct:pal("Final memory: ~p~n", [FinalStats]),
 
     ct:pal("Cleanup test passed~n"),
+    ok.
+
+%%% ============================================================================
+%%% SharedDict Tests
+%%% ============================================================================
+
+%% Test basic SharedDict operations
+test_shared_dict_basic(_Config) ->
+    %% Create a SharedDict
+    {ok, SD} = py:shared_dict_new(),
+    ct:pal("Created SharedDict: ~p~n", [SD]),
+
+    %% Initially empty
+    [] = py:shared_dict_keys(SD),
+
+    %% Set and get values
+    ok = py:shared_dict_set(SD, <<"key1">>, <<"value1">>),
+    <<"value1">> = py:shared_dict_get(SD, <<"key1">>),
+
+    %% Get with default
+    undefined = py:shared_dict_get(SD, <<"nonexistent">>),
+    default_val = py:shared_dict_get(SD, <<"nonexistent">>, default_val),
+
+    %% Set another key
+    ok = py:shared_dict_set(SD, <<"key2">>, 42),
+    42 = py:shared_dict_get(SD, <<"key2">>),
+
+    %% Verify keys
+    Keys = py:shared_dict_keys(SD),
+    2 = length(Keys),
+    true = lists:member(<<"key1">>, Keys),
+    true = lists:member(<<"key2">>, Keys),
+
+    %% Delete a key
+    ok = py:shared_dict_del(SD, <<"key1">>),
+    undefined = py:shared_dict_get(SD, <<"key1">>),
+
+    %% Keys after delete
+    [<<"key2">>] = py:shared_dict_keys(SD),
+
+    ct:pal("Basic SharedDict test passed~n"),
+    ok.
+
+%% Test SharedDict with complex types (pickled)
+test_shared_dict_types(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+
+    %% Map
+    Map = #{<<"foo">> => <<"bar">>, <<"num">> => 123},
+    ok = py:shared_dict_set(SD, <<"map">>, Map),
+    Retrieved = py:shared_dict_get(SD, <<"map">>),
+    ct:pal("Map: ~p, Retrieved: ~p~n", [Map, Retrieved]),
+    %% Note: Keys may be converted to Python strings and back
+    true = maps:get(<<"foo">>, Retrieved) =:= <<"bar">> orelse
+           maps:get(foo, Retrieved) =:= <<"bar">>,
+
+    %% List
+    List = [1, 2, 3, <<"four">>, 5.0],
+    ok = py:shared_dict_set(SD, <<"list">>, List),
+    List = py:shared_dict_get(SD, <<"list">>),
+
+    %% Nested structure
+    Nested = #{<<"data">> => [#{<<"id">> => 1}, #{<<"id">> => 2}]},
+    ok = py:shared_dict_set(SD, <<"nested">>, Nested),
+    RetrievedNested = py:shared_dict_get(SD, <<"nested">>),
+    ct:pal("Nested: ~p~n", [RetrievedNested]),
+
+    %% Update a value
+    ok = py:shared_dict_set(SD, <<"map">>, #{updated => true}),
+    Updated = py:shared_dict_get(SD, <<"map">>),
+    ct:pal("Updated map: ~p~n", [Updated]),
+
+    ct:pal("SharedDict types test passed~n"),
+    ok.
+
+%% Test SharedDict lifecycle (GC-based cleanup)
+test_shared_dict_process_death(_Config) ->
+    %% Note: Process monitoring is disabled in current implementation.
+    %% SharedDict is cleaned up by garbage collection when no references remain.
+    %% This test verifies basic resource lifecycle.
+
+    Parent = self(),
+
+    %% Create SharedDict in a child process
+    Child = spawn(fun() ->
+        {ok, SD} = py:shared_dict_new(),
+        ok = py:shared_dict_set(SD, <<"test">>, <<"value">>),
+        <<"value">> = py:shared_dict_get(SD, <<"test">>),
+        Parent ! {sd_ref, SD},
+        receive
+            continue -> ok
+        after 5000 ->
+            ok
+        end
+    end),
+
+    %% Get the SharedDict reference
+    SDRef = receive
+        {sd_ref, Ref} -> Ref
+    after 5000 ->
+        error(timeout_waiting_for_sd_ref)
+    end,
+
+    ct:pal("Got SharedDict ref from child: ~p~n", [SDRef]),
+
+    %% SharedDict should work while child is alive
+    <<"value">> = py:shared_dict_get(SDRef, <<"test">>),
+
+    %% Kill the child process
+    exit(Child, kill),
+    timer:sleep(100),
+
+    %% SharedDict still accessible since we hold a reference
+    %% (process monitoring disabled - cleanup is GC-based)
+    <<"value">> = py:shared_dict_get(SDRef, <<"test">>),
+
+    ct:pal("SharedDict lifecycle test passed~n"),
+    ok.
+
+%% Test Python access to SharedDict
+test_shared_dict_python_access(_Config) ->
+    %% Create a SharedDict
+    {ok, SD} = py:shared_dict_new(),
+
+    %% Set a value from Erlang
+    ok = py:shared_dict_set(SD, <<"config">>, #{port => 8080, host => <<"localhost">>}),
+
+    %% First, store the handle in Python's global namespace using eval
+    %% We use eval with locals to pass the handle, then store it globally
+    {ok, _} = py:eval(<<"(globals().__setitem__('_sd_handle', handle), None)[-1]">>,
+                       #{<<"handle">> => SD}),
+
+    %% Now execute code that uses the stored handle
+    Code = <<"
+from erlang import SharedDict
+sd = SharedDict(_sd_handle)
+
+# Read value set from Erlang
+config = sd['config']
+result_port = config.get('port') or config.get(b'port')
+
+# Set a value from Python
+sd['python_key'] = {'set_from': 'python', 'value': 42}
+
+# Test contains
+has_config = 'config' in sd
+has_missing = 'missing' in sd
+
+# Test keys
+key_count = len(sd.keys())
+">>,
+
+    ok = py:exec(Code),
+
+    %% Get results from Python namespace
+    {ok, ResultPort} = py:eval(<<"result_port">>),
+    ct:pal("Result port: ~p~n", [ResultPort]),
+    8080 = ResultPort,
+
+    {ok, HasConfig} = py:eval(<<"has_config">>),
+    true = HasConfig,
+
+    {ok, HasMissing} = py:eval(<<"has_missing">>),
+    false = HasMissing,
+
+    {ok, KeyCount} = py:eval(<<"key_count">>),
+    ct:pal("Key count: ~p~n", [KeyCount]),
+    2 = KeyCount,
+
+    %% Read value set from Python in Erlang
+    PythonValue = py:shared_dict_get(SD, <<"python_key">>),
+    ct:pal("Python value: ~p~n", [PythonValue]),
+    42 = maps:get(<<"value">>, PythonValue),
+
+    %% Test delete from Python
+    ok = py:exec(<<"del sd['python_key']">>),
+    undefined = py:shared_dict_get(SD, <<"python_key">>),
+
+    ct:pal("SharedDict Python access test passed~n"),
+    ok.
+
+%% Test explicit SharedDict destroy
+test_shared_dict_destroy(_Config) ->
+    %% Create SharedDict and populate it
+    {ok, SD} = py:shared_dict_new(),
+    ok = py:shared_dict_set(SD, <<"key">>, <<"value">>),
+    <<"value">> = py:shared_dict_get(SD, <<"key">>),
+    ct:pal("SharedDict created and populated~n"),
+
+    %% Destroy it
+    ok = py:shared_dict_destroy(SD),
+    ct:pal("SharedDict destroyed~n"),
+
+    %% Further access returns badarg
+    try
+        py:shared_dict_get(SD, <<"key">>),
+        ct:fail(expected_badarg)
+    catch
+        error:badarg -> ok
+    end,
+    ct:pal("Get after destroy correctly raises badarg~n"),
+
+    %% set also returns badarg
+    try
+        py:shared_dict_set(SD, <<"key2">>, <<"value2">>),
+        ct:fail(expected_badarg)
+    catch
+        error:badarg -> ok
+    end,
+    ct:pal("Set after destroy correctly raises badarg~n"),
+
+    %% keys also returns badarg
+    try
+        py:shared_dict_keys(SD),
+        ct:fail(expected_badarg)
+    catch
+        error:badarg -> ok
+    end,
+    ct:pal("Keys after destroy correctly raises badarg~n"),
+
+    %% Destroy is idempotent
+    ok = py:shared_dict_destroy(SD),
+    ok = py:shared_dict_destroy(SD),
+    ct:pal("Destroy is idempotent~n"),
+
+    ct:pal("SharedDict destroy test passed~n"),
+    ok.
+
+%%% ============================================================================
+%%% SharedDict Concurrent Tests
+%%% ============================================================================
+
+%% Test concurrent access to the same key from multiple processes
+%% Verifies mutex protection - individual operations are atomic, data remains consistent
+%% Note: SharedDict provides per-operation atomicity, not transactional atomicity
+test_shared_dict_concurrent_same_key(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+    Parent = self(),
+    NumProcs = 10,
+    WritesPerProc = 100,
+
+    %% Test 1: Concurrent writes to same key - verify no corruption
+    %% Each process writes its process number repeatedly
+    Pids1 = [spawn_link(fun() ->
+        lists:foreach(fun(_) ->
+            ok = py:shared_dict_set(SD, <<"shared_key">>, N)
+        end, lists:seq(1, WritesPerProc)),
+        Parent ! {done_write, self()}
+    end) || N <- lists:seq(1, NumProcs)],
+
+    [receive {done_write, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- Pids1],
+
+    %% Final value should be a valid process number (1-NumProcs)
+    FinalWrite = py:shared_dict_get(SD, <<"shared_key">>),
+    ct:pal("Concurrent writes - final value: ~p (valid if 1-~p)~n", [FinalWrite, NumProcs]),
+    true = is_integer(FinalWrite),
+    true = FinalWrite >= 1 andalso FinalWrite =< NumProcs,
+
+    %% Test 2: Concurrent reads while writing - verify no crashes/corruption
+    ok = py:shared_dict_set(SD, <<"rw_key">>, 0),
+
+    %% Half writers, half readers
+    WriterPids = [spawn_link(fun() ->
+        lists:foreach(fun(I) ->
+            ok = py:shared_dict_set(SD, <<"rw_key">>, I)
+        end, lists:seq(1, WritesPerProc)),
+        Parent ! {done_writer, self()}
+    end) || _ <- lists:seq(1, NumProcs div 2)],
+
+    ReaderPids = [spawn_link(fun() ->
+        Reads = [py:shared_dict_get(SD, <<"rw_key">>) || _ <- lists:seq(1, WritesPerProc)],
+        %% All reads should return integers (no corruption)
+        true = lists:all(fun is_integer/1, Reads),
+        Parent ! {done_reader, self()}
+    end) || _ <- lists:seq(1, NumProcs div 2)],
+
+    [receive {done_writer, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- WriterPids],
+    [receive {done_reader, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- ReaderPids],
+
+    %% Test 3: Rapid key updates - verify latest value is consistent type
+    lists:foreach(fun(I) ->
+        ok = py:shared_dict_set(SD, <<"type_key">>, I)
+    end, lists:seq(1, 1000)),
+
+    TypeVal = py:shared_dict_get(SD, <<"type_key">>),
+    true = is_integer(TypeVal),
+
+    ct:pal("SharedDict concurrent same-key test passed~n"),
+    ok.
+
+%% Test concurrent access to different keys from multiple processes
+%% Verifies no data corruption across keys
+test_shared_dict_concurrent_different_keys(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+    Parent = self(),
+    NumProcs = 10,
+    NumOps = 50,
+
+    %% Spawn processes, each writing to its own key
+    Pids = [spawn_link(fun() ->
+        Key = list_to_binary("key_" ++ integer_to_list(N)),
+        %% Write operations
+        lists:foreach(fun(I) ->
+            ok = py:shared_dict_set(SD, Key, I)
+        end, lists:seq(1, NumOps)),
+        %% Final value should be NumOps
+        Final = py:shared_dict_get(SD, Key),
+        Parent ! {done, self(), Key, Final}
+    end) || N <- lists:seq(1, NumProcs)],
+
+    %% Wait for all and collect results
+    Results = [receive
+        {done, Pid, Key, Final} -> {Key, Final}
+    after 30000 ->
+        ct:fail({timeout, Pid})
+    end || Pid <- Pids],
+
+    %% Verify all keys have correct final value
+    lists:foreach(fun({Key, Final}) ->
+        case Final of
+            NumOps -> ok;
+            Other ->
+                ct:fail({wrong_value, Key, expected, NumOps, got, Other})
+        end
+    end, Results),
+
+    %% Verify all keys are present
+    Keys = py:shared_dict_keys(SD),
+    NumProcs = length(Keys),
+
+    ct:pal("SharedDict concurrent different-keys test passed~n"),
+    ok.
+
+%% Test mixed read/write operations on shared and unique keys
+test_shared_dict_concurrent_mixed(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+    Parent = self(),
+    NumProcs = 10,
+    NumOps = 50,
+
+    %% Initialize shared keys
+    ok = py:shared_dict_set(SD, <<"shared_1">>, 0),
+    ok = py:shared_dict_set(SD, <<"shared_2">>, 0),
+
+    %% Spawn processes that do mixed operations
+    Pids = [spawn_link(fun() ->
+        UniqueKey = list_to_binary("unique_" ++ integer_to_list(N)),
+        mixed_operations(SD, UniqueKey, NumOps),
+        Parent ! {done, self(), UniqueKey}
+    end) || N <- lists:seq(1, NumProcs)],
+
+    %% Wait for all processes
+    UniqueKeys = [receive
+        {done, Pid, Key} -> Key
+    after 30000 ->
+        ct:fail({timeout, Pid})
+    end || Pid <- Pids],
+
+    %% Verify all unique keys exist with valid values
+    lists:foreach(fun(Key) ->
+        Value = py:shared_dict_get(SD, Key),
+        true = is_integer(Value) andalso Value >= 0
+    end, UniqueKeys),
+
+    %% Verify shared keys are integers (may have any value due to races)
+    Shared1 = py:shared_dict_get(SD, <<"shared_1">>),
+    Shared2 = py:shared_dict_get(SD, <<"shared_2">>),
+    true = is_integer(Shared1),
+    true = is_integer(Shared2),
+
+    ct:pal("Mixed operations - shared_1=~p, shared_2=~p~n", [Shared1, Shared2]),
+    ct:pal("SharedDict concurrent mixed test passed~n"),
+    ok.
+
+%% Helper for mixed operations
+mixed_operations(_SD, _UniqueKey, 0) -> ok;
+mixed_operations(SD, UniqueKey, N) ->
+    %% Mix of operations
+    case N rem 4 of
+        0 ->
+            %% Write to unique key
+            ok = py:shared_dict_set(SD, UniqueKey, N);
+        1 ->
+            %% Read from unique key
+            _ = py:shared_dict_get(SD, UniqueKey, 0);
+        2 ->
+            %% Increment shared key
+            Val = py:shared_dict_get(SD, <<"shared_1">>, 0),
+            ok = py:shared_dict_set(SD, <<"shared_1">>, Val + 1);
+        3 ->
+            %% Read all keys
+            _ = py:shared_dict_keys(SD)
+    end,
+    mixed_operations(SD, UniqueKey, N - 1).
+
+%% Benchmark SharedDict operations
+test_shared_dict_benchmark(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+
+    %% Warmup
+    lists:foreach(fun(I) ->
+        Key = list_to_binary("warmup_" ++ integer_to_list(I)),
+        ok = py:shared_dict_set(SD, Key, I),
+        I = py:shared_dict_get(SD, Key)
+    end, lists:seq(1, 100)),
+
+    %% Single process benchmark
+    NumOps = 1000,
+
+    %% Benchmark SET operations
+    SetStart = erlang:monotonic_time(microsecond),
+    lists:foreach(fun(I) ->
+        Key = list_to_binary("bench_" ++ integer_to_list(I rem 100)),
+        ok = py:shared_dict_set(SD, Key, I)
+    end, lists:seq(1, NumOps)),
+    SetEnd = erlang:monotonic_time(microsecond),
+    SetDuration = SetEnd - SetStart,
+    SetOpsPerSec = (NumOps * 1000000) div max(1, SetDuration),
+
+    %% Benchmark GET operations
+    GetStart = erlang:monotonic_time(microsecond),
+    lists:foreach(fun(I) ->
+        Key = list_to_binary("bench_" ++ integer_to_list(I rem 100)),
+        _ = py:shared_dict_get(SD, Key)
+    end, lists:seq(1, NumOps)),
+    GetEnd = erlang:monotonic_time(microsecond),
+    GetDuration = GetEnd - GetStart,
+    GetOpsPerSec = (NumOps * 1000000) div max(1, GetDuration),
+
+    ct:pal("~n=== SharedDict Single-Process Benchmark ===~n"),
+    ct:pal("SET: ~p ops in ~p us (~p ops/sec)~n", [NumOps, SetDuration, SetOpsPerSec]),
+    ct:pal("GET: ~p ops in ~p us (~p ops/sec)~n", [NumOps, GetDuration, GetOpsPerSec]),
+
+    %% Multi-process concurrent benchmark
+    Parent = self(),
+    NumProcs = 4,
+    OpsPerProc = 500,
+
+    ConcStart = erlang:monotonic_time(microsecond),
+    Pids = [spawn_link(fun() ->
+        lists:foreach(fun(I) ->
+            Key = list_to_binary("conc_" ++ integer_to_list(I rem 50)),
+            ok = py:shared_dict_set(SD, Key, I),
+            _ = py:shared_dict_get(SD, Key)
+        end, lists:seq(1, OpsPerProc)),
+        Parent ! {done, self()}
+    end) || _ <- lists:seq(1, NumProcs)],
+
+    [receive {done, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- Pids],
+    ConcEnd = erlang:monotonic_time(microsecond),
+    ConcDuration = ConcEnd - ConcStart,
+
+    TotalConcOps = NumProcs * OpsPerProc * 2,  % SET + GET per iteration
+    ConcOpsPerSec = (TotalConcOps * 1000000) div max(1, ConcDuration),
+
+    ct:pal("~n=== SharedDict Multi-Process Benchmark (~p procs) ===~n", [NumProcs]),
+    ct:pal("TOTAL: ~p ops in ~p us (~p ops/sec)~n", [TotalConcOps, ConcDuration, ConcOpsPerSec]),
+
+    %% Cleanup
+    ok = py:shared_dict_destroy(SD),
+
+    ct:pal("~nSharedDict benchmark completed~n"),
     ok.
