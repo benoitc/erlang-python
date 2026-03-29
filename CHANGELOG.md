@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.2.0 (2026-03-24)
+## 2.3.0 (2026-03-29)
 
 ### Added
 
@@ -15,6 +15,10 @@
   - Mutex-protected for concurrent access (~300k ops/sec)
   - Pickle serialization for complex types
   - See [SharedDict documentation](docs/shared-dict.md) for details
+
+## 2.2.0 (2026-03-24)
+
+### Added
 
 - **OWN_GIL Mode** - True parallel Python execution with Python 3.14+ subinterpreters
   - Each subinterpreter runs with its own GIL (`Py_GIL_OWN`) in a dedicated thread
