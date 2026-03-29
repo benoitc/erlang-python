@@ -3281,6 +3281,365 @@ static PyObject *erlang_whereis_impl(PyObject *self, PyObject *args) {
     return result;
 }
 
+/* ============================================================================
+ * SharedDict Python Methods
+ *
+ * These functions implement the Python-side API for SharedDict, allowing
+ * Python code to access process-scoped shared dictionaries.
+ * ============================================================================ */
+
+/**
+ * Extract py_shared_dict_t* from a PyCapsule.
+ * Returns NULL and sets exception on error.
+ */
+static py_shared_dict_t *get_shared_dict_from_capsule(PyObject *capsule) {
+    if (!PyCapsule_IsValid(capsule, "py_shared_dict")) {
+        PyErr_SetString(PyExc_TypeError, "Invalid SharedDict handle");
+        return NULL;
+    }
+    py_shared_dict_t *sd = (py_shared_dict_t *)PyCapsule_GetPointer(capsule, "py_shared_dict");
+    if (sd == NULL) {
+        PyErr_SetString(PyExc_ValueError, "SharedDict handle is NULL");
+        return NULL;
+    }
+    if (atomic_load(&sd->destroyed)) {
+        PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
+        return NULL;
+    }
+    return sd;
+}
+
+/**
+ * Python implementation of SharedDict.get(key, default=None)
+ * Usage: erlang._shared_dict_get(handle, key)
+ */
+static PyObject *py_shared_dict_get_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+    const char *key;
+    Py_ssize_t key_len;
+
+    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) {
+        return NULL;
+    }
+
+    py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
+    if (sd == NULL) return NULL;
+
+    pthread_mutex_lock(&sd->mutex);
+
+    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
+        return NULL;
+    }
+
+    /* Create Python key from bytes */
+    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
+    if (py_key == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    /* Look up pickled value */
+    PyObject *pickled = PyDict_GetItem(sd->dict, py_key);
+    Py_DECREF(py_key);
+
+    if (pickled == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        Py_RETURN_NONE;
+    }
+
+    /* Unpickle the value */
+    PyObject *pickle_mod = PyImport_ImportModule("pickle");
+    if (pickle_mod == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    PyObject *loads = PyObject_GetAttrString(pickle_mod, "loads");
+    Py_DECREF(pickle_mod);
+    if (loads == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    PyObject *value = PyObject_CallFunctionObjArgs(loads, pickled, NULL);
+    Py_DECREF(loads);
+
+    pthread_mutex_unlock(&sd->mutex);
+    return value;
+}
+
+/**
+ * Python implementation of SharedDict.set(key, value)
+ * Usage: erlang._shared_dict_set(handle, key, value)
+ */
+static PyObject *py_shared_dict_set_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+    const char *key;
+    Py_ssize_t key_len;
+    PyObject *value;
+
+    if (!PyArg_ParseTuple(args, "Os#O", &handle, &key, &key_len, &value)) {
+        return NULL;
+    }
+
+    py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
+    if (sd == NULL) return NULL;
+
+    pthread_mutex_lock(&sd->mutex);
+
+    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
+        return NULL;
+    }
+
+    /* Pickle the value */
+    PyObject *pickle_mod = PyImport_ImportModule("pickle");
+    if (pickle_mod == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    PyObject *dumps = PyObject_GetAttrString(pickle_mod, "dumps");
+    Py_DECREF(pickle_mod);
+    if (dumps == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    PyObject *pickled = PyObject_CallFunctionObjArgs(dumps, value, NULL);
+    Py_DECREF(dumps);
+    if (pickled == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    /* Create Python key */
+    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
+    if (py_key == NULL) {
+        Py_DECREF(pickled);
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    /* Store in dict */
+    int result = PyDict_SetItem(sd->dict, py_key, pickled);
+    Py_DECREF(py_key);
+    Py_DECREF(pickled);
+
+    pthread_mutex_unlock(&sd->mutex);
+
+    if (result < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+/**
+ * Python implementation of SharedDict.delete(key)
+ * Usage: erlang._shared_dict_del(handle, key)
+ * Returns True if key existed, False otherwise
+ */
+static PyObject *py_shared_dict_del_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+    const char *key;
+    Py_ssize_t key_len;
+
+    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) {
+        return NULL;
+    }
+
+    py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
+    if (sd == NULL) return NULL;
+
+    pthread_mutex_lock(&sd->mutex);
+
+    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
+        return NULL;
+    }
+
+    /* Create Python key */
+    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
+    if (py_key == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    /* Check if key exists */
+    int exists = PyDict_Contains(sd->dict, py_key);
+    if (exists > 0) {
+        PyDict_DelItem(sd->dict, py_key);
+        PyErr_Clear();
+    }
+    Py_DECREF(py_key);
+
+    pthread_mutex_unlock(&sd->mutex);
+
+    if (exists > 0) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+/**
+ * Python implementation of SharedDict.contains(key)
+ * Usage: erlang._shared_dict_contains(handle, key)
+ */
+static PyObject *py_shared_dict_contains_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+    const char *key;
+    Py_ssize_t key_len;
+
+    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) {
+        return NULL;
+    }
+
+    py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
+    if (sd == NULL) return NULL;
+
+    pthread_mutex_lock(&sd->mutex);
+
+    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
+        return NULL;
+    }
+
+    /* Create Python key */
+    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
+    if (py_key == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    int exists = PyDict_Contains(sd->dict, py_key);
+    Py_DECREF(py_key);
+
+    pthread_mutex_unlock(&sd->mutex);
+
+    if (exists > 0) {
+        Py_RETURN_TRUE;
+    } else if (exists == 0) {
+        Py_RETURN_FALSE;
+    } else {
+        return NULL;  /* Error occurred */
+    }
+}
+
+/**
+ * Python implementation of SharedDict.destroy()
+ * Usage: erlang._shared_dict_destroy(handle)
+ *
+ * Explicitly destroys the SharedDict, invalidating all references.
+ * This is idempotent - calling on already-destroyed dict returns None.
+ */
+static PyObject *py_shared_dict_destroy_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return NULL;
+    }
+
+    if (!PyCapsule_IsValid(capsule, "py_shared_dict")) {
+        PyErr_SetString(PyExc_TypeError, "Invalid SharedDict handle");
+        return NULL;
+    }
+
+    py_shared_dict_t *sd = (py_shared_dict_t *)PyCapsule_GetPointer(capsule, "py_shared_dict");
+    if (sd == NULL) {
+        PyErr_SetString(PyExc_ValueError, "SharedDict handle is NULL");
+        return NULL;
+    }
+
+    /* If already destroyed, return None (idempotent) */
+    if (atomic_load(&sd->destroyed)) {
+        Py_RETURN_NONE;
+    }
+
+    /* Mark as destroyed */
+    atomic_store(&sd->destroyed, true);
+
+    /* Clear the Python dict */
+    pthread_mutex_lock(&sd->mutex);
+    Py_CLEAR(sd->dict);
+    pthread_mutex_unlock(&sd->mutex);
+
+    Py_RETURN_NONE;
+}
+
+/**
+ * Python implementation of SharedDict.keys()
+ * Usage: erlang._shared_dict_keys(handle)
+ */
+static PyObject *py_shared_dict_keys_impl(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *handle;
+
+    if (!PyArg_ParseTuple(args, "O", &handle)) {
+        return NULL;
+    }
+
+    py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
+    if (sd == NULL) return NULL;
+
+    pthread_mutex_lock(&sd->mutex);
+
+    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
+        return NULL;
+    }
+
+    /* Get keys and decode them to strings */
+    PyObject *keys = PyDict_Keys(sd->dict);
+    if (keys == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    Py_ssize_t len = PyList_Size(keys);
+    PyObject *result = PyList_New(len);
+    if (result == NULL) {
+        Py_DECREF(keys);
+        pthread_mutex_unlock(&sd->mutex);
+        return NULL;
+    }
+
+    for (Py_ssize_t i = 0; i < len; i++) {
+        PyObject *py_key = PyList_GetItem(keys, i);
+        if (PyBytes_Check(py_key)) {
+            /* Decode bytes to string */
+            PyObject *str_key = PyUnicode_DecodeUTF8(
+                PyBytes_AS_STRING(py_key),
+                PyBytes_GET_SIZE(py_key),
+                "replace");
+            if (str_key == NULL) {
+                Py_DECREF(result);
+                Py_DECREF(keys);
+                pthread_mutex_unlock(&sd->mutex);
+                return NULL;
+            }
+            PyList_SET_ITEM(result, i, str_key);
+        } else {
+            Py_INCREF(py_key);
+            PyList_SET_ITEM(result, i, py_key);
+        }
+    }
+
+    Py_DECREF(keys);
+    pthread_mutex_unlock(&sd->mutex);
+    return result;
+}
+
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
     {"call", erlang_call_impl, METH_VARARGS,
@@ -3388,6 +3747,31 @@ static PyMethodDef ErlangModuleMethods[] = {
      "Cancel async waiter for byte channel.\n"
      "Usage: erlang._byte_channel_cancel_wait(channel_ref, callback_id)\n"
      "Returns: True."},
+    /* SharedDict methods */
+    {"_shared_dict_get", py_shared_dict_get_impl, METH_VARARGS,
+     "Get value from SharedDict.\n"
+     "Usage: erlang._shared_dict_get(handle, key)\n"
+     "Returns: value if found, None otherwise."},
+    {"_shared_dict_set", py_shared_dict_set_impl, METH_VARARGS,
+     "Set value in SharedDict.\n"
+     "Usage: erlang._shared_dict_set(handle, key, value)\n"
+     "Returns: None."},
+    {"_shared_dict_del", py_shared_dict_del_impl, METH_VARARGS,
+     "Delete key from SharedDict.\n"
+     "Usage: erlang._shared_dict_del(handle, key)\n"
+     "Returns: True if key existed, False otherwise."},
+    {"_shared_dict_contains", py_shared_dict_contains_impl, METH_VARARGS,
+     "Check if key exists in SharedDict.\n"
+     "Usage: erlang._shared_dict_contains(handle, key)\n"
+     "Returns: True if key exists, False otherwise."},
+    {"_shared_dict_keys", py_shared_dict_keys_impl, METH_VARARGS,
+     "Get all keys from SharedDict.\n"
+     "Usage: erlang._shared_dict_keys(handle)\n"
+     "Returns: list of string keys."},
+    {"_shared_dict_destroy", py_shared_dict_destroy_impl, METH_VARARGS,
+     "Explicitly destroy a SharedDict.\n"
+     "Usage: erlang._shared_dict_destroy(handle)\n"
+     "Returns: None. Idempotent - safe to call multiple times."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -3945,6 +4329,96 @@ static int create_erlang_module(void) {
             Py_DECREF(result);
         }
         Py_DECREF(atom_globals);
+    }
+
+    /* Add SharedDict wrapper class for process-scoped shared dictionaries.
+     * SharedDict provides dict-like interface to process-scoped storage.
+     * Handle is passed via PyCapsule from Erlang.
+     */
+    const char *shared_dict_code =
+        "class SharedDict:\n"
+        "    '''Dict-like interface to process-scoped shared storage.\n"
+        "    \n"
+        "    SharedDict is owned by an Erlang process and automatically\n"
+        "    destroyed when the process exits. Values are pickled for\n"
+        "    cross-interpreter safety.\n"
+        "    \n"
+        "    Usage from Python (handle passed via exec/eval locals):\n"
+        "        sd = erlang.SharedDict(handle)\n"
+        "        sd[\"key\"] = value\n"
+        "        value = sd[\"key\"]\n"
+        "        del sd[\"key\"]\n"
+        "        \"key\" in sd\n"
+        "        sd.keys()\n"
+        "    '''\n"
+        "    def __init__(self, handle):\n"
+        "        self._handle = handle\n"
+        "\n"
+        "    def __getitem__(self, key):\n"
+        "        if isinstance(key, str):\n"
+        "            key = key.encode('utf-8')\n"
+        "        val = erlang._shared_dict_get(self._handle, key)\n"
+        "        if val is None and key not in self:\n"
+        "            raise KeyError(key.decode('utf-8') if isinstance(key, bytes) else key)\n"
+        "        return val\n"
+        "\n"
+        "    def __setitem__(self, key, value):\n"
+        "        if isinstance(key, str):\n"
+        "            key = key.encode('utf-8')\n"
+        "        erlang._shared_dict_set(self._handle, key, value)\n"
+        "\n"
+        "    def __delitem__(self, key):\n"
+        "        if isinstance(key, str):\n"
+        "            key = key.encode('utf-8')\n"
+        "        if not erlang._shared_dict_del(self._handle, key):\n"
+        "            raise KeyError(key.decode('utf-8') if isinstance(key, bytes) else key)\n"
+        "\n"
+        "    def __contains__(self, key):\n"
+        "        if isinstance(key, str):\n"
+        "            key = key.encode('utf-8')\n"
+        "        return erlang._shared_dict_contains(self._handle, key)\n"
+        "\n"
+        "    def get(self, key, default=None):\n"
+        "        '''Get value by key, returning default if not found.'''\n"
+        "        if isinstance(key, str):\n"
+        "            key = key.encode('utf-8')\n"
+        "        val = erlang._shared_dict_get(self._handle, key)\n"
+        "        return val if val is not None else default\n"
+        "\n"
+        "    def keys(self):\n"
+        "        '''Return list of all keys.'''\n"
+        "        return erlang._shared_dict_keys(self._handle)\n"
+        "\n"
+        "    def destroy(self):\n"
+        "        '''Explicitly destroy the shared dict, invalidating all references.'''\n"
+        "        erlang._shared_dict_destroy(self._handle)\n"
+        "\n"
+        "import erlang\n"
+        "erlang.SharedDict = SharedDict\n";
+
+    PyObject *sd_globals = PyDict_New();
+    if (sd_globals != NULL) {
+        PyObject *builtins = PyEval_GetBuiltins();
+        PyDict_SetItemString(sd_globals, "__builtins__", builtins);
+
+        /* Import erlang module into globals so the code can reference it */
+        PyObject *sys_modules = PySys_GetObject("modules");
+        if (sys_modules != NULL) {
+            PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
+            if (erlang_mod != NULL) {
+                PyDict_SetItemString(sd_globals, "erlang", erlang_mod);
+            }
+        }
+
+        PyObject *result = PyRun_String(shared_dict_code, Py_file_input, sd_globals, sd_globals);
+        if (result == NULL) {
+            /* Non-fatal - SharedDict just won't be available */
+            PyErr_Print();
+            PyErr_Clear();
+        } else {
+            Py_DECREF(result);
+        }
+        Py_DECREF(sd_globals);
     }
 
     return 0;

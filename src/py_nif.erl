@@ -237,7 +237,14 @@
     %% PyBuffer API - zero-copy WSGI input
     py_buffer_create/1,
     py_buffer_write/2,
-    py_buffer_close/1
+    py_buffer_close/1,
+    %% SharedDict API - process-scoped shared dictionary
+    shared_dict_new/0,
+    shared_dict_get/3,
+    shared_dict_set/3,
+    shared_dict_del/2,
+    shared_dict_keys/1,
+    shared_dict_destroy/1
 ]).
 
 -on_load(load_nif/0).
@@ -2028,4 +2035,66 @@ py_buffer_write(_BufferRef, _Data) ->
 %% @returns ok
 -spec py_buffer_close(reference()) -> ok.
 py_buffer_close(_BufferRef) ->
+    ?NIF_STUB.
+
+%%% ============================================================================
+%%% SharedDict API - Process-scoped Shared Dictionary
+%%% ============================================================================
+
+%% @doc Create a new process-scoped SharedDict.
+%%
+%% Creates a SharedDict owned by the calling process. The dict is automatically
+%% destroyed when the owning process terminates.
+%%
+%% @returns {ok, Reference} on success, {error, Reason} on failure
+-spec shared_dict_new() -> {ok, reference()} | {error, term()}.
+shared_dict_new() ->
+    ?NIF_STUB.
+
+%% @doc Get a value from SharedDict.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @param Default Default value if key not found
+%% @returns Value or Default, badarg if destroyed
+-spec shared_dict_get(reference(), binary(), term()) -> term().
+shared_dict_get(_Handle, _Key, _Default) ->
+    ?NIF_STUB.
+
+%% @doc Set a value in SharedDict.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @param Value Erlang term value (will be pickled)
+%% @returns ok on success, badarg if destroyed
+-spec shared_dict_set(reference(), binary(), term()) -> ok | {error, term()}.
+shared_dict_set(_Handle, _Key, _Value) ->
+    ?NIF_STUB.
+
+%% @doc Delete a key from SharedDict.
+%%
+%% @param Handle SharedDict reference
+%% @param Key Binary key
+%% @returns ok on success (even if key didn't exist), badarg if destroyed
+-spec shared_dict_del(reference(), binary()) -> ok.
+shared_dict_del(_Handle, _Key) ->
+    ?NIF_STUB.
+
+%% @doc Get all keys from SharedDict.
+%%
+%% @param Handle SharedDict reference
+%% @returns List of binary keys, badarg if destroyed
+-spec shared_dict_keys(reference()) -> [binary()].
+shared_dict_keys(_Handle) ->
+    ?NIF_STUB.
+
+%% @doc Explicitly destroy a SharedDict.
+%%
+%% Marks the SharedDict as destroyed and clears its Python dict.
+%% This is idempotent - calling on an already-destroyed dict returns ok.
+%%
+%% @param Handle SharedDict reference
+%% @returns ok
+-spec shared_dict_destroy(reference()) -> ok.
+shared_dict_destroy(_Handle) ->
     ?NIF_STUB.

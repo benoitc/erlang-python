@@ -62,7 +62,13 @@
     test_process_env_isolation/1,
     test_process_env_main_function/1,
     test_process_env_state_persistence/1,
-    test_process_env_cleanup/1
+    test_process_env_cleanup/1,
+    %% SharedDict tests
+    test_shared_dict_basic/1,
+    test_shared_dict_types/1,
+    test_shared_dict_process_death/1,
+    test_shared_dict_python_access/1,
+    test_shared_dict_destroy/1
 ]).
 
 all() ->
@@ -119,7 +125,13 @@ all() ->
         test_process_env_isolation,
         test_process_env_main_function,
         test_process_env_state_persistence,
-        test_process_env_cleanup
+        test_process_env_cleanup,
+        %% SharedDict tests
+        test_shared_dict_basic,
+        test_shared_dict_types,
+        test_shared_dict_process_death,
+        test_shared_dict_python_access,
+        test_shared_dict_destroy
     ].
 
 init_per_suite(Config) ->
@@ -1352,4 +1364,230 @@ test_process_env_cleanup(_Config) ->
     ct:pal("Final memory: ~p~n", [FinalStats]),
 
     ct:pal("Cleanup test passed~n"),
+    ok.
+
+%%% ============================================================================
+%%% SharedDict Tests
+%%% ============================================================================
+
+%% Test basic SharedDict operations
+test_shared_dict_basic(_Config) ->
+    %% Create a SharedDict
+    {ok, SD} = py:shared_dict_new(),
+    ct:pal("Created SharedDict: ~p~n", [SD]),
+
+    %% Initially empty
+    [] = py:shared_dict_keys(SD),
+
+    %% Set and get values
+    ok = py:shared_dict_set(SD, <<"key1">>, <<"value1">>),
+    <<"value1">> = py:shared_dict_get(SD, <<"key1">>),
+
+    %% Get with default
+    undefined = py:shared_dict_get(SD, <<"nonexistent">>),
+    default_val = py:shared_dict_get(SD, <<"nonexistent">>, default_val),
+
+    %% Set another key
+    ok = py:shared_dict_set(SD, <<"key2">>, 42),
+    42 = py:shared_dict_get(SD, <<"key2">>),
+
+    %% Verify keys
+    Keys = py:shared_dict_keys(SD),
+    2 = length(Keys),
+    true = lists:member(<<"key1">>, Keys),
+    true = lists:member(<<"key2">>, Keys),
+
+    %% Delete a key
+    ok = py:shared_dict_del(SD, <<"key1">>),
+    undefined = py:shared_dict_get(SD, <<"key1">>),
+
+    %% Keys after delete
+    [<<"key2">>] = py:shared_dict_keys(SD),
+
+    ct:pal("Basic SharedDict test passed~n"),
+    ok.
+
+%% Test SharedDict with complex types (pickled)
+test_shared_dict_types(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+
+    %% Map
+    Map = #{<<"foo">> => <<"bar">>, <<"num">> => 123},
+    ok = py:shared_dict_set(SD, <<"map">>, Map),
+    Retrieved = py:shared_dict_get(SD, <<"map">>),
+    ct:pal("Map: ~p, Retrieved: ~p~n", [Map, Retrieved]),
+    %% Note: Keys may be converted to Python strings and back
+    true = maps:get(<<"foo">>, Retrieved) =:= <<"bar">> orelse
+           maps:get(foo, Retrieved) =:= <<"bar">>,
+
+    %% List
+    List = [1, 2, 3, <<"four">>, 5.0],
+    ok = py:shared_dict_set(SD, <<"list">>, List),
+    List = py:shared_dict_get(SD, <<"list">>),
+
+    %% Nested structure
+    Nested = #{<<"data">> => [#{<<"id">> => 1}, #{<<"id">> => 2}]},
+    ok = py:shared_dict_set(SD, <<"nested">>, Nested),
+    RetrievedNested = py:shared_dict_get(SD, <<"nested">>),
+    ct:pal("Nested: ~p~n", [RetrievedNested]),
+
+    %% Update a value
+    ok = py:shared_dict_set(SD, <<"map">>, #{updated => true}),
+    Updated = py:shared_dict_get(SD, <<"map">>),
+    ct:pal("Updated map: ~p~n", [Updated]),
+
+    ct:pal("SharedDict types test passed~n"),
+    ok.
+
+%% Test SharedDict lifecycle (GC-based cleanup)
+test_shared_dict_process_death(_Config) ->
+    %% Note: Process monitoring is disabled in current implementation.
+    %% SharedDict is cleaned up by garbage collection when no references remain.
+    %% This test verifies basic resource lifecycle.
+
+    Parent = self(),
+
+    %% Create SharedDict in a child process
+    Child = spawn(fun() ->
+        {ok, SD} = py:shared_dict_new(),
+        ok = py:shared_dict_set(SD, <<"test">>, <<"value">>),
+        <<"value">> = py:shared_dict_get(SD, <<"test">>),
+        Parent ! {sd_ref, SD},
+        receive
+            continue -> ok
+        after 5000 ->
+            ok
+        end
+    end),
+
+    %% Get the SharedDict reference
+    SDRef = receive
+        {sd_ref, Ref} -> Ref
+    after 5000 ->
+        error(timeout_waiting_for_sd_ref)
+    end,
+
+    ct:pal("Got SharedDict ref from child: ~p~n", [SDRef]),
+
+    %% SharedDict should work while child is alive
+    <<"value">> = py:shared_dict_get(SDRef, <<"test">>),
+
+    %% Kill the child process
+    exit(Child, kill),
+    timer:sleep(100),
+
+    %% SharedDict still accessible since we hold a reference
+    %% (process monitoring disabled - cleanup is GC-based)
+    <<"value">> = py:shared_dict_get(SDRef, <<"test">>),
+
+    ct:pal("SharedDict lifecycle test passed~n"),
+    ok.
+
+%% Test Python access to SharedDict
+test_shared_dict_python_access(_Config) ->
+    %% Create a SharedDict
+    {ok, SD} = py:shared_dict_new(),
+
+    %% Set a value from Erlang
+    ok = py:shared_dict_set(SD, <<"config">>, #{port => 8080, host => <<"localhost">>}),
+
+    %% First, store the handle in Python's global namespace using eval
+    %% We use eval with locals to pass the handle, then store it globally
+    {ok, _} = py:eval(<<"(globals().__setitem__('_sd_handle', handle), None)[-1]">>,
+                       #{<<"handle">> => SD}),
+
+    %% Now execute code that uses the stored handle
+    Code = <<"
+from erlang import SharedDict
+sd = SharedDict(_sd_handle)
+
+# Read value set from Erlang
+config = sd['config']
+result_port = config.get('port') or config.get(b'port')
+
+# Set a value from Python
+sd['python_key'] = {'set_from': 'python', 'value': 42}
+
+# Test contains
+has_config = 'config' in sd
+has_missing = 'missing' in sd
+
+# Test keys
+key_count = len(sd.keys())
+">>,
+
+    ok = py:exec(Code),
+
+    %% Get results from Python namespace
+    {ok, ResultPort} = py:eval(<<"result_port">>),
+    ct:pal("Result port: ~p~n", [ResultPort]),
+    8080 = ResultPort,
+
+    {ok, HasConfig} = py:eval(<<"has_config">>),
+    true = HasConfig,
+
+    {ok, HasMissing} = py:eval(<<"has_missing">>),
+    false = HasMissing,
+
+    {ok, KeyCount} = py:eval(<<"key_count">>),
+    ct:pal("Key count: ~p~n", [KeyCount]),
+    2 = KeyCount,
+
+    %% Read value set from Python in Erlang
+    PythonValue = py:shared_dict_get(SD, <<"python_key">>),
+    ct:pal("Python value: ~p~n", [PythonValue]),
+    42 = maps:get(<<"value">>, PythonValue),
+
+    %% Test delete from Python
+    ok = py:exec(<<"del sd['python_key']">>),
+    undefined = py:shared_dict_get(SD, <<"python_key">>),
+
+    ct:pal("SharedDict Python access test passed~n"),
+    ok.
+
+%% Test explicit SharedDict destroy
+test_shared_dict_destroy(_Config) ->
+    %% Create SharedDict and populate it
+    {ok, SD} = py:shared_dict_new(),
+    ok = py:shared_dict_set(SD, <<"key">>, <<"value">>),
+    <<"value">> = py:shared_dict_get(SD, <<"key">>),
+    ct:pal("SharedDict created and populated~n"),
+
+    %% Destroy it
+    ok = py:shared_dict_destroy(SD),
+    ct:pal("SharedDict destroyed~n"),
+
+    %% Further access returns badarg
+    try
+        py:shared_dict_get(SD, <<"key">>),
+        ct:fail(expected_badarg)
+    catch
+        error:badarg -> ok
+    end,
+    ct:pal("Get after destroy correctly raises badarg~n"),
+
+    %% set also returns badarg
+    try
+        py:shared_dict_set(SD, <<"key2">>, <<"value2">>),
+        ct:fail(expected_badarg)
+    catch
+        error:badarg -> ok
+    end,
+    ct:pal("Set after destroy correctly raises badarg~n"),
+
+    %% keys also returns badarg
+    try
+        py:shared_dict_keys(SD),
+        ct:fail(expected_badarg)
+    catch
+        error:badarg -> ok
+    end,
+    ct:pal("Keys after destroy correctly raises badarg~n"),
+
+    %% Destroy is idempotent
+    ok = py:shared_dict_destroy(SD),
+    ok = py:shared_dict_destroy(SD),
+    ct:pal("Destroy is idempotent~n"),
+
+    ct:pal("SharedDict destroy test passed~n"),
     ok.

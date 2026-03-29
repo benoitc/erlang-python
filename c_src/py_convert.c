@@ -52,6 +52,9 @@
 /* Capsule name for channel references */
 #define CHANNEL_CAPSULE_NAME "erlang.channel_ref"
 
+/* Capsule name for shared dict references */
+#define SHARED_DICT_CAPSULE_NAME "py_shared_dict"
+
 /**
  * @brief PyCapsule destructor for channel references
  *
@@ -60,6 +63,19 @@
  */
 static void channel_capsule_destructor(PyObject *capsule) {
     void *ptr = PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    if (ptr != NULL) {
+        enif_release_resource(ptr);
+    }
+}
+
+/**
+ * @brief PyCapsule destructor for shared dict references
+ *
+ * Called when a PyCapsule wrapping a SharedDict resource is garbage collected.
+ * Releases the resource reference that was kept when the capsule was created.
+ */
+static void shared_dict_capsule_destructor(PyObject *capsule) {
+    void *ptr = PyCapsule_GetPointer(capsule, SHARED_DICT_CAPSULE_NAME);
     if (ptr != NULL) {
         enif_release_resource(ptr);
     }
@@ -381,7 +397,16 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
             py_channel_t *channel = (py_channel_t *)ptr;
             return enif_make_resource(env, channel);
         }
-        /* Not a channel capsule, clear error and fall through */
+        /* Not a channel capsule, clear error and try SharedDict */
+        PyErr_Clear();
+
+        ptr = PyCapsule_GetPointer(obj, SHARED_DICT_CAPSULE_NAME);
+        if (ptr != NULL) {
+            /* This is a SharedDict reference capsule - convert back to resource term */
+            py_shared_dict_t *sd = (py_shared_dict_t *)ptr;
+            return enif_make_resource(env, sd);
+        }
+        /* Not a SharedDict capsule either, clear error and fall through */
         PyErr_Clear();
     }
 
@@ -645,6 +670,21 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         /* Wrap the buffer resource in a PyBufferObject.
          * PyBuffer_from_resource increments the resource refcount. */
         return PyBuffer_from_resource(pybuf, pybuf);
+    }
+
+    /* Check for shared dict resource - wrap in PyCapsule for Python access */
+    py_shared_dict_t *shared_dict;
+    if (enif_get_resource(env, term, PY_SHARED_DICT_RESOURCE_TYPE, (void **)&shared_dict)) {
+        /* Create a PyCapsule wrapping the SharedDict pointer.
+         * We increment the resource refcount so it stays valid while Python holds it.
+         * The destructor will decrement it when the capsule is garbage collected. */
+        enif_keep_resource(shared_dict);
+        PyObject *capsule = PyCapsule_New(shared_dict, SHARED_DICT_CAPSULE_NAME, shared_dict_capsule_destructor);
+        if (capsule == NULL) {
+            enif_release_resource(shared_dict);
+            return NULL;
+        }
+        return capsule;
     }
 
     /* Check for reference - serialize to binary for round-trip.

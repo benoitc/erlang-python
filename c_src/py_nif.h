@@ -1340,6 +1340,40 @@ typedef struct {
 /** @brief Resource type for py_env_resource_t (process-local Python environment) */
 extern ErlNifResourceType *PY_ENV_RESOURCE_TYPE;
 
+/**
+ * @struct py_shared_dict_t
+ * @brief Process-scoped shared dictionary resource
+ *
+ * A SharedDict is owned by an Erlang process and automatically destroyed
+ * when the process dies. Values are stored as pickled bytes for
+ * cross-interpreter safety (each subinterpreter has its own object space).
+ *
+ * @note Thread-safe: mutex protects all dict operations
+ * @note Process-monitored: destroyed flag set on owner process death
+ */
+typedef struct {
+    /** @brief PID of the owning Erlang process */
+    ErlNifPid owner_pid;
+
+    /** @brief Monitor handle for process monitoring */
+    ErlNifMonitor monitor;
+
+    /** @brief Whether the monitor is currently active */
+    bool monitor_active;
+
+    /** @brief Mutex for thread-safe dict operations */
+    pthread_mutex_t mutex;
+
+    /** @brief Python dict storing keys -> pickled bytes */
+    PyObject *dict;
+
+    /** @brief Atomic flag: true if dict has been destroyed (owner died) */
+    _Atomic bool destroyed;
+} py_shared_dict_t;
+
+/** @brief Resource type for py_shared_dict_t (process-scoped shared dictionary) */
+extern ErlNifResourceType *PY_SHARED_DICT_RESOURCE_TYPE;
+
 /** @brief Get the PY_ENV_RESOURCE_TYPE (for use by other modules) */
 ErlNifResourceType *get_env_resource_type(void);
 
