@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.4.0 (2026-03-29)
+## 2.3.0 (unreleased)
 
 ### Removed
 
@@ -9,8 +9,6 @@
   - `py_wsgi:run/3,4` - WSGI application runner
   - For web framework integration, use `py:call` with event loop contexts or the Channel API
   - See [Migration Guide](docs/migration.md#asgiwsgi-modules-removed) for alternatives
-
-## 2.3.0 (2026-03-29)
 
 ### Added
 
