@@ -37,6 +37,7 @@
  */
 
 #include "py_nif.h"
+#include "py_util.h"
 #include "py_event_loop.h"
 #include "py_channel.h"
 #include "py_buffer.h"
@@ -285,6 +286,7 @@ static int is_inline_schedule_marker(PyObject *obj);
  * Include module implementations
  * ============================================================================ */
 
+#include "py_util.c"
 #include "py_convert.c"
 #include "py_exec.c"
 #include "py_logging.c"
@@ -309,12 +311,7 @@ static void worker_destructor(ErlNifEnv *env, void *obj) {
     py_worker_t *worker = (py_worker_t *)obj;
 
     /* Close callback pipes */
-    if (worker->callback_pipe[0] >= 0) {
-        close(worker->callback_pipe[0]);
-    }
-    if (worker->callback_pipe[1] >= 0) {
-        close(worker->callback_pipe[1]);
-    }
+    close_pipe_pair(worker->callback_pipe);
 
     /* Only clean up Python state if Python is still initialized */
     if (worker->thread_state != NULL && runtime_is_running()) {
@@ -405,14 +402,7 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
     py_context_t *ctx = (py_context_t *)obj;
 
     /* Close callback pipes if open */
-    if (ctx->callback_pipe[0] >= 0) {
-        close(ctx->callback_pipe[0]);
-        ctx->callback_pipe[0] = -1;
-    }
-    if (ctx->callback_pipe[1] >= 0) {
-        close(ctx->callback_pipe[1]);
-        ctx->callback_pipe[1] = -1;
-    }
+    close_pipe_pair(ctx->callback_pipe);
 
     /* Skip if already destroyed by nif_context_destroy */
     if (ctx->destroyed) {

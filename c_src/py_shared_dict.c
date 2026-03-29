@@ -100,17 +100,13 @@ static ERL_NIF_TERM nif_shared_dict_new(ErlNifEnv *env, int argc,
     (void)argc;
     (void)argv;
 
-    if (!runtime_is_running()) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "not_initialized"));
-    }
+    RUNTIME_CHECK_ERROR(env);
 
     /* Allocate resource */
     py_shared_dict_t *sd = enif_alloc_resource(
         PY_SHARED_DICT_RESOURCE_TYPE, sizeof(py_shared_dict_t));
     if (sd == NULL) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "alloc_failed"));
+        return make_error_atom(env, "alloc_failed");
     }
 
     /* Initialize fields */
@@ -125,8 +121,7 @@ static ERL_NIF_TERM nif_shared_dict_new(ErlNifEnv *env, int argc,
         PyGILState_Release(gstate);
         pthread_mutex_destroy(&sd->mutex);
         enif_release_resource(sd);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "dict_alloc_failed"));
+        return make_error_atom(env, "dict_alloc_failed");
     }
     PyGILState_Release(gstate);
 
@@ -154,20 +149,12 @@ static ERL_NIF_TERM nif_shared_dict_get(ErlNifEnv *env, int argc,
     (void)argc;
 
     py_shared_dict_t *sd;
-    if (!enif_get_resource(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, (void **)&sd)) {
-        return enif_make_badarg(env);
-    }
-
-    /* Check if destroyed */
-    if (atomic_load(&sd->destroyed)) {
-        return enif_make_badarg(env);
-    }
+    GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
+    CHECK_NOT_DESTROYED(env, sd);
 
     /* Get key as binary */
     ErlNifBinary key_bin;
-    if (!enif_inspect_binary(env, argv[1], &key_bin)) {
-        return enif_make_badarg(env);
-    }
+    INSPECT_BINARY_OR_BADARG(env, argv[1], key_bin);
 
     /* Lock and access dict */
     pthread_mutex_lock(&sd->mutex);
@@ -205,8 +192,7 @@ static ERL_NIF_TERM nif_shared_dict_get(ErlNifEnv *env, int argc,
         PyErr_Clear();
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "pickle_unavailable"));
+        return make_error_atom(env, "pickle_unavailable");
     }
 
     PyObject *loads = PyObject_GetAttrString(pickle_mod, "loads");
@@ -215,8 +201,7 @@ static ERL_NIF_TERM nif_shared_dict_get(ErlNifEnv *env, int argc,
         PyErr_Clear();
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "pickle_loads_unavailable"));
+        return make_error_atom(env, "pickle_loads_unavailable");
     }
 
     PyObject *value = PyObject_CallFunctionObjArgs(loads, pickled, NULL);
@@ -226,8 +211,7 @@ static ERL_NIF_TERM nif_shared_dict_get(ErlNifEnv *env, int argc,
         PyErr_Clear();
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "unpickle_failed"));
+        return make_error_atom(env, "unpickle_failed");
     }
 
     /* Convert Python value to Erlang term */
@@ -253,20 +237,12 @@ static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
     (void)argc;
 
     py_shared_dict_t *sd;
-    if (!enif_get_resource(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, (void **)&sd)) {
-        return enif_make_badarg(env);
-    }
-
-    /* Check if destroyed */
-    if (atomic_load(&sd->destroyed)) {
-        return enif_make_badarg(env);
-    }
+    GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
+    CHECK_NOT_DESTROYED(env, sd);
 
     /* Get key as binary */
     ErlNifBinary key_bin;
-    if (!enif_inspect_binary(env, argv[1], &key_bin)) {
-        return enif_make_badarg(env);
-    }
+    INSPECT_BINARY_OR_BADARG(env, argv[1], key_bin);
 
     /* Lock and access dict */
     pthread_mutex_lock(&sd->mutex);
@@ -285,8 +261,7 @@ static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
         PyErr_Clear();
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "term_conversion_failed"));
+        return make_error_atom(env, "term_conversion_failed");
     }
 
     /* Pickle the value for cross-interpreter safety */
@@ -296,8 +271,7 @@ static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
         Py_DECREF(py_value);
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "pickle_unavailable"));
+        return make_error_atom(env, "pickle_unavailable");
     }
 
     PyObject *dumps = PyObject_GetAttrString(pickle_mod, "dumps");
@@ -307,8 +281,7 @@ static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
         Py_DECREF(py_value);
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "pickle_dumps_unavailable"));
+        return make_error_atom(env, "pickle_dumps_unavailable");
     }
 
     PyObject *pickled = PyObject_CallFunctionObjArgs(dumps, py_value, NULL);
@@ -319,8 +292,7 @@ static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
         PyErr_Clear();
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "pickle_failed"));
+        return make_error_atom(env, "pickle_failed");
     }
 
     /* Create Python key from binary */
@@ -341,8 +313,7 @@ static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
         PyErr_Clear();
         PyGILState_Release(gstate);
         pthread_mutex_unlock(&sd->mutex);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "dict_set_failed"));
+        return make_error_atom(env, "dict_set_failed");
     }
 
     PyGILState_Release(gstate);
@@ -363,20 +334,12 @@ static ERL_NIF_TERM nif_shared_dict_del(ErlNifEnv *env, int argc,
     (void)argc;
 
     py_shared_dict_t *sd;
-    if (!enif_get_resource(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, (void **)&sd)) {
-        return enif_make_badarg(env);
-    }
-
-    /* Check if destroyed */
-    if (atomic_load(&sd->destroyed)) {
-        return enif_make_badarg(env);
-    }
+    GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
+    CHECK_NOT_DESTROYED(env, sd);
 
     /* Get key as binary */
     ErlNifBinary key_bin;
-    if (!enif_inspect_binary(env, argv[1], &key_bin)) {
-        return enif_make_badarg(env);
-    }
+    INSPECT_BINARY_OR_BADARG(env, argv[1], key_bin);
 
     /* Lock and access dict */
     pthread_mutex_lock(&sd->mutex);
@@ -419,14 +382,8 @@ static ERL_NIF_TERM nif_shared_dict_keys(ErlNifEnv *env, int argc,
     (void)argc;
 
     py_shared_dict_t *sd;
-    if (!enif_get_resource(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, (void **)&sd)) {
-        return enif_make_badarg(env);
-    }
-
-    /* Check if destroyed */
-    if (atomic_load(&sd->destroyed)) {
-        return enif_make_badarg(env);
-    }
+    GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
+    CHECK_NOT_DESTROYED(env, sd);
 
     /* Lock and access dict */
     pthread_mutex_lock(&sd->mutex);
@@ -499,9 +456,7 @@ static ERL_NIF_TERM nif_shared_dict_destroy(ErlNifEnv *env, int argc,
     (void)argc;
 
     py_shared_dict_t *sd;
-    if (!enif_get_resource(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, (void **)&sd)) {
-        return enif_make_badarg(env);
-    }
+    GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
 
     /* Check if already destroyed - idempotent */
     if (atomic_load(&sd->destroyed)) {
