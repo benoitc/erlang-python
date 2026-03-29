@@ -1650,6 +1650,135 @@ static char *binary_to_string(const ErlNifBinary *bin) {
     return str;
 }
 
+/* ============================================================================
+ * Refactoring Helper Macros
+ * ============================================================================
+ * These macros consolidate common patterns across py_nif.c, py_callback.c,
+ * and py_event_loop.c to reduce code duplication.
+ */
+
+/**
+ * @brief Null-safe free macro
+ *
+ * Safely frees a pointer and sets it to NULL. Avoids undefined behavior
+ * from calling enif_free(NULL) and prevents double-free bugs.
+ *
+ * @param ptr Pointer to free (will be set to NULL after free)
+ */
+#define SAFE_FREE(ptr) do { \
+    if ((ptr) != NULL) { \
+        enif_free(ptr); \
+        (ptr) = NULL; \
+    } \
+} while(0)
+
+/**
+ * @brief Get resource or return error
+ *
+ * Validates and extracts a resource from an Erlang term. On failure,
+ * returns an error tuple immediately.
+ *
+ * @param var Variable to store the resource pointer
+ * @param env NIF environment
+ * @param term Erlang term containing the resource
+ * @param type Resource type
+ * @param err Error string to return on failure
+ */
+#define GET_RESOURCE_OR_FAIL(var, env, term, type, err) \
+    do { \
+        if (!enif_get_resource(env, term, type, (void **)&(var))) { \
+            return make_error(env, err); \
+        } \
+    } while(0)
+
+/**
+ * @brief Get binary or return error
+ *
+ * Validates and extracts a binary from an Erlang term. On failure,
+ * returns an error tuple immediately.
+ *
+ * @param var ErlNifBinary variable to store the binary
+ * @param env NIF environment
+ * @param term Erlang term containing the binary
+ * @param err Error string to return on failure
+ */
+#define GET_BINARY_OR_FAIL(var, env, term, err) \
+    do { \
+        if (!enif_inspect_binary(env, term, &(var))) { \
+            return make_error(env, err); \
+        } \
+    } while(0)
+
+/**
+ * @brief Check if GIL can be safely acquired
+ *
+ * Returns true if it's safe to call PyGILState_Ensure. This check ensures:
+ * - Python runtime is running
+ * - Current thread doesn't already have a thread state bound
+ * - GIL is not already held by current thread
+ *
+ * @return true if safe to acquire GIL, false otherwise
+ */
+#define CAN_ACQUIRE_GIL() \
+    (runtime_is_running() && \
+     PyGILState_GetThisThreadState() == NULL && \
+     !PyGILState_Check())
+
+/**
+ * @brief Get channel from PyCapsule with validation
+ *
+ * Extracts a py_channel_t pointer from a PyCapsule with proper validation.
+ * Sets Python exception on failure.
+ *
+ * @param capsule Python capsule object
+ * @param capsule_name Expected capsule name
+ * @return Channel pointer or NULL with exception set
+ */
+static inline void *get_capsule_pointer_or_fail(PyObject *capsule, const char *capsule_name,
+                                                 const char *type_name) {
+    if (!PyCapsule_CheckExact(capsule)) {
+        PyErr_Format(PyExc_TypeError, "expected %s reference", type_name);
+        return NULL;
+    }
+    void *ptr = PyCapsule_GetPointer(capsule, capsule_name);
+    if (ptr == NULL) {
+        PyErr_Format(PyExc_ValueError, "invalid %s reference", type_name);
+    }
+    return ptr;
+}
+
+/**
+ * @brief Decode ETF data to Python object
+ *
+ * Decodes Erlang external term format data to a Python object.
+ * Handles environment allocation/cleanup and error handling.
+ *
+ * @param data ETF data buffer (will be freed on success or failure)
+ * @param size Size of data buffer
+ * @return Python object or NULL with exception set
+ */
+static inline PyObject *decode_etf_to_python(unsigned char *data, size_t size) {
+    ErlNifEnv *tmp_env = enif_alloc_env();
+    if (tmp_env == NULL) {
+        enif_free(data);
+        PyErr_SetString(PyExc_MemoryError, "failed to allocate environment");
+        return NULL;
+    }
+
+    ERL_NIF_TERM term;
+    if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+        enif_free(data);
+        enif_free_env(tmp_env);
+        PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
+        return NULL;
+    }
+    enif_free(data);
+
+    PyObject *obj = term_to_py(tmp_env, term);
+    enif_free_env(tmp_env);
+    return obj;
+}
+
 /**
  * @brief Read from a file descriptor with optional timeout
  *

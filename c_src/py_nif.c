@@ -1518,10 +1518,7 @@ static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
 static ERL_NIF_TERM nif_worker_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     py_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
 
     /* Resource destructor will handle cleanup */
     return ATOM_OK;
@@ -1533,10 +1530,7 @@ static ERL_NIF_TERM nif_worker_destroy(ErlNifEnv *env, int argc, const ERL_NIF_T
 
 static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
 
     /* Build request and route to executor */
     py_request_t req;
@@ -1576,10 +1570,7 @@ static ERL_NIF_TERM nif_worker_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM
 
 static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     py_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
 
     py_request_t req;
     request_init(&req);
@@ -1612,10 +1603,7 @@ static ERL_NIF_TERM nif_worker_eval(ErlNifEnv *env, int argc, const ERL_NIF_TERM
 static ERL_NIF_TERM nif_worker_exec(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     py_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
 
     py_request_t req;
     request_init(&req);
@@ -1643,13 +1631,8 @@ static ERL_NIF_TERM nif_worker_next(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     (void)argc;
     py_worker_t *worker;
     py_object_t *gen_wrapper;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-    if (!enif_get_resource(env, argv[1], PYOBJ_RESOURCE_TYPE, (void **)&gen_wrapper)) {
-        return make_error(env, "invalid_generator");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
+    GET_RESOURCE_OR_FAIL(gen_wrapper, env, argv[1], PYOBJ_RESOURCE_TYPE, "invalid_generator");
 
     py_request_t req;
     request_init(&req);
@@ -1672,10 +1655,7 @@ static ERL_NIF_TERM nif_worker_next(ErlNifEnv *env, int argc, const ERL_NIF_TERM
 static ERL_NIF_TERM nif_import_module(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     py_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
 
     py_request_t req;
     request_init(&req);
@@ -1703,13 +1683,8 @@ static ERL_NIF_TERM nif_get_attr(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
     (void)argc;
     py_worker_t *worker;
     py_object_t *obj_wrapper;
-
-    if (!enif_get_resource(env, argv[0], WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-    if (!enif_get_resource(env, argv[1], PYOBJ_RESOURCE_TYPE, (void **)&obj_wrapper)) {
-        return make_error(env, "invalid_object");
-    }
+    GET_RESOURCE_OR_FAIL(worker, env, argv[0], WORKER_RESOURCE_TYPE, "invalid_worker");
+    GET_RESOURCE_OR_FAIL(obj_wrapper, env, argv[1], PYOBJ_RESOURCE_TYPE, "invalid_object");
 
     py_request_t req;
     request_init(&req);
@@ -4433,10 +4408,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     py_context_t *ctx;
-
-    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
-        return make_error(env, "invalid_context");
-    }
+    GET_RESOURCE_OR_FAIL(ctx, env, argv[0], PY_CONTEXT_RESOURCE_TYPE, "invalid_context");
 
     /* Skip if already destroyed */
     if (ctx->destroyed) {

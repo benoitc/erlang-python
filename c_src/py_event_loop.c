@@ -1292,29 +1292,27 @@ ERL_NIF_TERM nif_event_loop_set_id(ErlNifEnv *env, int argc,
     return ATOM_OK;
 }
 
+/* ============================================================================
+ * FD Watcher Helpers (consolidated reader/writer logic)
+ * ============================================================================ */
+
 /**
- * add_reader(LoopRef, Fd, CallbackId) -> {ok, FdRef}
+ * @brief Add an fd watcher (reader or writer)
+ *
+ * Consolidated helper for nif_add_reader and nif_add_writer.
+ * Allocates fd resource, sets up monitoring, and registers with scheduler.
+ *
+ * @param env NIF environment
+ * @param loop Event loop
+ * @param fd File descriptor to watch
+ * @param callback_id Callback ID for when fd is ready
+ * @param select_mode ERL_NIF_SELECT_READ or ERL_NIF_SELECT_WRITE
+ * @param is_reader true for reader, false for writer
+ * @return {ok, FdRef} or {error, Reason}
  */
-ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
-                            const ERL_NIF_TERM argv[]) {
-    (void)argc;
-
-    erlang_event_loop_t *loop;
-    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
-                           (void **)&loop)) {
-        return make_error(env, "invalid_loop");
-    }
-
-    int fd;
-    if (!enif_get_int(env, argv[1], &fd)) {
-        return make_error(env, "invalid_fd");
-    }
-
-    ErlNifUInt64 callback_id;
-    if (!enif_get_uint64(env, argv[2], &callback_id)) {
-        return make_error(env, "invalid_callback_id");
-    }
-
+static ERL_NIF_TERM add_fd_watcher(ErlNifEnv *env, erlang_event_loop_t *loop,
+                                    int fd, ErlNifUInt64 callback_id,
+                                    int select_mode, bool is_reader) {
     /* Scalable I/O: prefer worker, fall back to router */
     if (!event_loop_ensure_worker(loop)) {
         return make_error(env, "no_router");
@@ -1329,11 +1327,11 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     }
 
     fd_res->fd = fd;
-    fd_res->read_callback_id = callback_id;
-    fd_res->write_callback_id = 0;
+    fd_res->read_callback_id = is_reader ? callback_id : 0;
+    fd_res->write_callback_id = is_reader ? 0 : callback_id;
     fd_res->owner_pid = *target_pid;
-    fd_res->reader_active = true;
-    fd_res->writer_active = false;
+    fd_res->reader_active = is_reader;
+    fd_res->writer_active = !is_reader;
     fd_res->loop = loop;
 
     /* Initialize lifecycle management fields */
@@ -1347,8 +1345,8 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
         fd_res->monitor_active = true;
     }
 
-    /* Register with Erlang scheduler for read monitoring */
-    int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_READ,
+    /* Register with Erlang scheduler for monitoring */
+    int ret = enif_select(env, (ErlNifEvent)fd, select_mode,
                           fd_res, target_pid, enif_make_ref(env));
 
     if (ret < 0) {
@@ -1360,10 +1358,66 @@ ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
     }
 
     ERL_NIF_TERM fd_term = enif_make_resource(env, fd_res);
-    /* Keep the owner's reference - will be released in remove_reader.
+    /* Keep the owner's reference - will be released in remove_reader/writer.
      * This ensures the fd_res stays alive while registered for select. */
 
     return enif_make_tuple2(env, ATOM_OK, fd_term);
+}
+
+/**
+ * @brief Remove an fd watcher (reader or writer)
+ *
+ * Consolidated helper for nif_remove_reader and nif_remove_writer.
+ *
+ * @param env NIF environment
+ * @param fd_res FD resource to remove
+ * @param is_reader true for reader, false for writer
+ * @return ok
+ */
+static ERL_NIF_TERM remove_fd_watcher(ErlNifEnv *env, fd_resource_t *fd_res,
+                                       bool is_reader) {
+    bool *active_flag = is_reader ? &fd_res->reader_active : &fd_res->writer_active;
+    bool *other_flag = is_reader ? &fd_res->writer_active : &fd_res->reader_active;
+
+    if (!*active_flag) {
+        return ATOM_OK;  /* Already removed */
+    }
+
+    /* Stop monitoring using the same resource */
+    enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_STOP,
+                fd_res, NULL, enif_make_atom(env, "undefined"));
+
+    *active_flag = false;
+
+    /* Release the owner's reference that was kept in add_reader/writer */
+    if (!*other_flag) {
+        enif_release_resource(fd_res);
+    }
+
+    return ATOM_OK;
+}
+
+/**
+ * add_reader(LoopRef, Fd, CallbackId) -> {ok, FdRef}
+ */
+ERL_NIF_TERM nif_add_reader(ErlNifEnv *env, int argc,
+                            const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    GET_RESOURCE_OR_FAIL(loop, env, argv[0], EVENT_LOOP_RESOURCE_TYPE, "invalid_loop");
+
+    int fd;
+    if (!enif_get_int(env, argv[1], &fd)) {
+        return make_error(env, "invalid_fd");
+    }
+
+    ErlNifUInt64 callback_id;
+    if (!enif_get_uint64(env, argv[2], &callback_id)) {
+        return make_error(env, "invalid_callback_id");
+    }
+
+    return add_fd_watcher(env, loop, fd, callback_id, ERL_NIF_SELECT_READ, true);
 }
 
 /**
@@ -1376,32 +1430,13 @@ ERL_NIF_TERM nif_remove_reader(ErlNifEnv *env, int argc,
     (void)argc;
 
     erlang_event_loop_t *loop;
-    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
-                           (void **)&loop)) {
-        return make_error(env, "invalid_loop");
-    }
+    GET_RESOURCE_OR_FAIL(loop, env, argv[0], EVENT_LOOP_RESOURCE_TYPE, "invalid_loop");
+    (void)loop;  /* Used for validation only */
 
     fd_resource_t *fd_res;
-    if (!enif_get_resource(env, argv[1], FD_RESOURCE_TYPE, (void **)&fd_res)) {
-        return make_error(env, "invalid_fd_ref");
-    }
+    GET_RESOURCE_OR_FAIL(fd_res, env, argv[1], FD_RESOURCE_TYPE, "invalid_fd_ref");
 
-    if (!fd_res->reader_active) {
-        return ATOM_OK;  /* Already removed */
-    }
-
-    /* Stop monitoring for reads using the same resource */
-    enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_STOP,
-                fd_res, NULL, enif_make_atom(env, "undefined"));
-
-    fd_res->reader_active = false;
-
-    /* Release the owner's reference that was kept in add_reader */
-    if (!fd_res->writer_active) {
-        enif_release_resource(fd_res);
-    }
-
-    return ATOM_OK;
+    return remove_fd_watcher(env, fd_res, true);
 }
 
 /**
@@ -1412,10 +1447,7 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
     (void)argc;
 
     erlang_event_loop_t *loop;
-    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
-                           (void **)&loop)) {
-        return make_error(env, "invalid_loop");
-    }
+    GET_RESOURCE_OR_FAIL(loop, env, argv[0], EVENT_LOOP_RESOURCE_TYPE, "invalid_loop");
 
     int fd;
     if (!enif_get_int(env, argv[1], &fd)) {
@@ -1427,55 +1459,7 @@ ERL_NIF_TERM nif_add_writer(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_callback_id");
     }
 
-    /* Scalable I/O: prefer worker, fall back to router */
-    if (!event_loop_ensure_worker(loop)) {
-        return make_error(env, "no_router");
-    }
-    ErlNifPid *target_pid = &loop->worker_pid;
-
-    /* Allocate fd resource */
-    fd_resource_t *fd_res = enif_alloc_resource(FD_RESOURCE_TYPE,
-                                                 sizeof(fd_resource_t));
-    if (fd_res == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    fd_res->fd = fd;
-    fd_res->read_callback_id = 0;
-    fd_res->write_callback_id = callback_id;
-    fd_res->owner_pid = *target_pid;
-    fd_res->reader_active = false;
-    fd_res->writer_active = true;
-    fd_res->loop = loop;
-
-    /* Initialize lifecycle management fields */
-    atomic_store(&fd_res->closing_state, FD_STATE_OPEN);
-    fd_res->monitor_active = false;
-    fd_res->owns_fd = false;
-
-    /* Monitor owner process for cleanup on death */
-    if (enif_monitor_process(env, fd_res, target_pid,
-                             &fd_res->owner_monitor) == 0) {
-        fd_res->monitor_active = true;
-    }
-
-    /* Register with Erlang scheduler for write monitoring */
-    int ret = enif_select(env, (ErlNifEvent)fd, ERL_NIF_SELECT_WRITE,
-                          fd_res, target_pid, enif_make_ref(env));
-
-    if (ret < 0) {
-        if (fd_res->monitor_active) {
-            enif_demonitor_process(env, fd_res, &fd_res->owner_monitor);
-        }
-        enif_release_resource(fd_res);
-        return make_error(env, "select_failed");
-    }
-
-    ERL_NIF_TERM fd_term = enif_make_resource(env, fd_res);
-    /* Keep the owner's reference - will be released in remove_writer.
-     * This ensures the fd_res stays alive while registered for select. */
-
-    return enif_make_tuple2(env, ATOM_OK, fd_term);
+    return add_fd_watcher(env, loop, fd, callback_id, ERL_NIF_SELECT_WRITE, false);
 }
 
 /**
@@ -1488,32 +1472,13 @@ ERL_NIF_TERM nif_remove_writer(ErlNifEnv *env, int argc,
     (void)argc;
 
     erlang_event_loop_t *loop;
-    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
-                           (void **)&loop)) {
-        return make_error(env, "invalid_loop");
-    }
+    GET_RESOURCE_OR_FAIL(loop, env, argv[0], EVENT_LOOP_RESOURCE_TYPE, "invalid_loop");
+    (void)loop;  /* Used for validation only */
 
     fd_resource_t *fd_res;
-    if (!enif_get_resource(env, argv[1], FD_RESOURCE_TYPE, (void **)&fd_res)) {
-        return make_error(env, "invalid_fd_ref");
-    }
+    GET_RESOURCE_OR_FAIL(fd_res, env, argv[1], FD_RESOURCE_TYPE, "invalid_fd_ref");
 
-    if (!fd_res->writer_active) {
-        return ATOM_OK;  /* Already removed */
-    }
-
-    /* Stop monitoring for writes using the same resource */
-    enif_select(env, (ErlNifEvent)fd_res->fd, ERL_NIF_SELECT_STOP,
-                fd_res, NULL, enif_make_atom(env, "undefined"));
-
-    fd_res->writer_active = false;
-
-    /* Release the owner's reference that was kept in add_writer */
-    if (!fd_res->reader_active) {
-        enif_release_resource(fd_res);
-    }
-
-    return ATOM_OK;
+    return remove_fd_watcher(env, fd_res, false);
 }
 
 /**

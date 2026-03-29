@@ -2626,14 +2626,9 @@ static PyObject *erlang_channel_try_receive_impl(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2644,27 +2639,7 @@ static PyObject *erlang_channel_try_receive_impl(PyObject *self, PyObject *args)
 
     if (result == 0) {
         /* Success - decode from Erlang external term format to Python */
-        ErlNifEnv *tmp_env = enif_alloc_env();
-        if (tmp_env == NULL) {
-            enif_free(data);
-            PyErr_SetString(PyExc_MemoryError, "failed to allocate environment");
-            return NULL;
-        }
-
-        ERL_NIF_TERM term;
-        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
-            enif_free(data);
-            enif_free_env(tmp_env);
-            PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
-            return NULL;
-        }
-        enif_free(data);
-
-        /* Convert Erlang term to Python object */
-        PyObject *py_obj = term_to_py(tmp_env, term);
-        enif_free_env(tmp_env);
-
-        return py_obj;  /* May be NULL if conversion failed */
+        return decode_etf_to_python(data, size);
     } else if (result == 1) {
         /* Empty */
         Py_RETURN_NONE;
@@ -2694,14 +2669,9 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2723,29 +2693,7 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
     }
 
     /* Decode from Erlang external term format to Python */
-    {
-        ErlNifEnv *tmp_env = enif_alloc_env();
-        if (tmp_env == NULL) {
-            enif_free(data);
-            PyErr_SetString(PyExc_MemoryError, "failed to allocate environment");
-            return NULL;
-        }
-
-        ERL_NIF_TERM term;
-        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
-            enif_free(data);
-            enif_free_env(tmp_env);
-            PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
-            return NULL;
-        }
-        enif_free(data);
-
-        /* Convert Erlang term to Python object */
-        PyObject *py_obj = term_to_py(tmp_env, term);
-        enif_free_env(tmp_env);
-
-        return py_obj;  /* May be NULL if conversion failed */
-    }
+    return decode_etf_to_python(data, size);
 }
 
 /**
@@ -2764,16 +2712,10 @@ static PyObject *erlang_channel_send_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyBuffer_Release(&buffer);
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
         PyBuffer_Release(&buffer);
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2805,14 +2747,9 @@ static PyObject *erlang_channel_is_closed_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2838,14 +2775,9 @@ static PyObject *erlang_channel_close_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2874,14 +2806,9 @@ static PyObject *erlang_byte_channel_try_receive_bytes_impl(PyObject *self, PyOb
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2924,14 +2851,9 @@ static PyObject *erlang_byte_channel_receive_bytes_impl(PyObject *self, PyObject
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -2978,25 +2900,15 @@ static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(ch_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(ch_capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        ch_capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(loop_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected loop capsule");
-        return NULL;
-    }
-
-    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang_python.event_loop");
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)get_capsule_pointer_or_fail(
+        loop_capsule, "erlang_python.event_loop", "loop");
     if (loop == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid loop reference");
         return NULL;
     }
 
@@ -3090,14 +3002,9 @@ static PyObject *erlang_channel_cancel_wait_impl(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(ch_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(ch_capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        ch_capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
@@ -3136,25 +3043,15 @@ static PyObject *erlang_byte_channel_wait_impl(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(ch_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected channel reference");
-        return NULL;
-    }
-
-    py_channel_t *channel = (py_channel_t *)PyCapsule_GetPointer(ch_capsule, CHANNEL_CAPSULE_NAME);
+    py_channel_t *channel = (py_channel_t *)get_capsule_pointer_or_fail(
+        ch_capsule, CHANNEL_CAPSULE_NAME, "channel");
     if (channel == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid channel reference");
         return NULL;
     }
 
-    if (!PyCapsule_CheckExact(loop_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "expected loop capsule");
-        return NULL;
-    }
-
-    erlang_event_loop_t *loop = (erlang_event_loop_t *)PyCapsule_GetPointer(loop_capsule, "erlang_python.event_loop");
+    erlang_event_loop_t *loop = (erlang_event_loop_t *)get_capsule_pointer_or_fail(
+        loop_capsule, "erlang_python.event_loop", "loop");
     if (loop == NULL) {
-        PyErr_SetString(PyExc_ValueError, "invalid loop reference");
         return NULL;
     }
 
