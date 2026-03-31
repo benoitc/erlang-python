@@ -791,8 +791,16 @@ static int executor_enqueue(py_request_t *req) {
 
         case PY_MODE_MULTI_EXECUTOR:
             if (atomic_load(&g_multi_executor_initialized)) {
-                /* Route to multi-executor pool */
-                int exec_id = select_executor();
+                /* Route to multi-executor pool.
+                 * Use worker's assigned executor for thread affinity if available.
+                 * This ensures libraries like numpy/torch that have thread-local
+                 * state always run on the same thread for a given worker. */
+                int exec_id;
+                if (req->worker != NULL && req->worker->executor_id >= 0) {
+                    exec_id = req->worker->executor_id % g_num_executors;
+                } else {
+                    exec_id = select_executor();
+                }
                 multi_executor_enqueue(exec_id, req);
                 return 0;
             }

@@ -390,6 +390,9 @@ typedef struct {
 
     /** @brief Environment for building callback messages */
     ErlNifEnv *callback_env;
+
+    /** @brief Assigned executor ID for thread affinity (-1 = round-robin) */
+    int executor_id;
 } py_worker_t;
 
 /* async_pending_t and py_async_worker_t removed - async workers replaced by event loop model */

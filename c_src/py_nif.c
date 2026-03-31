@@ -1418,6 +1418,11 @@ static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     worker->has_callback_handler = false;
     worker->callback_env = NULL;
 
+    /* Assign executor affinity for thread-safe library support (numpy, torch).
+     * Each worker gets a fixed executor to ensure all calls from the same
+     * worker go to the same thread, preventing thread state corruption. */
+    worker->executor_id = select_executor();
+
     PyGILState_Release(gstate);
 
     ERL_NIF_TERM result = enif_make_resource(env, worker);
