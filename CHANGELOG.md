@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.1 (2026-04-01)
+
+### Fixed
+
+- **Executor affinity for numpy/torch** - Workers are now assigned a fixed executor
+  thread at creation. All calls from the same worker go to the same executor,
+  preventing thread state corruption in libraries like numpy and PyTorch that
+  have thread-local state. Fixes segfaults when using sentence-transformers
+  or other ML libraries.
+
 ## 2.3.0 (2026-03-29)
 
 ### Removed
