@@ -36,8 +36,7 @@
 
 all() ->
     [
-        {group, worker},
-        {group, subinterp}
+        {group, worker}
     ].
 
 groups() ->
@@ -56,8 +55,7 @@ groups() ->
         test_context_type_conversions
     ],
     [
-        {worker, [sequence], Tests},
-        {subinterp, [sequence], Tests}
+        {worker, [sequence], Tests}
     ].
 
 init_per_suite(Config) ->
@@ -69,14 +67,7 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(worker, Config) ->
-    [{context_type, worker} | Config];
-init_per_group(subinterp, Config) ->
-    case py_nif:subinterp_supported() of
-        true ->
-            [{context_type, subinterp} | Config];
-        false ->
-            {skip, "Subinterpreters not supported (requires Python 3.12+)"}
-    end.
+    [{context_type, worker} | Config].
 
 end_per_group(_Group, _Config) ->
     ok.

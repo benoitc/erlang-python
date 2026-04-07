@@ -443,6 +443,9 @@ typedef struct {
  * @{
  */
 
+/* Forward declaration for py_context_t (defined later) */
+typedef struct py_context py_context_t;
+
 /**
  * @enum py_request_type_t
  * @brief Types of requests that can be submitted to the executor
@@ -490,6 +493,9 @@ typedef struct py_request {
 
     /** @brief Worker context (may be NULL for global ops) */
     py_worker_t *worker;
+
+    /** @brief Context for process-owned operations (may be NULL) */
+    py_context_t *context;
 
     /** @brief Caller's NIF environment for term creation */
     ErlNifEnv *env;
@@ -791,7 +797,7 @@ typedef struct {
  * @see nif_context_call
  * @see subinterp_pool_alloc
  */
-typedef struct {
+struct py_context {
     /** @brief Unique interpreter ID for routing (0 = main, >0 = subinterp) */
     uint32_t interp_id;
 
@@ -885,7 +891,10 @@ typedef struct {
 
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
-} py_context_t;
+
+    /** @brief Assigned executor ID for thread affinity (-1 = not assigned) */
+    int executor_id;
+};
 
 /* ============================================================================
  * Shared-GIL Pool Architecture for Subinterpreters
@@ -1874,6 +1883,47 @@ static int select_executor(void);
  * @param req Request to submit
  */
 static void multi_executor_enqueue(int exec_id, struct py_request *req);
+
+/**
+ * @brief Dispatch a context call operation to the executor
+ *
+ * Used when a context has thread affinity (executor_id >= 0) to ensure
+ * numpy/torch thread-local state consistency.
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with thread affinity
+ * @param module_bin Module name binary
+ * @param func_bin Function name binary
+ * @param args_term Arguments list
+ * @param kwargs_term Keyword arguments map
+ * @return Result term
+ */
+ERL_NIF_TERM context_dispatch_call(ErlNifEnv *env, py_context_t *ctx,
+                                    ErlNifBinary *module_bin, ErlNifBinary *func_bin,
+                                    ERL_NIF_TERM args_term, ERL_NIF_TERM kwargs_term);
+
+/**
+ * @brief Dispatch a context eval operation to the executor
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with thread affinity
+ * @param code_bin Code string binary
+ * @param locals_term Local variables map
+ * @return Result term
+ */
+ERL_NIF_TERM context_dispatch_eval(ErlNifEnv *env, py_context_t *ctx,
+                                    ErlNifBinary *code_bin, ERL_NIF_TERM locals_term);
+
+/**
+ * @brief Dispatch a context exec operation to the executor
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with thread affinity
+ * @param code_bin Code string binary
+ * @return Result term
+ */
+ERL_NIF_TERM context_dispatch_exec(ErlNifEnv *env, py_context_t *ctx,
+                                    ErlNifBinary *code_bin);
 
 /** @} */
 

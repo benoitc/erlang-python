@@ -3997,6 +3997,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
+    ctx->executor_id = -1;  /* Not assigned yet */
 
     /* Create callback pipe for blocking callback responses */
     if (pipe(ctx->callback_pipe) < 0) {
@@ -4047,6 +4048,13 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         }
 
         PyGILState_Release(gstate);
+    }
+
+    /* Assign executor for thread affinity in MULTI_EXECUTOR mode.
+     * This ensures numpy/torch thread-local state consistency. */
+    if (g_execution_mode == PY_MODE_MULTI_EXECUTOR &&
+        atomic_load(&g_multi_executor_initialized)) {
+        ctx->executor_id = select_executor();
     }
 
     ERL_NIF_TERM ref = enif_make_resource(env, ctx);
@@ -4198,6 +4206,15 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
     }
     if (!enif_inspect_binary(env, argv[2], &func_bin)) {
         return make_error(env, "invalid_func");
+    }
+
+    /* Context thread affinity: dispatch via executor instead of direct execution.
+     * This ensures numpy/torch thread-local state consistency. */
+    if (ctx->executor_id >= 0 && g_execution_mode == PY_MODE_MULTI_EXECUTOR &&
+        atomic_load(&g_multi_executor_initialized)) {
+        ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
+            ? argv[4] : enif_make_new_map(env);
+        return context_dispatch_call(env, ctx, &module_bin, &func_bin, argv[3], kwargs);
     }
 
     char *module_name = binary_to_string(&module_bin);
@@ -4399,6 +4416,15 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_code");
     }
 
+    /* Context thread affinity: dispatch via executor instead of direct execution.
+     * This ensures numpy/torch thread-local state consistency. */
+    if (ctx->executor_id >= 0 && g_execution_mode == PY_MODE_MULTI_EXECUTOR &&
+        atomic_load(&g_multi_executor_initialized)) {
+        ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
+            ? argv[2] : enif_make_new_map(env);
+        return context_dispatch_eval(env, ctx, &code_bin, locals);
+    }
+
     char *code = binary_to_string(&code_bin);
     if (code == NULL) {
         return make_error(env, "alloc_failed");
@@ -4534,6 +4560,13 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
     ErlNifBinary code_bin;
     if (!enif_inspect_binary(env, argv[1], &code_bin)) {
         return make_error(env, "invalid_code");
+    }
+
+    /* Context thread affinity: dispatch via executor instead of direct execution.
+     * This ensures numpy/torch thread-local state consistency. */
+    if (ctx->executor_id >= 0 && g_execution_mode == PY_MODE_MULTI_EXECUTOR &&
+        atomic_load(&g_multi_executor_initialized)) {
+        return context_dispatch_exec(env, ctx, &code_bin);
     }
 
     char *code = binary_to_string(&code_bin);

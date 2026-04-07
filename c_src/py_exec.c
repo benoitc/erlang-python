@@ -198,11 +198,17 @@ static void request_cleanup(py_request_t *req) {
 static void process_request(py_request_t *req) {
     ErlNifEnv *env = req->env;
     py_worker_t *worker = req->worker;
+    py_context_t *context = req->context;
+
+    /* Extract globals/locals from context or worker */
+    PyObject *globals = context ? context->globals : (worker ? worker->globals : NULL);
+    PyObject *locals = context ? context->locals : (worker ? worker->locals : NULL);
 
     switch (req->type) {
     case PY_REQ_CALL: {
-        /* Set thread-local worker context for callbacks */
+        /* Set thread-local worker/context for callbacks */
         tl_current_worker = worker;
+        tl_current_context = context;
         tl_callback_env = env;
         tl_allow_suspension = false;  /* Blocking mode - code runs once, no replay */
 
@@ -217,20 +223,20 @@ static void process_request(py_request_t *req) {
 
         PyObject *func = NULL;
 
-        /* Special handling for __main__ - look in worker's namespace */
+        /* Special handling for __main__ - look in globals/locals namespace first */
         if (strcmp(module_name, "__main__") == 0) {
-            func = PyDict_GetItemString(worker->locals, func_name);
+            func = PyDict_GetItemString(locals, func_name);
             if (func == NULL) {
-                func = PyDict_GetItemString(worker->globals, func_name);
+                func = PyDict_GetItemString(globals, func_name);
             }
             if (func != NULL) {
                 Py_INCREF(func);
-            } else {
-                PyErr_Format(PyExc_NameError, "name '%s' is not defined", func_name);
-                req->result = make_py_error(env);
-                goto call_cleanup;
             }
-        } else {
+            /* If not found in namespace, fall through to module import below */
+        }
+
+        if (func == NULL) {
+            /* Import module and get attribute */
             PyObject *module = PyImport_ImportModule(module_name);
             if (module == NULL) {
                 req->result = make_py_error(env);
@@ -351,6 +357,7 @@ static void process_request(py_request_t *req) {
 
     call_cleanup:
         tl_current_worker = NULL;
+        tl_current_context = NULL;
         tl_callback_env = NULL;
         tl_allow_suspension = false;
         enif_free(module_name);
@@ -360,6 +367,7 @@ static void process_request(py_request_t *req) {
 
     case PY_REQ_EVAL: {
         tl_current_worker = worker;
+        tl_current_context = context;
         tl_callback_env = env;
         tl_allow_suspension = true;  /* Allow suspension - we replay on resume */
 
@@ -373,7 +381,7 @@ static void process_request(py_request_t *req) {
         if (enif_is_map(env, req->locals_term)) {
             PyObject *new_locals = term_to_py(env, req->locals_term);
             if (new_locals != NULL && PyDict_Check(new_locals)) {
-                PyDict_Update(worker->locals, new_locals);
+                PyDict_Update(locals, new_locals);
                 Py_DECREF(new_locals);
             }
         }
@@ -388,7 +396,7 @@ static void process_request(py_request_t *req) {
             stop_timeout();
             req->result = make_py_error(env);
         } else {
-            PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->locals);
+            PyObject *py_result = PyEval_EvalCode(compiled, globals, locals);
             Py_DECREF(compiled);
             stop_timeout();
 
@@ -451,6 +459,7 @@ static void process_request(py_request_t *req) {
         }
 
         tl_current_worker = NULL;
+        tl_current_context = NULL;
         tl_callback_env = NULL;
         tl_allow_suspension = false;
         enif_free(code);
@@ -459,6 +468,7 @@ static void process_request(py_request_t *req) {
 
     case PY_REQ_EXEC: {
         tl_current_worker = worker;
+        tl_current_context = context;
         tl_callback_env = env;
         /* Note: tl_allow_suspension stays false for exec - suspension not allowed */
 
@@ -476,7 +486,7 @@ static void process_request(py_request_t *req) {
             /* Use globals for both to ensure imports are visible to defined functions.
              * When using separate dicts, imports go to locals but function closures
              * only see globals, causing "name X is not defined" errors. */
-            PyObject *py_result = PyEval_EvalCode(compiled, worker->globals, worker->globals);
+            PyObject *py_result = PyEval_EvalCode(compiled, globals, globals);
             Py_DECREF(compiled);
 
             if (py_result == NULL) {
@@ -488,6 +498,7 @@ static void process_request(py_request_t *req) {
         }
 
         tl_current_worker = NULL;
+        tl_current_context = NULL;
         tl_callback_env = NULL;
         enif_free(code);
         break;
@@ -792,12 +803,14 @@ static int executor_enqueue(py_request_t *req) {
         case PY_MODE_MULTI_EXECUTOR:
             if (atomic_load(&g_multi_executor_initialized)) {
                 /* Route to multi-executor pool.
-                 * Use worker's assigned executor for thread affinity if available.
+                 * Use worker's or context's assigned executor for thread affinity if available.
                  * This ensures libraries like numpy/torch that have thread-local
-                 * state always run on the same thread for a given worker. */
+                 * state always run on the same thread for a given worker/context. */
                 int exec_id;
                 if (req->worker != NULL && req->worker->executor_id >= 0) {
                     exec_id = req->worker->executor_id % g_num_executors;
+                } else if (req->context != NULL && req->context->executor_id >= 0) {
+                    exec_id = req->context->executor_id % g_num_executors;
                 } else {
                     exec_id = select_executor();
                 }
@@ -1092,3 +1105,117 @@ static void multi_executor_stop(void) {
  * in executor_enqueue() using PyGILState_Ensure/Release which are no-ops
  * in free-threaded builds but still work correctly.
  */
+
+/* ============================================================================
+ * Context dispatch to executor
+ *
+ * When a context has thread affinity (executor_id >= 0), we dispatch
+ * operations through the executor queue instead of executing directly
+ * on the dirty scheduler. This ensures numpy/torch thread-local state
+ * consistency.
+ * ============================================================================ */
+
+/**
+ * Dispatch a context call operation to the executor.
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with thread affinity
+ * @param module_bin Module name binary
+ * @param func_bin Function name binary
+ * @param args_term Arguments list
+ * @param kwargs_term Keyword arguments map
+ * @return Result term
+ */
+ERL_NIF_TERM context_dispatch_call(ErlNifEnv *env, py_context_t *ctx,
+                                    ErlNifBinary *module_bin, ErlNifBinary *func_bin,
+                                    ERL_NIF_TERM args_term, ERL_NIF_TERM kwargs_term) {
+    py_request_t req;
+    request_init(&req);
+
+    req.type = PY_REQ_CALL;
+    req.env = env;
+    req.worker = NULL;
+    req.context = ctx;
+    req.module_bin = *module_bin;
+    req.func_bin = *func_bin;
+    req.args_term = args_term;
+    req.kwargs_term = kwargs_term;
+    req.timeout_ms = 0;
+
+    if (executor_enqueue(&req) < 0) {
+        request_cleanup(&req);
+        return make_error(env, "executor_shutdown");
+    }
+
+    executor_wait(&req);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
+
+    return result;
+}
+
+/**
+ * Dispatch a context eval operation to the executor.
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with thread affinity
+ * @param code_bin Code string binary
+ * @param locals_term Local variables map
+ * @return Result term
+ */
+ERL_NIF_TERM context_dispatch_eval(ErlNifEnv *env, py_context_t *ctx,
+                                    ErlNifBinary *code_bin, ERL_NIF_TERM locals_term) {
+    py_request_t req;
+    request_init(&req);
+
+    req.type = PY_REQ_EVAL;
+    req.env = env;
+    req.worker = NULL;
+    req.context = ctx;
+    req.code_bin = *code_bin;
+    req.locals_term = locals_term;
+    req.timeout_ms = 0;
+
+    if (executor_enqueue(&req) < 0) {
+        request_cleanup(&req);
+        return make_error(env, "executor_shutdown");
+    }
+
+    executor_wait(&req);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
+
+    return result;
+}
+
+/**
+ * Dispatch a context exec operation to the executor.
+ *
+ * @param env Caller's NIF environment
+ * @param ctx Context with thread affinity
+ * @param code_bin Code string binary
+ * @return Result term
+ */
+ERL_NIF_TERM context_dispatch_exec(ErlNifEnv *env, py_context_t *ctx,
+                                    ErlNifBinary *code_bin) {
+    py_request_t req;
+    request_init(&req);
+
+    req.type = PY_REQ_EXEC;
+    req.env = env;
+    req.worker = NULL;
+    req.context = ctx;
+    req.code_bin = *code_bin;
+    req.timeout_ms = 0;
+
+    if (executor_enqueue(&req) < 0) {
+        request_cleanup(&req);
+        return make_error(env, "executor_shutdown");
+    }
+
+    executor_wait(&req);
+    ERL_NIF_TERM result = req.result;
+    request_cleanup(&req);
+
+    return result;
+}

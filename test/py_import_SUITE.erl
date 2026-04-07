@@ -594,17 +594,17 @@ subinterp_isolation_test(_Config) ->
 %% When py:import is called, it adds to the registry. New contexts should
 %% have these imports applied to their interpreter.
 registry_applied_to_subinterp_test(_Config) ->
-    %% Skip if subinterpreters not supported
-    case py_nif:subinterp_supported() of
+    %% Skip if OWN_GIL not supported (requires Python 3.14+)
+    case py_nif:owngil_supported() of
         false ->
-            {skip, "Subinterpreters not supported"};
+            {skip, "OWN_GIL requires Python 3.14+"};
         true ->
             %% Clear registry and add an import
             ok = py_import:clear_imports(),
             ok = py_import:ensure_imported(uuid),
 
-            %% Create a new subinterp context
-            {ok, Ctx} = py_context:new(#{mode => subinterp}),
+            %% Create a new owngil context
+            {ok, Ctx} = py_context:new(#{mode => owngil}),
 
             %% The uuid module should be available (applied from registry)
             {ok, Result} = py_context:call(Ctx, uuid, uuid4, [], #{}),
@@ -614,7 +614,7 @@ registry_applied_to_subinterp_test(_Config) ->
             py_context:destroy(Ctx),
             ok = py_import:clear_imports(),
 
-            ct:pal("Registry imports successfully applied to new subinterpreter")
+            ct:pal("Registry imports successfully applied to new owngil context")
     end.
 
 %% ============================================================================
