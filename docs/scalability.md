@@ -93,6 +93,10 @@ Ctx = py:context(1),
 
 Runs N executor threads that share the GIL. Requests are distributed round-robin across executors. Good for I/O-bound workloads where Python releases the GIL during I/O operations.
 
+**Thread Affinity:** In MULTI_EXECUTOR mode, both workers and contexts are assigned
+a fixed executor thread. This ensures libraries with thread-local state (numpy, torch,
+tensorflow) always run on the same OS thread, preventing segfaults and state corruption.
+
 ## Choosing the Right Mode
 
 ### Mode Comparison

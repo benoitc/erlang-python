@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.0 (Unreleased)
+
+### Added
+
+- **Context thread affinity** - Contexts in MULTI_EXECUTOR mode are now assigned a
+  fixed executor thread at creation. All operations (call, eval, exec) from the same
+  context run on the same OS thread, preventing thread state corruption in libraries
+  like numpy and PyTorch that have thread-local state.
+
+### Changed
+
+- **Removed obsolete subinterp test references** - Test suites updated to reflect
+  the removal of subinterpreter mode. Tests now use `worker` or `owngil` modes.
+
 ## 2.3.1 (2026-04-01)
 
 ### Fixed

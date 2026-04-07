@@ -357,6 +357,18 @@ Process-bound environments work by:
 
 For subinterpreters, environments are created inside the target interpreter to ensure memory safety - Python's subinterpreters have isolated memory allocators.
 
+### Thread Safety for C Extensions
+
+Contexts in MULTI_EXECUTOR mode have automatic thread affinity. Each context is
+assigned a dedicated executor thread at creation, ensuring that all Python operations
+run on the same OS thread. This is critical for C extensions with thread-local state:
+
+- **numpy** - Uses thread-local random state and BLAS threading
+- **torch** - Maintains thread-local state for CUDA and CPU operations
+- **tensorflow** - Thread-local session state
+
+No configuration is needed - thread affinity is enabled automatically.
+
 ## Best Practices
 
 1. **Use explicit contexts for stateful operations**: `Ctx = py:context(1)` ensures state persists
