@@ -1258,11 +1258,21 @@ ensure_binary(S) ->
 %% @doc Get the current execution mode.
 %% Returns one of:
 %% - `free_threaded': Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - `subinterp': Python 3.12+ with per-interpreter GIL
-%% - `multi_executor': Traditional Python with N executor threads
--spec execution_mode() -> free_threaded | subinterp | multi_executor.
+%% - `worker': Contexts use main interpreter namespaces (default)
+%% - `owngil': Contexts use dedicated threads with own GIL (Python 3.14+)
+%% - `multi_executor': Traditional Python with N executor threads (Python < 3.12)
+-spec execution_mode() -> free_threaded | worker | owngil | multi_executor.
 execution_mode() ->
-    py_nif:execution_mode().
+    case py_nif:execution_mode() of
+        free_threaded -> free_threaded;
+        multi_executor -> multi_executor;
+        subinterp ->
+            %% Check actual context_mode config
+            case application:get_env(erlang_python, context_mode, worker) of
+                owngil -> owngil;
+                _ -> worker
+            end
+    end.
 
 %% @doc Get the number of executor threads.
 %% For `multi_executor' mode, this is the number of executor threads.

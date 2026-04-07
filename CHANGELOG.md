@@ -11,6 +11,11 @@
 
 ### Changed
 
+- **`py:execution_mode/0` now returns actual mode** - Returns `worker` (default),
+  `owngil`, `free_threaded`, or `multi_executor` based on actual configuration
+  instead of Python capability. Previously returned `subinterp` even when using
+  worker mode.
+
 - **Removed obsolete subinterp test references** - Test suites updated to reflect
   the removal of subinterpreter mode. Tests now use `worker` or `owngil` modes.
 

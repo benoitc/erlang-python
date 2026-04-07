@@ -9,7 +9,7 @@ erlang_python automatically detects the optimal execution mode based on your Pyt
 ```erlang
 %% Check current execution mode
 py:execution_mode().
-%% => free_threaded | subinterp | multi_executor
+%% => free_threaded | worker | owngil | multi_executor
 
 %% Check number of executor threads
 py:num_executors().
@@ -21,9 +21,9 @@ py:num_executors().
 | Mode | Python Version | Parallelism | GIL Behavior | Best For |
 |------|----------------|-------------|--------------|----------|
 | **free_threaded** | 3.13+ (nogil build) | True N-way | None | Maximum throughput |
-| **owngil** | 3.12+ | True N-way | Per-interpreter (dedicated thread) | CPU-bound parallel |
-| **subinterp** | 3.12+ | None (shared GIL) | Shared GIL (pool) | High call frequency |
-| **multi_executor** | Any | GIL contention | Shared, round-robin | I/O-bound, compatibility |
+| **owngil** | 3.14+ | True N-way | Per-interpreter (dedicated thread) | CPU-bound parallel |
+| **worker** | 3.12+ | GIL contention | Shared GIL | Default, compatibility |
+| **multi_executor** | < 3.12 | GIL contention | Shared, round-robin | I/O-bound, legacy |
 
 ### Free-Threaded Mode (Python 3.13+)
 
@@ -101,13 +101,13 @@ tensorflow) always run on the same OS thread, preventing segfaults and state cor
 
 ### Mode Comparison
 
-| Aspect | Free-Threaded | Subinterpreter | Multi-Executor |
-|--------|---------------|----------------|----------------|
-| **Parallelism** | True N-way | True N-way | GIL contention |
-| **State Isolation** | Shared | Isolated | Shared |
-| **Memory Overhead** | Low | Higher (per-interp) | Low |
-| **Module Compatibility** | Limited | Most modules | All modules |
-| **Python Version** | 3.13+ (nogil) | 3.12+ | Any |
+| Aspect | Free-Threaded | OWN_GIL | Worker | Multi-Executor |
+|--------|---------------|---------|--------|----------------|
+| **Parallelism** | True N-way | True N-way | GIL contention | GIL contention |
+| **State Isolation** | Shared | Isolated | Shared | Shared |
+| **Memory Overhead** | Low | Higher (per-interp) | Low | Low |
+| **Module Compatibility** | Limited | Most modules | All modules | All modules |
+| **Python Version** | 3.13+ (nogil) | 3.14+ | 3.12+ | < 3.12 |
 
 ### When to Use Each Mode
 
@@ -117,41 +117,48 @@ tensorflow) always run on the same OS thread, preventing segfaults and state cor
 - You're running CPU-bound workloads
 - Memory efficiency is important
 
-**Use OWN_GIL (Python 3.12+) when:**
+**Use OWN_GIL (Python 3.14+) when:**
 - You need true CPU parallelism across Python contexts
 - Running long computations (ML inference, data processing)
 - Workload benefits from multiple independent Python interpreters
 - You can tolerate higher per-call latency for better throughput
 
-**Use Subinterpreters/Shared-GIL (Python 3.12+) when:**
+**Use Worker (Python 3.12+, default) when:**
 - You need high call frequency with low latency
-- Individual operations are short
-- You want namespace isolation without thread overhead
-- Memory efficiency is important (shared interpreter pool)
+- Maximum module compatibility is required
+- Shared state between contexts is needed
+- Running libraries that don't support subinterpreters (torch, etc.)
 
 **Use Multi-Executor (Python < 3.12) when:**
 - Running on older Python versions
 - Your workload is I/O-bound (GIL released during I/O)
-- You need compatibility with all Python modules
-- Shared state between workers is required
+- Thread affinity for numpy/torch is needed
 
 ### Pros and Cons
 
-**Subinterpreter Mode Pros:**
+**Worker Mode Pros:**
+- Maximum module compatibility (all C extensions work)
+- Low memory overhead (single interpreter)
+- Shared state between contexts
+- Default mode for Python 3.12+
+
+**Worker Mode Cons:**
+- GIL contention limits parallelism
+- No isolation between contexts
+
+**OWN_GIL Mode Pros:**
 - True parallelism without GIL contention
 - Complete isolation (crashes don't affect other contexts)
 - Each context has clean namespace (no state bleed)
-- 25-30% faster cast operations vs worker mode
 
-**Subinterpreter Mode Cons:**
+**OWN_GIL Mode Cons:**
 - Higher memory usage (each interpreter loads modules separately)
 - Some C extensions don't support subinterpreters
-- No shared state between contexts (use Shared State API)
-- asyncio event loop integration requires main interpreter
+- Requires Python 3.14+
 
 **Free-Threaded Mode Pros:**
 - True parallelism with shared state
-- Lower memory overhead than subinterpreters
+- Lower memory overhead than OWN_GIL
 - Simplest mental model (like regular threading)
 
 **Free-Threaded Mode Cons:**
