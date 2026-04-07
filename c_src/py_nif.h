@@ -148,9 +148,6 @@ static inline PyObject *Py_NewRef(PyObject *o) {
 
 /** @} */
 
-/* Include subinterpreter pool header for shared-GIL pool model */
-#include "py_subinterp_pool.h"
-
 /* Include subinterpreter thread pool header for OWN_GIL parallelism */
 #include "py_subinterp_thread.h"
 
@@ -814,9 +811,6 @@ typedef struct {
     int callback_pipe[2];
 
 #ifdef HAVE_SUBINTERPRETERS
-    /** @brief Index into subinterpreter pool (-1 = not using pool / worker mode) */
-    int pool_slot;
-
     /* ========== OWN_GIL mode fields ========== */
 
     /** @brief Whether this context uses OWN_GIL mode (dedicated pthread) */
@@ -941,9 +935,6 @@ typedef enum {
     /** @brief Worker mode: Uses PyGILState_Ensure/Release (main interpreter) */
     PY_GUARD_WORKER,
 
-    /** @brief Subinterp mode: GIL + PyThreadState_Swap to pool slot */
-    PY_GUARD_SUBINTERP,
-
     /** @brief OWN_GIL mode: dispatch to dedicated pthread with its own GIL */
     PY_GUARD_OWN_GIL
 } py_guard_mode_t;
@@ -1009,27 +1000,8 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
         return guard;
     }
 
-    /* Acquire the GIL first (works for both modes) */
+    /* Acquire the GIL first */
     guard.gstate = PyGILState_Ensure();
-
-#ifdef HAVE_SUBINTERPRETERS
-    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
-        /* Subinterpreter mode: swap to the pool slot's thread state */
-        subinterp_slot_t *slot = subinterp_pool_get(ctx->pool_slot);
-
-        if (slot == NULL || !slot->initialized) {
-            /* Pool slot invalid - release GIL and fail */
-            PyGILState_Release(guard.gstate);
-            return guard;
-        }
-
-        /* Swap to subinterpreter's thread state */
-        guard.saved_tstate = PyThreadState_Swap(slot->tstate);
-        guard.mode = PY_GUARD_SUBINTERP;
-        guard.acquired = true;
-        return guard;
-    }
-#endif
 
     /* Worker mode: just use the GIL we acquired */
     guard.mode = PY_GUARD_WORKER;
@@ -1051,13 +1023,6 @@ static inline void py_context_release(py_context_guard_t *guard) {
     if (!guard->acquired) {
         return;
     }
-
-#ifdef HAVE_SUBINTERPRETERS
-    if (guard->mode == PY_GUARD_SUBINTERP) {
-        /* Swap back to saved thread state */
-        PyThreadState_Swap(guard->saved_tstate);
-    }
-#endif
 
     /* Release the GIL */
     PyGILState_Release(guard->gstate);
@@ -1336,8 +1301,6 @@ typedef struct {
     PyObject *locals;
     /** @brief Interpreter ID that owns these dicts (0 = main interpreter) */
     int64_t interp_id;
-    /** @brief Pool slot index (-1 for main interpreter) */
-    int pool_slot;
 } py_env_resource_t;
 
 /** @brief Resource type for py_env_resource_t (process-local Python environment) */

@@ -42,8 +42,6 @@
     mixed_waiter_async_blocks_sync_test/1,
     %% Async receive with actual waiting
     async_receive_wait_e2e_test/1,
-    %% Subinterpreter mode tests
-    subinterp_sync_receive_wait_test/1,
     %% Close and drain tests
     close_drain_erlang_test/1,
     close_drain_python_sync_test/1,
@@ -80,8 +78,6 @@ all() -> [
     mixed_waiter_async_blocks_sync_test,
     %% Async receive with actual waiting
     async_receive_wait_e2e_test,
-    %% Subinterpreter mode tests
-    subinterp_sync_receive_wait_test,
     %% Close and drain tests
     close_drain_erlang_test,
     close_drain_python_sync_test,
@@ -550,71 +546,6 @@ async def receive_from_channel(ch_ref):
     ct:pal("Async receive successfully received data via erlang.run()"),
 
     ok = py_channel:close(Ch).
-
-%%% ============================================================================
-%%% Subinterpreter Mode Tests
-%%% ============================================================================
-
-%% @doc Test sync blocking receive works with subinterpreter mode contexts
-%% This is a true e2e test: Python Channel.receive() blocks until Erlang sends data
-subinterp_sync_receive_wait_test(_Config) ->
-    case py_nif:subinterp_supported() of
-        false ->
-            {skip, "Subinterpreters not supported (requires Python 3.12+)"};
-        true ->
-            do_subinterp_sync_receive_wait_test()
-    end.
-
-do_subinterp_sync_receive_wait_test() ->
-    {ok, Ch} = py_channel:new(),
-    Self = self(),
-
-    %% Create a context explicitly in subinterp mode
-    CtxId = erlang:unique_integer([positive]),
-    {ok, CtxPid} = py_context:start_link(CtxId, subinterp),
-
-    %% Import Channel class in the subinterp context
-    ok = py_context:exec(CtxPid, <<"from erlang import Channel">>),
-
-    %% Test 1: Immediate receive with data already available
-    ok = py_channel:send(Ch, <<"immediate_data">>),
-    {ok, <<"immediate_data">>} = py_context:eval(CtxPid,
-        <<"Channel(ch).receive()">>, #{<<"ch">> => Ch}),
-    ct:pal("Subinterp immediate receive OK"),
-
-    %% Test 2: Blocking receive - spawn process to send data after delay
-    spawn_link(fun() ->
-        timer:sleep(100),
-        ok = py_channel:send(Ch, <<"delayed_data">>),
-        Self ! data_sent
-    end),
-
-    %% This should block until the spawned process sends data
-    {ok, <<"delayed_data">>} = py_context:eval(CtxPid,
-        <<"Channel(ch).receive()">>, #{<<"ch">> => Ch}),
-    receive data_sent -> ok after 1000 -> ok end,
-    ct:pal("Subinterp blocking receive OK"),
-
-    %% Test 3: try_receive on empty channel returns None
-    {ok, none} = py_context:eval(CtxPid,
-        <<"Channel(ch).try_receive()">>, #{<<"ch">> => Ch}),
-    ct:pal("Subinterp try_receive empty OK"),
-
-    %% Test 4: Channel close detected by receive
-    ok = py_channel:close(Ch),
-    ok = py_context:exec(CtxPid, <<"
-def test_closed(ch_ref):
-    try:
-        Channel(ch_ref).receive()
-        return 'no_exception'
-    except:
-        return 'got_exception'
-">>),
-    {ok, <<"got_exception">>} = py_context:eval(CtxPid,
-        <<"test_closed(ch)">>, #{<<"ch">> => Ch}),
-    ct:pal("Subinterp closed channel detected OK"),
-
-    py_context:stop(CtxPid).
 
 %%% ============================================================================
 %%% Close and Drain Tests

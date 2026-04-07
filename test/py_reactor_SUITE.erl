@@ -23,8 +23,8 @@
     protocol_close_test/1,
     async_pending_test/1,
     reactor_buffer_test/1,
-    %% SHARED_GIL subinterpreter isolation test
-    reactor_context_subinterp_isolation_test/1
+    %% Worker mode isolation test
+    reactor_context_worker_isolation_test/1
 ]).
 
 all() -> [
@@ -36,7 +36,7 @@ all() -> [
     protocol_close_test,
     async_pending_test,
     reactor_buffer_test,
-    reactor_context_subinterp_isolation_test
+    reactor_context_worker_isolation_test
 ].
 
 init_per_suite(Config) ->
@@ -391,26 +391,26 @@ _reactor_buffer_test_passed = True
     {ok, true} = py:eval(Ctx, <<"_reactor_buffer_test_passed">>).
 
 %%% ============================================================================
-%%% SHARED_GIL Subinterpreter Isolation Test
+%%% Worker Mode Isolation Test
 %%% ============================================================================
 %%%
-%%% Tests that the reactor module cache is properly isolated per-interpreter
-%%% when using SHARED_GIL subinterpreters via py_reactor_context.
+%%% Tests that the reactor module cache is properly isolated per-context
+%%% when using worker mode via py_reactor_context.
 %%%
-%%% Each py_reactor_context with mode=subinterp creates a separate Python
-%%% subinterpreter that shares the GIL but has its own module state, including
-%%% the reactor cache (protocol factory, connections, etc.).
+%%% Each py_reactor_context with mode=worker creates a separate Python
+%%% context with its own module state, including the reactor cache
+%%% (protocol factory, connections, etc.).
 
-%% @doc Test that reactor contexts with subinterp mode have isolated protocol factories.
+%% @doc Test that reactor contexts with worker mode have isolated protocol factories.
 %%
 %% Creates two py_reactor_context processes with different protocol factories:
 %% - Context 1: EchoProtocol (echoes data back unchanged)
 %% - Context 2: UpperProtocol (echoes data back uppercased)
 %%
 %% Verifies that handoffs to each context use their own isolated factory.
-%% Note: This test may be skipped on platforms where SHARED_GIL subinterpreters
+%% Note: This test may be skipped on platforms where worker contexts
 %% don't properly isolate module globals (e.g., some FreeBSD configurations).
-reactor_context_subinterp_isolation_test(_Config) ->
+reactor_context_worker_isolation_test(_Config) ->
     %% Context 1 with EchoProtocol - echoes data unchanged
     EchoSetup = <<"
 import erlang.reactor as reactor
@@ -430,7 +430,7 @@ class EchoProtocol(reactor.Protocol):
 reactor.set_protocol_factory(EchoProtocol)
 ">>,
 
-    {ok, Ctx1} = py_reactor_context:start_link(101, subinterp, #{
+    {ok, Ctx1} = py_reactor_context:start_link(101, worker, #{
         setup_code => EchoSetup
     }),
 
@@ -453,7 +453,7 @@ class UpperProtocol(reactor.Protocol):
 reactor.set_protocol_factory(UpperProtocol)
 ">>,
 
-    {ok, Ctx2} = py_reactor_context:start_link(102, subinterp, #{
+    {ok, Ctx2} = py_reactor_context:start_link(102, worker, #{
         setup_code => UpperSetup
     }),
 
@@ -489,7 +489,7 @@ reactor.set_protocol_factory(UpperProtocol)
     py_reactor_context:stop(Ctx2),
 
     %% Verify isolation: Ctx1 echoes unchanged, Ctx2 uppercases
-    %% On some platforms (e.g., FreeBSD), SHARED_GIL subinterpreters may not
+    %% On some platforms (e.g., FreeBSD), worker contexts may not
     %% properly isolate module globals, causing both to use the same factory.
     case {Response1, Response2} of
         {<<"hello">>, <<"HELLO">>} ->
@@ -497,10 +497,10 @@ reactor.set_protocol_factory(UpperProtocol)
             ok;
         {<<"HELLO">>, <<"HELLO">>} ->
             %% Both used UpperProtocol - isolation not working
-            {skip, "SHARED_GIL subinterpreter module isolation not supported on this platform"};
+            {skip, "Worker module isolation not supported on this platform"};
         {<<"hello">>, <<"hello">>} ->
             %% Both used EchoProtocol - isolation not working
-            {skip, "SHARED_GIL subinterpreter module isolation not supported on this platform"};
+            {skip, "Worker module isolation not supported on this platform"};
         Other ->
             ct:fail({unexpected_responses, Other})
     end.

@@ -1232,13 +1232,13 @@ pool_stats() ->
 
 %% @doc Create a new Python context.
 %%
-%% Creates a subinterpreter (Python 3.12+) or worker thread-state based
-%% on the mode parameter. Returns a reference to the context and its
+%% Creates a subinterpreter (Python 3.14+ OWN_GIL) or worker thread-state
+%% based on the mode parameter. Returns a reference to the context and its
 %% interpreter ID for routing.
 %%
-%% @param Mode `subinterp', `worker', or `owngil'
+%% @param Mode `worker' or `owngil'
 %% @returns {ok, ContextRef, InterpId} | {error, Reason}
--spec context_create(subinterp | worker | owngil) ->
+-spec context_create(worker | owngil) ->
     {ok, reference(), non_neg_integer()} | {error, term()}.
 context_create(_Mode) ->
     ?NIF_STUB.

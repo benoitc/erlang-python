@@ -112,25 +112,8 @@ static void py_env_resource_dtor(ErlNifEnv *env, void *obj) {
     PyGILState_STATE gstate = PyGILState_Ensure();
 
 #ifdef HAVE_SUBINTERPRETERS
-    if (res->pool_slot >= 0) {
-        /* Created in a shared-GIL subinterpreter - must DECREF in correct interpreter */
-        subinterp_slot_t *slot = subinterp_pool_get(res->pool_slot);
-
-        /* Verify slot is still valid and has same interpreter */
-        if (slot != NULL && slot->initialized && slot->interp != NULL) {
-            int64_t slot_interp_id = PyInterpreterState_GetID(slot->interp);
-            if (slot_interp_id == res->interp_id) {
-                /* Same interpreter, safe to DECREF */
-                PyThreadState *saved = PyThreadState_Swap(slot->tstate);
-                Py_XDECREF(res->globals);
-                Py_XDECREF(res->locals);
-                PyThreadState_Swap(saved);
-            }
-            /* If interp_id mismatch, slot was reused - skip DECREF */
-        }
-        /* If slot invalid/not initialized, interpreter destroyed - skip DECREF */
-    } else if (res->interp_id != 0) {
-        /* OWN_GIL subinterpreter: pool_slot == -1 but interp_id != 0
+    if (res->interp_id != 0) {
+        /* OWN_GIL subinterpreter: interp_id != 0
          * These dicts were created in an OWN_GIL interpreter. We cannot safely
          * DECREF them here because:
          * 1. The interpreter might already be destroyed
@@ -296,7 +279,6 @@ static int is_inline_schedule_marker(PyObject *obj);
 #include "py_event_loop.c"
 #include "py_worker_pool.h"
 #include "py_worker_pool.c"
-#include "py_subinterp_pool.c"
 #include "py_subinterp_thread.c"
 #include "py_reactor_buffer.c"
 #include "py_channel.c"
@@ -408,36 +390,6 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
     if (ctx->destroyed) {
         return;
     }
-
-#ifdef HAVE_SUBINTERPRETERS
-    /* For subinterpreter mode: clean up context's own dictionaries and release pool slot */
-    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
-        /* Clean up Python objects with GIL */
-        if (runtime_is_running()) {
-            subinterp_slot_t *slot = subinterp_pool_get(ctx->pool_slot);
-            if (slot != NULL && slot->initialized) {
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                PyThreadState *saved = PyThreadState_Swap(slot->tstate);
-
-                Py_XDECREF(ctx->module_cache);
-                Py_XDECREF(ctx->globals);
-                Py_XDECREF(ctx->locals);
-
-                PyThreadState_Swap(saved);
-                PyGILState_Release(gstate);
-            }
-        }
-        ctx->module_cache = NULL;
-        ctx->globals = NULL;
-        ctx->locals = NULL;
-
-        subinterp_pool_free(ctx->pool_slot);
-        ctx->pool_slot = -1;
-        ctx->destroyed = true;
-        atomic_fetch_add(&g_counters.ctx_destroyed, 1);
-        return;
-    }
-#endif
 
     if (!runtime_is_running()) {
         return;
@@ -1190,34 +1142,6 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     /* Save main thread state and release GIL for other threads */
     g_main_thread_state = PyEval_SaveThread();
 
-    /* Initialize subinterpreter pool (Python 3.12+) before starting executors */
-#ifdef HAVE_SUBINTERPRETERS
-    {
-        int pool_size = DEFAULT_POOL_SIZE;  /* Default pool size */
-        /* Check for config */
-        if (argc > 0 && enif_is_map(env, argv[0])) {
-            ERL_NIF_TERM key = enif_make_atom(env, "pool_size");
-            ERL_NIF_TERM value;
-            if (enif_get_map_value(env, argv[0], key, &value)) {
-                enif_get_int(env, value, &pool_size);
-            }
-        }
-
-        /* Restore GIL temporarily to create subinterpreters */
-        PyEval_RestoreThread(g_main_thread_state);
-        int pool_result = subinterp_pool_init(pool_size);
-        g_main_thread_state = PyEval_SaveThread();
-
-        if (pool_result < 0) {
-            PyEval_RestoreThread(g_main_thread_state);
-            g_main_thread_state = NULL;
-            Py_Finalize();
-            atomic_store(&g_runtime_state, PY_STATE_STOPPED);
-            return make_error(env, "subinterp_pool_init_failed");
-        }
-    }
-#endif
-
     /* Start executors based on execution mode */
     int executor_result = 0;
     switch (g_execution_mode) {
@@ -1332,20 +1256,12 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
         Py_XDECREF(g_numpy_ndarray_type);
         g_numpy_ndarray_type = NULL;
 
-#ifdef HAVE_SUBINTERPRETERS
-        /* Step 4: Shutdown subinterpreter pool - must be done with GIL held */
-        subinterp_pool_shutdown();
-#endif
-
         g_main_thread_state = PyEval_SaveThread();
     } else {
         /* Fallback to PyGILState if no main thread state saved */
         PyGILState_STATE gstate = PyGILState_Ensure();
         Py_XDECREF(g_numpy_ndarray_type);
         g_numpy_ndarray_type = NULL;
-#ifdef HAVE_SUBINTERPRETERS
-        subinterp_pool_shutdown();
-#endif
         PyGILState_Release(gstate);
     }
 
@@ -3017,7 +2933,6 @@ static void owngil_execute_create_local_env(py_context_t *ctx) {
     }
 
     /* Store interpreter info for destructor */
-    res->pool_slot = -1;  /* OWN_GIL doesn't use pool slots */
     PyInterpreterState *interp = PyInterpreterState_Get();
     if (interp != NULL) {
         res->interp_id = PyInterpreterState_GetID(interp);
@@ -4064,7 +3979,6 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "invalid_mode");
     }
 
-    bool use_subinterp = (strcmp(mode_str, "subinterp") == 0);
     bool use_owngil = (strcmp(mode_str, "owngil") == 0);
 
     /* Allocate context resource */
@@ -4075,7 +3989,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
     /* Initialize fields */
     ctx->interp_id = atomic_fetch_add(&g_context_id_counter, 1);
-    ctx->is_subinterp = use_subinterp || use_owngil;
+    ctx->is_subinterp = use_owngil;
     ctx->destroyed = false;
     ctx->has_callback_handler = false;
     ctx->callback_pipe[0] = -1;
@@ -4091,7 +4005,6 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     }
 
 #ifdef HAVE_SUBINTERPRETERS
-    ctx->pool_slot = -1;  /* Default: not using pool */
     ctx->uses_own_gil = false;
 
     if (use_owngil) {
@@ -4107,76 +4020,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         enif_release_resource(ctx);
         atomic_fetch_add(&g_counters.ctx_created, 1);
         return enif_make_tuple3(env, ATOM_OK, ref, enif_make_uint(env, ctx->interp_id));
-    } else if (use_subinterp) {
-        /* Allocate a slot from the subinterpreter pool */
-        int slot = subinterp_pool_alloc();
-        if (slot < 0) {
-            close(ctx->callback_pipe[0]);
-            close(ctx->callback_pipe[1]);
-            enif_release_resource(ctx);
-            return make_error(env, "pool_exhausted");
-        }
-
-        ctx->pool_slot = slot;
-
-        /* Get the pool slot for interpreter access */
-        subinterp_slot_t *pool_slot = subinterp_pool_get(slot);
-        if (pool_slot == NULL || !pool_slot->initialized) {
-            subinterp_pool_free(slot);
-            close(ctx->callback_pipe[0]);
-            close(ctx->callback_pipe[1]);
-            enif_release_resource(ctx);
-            return make_error(env, "pool_slot_invalid");
-        }
-
-        /* Create context's own namespace dictionaries.
-         * Each context needs its own globals/locals for isolation,
-         * even though they share the interpreter. */
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        PyThreadState *saved = PyThreadState_Swap(pool_slot->tstate);
-
-        ctx->globals = PyDict_New();
-        ctx->locals = PyDict_New();
-        ctx->module_cache = PyDict_New();
-
-        if (ctx->globals == NULL || ctx->locals == NULL || ctx->module_cache == NULL) {
-            Py_XDECREF(ctx->globals);
-            Py_XDECREF(ctx->locals);
-            Py_XDECREF(ctx->module_cache);
-            PyThreadState_Swap(saved);
-            PyGILState_Release(gstate);
-            subinterp_pool_free(slot);
-            close(ctx->callback_pipe[0]);
-            close(ctx->callback_pipe[1]);
-            enif_release_resource(ctx);
-            return make_error(env, "dict_alloc_failed");
-        }
-
-        /* Import __builtins__ into globals */
-        PyObject *builtins = PyEval_GetBuiltins();
-        PyDict_SetItemString(ctx->globals, "__builtins__", builtins);
-
-        /* Import erlang module into globals */
-        PyObject *erlang_module = PyImport_ImportModule("erlang");
-        if (erlang_module != NULL) {
-            PyDict_SetItemString(ctx->globals, "erlang", erlang_module);
-            Py_DECREF(erlang_module);
-        } else {
-            PyErr_Clear();
-        }
-
-        PyThreadState_Swap(saved);
-        PyGILState_Release(gstate);
-
-#ifdef DEBUG
-        fprintf(stderr, "[NIF] Created context %u using pool slot %d with own namespace\n",
-                ctx->interp_id, slot);
-        fflush(stderr);
-#endif
-    } else
-#else
-    /* Pre-3.12 Python - ignore subinterp mode request */
-    (void)use_subinterp;
+    }
 #endif
     {
         /* Worker mode - create a thread state in main interpreter */
@@ -4251,39 +4095,6 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
             close(ctx->callback_pipe[1]);
             ctx->callback_pipe[1] = -1;
         }
-        atomic_fetch_add(&g_counters.ctx_destroyed, 1);
-        return ATOM_OK;
-    }
-
-    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
-        /* Clean up context's own namespace dictionaries */
-        if (runtime_is_running()) {
-            subinterp_slot_t *slot = subinterp_pool_get(ctx->pool_slot);
-            if (slot != NULL && slot->initialized) {
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                PyThreadState *saved = PyThreadState_Swap(slot->tstate);
-
-                Py_XDECREF(ctx->module_cache);
-                Py_XDECREF(ctx->globals);
-                Py_XDECREF(ctx->locals);
-
-                PyThreadState_Swap(saved);
-                PyGILState_Release(gstate);
-            }
-        }
-        ctx->globals = NULL;
-        ctx->locals = NULL;
-        ctx->module_cache = NULL;
-
-        /* Release the pool slot back to the pool */
-        subinterp_pool_free(ctx->pool_slot);
-        ctx->pool_slot = -1;
-
-#ifdef DEBUG
-        fprintf(stderr, "[NIF] Destroyed context %u, released pool slot\n", ctx->interp_id);
-        fflush(stderr);
-#endif
-
         atomic_fetch_add(&g_counters.ctx_destroyed, 1);
         return ATOM_OK;
     }
@@ -4803,7 +4614,6 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     res->globals = NULL;
     res->locals = NULL;
     res->interp_id = 0;
-    res->pool_slot = -1;
 
 #ifdef HAVE_SUBINTERPRETERS
     /* OWN_GIL mode: dispatch to the dedicated thread to create dicts */
@@ -4834,15 +4644,6 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
         enif_release_resource(res);
         return make_error(env, "acquire_failed");
     }
-
-    /* Store interpreter info for destructor */
-#ifdef HAVE_SUBINTERPRETERS
-    if (ctx->is_subinterp && ctx->pool_slot >= 0) {
-        res->pool_slot = ctx->pool_slot;
-        PyInterpreterState *interp = PyInterpreterState_Get();
-        res->interp_id = PyInterpreterState_GetID(interp);
-    }
-#endif
 
     /* Copy globals from context to inherit preloaded code */
     res->globals = PyDict_Copy(ctx->globals);

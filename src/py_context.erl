@@ -62,7 +62,7 @@
 %% Exported for py_reactor_context
 -export([extend_erlang_module_in_context/1]).
 
--type context_mode() :: worker | subinterp | owngil.
+-type context_mode() :: worker | owngil.
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
@@ -83,7 +83,6 @@
 %%
 %% The process creates a Python context based on the mode:
 %% - `worker' - Create a thread-state worker (main interpreter namespace)
-%% - `subinterp' - Create a sub-interpreter with shared GIL (Python 3.12+)
 %% - `owngil' - Create a sub-interpreter with its own GIL (Python 3.14+)
 %%
 %% The `owngil' mode creates a dedicated pthread for each context, allowing
@@ -530,8 +529,6 @@ apply_preload(Ref) ->
 %% @private
 create_context(worker) ->
     py_nif:context_create(worker);
-create_context(subinterp) ->
-    py_nif:context_create(subinterp);
 create_context(owngil) ->
     %% OWN_GIL mode requires Python 3.14+ due to C extension bugs in earlier versions
     case py_nif:owngil_supported() of
