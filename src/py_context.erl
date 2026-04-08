@@ -563,11 +563,12 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
             loop(State);
 
         {exec, From, MRef, Code} ->
-            Result = py_nif:context_exec(Ref, Code),
+            Result = handle_exec_with_async(Ref, Code),
             From ! {MRef, Result},
             loop(State);
 
         %% Exec with process-local environment (worker mode)
+        %% Note: Uses blocking dispatch since async+env isn't implemented yet.
         {exec, From, MRef, Code, EnvRef} ->
             Result = py_nif:context_exec(Ref, Code, EnvRef),
             From ! {MRef, Result},
@@ -723,7 +724,23 @@ handle_blocking_callback(Ref, FuncName, Args) ->
 
 %% @private
 %% Handle call with potential suspension for callbacks
+%% Uses async dispatch to avoid blocking dirty schedulers when possible.
 handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
+    RequestId = make_ref(),
+    case py_nif:context_call_async(Ref, self(), RequestId, Module, Func, Args, Kwargs) of
+        {enqueued, RequestId} ->
+            %% Async dispatch succeeded - wait for result message
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            %% Fall back to blocking call for non-worker-thread contexts
+            handle_call_blocking(Ref, Module, Func, Args, Kwargs);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+%% Blocking call handler (used when async is not available)
+handle_call_blocking(Ref, Module, Func, Args, Kwargs) ->
     case py_nif:context_call(Ref, Module, Func, Args, Kwargs) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
             %% Callback needed - handle it with recursive receive
@@ -740,7 +757,36 @@ handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
 
 %% @private
 %% Handle eval with potential suspension for callbacks
+%% Uses async dispatch to avoid blocking dirty schedulers when possible.
 handle_eval_with_suspension(Ref, Code, Locals) ->
+    RequestId = make_ref(),
+    case py_nif:context_eval_async(Ref, self(), RequestId, Code, Locals) of
+        {enqueued, RequestId} ->
+            %% Async dispatch succeeded - wait for result message
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            %% Fall back to blocking call for non-worker-thread contexts
+            handle_eval_blocking(Ref, Code, Locals);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+%% Handle exec with async dispatch
+handle_exec_with_async(Ref, Code) ->
+    RequestId = make_ref(),
+    case py_nif:context_exec_async(Ref, self(), RequestId, Code) of
+        {enqueued, RequestId} ->
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            py_nif:context_exec(Ref, Code);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+%% Blocking eval handler (used when async is not available)
+handle_eval_blocking(Ref, Code, Locals) ->
     case py_nif:context_eval(Ref, Code, Locals) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
             %% Callback needed - handle it with recursive receive
@@ -756,7 +802,30 @@ handle_eval_with_suspension(Ref, Code, Locals) ->
     end.
 
 %% @private
+%% Wait for async result from worker thread
+%% The worker thread sends {py_result, RequestId, Result} when done.
+wait_for_async_result(Ref, RequestId) ->
+    receive
+        {py_result, RequestId, Result} ->
+            process_async_result(Ref, Result)
+    after 300000 ->  %% 5 minute timeout
+        {error, async_timeout}
+    end.
+
+%% @private
+%% Process the result from async dispatch
+%% Handles suspension, schedule markers, and normal results.
+process_async_result(Ref, {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}}) ->
+    CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
+    resume_and_continue(Ref, StateRef, CallbackResult);
+process_async_result(Ref, {schedule, CallbackName, CallbackArgs}) ->
+    handle_schedule(Ref, CallbackName, CallbackArgs);
+process_async_result(_Ref, Result) ->
+    Result.
+
+%% @private
 %% Handle call with process-local environment
+%% Note: Uses blocking dispatch since async+env isn't implemented yet.
 handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
     case py_nif:context_call(Ref, Module, Func, Args, Kwargs, EnvRef) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
@@ -770,6 +839,7 @@ handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
 
 %% @private
 %% Handle eval with process-local environment
+%% Note: Uses blocking dispatch since async+env isn't implemented yet.
 handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
     case py_nif:context_eval(Ref, Code, Locals, EnvRef) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->

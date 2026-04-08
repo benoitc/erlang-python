@@ -1,23 +1,39 @@
 # Changelog
 
-## 2.4.0 (Unreleased)
+## 3.0.0 (Unreleased)
 
-### Added
+### Breaking Changes
 
-- **Context thread affinity** - Contexts in MULTI_EXECUTOR mode are now assigned a
-  fixed executor thread at creation. All operations (call, eval, exec) from the same
-  context run on the same OS thread, preventing thread state corruption in libraries
-  like numpy and PyTorch that have thread-local state.
+- **Simplified execution model** - Only two public execution modes: `worker` and `owngil`
+  - `worker`: Dedicated pthread per context with stable thread affinity (default)
+  - `owngil`: Dedicated pthread + subinterpreter with own GIL (Python 3.14+)
+  - Removed `multi_executor` and `free_threaded` from public API
+  - Internal capability detection still tracks Python features
+
+- **Removed `py:num_executors/0`** - Contexts now use per-context worker threads
+  instead of a shared executor pool. This function is no longer needed.
+
+- **`py:execution_mode/0` returns `worker | owngil`** - Based on the `context_mode`
+  application configuration. Previously returned internal capabilities like
+  `free_threaded`, `subinterp`, or `multi_executor`.
 
 ### Changed
 
-- **`py:execution_mode/0` now returns actual mode** - Returns `worker` (default),
-  `owngil`, `free_threaded`, or `multi_executor` based on actual configuration
-  instead of Python capability. Previously returned `subinterp` even when using
-  worker mode.
+- **Per-context worker threads** - Each context now gets its own dedicated pthread
+  that handles all Python operations. This provides stable thread affinity for
+  numpy/torch/tensorflow compatibility without needing a shared executor pool.
 
-- **Removed obsolete subinterp test references** - Test suites updated to reflect
-  the removal of subinterpreter mode. Tests now use `worker` or `owngil` modes.
+- **Async NIF dispatch** - Context operations use async NIFs with message passing
+  instead of blocking dirty schedulers. This improves concurrency under load.
+
+- **Request queue per context** - Replaced single-slot request pattern with proper
+  request queues that support multiple concurrent callers.
+
+### Removed
+
+- Multi-executor pool (`g_executors[]`, `multi_executor_start/stop`)
+- `context_dispatch_call/eval/exec` functions (dead code)
+- References to `PY_MODE_MULTI_EXECUTOR` in context operations
 
 ## 2.3.1 (2026-04-01)
 

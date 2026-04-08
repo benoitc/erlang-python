@@ -107,7 +107,6 @@
     venv_info/0,
     %% Execution info
     execution_mode/0,
-    num_executors/0,
     %% Shared state (accessible from Python workers)
     state_fetch/1,
     state_store/2,
@@ -1257,29 +1256,21 @@ ensure_binary(S) ->
 
 %% @doc Get the current execution mode.
 %% Returns one of:
-%% - `free_threaded': Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - `worker': Contexts use main interpreter namespaces (default)
-%% - `owngil': Contexts use dedicated threads with own GIL (Python 3.14+)
-%% - `multi_executor': Traditional Python with N executor threads (Python < 3.12)
--spec execution_mode() -> free_threaded | worker | owngil | multi_executor.
+%% - `worker': Contexts use dedicated pthread per context (default).
+%%   Provides stable thread affinity for numpy/torch/tensorflow compatibility.
+%% - `owngil': Contexts use dedicated pthread + subinterpreter with own GIL.
+%%   Enables true parallelism (Python 3.12+ with subinterpreter support).
+%%
+%% The mode is determined by the `context_mode' application config:
+%% ```
+%% application:set_env(erlang_python, context_mode, owngil).
+%% '''
+-spec execution_mode() -> worker | owngil.
 execution_mode() ->
-    case py_nif:execution_mode() of
-        free_threaded -> free_threaded;
-        multi_executor -> multi_executor;
-        subinterp ->
-            %% Check actual context_mode config
-            case application:get_env(erlang_python, context_mode, worker) of
-                owngil -> owngil;
-                _ -> worker
-            end
+    case application:get_env(erlang_python, context_mode, worker) of
+        owngil -> owngil;
+        _ -> worker
     end.
-
-%% @doc Get the number of executor threads.
-%% For `multi_executor' mode, this is the number of executor threads.
-%% For other modes, returns 1.
--spec num_executors() -> pos_integer().
-num_executors() ->
-    py_nif:num_executors().
 
 %%% ============================================================================
 %%% Shared State

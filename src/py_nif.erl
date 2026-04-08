@@ -82,7 +82,6 @@
     owngil_apply_paths/3,
     %% Execution mode info
     execution_mode/0,
-    num_executors/0,
     %% Thread worker support (ThreadPoolExecutor)
     thread_worker_set_coordinator/1,
     thread_worker_write/2,
@@ -176,6 +175,10 @@
     context_eval/4,
     context_exec/2,
     context_exec/3,
+    %% Async dispatch (non-blocking)
+    context_call_async/7,
+    context_eval_async/5,
+    context_exec_async/4,
     context_call_method/4,
     create_local_env/1,
     context_to_term/1,
@@ -653,20 +656,17 @@ owngil_apply_paths(_WorkerId, _HandleId, _Paths) ->
 %%% Execution Mode Info
 %%% ============================================================================
 
-%% @doc Get the current execution mode.
-%% Returns one of: free_threaded | subinterp | multi_executor
+%% @doc Get Python capability (internal use).
+%% Returns the detected Python runtime capability:
 %% - free_threaded: Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - subinterp: Python 3.12+ with per-interpreter GIL
-%% - multi_executor: Traditional Python with N executor threads
+%% - subinterp: Python 3.12+ with per-interpreter GIL support
+%% - multi_executor: Traditional Python with executor threads
+%%
+%% For public execution mode, use py:execution_mode/0 which returns
+%% `worker | owngil' based on the application configuration.
+%% @private
 -spec execution_mode() -> free_threaded | subinterp | multi_executor.
 execution_mode() ->
-    ?NIF_STUB.
-
-%% @doc Get the number of executor threads.
-%% For multi_executor mode, this is the number of executor threads.
-%% For other modes, returns 1.
--spec num_executors() -> pos_integer().
-num_executors() ->
     ?NIF_STUB.
 
 %%% ============================================================================
@@ -1335,6 +1335,58 @@ context_exec(_ContextRef, _Code) ->
 %% @returns ok | {error, Reason}
 -spec context_exec(reference(), binary(), reference()) -> ok | {error, term()}.
 context_exec(_ContextRef, _Code, _EnvRef) ->
+    ?NIF_STUB.
+
+%% @doc Async call - enqueue and return immediately.
+%%
+%% Dispatches a Python function call to the worker thread and returns
+%% immediately with {enqueued, RequestId}. The worker thread will send
+%% {py_result, RequestId, Result} to CallerPid when done.
+%%
+%% @param ContextRef Context reference
+%% @param CallerPid PID to send result to
+%% @param RequestId Request ID for correlation
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @param Kwargs Keyword arguments map
+%% @returns {enqueued, RequestId} | {error, Reason}
+-spec context_call_async(reference(), pid(), term(), binary(), binary(), list(), map()) ->
+    {enqueued, term()} | {error, term()}.
+context_call_async(_ContextRef, _CallerPid, _RequestId, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Async eval - enqueue and return immediately.
+%%
+%% Dispatches a Python eval to the worker thread and returns immediately
+%% with {enqueued, RequestId}. The worker thread will send
+%% {py_result, RequestId, Result} to CallerPid when done.
+%%
+%% @param ContextRef Context reference
+%% @param CallerPid PID to send result to
+%% @param RequestId Request ID for correlation
+%% @param Code Python expression to evaluate
+%% @param Locals Local variables map
+%% @returns {enqueued, RequestId} | {error, Reason}
+-spec context_eval_async(reference(), pid(), term(), binary(), map()) ->
+    {enqueued, term()} | {error, term()}.
+context_eval_async(_ContextRef, _CallerPid, _RequestId, _Code, _Locals) ->
+    ?NIF_STUB.
+
+%% @doc Async exec - enqueue and return immediately.
+%%
+%% Dispatches Python code execution to the worker thread and returns
+%% immediately with {enqueued, RequestId}. The worker thread will send
+%% {py_result, RequestId, Result} to CallerPid when done.
+%%
+%% @param ContextRef Context reference
+%% @param CallerPid PID to send result to
+%% @param RequestId Request ID for correlation
+%% @param Code Python code to execute
+%% @returns {enqueued, RequestId} | {error, Reason}
+-spec context_exec_async(reference(), pid(), term(), binary()) ->
+    {enqueued, term()} | {error, term()}.
+context_exec_async(_ContextRef, _CallerPid, _RequestId, _Code) ->
     ?NIF_STUB.
 
 %% @doc Call a method on a Python object in a context.

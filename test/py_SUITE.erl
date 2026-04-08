@@ -41,7 +41,6 @@
     test_venv_pth/1,
     %% New scalability tests
     test_execution_mode/1,
-    test_num_executors/1,
     test_semaphore_basic/1,
     test_semaphore_acquire_release/1,
     test_semaphore_concurrent/1,
@@ -101,7 +100,6 @@ all() ->
         test_venv_pth,
         %% Scalability tests
         test_execution_mode,
-        test_num_executors,
         test_semaphore_basic,
         test_semaphore_acquire_release,
         test_semaphore_concurrent,
@@ -733,15 +731,7 @@ test_execution_mode(_Config) ->
     %% Test that execution_mode returns a valid mode
     Mode = py:execution_mode(),
     ct:pal("Execution mode: ~p~n", [Mode]),
-    true = lists:member(Mode, [free_threaded, subinterp, multi_executor]),
-    ok.
-
-test_num_executors(_Config) ->
-    %% Test that num_executors returns a positive integer
-    Num = py:num_executors(),
-    ct:pal("Number of executors: ~p~n", [Num]),
-    true = is_integer(Num),
-    true = Num > 0,
+    true = lists:member(Mode, [worker, owngil]),
     ok.
 
 test_semaphore_basic(_Config) ->
