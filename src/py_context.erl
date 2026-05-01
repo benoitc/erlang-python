@@ -804,12 +804,34 @@ handle_eval_blocking(Ref, Code, Locals) ->
 %% @private
 %% Wait for async result from worker thread
 %% The worker thread sends {py_result, RequestId, Result} when done.
+%%
+%% Drains stale {py_result, _, _} messages from prior timed-out
+%% requests before the matching receive so a context that experiences
+%% repeat timeouts doesn't grow an unbounded mailbox: when
+%% wait_for_async_result/2 returns {error, async_timeout}, the C
+%% worker can still finish later and deliver the result; without the
+%% drain those messages would accumulate forever.
+%%
+%% Safe because the context process is the sole receiver for its own
+%% async results and only one wait_for_async_result/2 is in flight at
+%% a time, so the drain cannot consume the result of a concurrent live
+%% request.
 wait_for_async_result(Ref, RequestId) ->
+    drain_stale_async_results(RequestId),
     receive
         {py_result, RequestId, Result} ->
             process_async_result(Ref, Result)
     after 300000 ->  %% 5 minute timeout
         {error, async_timeout}
+    end.
+
+%% @private
+drain_stale_async_results(CurrentId) ->
+    receive
+        {py_result, OldId, _} when OldId =/= CurrentId ->
+            drain_stale_async_results(CurrentId)
+    after 0 ->
+        ok
     end.
 
 %% @private
