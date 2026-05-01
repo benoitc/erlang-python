@@ -3293,18 +3293,22 @@ static void worker_context_shutdown(py_context_t *ctx) {
         return;
     }
 
-    /* Signal shutdown */
+    /* Signal shutdown and wake any worker parked on the condvar.
+     *
+     * We deliberately don't enqueue a CTX_REQ_SHUTDOWN sentinel:
+     *   - the worker loop predicate already exits once
+     *     shutdown_requested is true, so a broadcast is sufficient;
+     *   - if the worker is mid-process_request when we set the flag,
+     *     it returns to the top of the loop, sees !shutdown_requested
+     *     == false, and exits without dequeuing — leaving any
+     *     sentinel as an orphan ctx_request_t in the queue.
+     * Broadcasting under the mutex avoids the lost-wakeup race.
+     */
     atomic_store(&ctx->shutdown_requested, true);
-
-    /* Cancel all pending (not-yet-started) requests */
     ctx_queue_cancel_all(ctx);
-
-    /* Enqueue shutdown request to wake worker if idle */
-    ctx_request_t *shutdown_req = ctx_request_create();
-    if (shutdown_req != NULL) {
-        shutdown_req->type = CTX_REQ_SHUTDOWN;
-        ctx_queue_enqueue(ctx, shutdown_req);
-    }
+    pthread_mutex_lock(&ctx->queue_mutex);
+    pthread_cond_broadcast(&ctx->queue_not_empty);
+    pthread_mutex_unlock(&ctx->queue_mutex);
 
     /* Wait for thread to exit with timeout */
     bool join_succeeded = false;
@@ -3330,10 +3334,21 @@ static void worker_context_shutdown(py_context_t *ctx) {
 #endif
 
     if (!join_succeeded) {
-        /* Worker thread is unresponsive - use leak pattern */
+        /* Worker thread is unresponsive - leak the context so the
+         * stuck pthread doesn't UAF when the BEAM frees the
+         * resource. Pin the resource: enif_keep_resource pushes the
+         * refcount above zero permanently, so context_destructor
+         * never runs and the BEAM keeps the memory alive for the
+         * thread that still holds a raw pointer to it.
+         *
+         * The leaked thread also keeps using ctx->callback_pipe[]
+         * (see nif_context_destroy: pipe close is gated on
+         * !ctx->leaked for the same reason). Future cleanup happens
+         * at VM exit. */
         fprintf(stderr, "Worker thread shutdown timeout after %d seconds, leaking context\n",
                 WORKER_SHUTDOWN_TIMEOUT_SECS);
         atomic_store(&ctx->leaked, true);
+        enif_keep_resource(ctx);
         return;
     }
 
@@ -4540,18 +4555,14 @@ static void owngil_context_shutdown(py_context_t *ctx) {
         return;
     }
 
-    /* Signal shutdown */
+    /* Signal shutdown and wake any worker parked on the condvar.
+     * See worker_context_shutdown for why we broadcast instead of
+     * enqueuing a CTX_REQ_SHUTDOWN sentinel. */
     atomic_store(&ctx->shutdown_requested, true);
-
-    /* Cancel all pending (not-yet-started) requests */
     ctx_queue_cancel_all(ctx);
-
-    /* Enqueue shutdown request to wake worker if idle */
-    ctx_request_t *shutdown_req = ctx_request_create();
-    if (shutdown_req != NULL) {
-        shutdown_req->type = CTX_REQ_SHUTDOWN;
-        ctx_queue_enqueue(ctx, shutdown_req);
-    }
+    pthread_mutex_lock(&ctx->queue_mutex);
+    pthread_cond_broadcast(&ctx->queue_not_empty);
+    pthread_mutex_unlock(&ctx->queue_mutex);
 
     /* Wait for thread to exit with timeout */
     bool join_succeeded = false;
@@ -4577,13 +4588,14 @@ static void owngil_context_shutdown(py_context_t *ctx) {
 #endif
 
     if (!join_succeeded) {
-        /* Worker thread is unresponsive - use leak pattern */
+        /* Worker thread is unresponsive - leak the context. Pin the
+         * resource so the BEAM doesn't free its memory under the
+         * stuck pthread (UAF). See worker_context_shutdown for the
+         * full rationale. */
         fprintf(stderr, "OWN_GIL shutdown timeout after %d seconds, leaking context\n",
                 OWNGIL_SHUTDOWN_TIMEOUT_SECS);
         atomic_store(&ctx->leaked, true);
-        /* Do NOT free shared resources - worker thread may still be using them.
-         * The leaked thread is isolated and will eventually clean up itself
-         * when Python exits, or persist until VM exit. */
+        enif_keep_resource(ctx);
         return;
     }
 
@@ -4739,14 +4751,20 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
     /* OWN_GIL mode: shutdown the dedicated thread */
     if (ctx->uses_own_gil) {
         owngil_context_shutdown(ctx);
-        /* Close callback pipes */
-        if (ctx->callback_pipe[0] >= 0) {
-            close(ctx->callback_pipe[0]);
-            ctx->callback_pipe[0] = -1;
-        }
-        if (ctx->callback_pipe[1] >= 0) {
-            close(ctx->callback_pipe[1]);
-            ctx->callback_pipe[1] = -1;
+        /* Close callback pipes only on a clean shutdown. If the
+         * worker timed out (ctx->leaked == true) it may still write
+         * to / read from these fds; closing them here would let the
+         * kernel reissue the fd numbers to unrelated files and
+         * silently corrupt them. */
+        if (!atomic_load(&ctx->leaked)) {
+            if (ctx->callback_pipe[0] >= 0) {
+                close(ctx->callback_pipe[0]);
+                ctx->callback_pipe[0] = -1;
+            }
+            if (ctx->callback_pipe[1] >= 0) {
+                close(ctx->callback_pipe[1]);
+                ctx->callback_pipe[1] = -1;
+            }
         }
         atomic_fetch_add(&g_counters.ctx_destroyed, 1);
         return ATOM_OK;
@@ -4756,14 +4774,17 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
     /* Worker mode: shutdown the dedicated worker thread */
     if (ctx->uses_worker_thread) {
         worker_context_shutdown(ctx);
-        /* Close callback pipes */
-        if (ctx->callback_pipe[0] >= 0) {
-            close(ctx->callback_pipe[0]);
-            ctx->callback_pipe[0] = -1;
-        }
-        if (ctx->callback_pipe[1] >= 0) {
-            close(ctx->callback_pipe[1]);
-            ctx->callback_pipe[1] = -1;
+        /* Close callback pipes (see OWN_GIL branch for why this is
+         * gated on !ctx->leaked). */
+        if (!atomic_load(&ctx->leaked)) {
+            if (ctx->callback_pipe[0] >= 0) {
+                close(ctx->callback_pipe[0]);
+                ctx->callback_pipe[0] = -1;
+            }
+            if (ctx->callback_pipe[1] >= 0) {
+                close(ctx->callback_pipe[1]);
+                ctx->callback_pipe[1] = -1;
+            }
         }
         atomic_fetch_add(&g_counters.ctx_destroyed, 1);
         return ATOM_OK;
@@ -7472,8 +7493,10 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         env, NULL, "inline_continuation", inline_continuation_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
-    /* Process-scoped shared dictionary resource type
-     * Using simple resource type without process monitoring for now */
+    /* Process-scoped shared dictionary resource type. GC-scoped: the
+     * destructor releases the Python dict when the last term ref
+     * drops. No per-process monitor — explicit shared_dict_destroy/1
+     * is the eager-release path. */
     PY_SHARED_DICT_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "py_shared_dict", shared_dict_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
