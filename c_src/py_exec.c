@@ -24,7 +24,8 @@
  * This module implements the core Python execution engine, handling:
  *
  * - **Timeout support**: Trace-based execution timeout monitoring
- * - **Executor threads**: Single and multi-executor pool management
+ * - **Single coordinator executor thread**: serializes legacy worker API and
+ *   coordinator tasks behind one GIL-holding thread.
  * - **Request processing**: Dispatch for call/eval/exec/import operations
  * - **Free-threaded mode**: Support for Python 3.13+ no-GIL builds
  *
@@ -43,6 +44,10 @@
  *       │                          completed                       result
  * ```
  *
+ * Per-context worker threads (see py_nif.c) handle the public worker / owngil
+ * APIs directly; the single executor here only backs the legacy worker pool
+ * and a few coordinator paths.
+ *
  * @par GIL Management Patterns
  *
  * Following PyO3/Granian best practices:
@@ -50,14 +55,6 @@
  * - **Py_BEGIN_ALLOW_THREADS**: Release GIL during blocking waits
  * - **Py_END_ALLOW_THREADS**: Re-acquire GIL before Python calls
  * - **PyGILState_Ensure/Release**: For callbacks from non-Python threads
- *
- * @par Execution Modes
- *
- * | Mode | Description | GIL Handling |
- * |------|-------------|--------------|
- * | FREE_THREADED | Python 3.13+ no-GIL | Direct execution |
- * | SUBINTERP | Python 3.12+ | Per-interpreter GIL |
- * | MULTI_EXECUTOR | Traditional | N executor threads |
  *
  * @par Thread Safety
  *
@@ -155,19 +152,10 @@ static bool check_timeout_error(void) {
 
 static void detect_execution_mode(void) {
 #ifdef HAVE_FREE_THREADED
-    /* Python 3.13+ with free-threading enabled */
     g_execution_mode = PY_MODE_FREE_THREADED;
-    return;
+#else
+    g_execution_mode = PY_MODE_GIL;
 #endif
-
-#ifdef HAVE_SUBINTERPRETERS
-    /* Python 3.12+ supports per-interpreter GIL */
-    g_execution_mode = PY_MODE_SUBINTERP;
-    return;
-#endif
-
-    /* Fallback: multi-executor with shared GIL */
-    g_execution_mode = PY_MODE_MULTI_EXECUTOR;
 }
 
 /* ============================================================================
@@ -783,50 +771,22 @@ static int executor_enqueue(py_request_t *req) {
     /* Track enqueued requests */
     atomic_fetch_add(&g_counters.enqueue_count, 1);
 
-    switch (g_execution_mode) {
 #ifdef HAVE_FREE_THREADED
-        case PY_MODE_FREE_THREADED:
-            /* Execute directly in free-threaded mode - no executor needed */
-            {
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                process_request(req);
-                PyGILState_Release(gstate);
-                /* Signal completion immediately */
-                pthread_mutex_lock(&req->mutex);
-                req->completed = true;
-                pthread_cond_signal(&req->cond);
-                pthread_mutex_unlock(&req->mutex);
-            }
-            return 0;
+    if (g_execution_mode == PY_MODE_FREE_THREADED) {
+        /* Execute directly in free-threaded mode - no executor needed */
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        process_request(req);
+        PyGILState_Release(gstate);
+        /* Signal completion immediately */
+        pthread_mutex_lock(&req->mutex);
+        req->completed = true;
+        pthread_cond_signal(&req->cond);
+        pthread_mutex_unlock(&req->mutex);
+        return 0;
+    }
 #endif
 
-        case PY_MODE_MULTI_EXECUTOR:
-            if (atomic_load(&g_multi_executor_initialized)) {
-                /* Route to multi-executor pool.
-                 * Use worker's or context's assigned executor for thread affinity if available.
-                 * This ensures libraries like numpy/torch that have thread-local
-                 * state always run on the same thread for a given worker/context. */
-                int exec_id;
-                if (req->worker != NULL && req->worker->executor_id >= 0) {
-                    exec_id = req->worker->executor_id % g_num_executors;
-                } else if (req->context != NULL && req->context->executor_id >= 0) {
-                    exec_id = req->context->executor_id % g_num_executors;
-                } else {
-                    exec_id = select_executor();
-                }
-                multi_executor_enqueue(exec_id, req);
-                return 0;
-            }
-            /* Fall through to single executor if multi not initialized */
-            break;
-
-        case PY_MODE_SUBINTERP:
-        default:
-            /* Use single executor */
-            break;
-    }
-
-    /* Single executor queue */
+    /* Single coordinator executor queue */
     pthread_mutex_lock(&g_executor_mutex);
     req->next = NULL;
     if (g_executor_queue_tail == NULL) {
@@ -897,325 +857,8 @@ static void executor_stop(void) {
     pthread_join(g_executor_thread, NULL);
 }
 
-/* ============================================================================
- * Multi-executor pool implementation
- *
- * For MULTI_EXECUTOR mode (traditional Python), we run N executor threads
- * that each hold the GIL in turn. This allows GIL contention-based parallelism
- * similar to PyO3's multi-executor pattern.
- * ============================================================================ */
-
-/**
- * Main function for a multi-executor thread.
- * Each executor has its own queue and processes requests independently.
- *
- * GIL handling: Acquire GIL only when processing work, not while idle.
- * This prevents idle executors from competing with dirty schedulers
- * running actual Python work via the context-based API.
- */
-static void *multi_executor_thread_main(void *arg) {
-    executor_t *exec = (executor_t *)arg;
-
-    exec->running = true;
-
-    while (!exec->shutdown) {
-        py_request_t *req = NULL;
-
-        /* Wait for work - NO GIL held while idle */
-        pthread_mutex_lock(&exec->mutex);
-        while (exec->queue_head == NULL && !exec->shutdown) {
-            pthread_cond_wait(&exec->cond, &exec->mutex);
-        }
-
-        /* Dequeue request if available */
-        if (exec->queue_head != NULL) {
-            req = exec->queue_head;
-            exec->queue_head = req->next;
-            if (exec->queue_head == NULL) {
-                exec->queue_tail = NULL;
-            }
-            req->next = NULL;
-        }
-        pthread_mutex_unlock(&exec->mutex);
-
-        if (req != NULL) {
-            if (req->type == PY_REQ_SHUTDOWN) {
-                pthread_mutex_lock(&req->mutex);
-                req->completed = true;
-                pthread_cond_signal(&req->cond);
-                pthread_mutex_unlock(&req->mutex);
-                break;
-            } else {
-                /* Acquire GIL only for actual work */
-                PyGILState_STATE gstate = PyGILState_Ensure();
-
-                /* Process the request */
-                process_request(req);
-
-                /* Release GIL immediately after processing */
-                PyGILState_Release(gstate);
-
-                /* Signal completion (outside GIL) */
-                pthread_mutex_lock(&req->mutex);
-                req->completed = true;
-                pthread_cond_signal(&req->cond);
-                pthread_mutex_unlock(&req->mutex);
-            }
-        }
-    }
-
-    exec->running = false;
-
-    return NULL;
-}
-
-/**
- * Select an executor using round-robin.
- */
-static int select_executor(void) {
-    int idx = atomic_fetch_add(&g_next_executor, 1) % g_num_executors;
-    return idx;
-}
-
-/**
- * Enqueue a request to a specific executor.
- */
-static void multi_executor_enqueue(int exec_id, py_request_t *req) {
-    executor_t *exec = &g_executors[exec_id];
-
-    pthread_mutex_lock(&exec->mutex);
-    req->next = NULL;
-    if (exec->queue_tail == NULL) {
-        exec->queue_head = req;
-        exec->queue_tail = req;
-    } else {
-        exec->queue_tail->next = req;
-        exec->queue_tail = req;
-    }
-    pthread_cond_signal(&exec->cond);
-    pthread_mutex_unlock(&exec->mutex);
-}
-
-/**
- * Start the multi-executor pool.
- */
-static int multi_executor_start(int num_executors) {
-    if (atomic_load(&g_multi_executor_initialized)) {
-        return 0;
-    }
-
-    if (num_executors < MIN_EXECUTORS) {
-        num_executors = MIN_EXECUTORS;
-    }
-    if (num_executors > MAX_EXECUTORS) {
-        num_executors = MAX_EXECUTORS;
-    }
-
-    g_num_executors = num_executors;
-
-    for (int i = 0; i < num_executors; i++) {
-        executor_t *exec = &g_executors[i];
-        exec->id = i;
-        exec->queue_head = NULL;
-        exec->queue_tail = NULL;
-        exec->running = false;
-        exec->shutdown = false;
-        pthread_mutex_init(&exec->mutex, NULL);
-        pthread_cond_init(&exec->cond, NULL);
-
-        if (pthread_create(&exec->thread, NULL, multi_executor_thread_main, exec) != 0) {
-            /* Cleanup already created threads */
-            for (int j = 0; j < i; j++) {
-                g_executors[j].shutdown = true;
-                pthread_cond_signal(&g_executors[j].cond);
-                pthread_join(g_executors[j].thread, NULL);
-                pthread_mutex_destroy(&g_executors[j].mutex);
-                pthread_cond_destroy(&g_executors[j].cond);
-            }
-            return -1;
-        }
-    }
-
-    /* Wait for all executors to be ready */
-    int max_wait = 100;
-    bool all_ready = false;
-    while (!all_ready && max_wait-- > 0) {
-        all_ready = true;
-        for (int i = 0; i < num_executors; i++) {
-            if (!g_executors[i].running) {
-                all_ready = false;
-                break;
-            }
-        }
-        if (!all_ready) {
-            usleep(10000);
-        }
-    }
-
-    atomic_store(&g_multi_executor_initialized, all_ready);
-    return all_ready ? 0 : -1;
-}
-
-/**
- * Stop the multi-executor pool.
- */
-static void multi_executor_stop(void) {
-    if (!atomic_load(&g_multi_executor_initialized)) {
-        return;
-    }
-
-    /* Allocate shutdown requests for all executors */
-    py_request_t *shutdown_reqs[MAX_EXECUTORS] = {0};
-
-    /* Signal shutdown and send shutdown requests to all executors */
-    for (int i = 0; i < g_num_executors; i++) {
-        executor_t *exec = &g_executors[i];
-        exec->shutdown = true;
-
-        py_request_t *shutdown_req = enif_alloc(sizeof(py_request_t));
-        if (shutdown_req != NULL) {
-            request_init(shutdown_req);
-            shutdown_req->type = PY_REQ_SHUTDOWN;
-            shutdown_reqs[i] = shutdown_req;
-            multi_executor_enqueue(i, shutdown_req);
-        }
-        /* If alloc fails, the shutdown flag is already set, so executor
-         * will exit when it checks the flag */
-    }
-
-    /* Wait for all executors to finish and clean up shutdown requests */
-    for (int i = 0; i < g_num_executors; i++) {
-        executor_t *exec = &g_executors[i];
-        pthread_join(exec->thread, NULL);
-        pthread_mutex_destroy(&exec->mutex);
-        pthread_cond_destroy(&exec->cond);
-
-        /* Clean up the shutdown request */
-        if (shutdown_reqs[i] != NULL) {
-            request_cleanup(shutdown_reqs[i]);
-            enif_free(shutdown_reqs[i]);
-        }
-    }
-
-    atomic_store(&g_multi_executor_initialized, false);
-}
-
 /*
  * Note: Free-threaded execution (Python 3.13+ nogil) is handled inline
  * in executor_enqueue() using PyGILState_Ensure/Release which are no-ops
  * in free-threaded builds but still work correctly.
  */
-
-/* ============================================================================
- * Context dispatch to executor
- *
- * When a context has thread affinity (executor_id >= 0), we dispatch
- * operations through the executor queue instead of executing directly
- * on the dirty scheduler. This ensures numpy/torch thread-local state
- * consistency.
- * ============================================================================ */
-
-/**
- * Dispatch a context call operation to the executor.
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param module_bin Module name binary
- * @param func_bin Function name binary
- * @param args_term Arguments list
- * @param kwargs_term Keyword arguments map
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_call(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *module_bin, ErlNifBinary *func_bin,
-                                    ERL_NIF_TERM args_term, ERL_NIF_TERM kwargs_term) {
-    py_request_t req;
-    request_init(&req);
-
-    req.type = PY_REQ_CALL;
-    req.env = env;
-    req.worker = NULL;
-    req.context = ctx;
-    req.module_bin = *module_bin;
-    req.func_bin = *func_bin;
-    req.args_term = args_term;
-    req.kwargs_term = kwargs_term;
-    req.timeout_ms = 0;
-
-    if (executor_enqueue(&req) < 0) {
-        request_cleanup(&req);
-        return make_error(env, "executor_shutdown");
-    }
-
-    executor_wait(&req);
-    ERL_NIF_TERM result = req.result;
-    request_cleanup(&req);
-
-    return result;
-}
-
-/**
- * Dispatch a context eval operation to the executor.
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param code_bin Code string binary
- * @param locals_term Local variables map
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_eval(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *code_bin, ERL_NIF_TERM locals_term) {
-    py_request_t req;
-    request_init(&req);
-
-    req.type = PY_REQ_EVAL;
-    req.env = env;
-    req.worker = NULL;
-    req.context = ctx;
-    req.code_bin = *code_bin;
-    req.locals_term = locals_term;
-    req.timeout_ms = 0;
-
-    if (executor_enqueue(&req) < 0) {
-        request_cleanup(&req);
-        return make_error(env, "executor_shutdown");
-    }
-
-    executor_wait(&req);
-    ERL_NIF_TERM result = req.result;
-    request_cleanup(&req);
-
-    return result;
-}
-
-/**
- * Dispatch a context exec operation to the executor.
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param code_bin Code string binary
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_exec(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *code_bin) {
-    py_request_t req;
-    request_init(&req);
-
-    req.type = PY_REQ_EXEC;
-    req.env = env;
-    req.worker = NULL;
-    req.context = ctx;
-    req.code_bin = *code_bin;
-    req.timeout_ms = 0;
-
-    if (executor_enqueue(&req) < 0) {
-        request_cleanup(&req);
-        return make_error(env, "executor_shutdown");
-    }
-
-    executor_wait(&req);
-    ERL_NIF_TERM result = req.result;
-    request_cleanup(&req);
-
-    return result;
-}

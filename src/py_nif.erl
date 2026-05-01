@@ -659,13 +659,12 @@ owngil_apply_paths(_WorkerId, _HandleId, _Paths) ->
 %% @doc Get Python capability (internal use).
 %% Returns the detected Python runtime capability:
 %% - free_threaded: Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - subinterp: Python 3.12+ with per-interpreter GIL support
-%% - multi_executor: Traditional Python with executor threads
+%% - gil: Conventional GIL build (any other supported version)
 %%
 %% For public execution mode, use py:execution_mode/0 which returns
 %% `worker | owngil' based on the application configuration.
 %% @private
--spec execution_mode() -> free_threaded | subinterp | multi_executor.
+-spec execution_mode() -> free_threaded | gil.
 execution_mode() ->
     ?NIF_STUB.
 

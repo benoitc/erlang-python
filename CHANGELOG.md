@@ -17,6 +17,28 @@
   application configuration. Previously returned internal capabilities like
   `free_threaded`, `subinterp`, or `multi_executor`.
 
+- **Removed `py:async_stream/3,4`** - Streaming async generators was never
+  implemented behind the API and always returned `{error, stream_not_implemented}`.
+  Use `py:stream_start/3,4` for sync generators; async-generator support may
+  return in a later release.
+
+- **Removed `num_executors` / `num_async_workers` configuration** - Both keys
+  were no-ops after the v3.0 worker rework. Configure context count via
+  `num_contexts` and the rate-limit ceiling via `max_concurrent`.
+
+### Fixed
+
+- **`py:async_call/3,4` + `py:async_await/1,2` round-trip** - Previously the
+  await receive matched `{py_response, _, _}` while the event loop sent
+  `{async_result, _, _}`, causing every async call to silently time out.
+  Async calls now go directly through `py_event_loop:create_task` and
+  `py_event_loop:await`.
+
+- **`py:async_gather/1,2` actually executes** - Reimplemented as concurrent
+  `async_call` submission with sequential `async_await`. Returns
+  `{ok, [Result1, ...]}` on success or `{error, {gather_failed, [{Idx, Reason}, ...]}}`
+  if any call fails. The previous implementation returned `gather_not_implemented`.
+
 ### Changed
 
 - **Per-context worker threads** - Each context now gets its own dedicated pthread
@@ -34,6 +56,7 @@
 - Multi-executor pool (`g_executors[]`, `multi_executor_start/stop`)
 - `context_dispatch_call/eval/exec` functions (dead code)
 - References to `PY_MODE_MULTI_EXECUTOR` in context operations
+- `py_async_pool` legacy gen_server (unused after async API rewire)
 
 ## 2.3.1 (2026-04-01)
 

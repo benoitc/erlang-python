@@ -119,5 +119,5 @@ py_preload:clear_code().
 ## Limitations
 
 - Changes to preload code don't affect existing contexts
-- Same preload applies to all context modes (worker, subinterp, owngil)
+- Same preload applies to both context modes (worker, owngil)
 - Preload errors during context creation will fail the context

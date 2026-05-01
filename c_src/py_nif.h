@@ -179,20 +179,13 @@ typedef enum {
     PY_MODE_FREE_THREADED,
 
     /**
-     * @brief Sub-interpreter mode (Python 3.12+)
+     * @brief Conventional GIL mode (every other supported build)
      *
-     * Each sub-interpreter has its own GIL, allowing parallel execution
-     * across interpreters while maintaining GIL semantics within each.
+     * Coordinator-side work runs through the single executor thread.
+     * Per-context worker / OWN_GIL pthreads handle the public context
+     * APIs directly; this mode label only governs the coordinator path.
      */
-    PY_MODE_SUBINTERP,
-
-    /**
-     * @brief Multi-executor mode (all Python versions)
-     *
-     * Multiple executor threads share the GIL using a work-stealing
-     * pattern. This is the fallback mode for older Python versions.
-     */
-    PY_MODE_MULTI_EXECUTOR
+    PY_MODE_GIL
 } py_execution_mode_t;
 
 /** @} */
@@ -387,9 +380,6 @@ typedef struct {
 
     /** @brief Environment for building callback messages */
     ErlNifEnv *callback_env;
-
-    /** @brief Assigned executor ID for thread affinity (-1 = round-robin) */
-    int executor_id;
 } py_worker_t;
 
 /* async_pending_t and py_async_worker_t removed - async workers replaced by event loop model */
@@ -1047,9 +1037,6 @@ struct py_context {
 
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
-
-    /** @brief Assigned executor ID for thread affinity (-1 = not assigned) */
-    int executor_id;
 };
 
 /* ============================================================================
@@ -1357,63 +1344,6 @@ typedef struct {
 /** @} */
 
 /* ============================================================================
- * Executor Pool
- * ============================================================================ */
-
-/**
- * @defgroup executor Executor Pool
- * @brief Multi-executor thread pool for GIL management
- * @{
- */
-
-/**
- * @def MIN_EXECUTORS
- * @brief Minimum number of executor threads in the pool
- */
-#define MIN_EXECUTORS 2
-
-/**
- * @def MAX_EXECUTORS
- * @brief Maximum number of executor threads in the pool
- */
-#define MAX_EXECUTORS 32
-
-/**
- * @struct executor_t
- * @brief Single executor thread in the multi-executor pool
- *
- * Each executor has its own request queue and processes requests
- * independently. The GIL is acquired/released around queue operations.
- */
-typedef struct {
-    /** @brief Executor thread handle */
-    pthread_t thread;
-
-    /** @brief Mutex protecting the request queue */
-    pthread_mutex_t mutex;
-
-    /** @brief Condition variable for queue signaling */
-    pthread_cond_t cond;
-
-    /** @brief Head of request queue */
-    struct py_request *queue_head;
-
-    /** @brief Tail of request queue */
-    struct py_request *queue_tail;
-
-    /** @brief Flag: executor is running */
-    volatile bool running;
-
-    /** @brief Flag: executor should shut down */
-    volatile bool shutdown;
-
-    /** @brief Executor ID (0 to MAX_EXECUTORS-1) */
-    int id;
-} executor_t;
-
-/** @} */
-
-/* ============================================================================
  * Global State Declarations
  * ============================================================================ */
 
@@ -1519,18 +1449,6 @@ extern PyThreadState *g_main_thread_state;
 
 /** @brief Current execution mode */
 extern py_execution_mode_t g_execution_mode;
-
-/** @brief Number of active executors */
-extern int g_num_executors;
-
-/** @brief Multi-executor pool array */
-extern executor_t g_executors[MAX_EXECUTORS];
-
-/** @brief Round-robin counter for executor selection */
-extern _Atomic int g_next_executor;
-
-/** @brief Flag: multi-executor pool is initialized (atomic for thread-safe access) */
-extern _Atomic bool g_multi_executor_initialized;
 
 /* Single executor state */
 
@@ -1996,90 +1914,6 @@ static int executor_start(void);
  * Sends shutdown request and waits for thread to terminate.
  */
 static void executor_stop(void);
-
-/**
- * @brief Main function for multi-executor threads
- *
- * Thread entry point for executor pool threads. Processes
- * requests from its queue until shutdown.
- *
- * @param arg Pointer to executor_t for this thread
- * @return NULL
- */
-static void *multi_executor_thread_main(void *arg);
-
-/**
- * @brief Start the multi-executor pool
- *
- * Creates and starts num_executors threads.
- *
- * @param num_executors Number of executors (capped at MAX_EXECUTORS)
- * @return 0 on success, -1 on failure
- */
-static int multi_executor_start(int num_executors);
-
-/**
- * @brief Stop the multi-executor pool
- *
- * Signals shutdown and waits for all executor threads.
- */
-static void multi_executor_stop(void);
-
-/**
- * @brief Select an executor using round-robin
- *
- * @return Executor index (0 to g_num_executors-1)
- */
-static int select_executor(void);
-
-/**
- * @brief Submit a request to a specific executor
- *
- * @param exec_id Executor index
- * @param req Request to submit
- */
-static void multi_executor_enqueue(int exec_id, struct py_request *req);
-
-/**
- * @brief Dispatch a context call operation to the executor
- *
- * Used when a context has thread affinity (executor_id >= 0) to ensure
- * numpy/torch thread-local state consistency.
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param module_bin Module name binary
- * @param func_bin Function name binary
- * @param args_term Arguments list
- * @param kwargs_term Keyword arguments map
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_call(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *module_bin, ErlNifBinary *func_bin,
-                                    ERL_NIF_TERM args_term, ERL_NIF_TERM kwargs_term);
-
-/**
- * @brief Dispatch a context eval operation to the executor
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param code_bin Code string binary
- * @param locals_term Local variables map
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_eval(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *code_bin, ERL_NIF_TERM locals_term);
-
-/**
- * @brief Dispatch a context exec operation to the executor
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param code_bin Code string binary
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_exec(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *code_bin);
 
 /** @} */
 

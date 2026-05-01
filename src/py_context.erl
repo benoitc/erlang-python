@@ -125,7 +125,7 @@ stop(Ctx) when is_pid(Ctx) ->
 %% @doc Create a new context with options map.
 %%
 %% Options:
-%% - `mode' - Context mode (worker | subinterp | owngil), default: worker
+%% - `mode' - Context mode (worker | owngil), default: worker
 %%
 %% @param Opts Options map
 %% @returns {ok, Pid} | {error, Reason}

@@ -31,33 +31,6 @@
  * ============================================================================ */
 
 /**
- * @brief Down callback for py_shared_dict_t
- *
- * Called when the owning process dies. Sets destroyed flag and clears the dict.
- * This callback is invoked by the runtime when the monitored process terminates.
- */
-static void shared_dict_down(ErlNifEnv *env, void *obj,
-                              ErlNifPid *pid, ErlNifMonitor *mon) {
-    (void)env;
-    (void)pid;
-    (void)mon;
-    py_shared_dict_t *sd = (py_shared_dict_t *)obj;
-
-    /* Mark as destroyed - subsequent access will return badarg */
-    atomic_store(&sd->destroyed, true);
-    sd->monitor_active = false;
-
-    /* Clear the Python dict if runtime is still running */
-    if (runtime_is_running() && sd->dict != NULL) {
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        pthread_mutex_lock(&sd->mutex);
-        Py_CLEAR(sd->dict);
-        pthread_mutex_unlock(&sd->mutex);
-        PyGILState_Release(gstate);
-    }
-}
-
-/**
  * @brief Destructor for py_shared_dict_t
  *
  * Called when the resource is garbage collected.

@@ -266,38 +266,33 @@ ok = py:deactivate_venv().
 
 ### Context Modes
 
-When creating explicit contexts, you can choose different execution modes:
+When creating explicit contexts, you can choose between the two public modes:
 
 ```erlang
-%% Worker mode (default, recommended) - main interpreter
-%% With free-threaded Python (3.13t+), provides true parallelism automatically
+%% Worker mode (default) - dedicated pthread per context, main interpreter
 {ok, Ctx} = py_context:new(#{mode => worker}).
 
-%% SHARED_GIL sub-interpreter (Python 3.12+) - isolated namespace
-{ok, Ctx} = py_context:new(#{mode => subinterp}).
-
-%% OWN_GIL sub-interpreter (Python 3.14+) - true parallelism
+%% OWN_GIL mode (Python 3.14+) - dedicated pthread + subinterpreter with own GIL
 {ok, Ctx} = py_context:new(#{mode => owngil}).
 ```
 
 | Mode | Python | Description |
 |------|--------|-------------|
-| `worker` | Any | Main interpreter, shared namespace (default, recommended) |
-| `subinterp` | 3.12+ | SHARED_GIL sub-interpreter, isolated namespace |
-| `owngil` | 3.14+ | OWN_GIL sub-interpreter, each has own GIL |
+| `worker` | Any | Dedicated pthread per context, main interpreter namespace (default) |
+| `owngil` | 3.14+ | Dedicated pthread + subinterpreter with its own GIL, true parallelism |
 
-**Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available.
+**Worker mode is recommended** because it works with any Python version, provides stable thread affinity for libraries with thread-local state (numpy, torch, tensorflow), and automatically benefits from free-threaded Python (3.13t+) when available.
 
-**Why OWN_GIL requires Python 3.14+**: C extensions like `_decimal`, `numpy` have global state bugs in sub-interpreters on Python 3.12/3.13. These are fixed in Python 3.14. SHARED_GIL mode works on 3.12+ but some C extensions may have issues.
+**Why OWN_GIL requires Python 3.14+**: C extensions like `_decimal`, `numpy` have global state bugs in sub-interpreters on Python 3.12/3.13. These are fixed in Python 3.14.
 
 ### Runtime Detection
 
 Check the current execution mode:
 
 ```erlang
-%% See how Python is being executed
+%% Mirrors the context_mode application env
 py:execution_mode().
-%% => free_threaded | subinterp | multi_executor
+%% => worker | owngil
 
 %% Check rate limiting status
 py_semaphore:max_concurrent().  %% Maximum concurrent calls

@@ -78,9 +78,13 @@ Ctx2 = py:context(2),
 ```erlang
 {erlang_python, [
     {context_mode, worker},  %% worker | owngil
-    {num_contexts, 8}        %% Number of contexts to create
+    {num_contexts, 8},       %% Number of contexts to create
+    {max_concurrent, 17}     %% Optional rate-limit ceiling
 ]}
 ```
+
+`num_executors` and `num_async_workers` were both removed in v3.0; the
+supervisor no longer reads them.
 
 ### Python Version Compatibility
 
@@ -614,21 +618,24 @@ async def async_handler():
 
 ### Async Task API (Erlang Side)
 
-Submit and manage async Python tasks from Erlang:
+Submit and manage async Python tasks from Erlang. Tasks always run on the
+shared `py_event_loop`; routing happens via `py_event_loop_pool` for the
+pool-based variant. The `(Module, Func, Args[, Opts/Kwargs])` signature does
+not take a context — coroutines are scheduled on the loop, not on a context.
 
 ```erlang
 %% Blocking run
-{ok, Result} = py_event_loop:run(Ctx, my_module, my_async_func, [Arg1]).
+{ok, Result} = py_event_loop:run(my_module, my_async_func, [Arg1]).
 
 %% Non-blocking with reference
-Ref = py_event_loop:create_task(Ctx, my_module, my_async_func, [Arg1]),
+Ref = py_event_loop:create_task(my_module, my_async_func, [Arg1]),
 {ok, Result} = py_event_loop:await(Ref, 5000).
 
 %% Fire-and-forget
-py_event_loop:spawn_task(Ctx, my_module, my_async_func, [Arg1]).
+py_event_loop:spawn_task(my_module, my_async_func, [Arg1]).
 
 %% Message-based result delivery
-Ref = py_event_loop:create_task(Ctx, my_module, my_async_func, [Arg1]),
+Ref = py_event_loop:create_task(my_module, my_async_func, [Arg1]),
 receive
     {async_result, Ref, {ok, Result}} -> handle(Result);
     {async_result, Ref, {error, Reason}} -> handle_error(Reason)

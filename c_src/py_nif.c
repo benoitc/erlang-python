@@ -140,13 +140,7 @@ _Atomic py_runtime_state_t g_runtime_state = PY_STATE_UNINIT;
 PyThreadState *g_main_thread_state = NULL;
 
 /* Execution mode */
-py_execution_mode_t g_execution_mode = PY_MODE_MULTI_EXECUTOR;
-int g_num_executors = 4;
-
-/* Multi-executor pool */
-executor_t g_executors[MAX_EXECUTORS];
-_Atomic int g_next_executor = 0;
-_Atomic bool g_multi_executor_initialized = false;
+py_execution_mode_t g_execution_mode = PY_MODE_GIL;
 
 /* Single executor state */
 pthread_t g_executor_thread;
@@ -1146,17 +1140,8 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
      * Context operations use per-context worker threads (see worker_context_init).
      * The single executor handles legacy worker API and coordinator tasks. */
     int executor_result = 0;
-    switch (g_execution_mode) {
-        case PY_MODE_FREE_THREADED:
-            /* No executor needed - direct execution */
-            break;
-
-        case PY_MODE_SUBINTERP:
-        case PY_MODE_MULTI_EXECUTOR:
-        default:
-            /* Use single executor for coordinator operations */
-            executor_result = executor_start();
-            break;
+    if (g_execution_mode != PY_MODE_FREE_THREADED) {
+        executor_result = executor_start();
     }
 
     if (executor_result < 0) {
@@ -1205,16 +1190,8 @@ static ERL_NIF_TERM nif_finalize(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
      */
 
     /* Step 1: Stop executor - it will finish in-flight requests and exit */
-    switch (g_execution_mode) {
-        case PY_MODE_FREE_THREADED:
-            /* No executor to stop */
-            break;
-
-        case PY_MODE_SUBINTERP:
-        case PY_MODE_MULTI_EXECUTOR:
-        default:
-            executor_stop();
-            break;
+    if (g_execution_mode != PY_MODE_FREE_THREADED) {
+        executor_stop();
     }
 
     /* Step 2: Clean up thread worker system */
@@ -1309,11 +1286,6 @@ static ERL_NIF_TERM nif_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
     worker->callback_pipe[1] = -1;
     worker->has_callback_handler = false;
     worker->callback_env = NULL;
-
-    /* Assign executor affinity for thread-safe library support (numpy, torch).
-     * Each worker gets a fixed executor to ensure all calls from the same
-     * worker go to the same thread, preventing thread state corruption. */
-    worker->executor_id = select_executor();
 
     PyGILState_Release(gstate);
 
@@ -1731,19 +1703,9 @@ static ERL_NIF_TERM nif_execution_mode(ErlNifEnv *env, int argc, const ERL_NIF_T
     (void)argc;
     (void)argv;
 
-    const char *mode_str;
-    switch (g_execution_mode) {
-        case PY_MODE_FREE_THREADED:
-            mode_str = "free_threaded";
-            break;
-        case PY_MODE_SUBINTERP:
-            mode_str = "subinterp";
-            break;
-        case PY_MODE_MULTI_EXECUTOR:
-        default:
-            mode_str = "multi_executor";
-            break;
-    }
+    const char *mode_str = (g_execution_mode == PY_MODE_FREE_THREADED)
+                           ? "free_threaded"
+                           : "gil";
     return enif_make_atom(env, mode_str);
 }
 
@@ -2301,20 +2263,13 @@ static void ctx_queue_cancel_all(py_context_t *ctx) {
 }
 
 /* ============================================================================
- * Legacy execute functions (use context fields for compatibility)
+ * OWN_GIL execute helpers
  *
- * These functions read from ctx->shared_env/request_term and write to
- * ctx->response_term/response_ok. The new queue-based approach populates
- * these fields from the dequeued request for compatibility.
- *
- * TODO: Refactor these to take ctx_request_t* directly in a future phase.
+ * Each OWN_GIL worker thread dequeues a ctx_request_t and copies the request
+ * fields onto the owning context (ctx->shared_env, ctx->request_term, etc.)
+ * before calling these helpers. Helpers consume those fields and write the
+ * response back into ctx->response_term / ctx->response_ok.
  * ============================================================================ */
-
-/* Thread-local for current request being processed (for compatibility layer) */
-static __thread ErlNifEnv *tl_current_req_env = NULL;
-static __thread ERL_NIF_TERM tl_current_req_data = 0;
-static __thread ERL_NIF_TERM *tl_current_response = NULL;
-static __thread bool *tl_current_response_ok = NULL;
 
 /**
  * @brief Execute a call request in the OWN_GIL thread
@@ -4993,15 +4948,14 @@ static void owngil_context_shutdown(py_context_t *ctx) {
  * @brief Create a new Python context
  *
  * nif_context_create(Mode) -> {ok, ContextRef, InterpId} | {error, Reason}
- * Mode: subinterp | worker | owngil
- *
- * For subinterp mode: allocates a slot from the pre-created subinterpreter pool.
- * Execution happens on dirty schedulers using PyThreadState_Swap().
+ * Mode: worker | owngil
  *
  * For owngil mode: creates a dedicated pthread with an OWN_GIL subinterpreter.
  * This enables true parallel Python execution across contexts.
+ * Requires Python 3.14+; returns {error, owngil_requires_python314} otherwise.
  *
- * For worker mode: creates namespace in the main interpreter.
+ * For worker mode: creates a namespace in the main interpreter, dispatched
+ * through the context's dedicated worker pthread.
  */
 static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
@@ -5036,7 +4990,6 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
-    ctx->executor_id = -1;  /* Not assigned yet */
     ctx->uses_worker_thread = false;
 
     /* Create callback pipe for blocking callback responses */

@@ -75,8 +75,7 @@
     async_await/1,
     async_await/2,
     async_gather/1,
-    async_stream/3,
-    async_stream/4,
+    async_gather/2,
     %% Parallel execution (Python 3.12+ sub-interpreters)
     parallel/1,
     subinterp_supported/0,
@@ -319,7 +318,7 @@ eval(Code, Locals, Timeout) ->
 %%
 %% In worker mode, the code runs in a process-local Python environment.
 %% Variables defined via exec persist within the calling Erlang process.
-%% In subinterpreter mode, each context has its own isolated namespace.
+%% In owngil mode, each context has its own isolated namespace.
 -spec exec(string() | binary()) -> ok | {error, term()}.
 exec(Code) ->
     %% Always route through context process - it handles callbacks inline using
@@ -720,28 +719,33 @@ async_call(Module, Func, Args) ->
 %% @doc Call a Python async function with keyword arguments.
 -spec async_call(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
 async_call(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_call, Ref, self(), Module, Func, Args, Kwargs}),
-    Ref.
+    py_event_loop:create_task(Module, Func, Args, Kwargs).
 
 %% @doc Wait for an async call to complete.
 -spec async_await(py_ref()) -> py_result().
 async_await(Ref) ->
-    await(Ref, ?DEFAULT_TIMEOUT).
+    async_await(Ref, ?DEFAULT_TIMEOUT).
 
 %% @doc Wait for an async call with timeout.
-%% Note: Identical to await/2 - provided for API symmetry with async_call.
 -spec async_await(py_ref(), timeout()) -> py_result().
 async_await(Ref, Timeout) ->
-    await(Ref, Timeout).
+    py_event_loop:await(Ref, Timeout).
 
-%% @doc Execute multiple async calls concurrently using asyncio.gather.
-%% Takes a list of {Module, Func, Args} tuples and executes them all
-%% concurrently, returning when all are complete.
+%% @doc Execute multiple async Python calls concurrently.
+%%
+%% Each call is submitted to the event loop independently, so they run
+%% concurrently. Results are collected in the order of the input list.
+%% Sync functions are accepted and resolve immediately (the event loop
+%% short-circuits non-coroutines).
+%%
+%% Returns `{ok, [Result1, Result2, ...]}' when every call succeeds, where
+%% each `ResultN' is the value returned by the corresponding call.
+%% Returns `{error, {gather_failed, Errors}}' if any call fails, where
+%% `Errors' is a list of `{Index, Reason}' tuples for each failure.
 %%
 %% Example:
 %% ```
-%% {ok, Results} = py:async_gather([
+%% {ok, [R1, R2, R3]} = py:async_gather([
 %%     {aiohttp, get, [Url1]},
 %%     {aiohttp, get, [Url2]},
 %%     {aiohttp, get, [Url3]}
@@ -749,37 +753,21 @@ async_await(Ref, Timeout) ->
 %% '''
 -spec async_gather([{py_module(), py_func(), py_args()}]) -> py_result().
 async_gather(Calls) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_gather, Ref, self(), Calls}),
-    async_await(Ref, ?DEFAULT_TIMEOUT).
+    async_gather(Calls, ?DEFAULT_TIMEOUT).
 
-%% @doc Stream results from a Python async generator.
-%% Returns a list of all yielded values.
--spec async_stream(py_module(), py_func(), py_args()) -> py_result().
-async_stream(Module, Func, Args) ->
-    async_stream(Module, Func, Args, #{}).
-
-%% @doc Stream results from a Python async generator with kwargs.
--spec async_stream(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
-async_stream(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_stream, Ref, self(), Module, Func, Args, Kwargs}),
-    async_stream_collect(Ref, []).
-
-%% @private
-async_stream_collect(Ref, Acc) ->
-    receive
-        {py_response, Ref, {ok, Result}} ->
-            %% Got final result (async generator collected)
-            {ok, Result};
-        {py_chunk, Ref, Chunk} ->
-            async_stream_collect(Ref, [Chunk | Acc]);
-        {py_end, Ref} ->
-            {ok, lists:reverse(Acc)};
-        {py_error, Ref, Error} ->
-            {error, Error}
-    after ?DEFAULT_TIMEOUT ->
-        {error, timeout}
+%% @doc Like async_gather/1 with explicit per-call timeout.
+-spec async_gather([{py_module(), py_func(), py_args()}], timeout()) -> py_result().
+async_gather(Calls, Timeout) when is_list(Calls) ->
+    Refs = [async_call(M, F, A) || {M, F, A} <- Calls],
+    Results = [async_await(R, Timeout) || R <- Refs],
+    Errors = [{Idx, Reason}
+              || {Idx, {error, Reason}} <- lists:zip(lists:seq(1, length(Results)), Results)],
+    case Errors of
+        [] ->
+            Values = [V || {ok, V} <- Results],
+            {ok, Values};
+        _ ->
+            {error, {gather_failed, Errors}}
     end.
 
 %%% ============================================================================
@@ -1485,7 +1473,7 @@ start_contexts() ->
 %%
 %% Options:
 %% - `contexts' - Number of contexts to create (default: number of schedulers)
-%% - `mode' - Context mode: `worker', `subinterp', or `owngil' (default: `worker')
+%% - `mode' - Context mode: `worker' or `owngil' (default: `worker')
 %%
 %% @param Opts Start options
 %% @returns {ok, [Context]} | {error, Reason}

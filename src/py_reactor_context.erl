@@ -79,7 +79,7 @@
 %% @doc Start a new py_reactor_context process.
 %%
 %% @param Id Unique identifier for this context
-%% @param Mode Context mode (worker, subinterp, owngil)
+%% @param Mode Context mode (worker, owngil)
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_link(pos_integer(), atom()) -> {ok, pid()} | {error, term()}.
 start_link(Id, Mode) ->
@@ -95,7 +95,7 @@ start_link(Id, Mode) ->
 %%               (useful for setting up protocol factory)
 %%
 %% @param Id Unique identifier for this context
-%% @param Mode Context mode (worker, subinterp, owngil)
+%% @param Mode Context mode (worker, owngil)
 %% @param Opts Options map
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_link(pos_integer(), atom(), map()) -> {ok, pid()} | {error, term()}.

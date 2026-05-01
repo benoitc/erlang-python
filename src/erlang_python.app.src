@@ -7,11 +7,7 @@
         kernel,
         stdlib
     ]},
-    {env, [
-        {num_workers, 4},
-        {python_path, ""},
-        {worker_timeout, 30000}
-    ]},
+    {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, [{"GitHub", "https://github.com/benoitc/erlang-python"}]},

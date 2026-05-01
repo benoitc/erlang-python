@@ -167,14 +167,10 @@ Ctx = py:context(1),
 
 ### Pool Size
 
-The subinterpreter pool size is configured at two levels:
-
-| Level | Default | Max |
-|-------|---------|-----|
-| **Erlang (py_context_router)** | `erlang:system_info(schedulers)` | configurable |
-| **C pool (py_subinterp_pool)** | 32 | 64 |
-
-On a typical 8-core machine, 8 context processes are started, each with one subinterpreter slot.
+`py_context_router` sizes the context pool from `num_contexts` (default
+`erlang:system_info(schedulers)`). Each context owns its own pthread; in
+`owngil` mode that thread also owns a dedicated subinterpreter. There is no
+shared C-level pool.
 
 **Configuration via sys.config:**
 ```erlang
@@ -271,8 +267,8 @@ For CPU-bound workloads on Python 3.12+, erlang_python provides true parallelism
 %% Check if subinterpreters are supported (Python 3.12+)
 true = py:subinterp_supported().
 
-%% Check current execution mode
-subinterp = py:execution_mode().
+%% Check current execution mode (mirrors context_mode app env)
+worker = py:execution_mode().  %% or owngil
 ```
 
 ### Using the Context Router
@@ -388,7 +384,10 @@ PYTHON_CONFIG=/path/to/python3.13-config rebar3 compile
 ```erlang
 1> application:ensure_all_started(erlang_python).
 2> py:execution_mode().
-free_threaded
+worker
+%% Free-threaded Python is detected internally; the public mode mirrors
+%% the configured context_mode (worker | owngil), and worker mode
+%% automatically benefits from the free-threaded build.
 ```
 
 ## Performance Tuning

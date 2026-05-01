@@ -16,10 +16,9 @@ evaluate expressions, and stream from generators - all without blocking Erlang
 schedulers.
 
 **Parallelism options:**
-- **Worker mode** (default, recommended) - Works with any Python version. With free-threaded Python (3.13t+), provides true parallelism automatically
-- **SHARED_GIL sub-interpreters** (Python 3.12+) - Isolated namespaces, shared GIL (isolation improves in 3.14+)
-- **OWN_GIL sub-interpreters** (Python 3.14+) - Each interpreter has its own GIL, true parallelism
-- **BEAM processes** - Fan out work across lightweight Erlang processes
+- **Worker mode** (default, recommended) - Works with any Python version. With free-threaded Python (3.13t+), provides true parallelism automatically.
+- **OWN_GIL sub-interpreters** (Python 3.14+) - Each interpreter has its own GIL, true parallelism.
+- **BEAM processes** - Fan out work across lightweight Erlang processes.
 
 Key features:
 - **Process-bound environments** - Each Erlang process gets isolated Python state, enabling OTP-supervised Python actors
@@ -302,14 +301,11 @@ Ref = py:async_call(aiohttp, get, [<<"https://api.example.com/data">>]),
 {ok, Response} = py:async_await(Ref).
 
 %% Gather multiple async calls concurrently
-{ok, Results} = py:async_gather([
+{ok, [Users, Posts, Comments]} = py:async_gather([
     {aiohttp, get, [<<"https://api.example.com/users">>]},
     {aiohttp, get, [<<"https://api.example.com/posts">>]},
     {aiohttp, get, [<<"https://api.example.com/comments">>]}
 ]).
-
-%% Stream from async generators
-{ok, Chunks} = py:async_stream(mymodule, async_generator, [args]).
 ```
 
 ## Parallel Execution with Sub-interpreters
@@ -328,7 +324,7 @@ True parallelism without GIL contention using Python 3.14+ OWN_GIL sub-interpret
 %% Each call runs in its own interpreter with its own GIL
 ```
 
-For Python 3.12/3.13, use SHARED_GIL sub-interpreters (`mode => subinterp`) for namespace isolation, but note that parallelism is limited by the shared GIL.
+For Python 3.12/3.13 the public modes are `worker` (default) and `owngil` (Python 3.14+ only). Earlier versions run all contexts under the shared main interpreter via dedicated worker threads — namespace isolation between contexts is local-dict based, not via subinterpreters.
 
 ## Parallel Processing with BEAM Processes
 
@@ -590,9 +586,9 @@ ok = py:clear_traces().
 %% sys.config
 [
   {erlang_python, [
-    {num_workers, 4},           %% Python worker pool size
-    {max_concurrent, 17},       %% Max concurrent operations (default: schedulers * 2 + 1)
-    {num_executors, 4}          %% Executor threads (multi-executor mode)
+    {num_contexts, 8},          %% Number of contexts (default: schedulers)
+    {context_mode, worker},     %% worker | owngil
+    {max_concurrent, 17}        %% Max concurrent operations (default: schedulers * 2 + 1)
   ]}
 ].
 ```
@@ -605,40 +601,34 @@ When creating Python contexts, you can choose the execution mode:
 
 | Mode | Python Version | Description |
 |------|----------------|-------------|
-| `worker` | Any | Main interpreter, shared namespace (default, recommended) |
-| `subinterp` | 3.12+ | SHARED_GIL sub-interpreter, isolated namespace |
-| `owngil` | 3.14+ | OWN_GIL sub-interpreter, true parallelism |
+| `worker` | Any | Dedicated pthread per context, main interpreter namespace (default) |
+| `owngil` | 3.14+ | Dedicated pthread + subinterpreter with its own GIL, true parallelism |
 
 ```erlang
 %% Default: worker mode (recommended)
 %% With free-threaded Python (3.13t+), provides true parallelism automatically
 {ok, Ctx} = py_context:new(#{}).
 
-%% Explicit subinterpreter with shared GIL (Python 3.12+)
-%% Provides namespace isolation but no parallelism
-{ok, Ctx} = py_context:new(#{mode => subinterp}).
-
 %% OWN_GIL mode for true parallelism (Python 3.14+ required)
 %% Each context runs in its own pthread with independent GIL
 {ok, Ctx} = py_context:new(#{mode => owngil}).
 ```
 
-**Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available.
+**Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available. Each context owns a dedicated pthread, providing stable thread affinity for libraries with thread-local state (numpy, torch, tensorflow).
 
-**Why OWN_GIL requires Python 3.14+**: Some C extensions (e.g., `_decimal`, `numpy`) have global state bugs in sub-interpreters on Python 3.12/3.13. These are fixed in Python 3.14. SHARED_GIL mode works on 3.12+ but with caveats for C extensions with global state.
+**Why OWN_GIL requires Python 3.14+**: Some C extensions (e.g., `_decimal`, `numpy`) have global state bugs in sub-interpreters on Python 3.12/3.13. These are fixed in Python 3.14.
 
 ### Runtime Detection
 
-Check the current execution mode:
+Check the current execution mode (mirrors the `context_mode` application env):
 ```erlang
-py:execution_mode().  %% => free_threaded | subinterp | multi_executor
+py:execution_mode().  %% => worker | owngil
 ```
 
 | Mode | Python Version | Parallelism |
 |------|----------------|-------------|
-| Free-threaded | 3.13+ (nogil) | True parallel, no GIL |
-| Sub-interpreter | 3.12+ | Per-interpreter GIL |
-| Multi-executor | Any | GIL contention |
+| `worker` (default) | Any | One pthread per context; true parallelism on free-threaded 3.13t+ |
+| `owngil` | 3.14+ | Per-interpreter GIL, true parallelism across contexts |
 
 ## Error Handling
 

@@ -87,14 +87,8 @@ Simple echo server using Reactor API.
 escript examples/reactor_echo.erl
 ```
 
-### reactor_subinterp_example.erl
-Reactor with subinterpreter isolation (Python 3.12+).
-```bash
-escript examples/reactor_subinterp_example.erl
-```
-
 ### reactor_owngil_example.erl
-Reactor with OWN_GIL subinterpreters (Python 3.12+).
+Reactor with OWN_GIL subinterpreters (Python 3.14+).
 ```bash
 escript examples/reactor_owngil_example.erl
 ```
@@ -122,7 +116,7 @@ escript examples/bench_channel.erl
 ```
 
 ### bench_reactor_modes.erl
-Reactor worker vs subinterpreter benchmark.
+Reactor worker vs OWN_GIL benchmark.
 ```bash
 escript examples/bench_reactor_modes.erl
 ```

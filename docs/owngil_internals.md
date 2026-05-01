@@ -4,7 +4,7 @@
 
 OWN_GIL mode provides true parallel Python execution using Python 3.14+ per-interpreter GIL (`PyInterpreterConfig_OWN_GIL`). Each OWN_GIL context runs in a dedicated pthread with its own subinterpreter and GIL.
 
-**Note**: OWN_GIL requires Python 3.14+ due to C extension global state bugs in earlier versions (e.g., `_decimal`, `numpy`). For Python 3.12/3.13, use SHARED_GIL sub-interpreters (`mode => subinterp`) which provide namespace isolation but share the GIL.
+**Note**: OWN_GIL requires Python 3.14+ due to C extension global state bugs in earlier versions (e.g., `_decimal`, `numpy`). On Python 3.12/3.13, use the default `worker` mode — contexts share the main interpreter but each owns a dedicated pthread.
 
 ## Quick Start
 
@@ -83,11 +83,10 @@ All major erlang_python features work with OWN_GIL mode:
 
 | Mode | Python Version | Thread Model | GIL | Parallelism |
 |------|----------------|--------------|-----|-------------|
-| `worker` | Any | Dirty scheduler | Main interpreter GIL | None |
-| `subinterp` | 3.12+ | Dirty scheduler | Shared GIL | None (isolated namespaces) |
-| `owngil` | 3.14+ | Dedicated pthread | Per-interpreter GIL | True parallel |
+| `worker` | Any | Dedicated pthread per context | Main interpreter GIL | True parallel on free-threaded 3.13t+ |
+| `owngil` | 3.14+ | Dedicated pthread per context | Per-interpreter GIL | True parallel |
 
-**Why version requirements differ**: The `subinterp` mode (SHARED_GIL) works on Python 3.12+ for namespace isolation. However, `owngil` mode requires Python 3.14+ because C extensions like `_decimal`, `numpy` have global state that crashes in OWN_GIL sub-interpreters on earlier versions. Python 3.14 includes fixes for these issues (see [cpython#106078](https://github.com/python/cpython/issues/106078)).
+**Why OWN_GIL requires Python 3.14+**: C extensions like `_decimal`, `numpy` have global state that crashes in OWN_GIL sub-interpreters on Python 3.12/3.13. Python 3.14 includes fixes for these issues (see [cpython#106078](https://github.com/python/cpython/issues/106078)).
 
 ## Key Data Structures
 
@@ -174,7 +173,7 @@ nif_context_call(env, ctx, module, func, args, kwargs)
     │       └── pthread_mutex_unlock(&ctx->request_mutex)
     │
     └── [ctx->uses_own_gil == false]
-        └── Direct execution with GIL (worker/subinterp mode)
+        └── Direct execution with GIL (worker mode)
 ```
 
 ### 3. Request Processing (OWN_GIL Thread)
@@ -438,7 +437,7 @@ Use OWN_GIL when:
 - Long-running computations
 - Need true concurrent Python execution
 
-Use shared-GIL (subinterp) when:
+Use worker mode when:
 - I/O-bound or short operations
 - High call frequency
 - Resource constraints
@@ -454,7 +453,7 @@ rebar3 compile && escript examples/bench_owngil.erl
 Example output:
 ```
 ========================================================
-  OWN_GIL vs SHARED_GIL Benchmark
+  OWN_GIL vs Worker Benchmark
 ========================================================
 
 System Information
@@ -462,25 +461,25 @@ System Information
   Erlang/OTP:       27
   Schedulers:       8
   Python:           3.14.0
-  Subinterp:        true
+  OWN_GIL:          true
 
 1. Single Context Latency (1000 calls to math.sqrt)
    Mode            us/call    calls/sec
    ----            -------    ---------
-   subinterp           2.5       400000
+   worker              2.5       400000
    owngil             10.2        98000
 
 2. Parallel Throughput (4 contexts, 10000 calls each)
    Mode            total_ms   calls/sec
    ----            --------   ---------
-   subinterp          100.5       398000
-   owngil              28.3      1415000   <- 3.5x faster
+   worker            100.5       398000
+   owngil             28.3      1415000   <- 3.5x faster
 
 3. CPU-Bound Speedup (fibonacci(30) x 4 contexts)
    Mode            total_ms   speedup
    ----            --------   -------
-   subinterp          800.2      1.0x
-   owngil             205.1      3.9x     <- near-linear scaling
+   worker            800.2      1.0x
+   owngil            205.1      3.9x     <- near-linear scaling
 ```
 
 ## Safety Mechanisms

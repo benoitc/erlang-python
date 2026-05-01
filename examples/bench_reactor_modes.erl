@@ -2,7 +2,7 @@
 %% -*- erlang -*-
 %%! -pa _build/default/lib/erlang_python/ebin
 
-%%% @doc Benchmark comparing Reactor (worker vs subinterp) with Channel API.
+%%% @doc Benchmark comparing Reactor (worker vs OWN_GIL) with Channel API.
 %%%
 %%% Run with:
 %%%   rebar3 compile && escript examples/bench_reactor_modes.erl
@@ -30,18 +30,18 @@ main(_Args) ->
     io:format("~n--- Reactor (Worker Mode) ---~n"),
     {WkPersistent, WkLifecycle} = run_reactor_worker_bench(),
 
-    %% Subinterpreter mode benchmarks (if supported)
-    {SiPersistent, SiLifecycle} = case py:subinterp_supported() of
+    %% OWN_GIL mode benchmarks (if supported)
+    {OgPersistent, OgLifecycle} = case py_nif:owngil_supported() of
         true ->
-            io:format("~n--- Reactor (Subinterpreter Mode) ---~n"),
-            run_reactor_subinterp_bench();
+            io:format("~n--- Reactor (OWN_GIL Mode) ---~n"),
+            run_reactor_owngil_bench();
         false ->
-            io:format("~n[Skipping subinterpreter benchmarks - Python < 3.12]~n"),
+            io:format("~n[Skipping OWN_GIL benchmarks - Python < 3.14]~n"),
             {[], []}
     end,
 
     %% Print comparison summary
-    print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, SiPersistent, SiLifecycle),
+    print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, OgPersistent, OgLifecycle),
 
     halt(0).
 
@@ -52,7 +52,7 @@ print_system_info() ->
     io:format("  Schedulers:       ~p~n", [erlang:system_info(schedulers)]),
     {ok, PyVer} = py:version(),
     io:format("  Python:           ~s~n", [PyVer]),
-    io:format("  Subinterp:        ~p~n", [py:subinterp_supported()]),
+    io:format("  OWN_GIL:          ~p~n", [py_nif:owngil_supported()]),
     io:format("~n").
 
 %% ============================================================================
@@ -290,10 +290,10 @@ recv_all(Socket, Remaining, Timeout, Acc) ->
     end.
 
 %% ============================================================================
-%% Reactor Subinterpreter Mode Benchmarks
+%% Reactor OWN_GIL Mode Benchmarks
 %% ============================================================================
 
-run_reactor_subinterp_bench() ->
+run_reactor_owngil_bench() ->
     %% Protocol that stays open for multiple messages
     PersistentSetup = <<"
 import erlang.reactor as reactor
@@ -340,7 +340,7 @@ reactor.set_protocol_factory(OneMessageProtocol)
         Data = binary:copy(<<$X>>, Size),
         Iterations = 500,
 
-        {ok, Ctx} = py_reactor_context:start_link(1900 + Size, subinterp, #{
+        {ok, Ctx} = py_reactor_context:start_link(1900 + Size, owngil, #{
             setup_code => PersistentSetup
         }),
 
@@ -387,7 +387,7 @@ reactor.set_protocol_factory(OneMessageProtocol)
         Data = binary:copy(<<$X>>, Size),
         Iterations = 100,
 
-        {ok, Ctx} = py_reactor_context:start_link(1800 + Size, subinterp, #{
+        {ok, Ctx} = py_reactor_context:start_link(1800 + Size, owngil, #{
             setup_code => LifecycleSetup
         }),
 
@@ -421,7 +421,7 @@ reactor.set_protocol_factory(OneMessageProtocol)
 %% Comparison Summary
 %% ============================================================================
 
-print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, SiPersistent, SiLifecycle) ->
+print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, OgPersistent, OgLifecycle) ->
     io:format("~n"),
     io:format("========================================================~n"),
     io:format("  COMPARISON SUMMARY~n"),
@@ -431,16 +431,16 @@ print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, SiPersist
     io:format("A) PERSISTENT CONNECTION (messages on existing connection)~n"),
     io:format("-----------------------------------------------------------~n"),
     io:format("~8s | ~12s | ~12s | ~12s~n",
-              ["Size", "Channel", "Reactor/W", "Reactor/S"]),
+              ["Size", "Channel", "Reactor/W", "Reactor/OG"]),
     io:format("~s~n", [string:copies("-", 52)]),
 
     lists:foreach(fun({{Size, _, ChOps}, {_, _, WkOps}}) ->
-        SubOps = case lists:keyfind(Size, 1, SiPersistent) of
+        OgOps = case lists:keyfind(Size, 1, OgPersistent) of
             {_, _, O} -> integer_to_list(O);
             false -> "N/A"
         end,
         io:format("~8B | ~12w | ~12w | ~12s~n",
-                  [Size, ChOps, WkOps, SubOps])
+                  [Size, ChOps, WkOps, OgOps])
     end, lists:zip(ChPersistent, WkPersistent)),
 
     %% Full lifecycle comparison (connections/sec including setup/teardown)
@@ -448,23 +448,23 @@ print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, SiPersist
     io:format("B) FULL LIFECYCLE (create + send/recv + close per op)~n"),
     io:format("-----------------------------------------------------------~n"),
     io:format("~8s | ~12s | ~12s | ~12s~n",
-              ["Size", "Channel", "Reactor/W", "Reactor/S"]),
+              ["Size", "Channel", "Reactor/W", "Reactor/OG"]),
     io:format("~s~n", [string:copies("-", 52)]),
 
     lists:foreach(fun({{Size, _, ChOps}, {_, _, WkOps}}) ->
-        SubOps = case lists:keyfind(Size, 1, SiLifecycle) of
+        OgOps = case lists:keyfind(Size, 1, OgLifecycle) of
             {_, _, O} -> integer_to_list(O);
             false -> "N/A"
         end,
         io:format("~8B | ~12w | ~12w | ~12s~n",
-                  [Size, ChOps, WkOps, SubOps])
+                  [Size, ChOps, WkOps, OgOps])
     end, lists:zip(ChLifecycle, WkLifecycle)),
 
     io:format("~n"),
     io:format("Legend:~n"),
-    io:format("  Channel   = py_channel API~n"),
-    io:format("  Reactor/W = erlang.reactor with worker mode~n"),
-    io:format("  Reactor/S = erlang.reactor with subinterpreter (SHARED_GIL)~n"),
+    io:format("  Channel    = py_channel API~n"),
+    io:format("  Reactor/W  = erlang.reactor with worker mode~n"),
+    io:format("  Reactor/OG = erlang.reactor with OWN_GIL subinterpreter~n"),
     io:format("~n"),
     io:format("Notes:~n"),
     io:format("  - A) measures throughput on persistent connection (best case)~n"),

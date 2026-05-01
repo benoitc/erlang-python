@@ -73,7 +73,7 @@ print_system_info() ->
     {ok, PyVer} = py:version(),
     io:format("~s~n", [PyVer]),
     io:format("  Execution Mode: ~p~n", [py:execution_mode()]),
-    io:format("  Num Executors: ~p~n", [py:num_executors()]),
+    io:format("  Num Contexts: ~p~n", [py_context_router:num_contexts()]),
     io:format("  Max Concurrent: ~p~n", [py_semaphore:max_concurrent()]),
     io:format("~n").
 
