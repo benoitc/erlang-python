@@ -98,8 +98,11 @@ static ERL_NIF_TERM nif_shared_dict_new(ErlNifEnv *env, int argc,
     }
     PyGILState_Release(gstate);
 
-    /* Note: Process monitoring disabled for now to debug crash
-     * SharedDict will be garbage collected when no references remain */
+    /* SharedDict is GC-scoped: the resource destructor runs once the
+     * last term reference is dropped (or at process exit), at which
+     * point the underlying Python dict is cleared. There is no
+     * per-process monitor — callers that want eager release must call
+     * shared_dict_destroy/1 explicitly. */
     sd->monitor_active = false;
 
     /* Create reference term and release our reference */
