@@ -784,19 +784,41 @@ typedef struct ctx_request {
 
 /**
  * @brief Create a new context request
+ *
+ * Rolls back partial state on any init failure: pthread_mutex_init,
+ * pthread_cond_init, or enif_alloc_env() can each fail under resource
+ * pressure. Returning NULL keeps callers safe — every call site
+ * already tests the result.
+ *
  * @return Newly allocated request with refcount=1, or NULL on failure
  */
 static inline ctx_request_t *ctx_request_create(void) {
     ctx_request_t *req = enif_alloc(sizeof(ctx_request_t));
-    if (req == NULL) return NULL;
-
+    if (req == NULL) {
+        return NULL;
+    }
     memset(req, 0, sizeof(ctx_request_t));
-    pthread_mutex_init(&req->mutex, NULL);
-    pthread_cond_init(&req->cond, NULL);
+
+    if (pthread_mutex_init(&req->mutex, NULL) != 0) {
+        enif_free(req);
+        return NULL;
+    }
+    if (pthread_cond_init(&req->cond, NULL) != 0) {
+        pthread_mutex_destroy(&req->mutex);
+        enif_free(req);
+        return NULL;
+    }
+    req->request_env = enif_alloc_env();
+    if (req->request_env == NULL) {
+        pthread_cond_destroy(&req->cond);
+        pthread_mutex_destroy(&req->mutex);
+        enif_free(req);
+        return NULL;
+    }
+
     atomic_store(&req->completed, false);
     atomic_store(&req->cancelled, false);
     atomic_store(&req->refcount, 1);
-    req->request_env = enif_alloc_env();
     req->result_env = NULL;  /* Created by worker when processing */
     req->next = NULL;
     req->async_mode = false;
