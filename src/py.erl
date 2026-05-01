@@ -1317,8 +1317,8 @@ clear_traces() ->
 %%% Ctx = py:context(),
 %%% {ok, Result} = py:call(Ctx, math, sqrt, [16]),
 %%%
-%%% %% Or bind a specific context to this process
-%%% ok = py:bind_context(py:context(1)),
+%%% %% Or bind a specific context to this process via the router
+%%% ok = py_context_router:bind_context(py:context(1)),
 %%% {ok, Result} = py:call(py:context(), math, sqrt, [16]).
 %%% '''
 %%% ============================================================================

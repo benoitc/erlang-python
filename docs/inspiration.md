@@ -139,7 +139,7 @@ Build TCP/UDP servers with Python protocol logic:
 
 ```erlang
 %% Erlang handles TCP accept and I/O scheduling
-{ok, Ctx} = py_reactor_context:start_link(1, auto),
+{ok, Ctx} = py_reactor_context:start_link(1, worker),
 
 py:exec(Ctx, <<"
 import erlang.reactor as reactor
@@ -312,8 +312,8 @@ Each Python context runs in isolation:
 
 ```erlang
 %% Multiple independent contexts
-{ok, Ctx1} = py_context:start_link(1, auto),
-{ok, Ctx2} = py_context:start_link(2, auto),
+{ok, Ctx1} = py_context:start_link(1, worker),
+{ok, Ctx2} = py_context:start_link(2, worker),
 
 %% Failures in Ctx1 don't affect Ctx2
 py:exec(Ctx1, <<"import dangerous_lib">>),
@@ -326,10 +326,10 @@ Separate pools prevent I/O from blocking compute:
 
 ```erlang
 %% CPU-bound pool (for ML inference)
-{ok, _} = py_pool:start_link(cpu_pool, #{size => 4}),
+{ok, _} = py_context_router:start_pool(cpu_pool, 4, owngil),
 
 %% I/O-bound pool (for API calls)
-{ok, _} = py_pool:start_link(io_pool, #{size => 16}),
+{ok, _} = py_context_router:start_pool(io_pool, 16, worker),
 
 %% Route accordingly
 py:call(cpu_pool, model, predict, [Data]),

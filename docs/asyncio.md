@@ -923,7 +923,7 @@ erlang.run(main())
 
 ## Async Worker Backend (Internal)
 
-The `py:async_call/3,4` and `py:await/1,2` APIs use an event-driven backend based on `py_event_loop`.
+The `py:async_call/3,4` and `py:async_await/1,2` APIs use an event-driven backend based on `py_event_loop`.
 
 ### Architecture
 
