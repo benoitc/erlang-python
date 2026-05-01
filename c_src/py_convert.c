@@ -95,13 +95,19 @@ static void shared_dict_capsule_destructor(PyObject *capsule) {
  * @return true if obj is a numpy ndarray, false otherwise
  */
 static inline bool is_numpy_ndarray(PyObject *obj) {
-    /* Use cached type for fast isinstance check when available.
-     * The cache is only valid in the main interpreter - subinterpreters
-     * have their own object space, so we fall back to attribute detection. */
-    if (g_numpy_ndarray_type != NULL && g_execution_mode != PY_MODE_SUBINTERP) {
+    /* The cache is populated in the main interpreter. On builds where
+     * subinterpreters can be created (and the runtime isn't free-threaded,
+     * which short-circuits subinterp use) a context may be running inside
+     * a subinterpreter where the cached type is invalid -- fall back to
+     * duck typing in that case. */
+#if defined(HAVE_SUBINTERPRETERS) && !defined(HAVE_FREE_THREADED)
+    /* Build supports subinterpreters and isn't free-threaded:
+     * skip the cached fast path. */
+#else
+    if (g_numpy_ndarray_type != NULL) {
         return PyObject_IsInstance(obj, g_numpy_ndarray_type) == 1;
     }
-
+#endif
     /* Fallback: duck typing via attribute detection.
      * Check for both 'tolist' method and 'ndim' attribute. */
     return PyObject_HasAttrString(obj, "tolist") &&

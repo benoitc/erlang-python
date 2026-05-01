@@ -4,30 +4,24 @@ This guide covers the scalability features of erlang_python, including execution
 
 ## Execution Modes
 
-erlang_python automatically detects the optimal execution mode based on your Python version:
+erlang_python supports two execution modes:
 
 ```erlang
 %% Check current execution mode
 py:execution_mode().
-%% => free_threaded | worker | owngil | multi_executor
-
-%% Check number of executor threads
-py:num_executors().
-%% => 4 (default)
+%% => worker | owngil
 ```
 
 ### Mode Comparison
 
-| Mode | Python Version | Parallelism | GIL Behavior | Best For |
-|------|----------------|-------------|--------------|----------|
-| **free_threaded** | 3.13+ (nogil build) | True N-way | None | Maximum throughput |
-| **owngil** | 3.14+ | True N-way | Per-interpreter (dedicated thread) | CPU-bound parallel |
-| **worker** | 3.12+ | GIL contention | Shared GIL | Default, compatibility |
-| **multi_executor** | < 3.12 | GIL contention | Shared, round-robin | I/O-bound, legacy |
+| Mode | Description | Parallelism | GIL Behavior | Best For |
+|------|-------------|-------------|--------------|----------|
+| **worker** | Dedicated pthread per context | GIL contention | Shared GIL | Default, maximum compatibility |
+| **owngil** | Dedicated pthread + subinterpreter | True N-way | Per-interpreter GIL | CPU-bound parallel (Python 3.14+) |
 
-### Free-Threaded Mode (Python 3.13+)
+### Worker Mode (Default)
 
-When running on a free-threaded Python build (compiled with `--disable-gil`), erlang_python executes Python calls directly without any executor routing. This provides maximum parallelism for CPU-bound workloads.
+Each context gets a dedicated pthread that handles all Python operations. This provides stable thread affinity, which is critical for libraries like numpy, torch, and tensorflow that maintain thread-local state.
 
 ### OWN_GIL Mode (Python 3.12+)
 
@@ -67,18 +61,6 @@ ok = py_nif:context_exec(CtxRef, <<"x = 42">>, Env),
 
 **See also:** [OWN_GIL Internals](owngil_internals.md) for architecture details.
 
-### Sub-interpreter Mode (Python 3.12+)
-
-Uses Python's sub-interpreter feature with a shared GIL pool. Multiple contexts share the GIL but have isolated namespaces. Best for high call frequency with low latency.
-
-**Architecture:**
-- Pool of pre-created subinterpreters with shared GIL
-- Execution on dirty schedulers with `PyThreadState_Swap`
-- Lower latency (~2.5μs) but no true parallelism
-- Best throughput for short operations
-
-**Note:** Each sub-interpreter has isolated state. Use the [Shared State](#shared-state) API to share data between workers.
-
 **Explicit Context Selection:**
 ```erlang
 %% Get a specific context by index (1-based)
@@ -89,58 +71,29 @@ Ctx = py:context(1),
 {ok, Result} = py:call(math, sqrt, [16]).
 ```
 
-### Multi-Executor Mode (Python < 3.12)
-
-Runs N executor threads that share the GIL. Requests are distributed round-robin across executors. Good for I/O-bound workloads where Python releases the GIL during I/O operations.
-
-**Thread Affinity:** In MULTI_EXECUTOR mode, both workers and contexts are assigned
-a fixed executor thread. This ensures libraries with thread-local state (numpy, torch,
-tensorflow) always run on the same OS thread, preventing segfaults and state corruption.
-
 ## Choosing the Right Mode
-
-### Mode Comparison
-
-| Aspect | Free-Threaded | OWN_GIL | Worker | Multi-Executor |
-|--------|---------------|---------|--------|----------------|
-| **Parallelism** | True N-way | True N-way | GIL contention | GIL contention |
-| **State Isolation** | Shared | Isolated | Shared | Shared |
-| **Memory Overhead** | Low | Higher (per-interp) | Low | Low |
-| **Module Compatibility** | Limited | Most modules | All modules | All modules |
-| **Python Version** | 3.13+ (nogil) | 3.14+ | 3.12+ | < 3.12 |
 
 ### When to Use Each Mode
 
-**Use Free-Threaded (Python 3.13t) when:**
-- You need maximum parallelism with shared state
-- Your libraries are GIL-free compatible
-- You're running CPU-bound workloads
-- Memory efficiency is important
+**Use Worker Mode (default) when:**
+- You need maximum module compatibility
+- Running libraries like numpy, torch, tensorflow
+- High call frequency with low latency
+- Shared state between contexts is needed
 
-**Use OWN_GIL (Python 3.14+) when:**
+**Use OWN_GIL Mode when:**
 - You need true CPU parallelism across Python contexts
 - Running long computations (ML inference, data processing)
 - Workload benefits from multiple independent Python interpreters
 - You can tolerate higher per-call latency for better throughput
 
-**Use Worker (Python 3.12+, default) when:**
-- You need high call frequency with low latency
-- Maximum module compatibility is required
-- Shared state between contexts is needed
-- Running libraries that don't support subinterpreters (torch, etc.)
-
-**Use Multi-Executor (Python < 3.12) when:**
-- Running on older Python versions
-- Your workload is I/O-bound (GIL released during I/O)
-- Thread affinity for numpy/torch is needed
-
 ### Pros and Cons
 
 **Worker Mode Pros:**
 - Maximum module compatibility (all C extensions work)
+- Stable thread affinity for numpy/torch/tensorflow
 - Low memory overhead (single interpreter)
 - Shared state between contexts
-- Default mode for Python 3.12+
 
 **Worker Mode Cons:**
 - GIL contention limits parallelism
@@ -155,17 +108,6 @@ tensorflow) always run on the same OS thread, preventing segfaults and state cor
 - Higher memory usage (each interpreter loads modules separately)
 - Some C extensions don't support subinterpreters
 - Requires Python 3.14+
-
-**Free-Threaded Mode Pros:**
-- True parallelism with shared state
-- Lower memory overhead than OWN_GIL
-- Simplest mental model (like regular threading)
-
-**Free-Threaded Mode Cons:**
-- Requires Python 3.13+ built with `--disable-gil`
-- Many C extensions not yet compatible
-- Shared state requires careful synchronization
-- Still experimental
 
 ## Subinterpreter Architecture
 
@@ -225,14 +167,10 @@ tensorflow) always run on the same OS thread, preventing segfaults and state cor
 
 ### Pool Size
 
-The subinterpreter pool size is configured at two levels:
-
-| Level | Default | Max |
-|-------|---------|-----|
-| **Erlang (py_context_router)** | `erlang:system_info(schedulers)` | configurable |
-| **C pool (py_subinterp_pool)** | 32 | 64 |
-
-On a typical 8-core machine, 8 context processes are started, each with one subinterpreter slot.
+`py_context_router` sizes the context pool from `num_contexts` (default
+`erlang:system_info(schedulers)`). Each context owns its own pthread; in
+`owngil` mode that thread also owns a dedicated subinterpreter. There is no
+shared C-level pool.
 
 **Configuration via sys.config:**
 ```erlang
@@ -308,14 +246,13 @@ This allows your application to implement backpressure or shed load gracefully.
         %% Default: erlang:system_info(schedulers) * 2 + 1
         {max_concurrent, 50},
 
-        %% Number of executor threads (multi_executor mode only)
-        %% Default: 4
-        {num_executors, 8},
+        %% Context mode: worker | owngil
+        %% Default: worker
+        {context_mode, worker},
 
-        %% Worker pool sizes
-        {num_workers, 4},
-        {num_async_workers, 2},
-        {num_subinterp_workers, 4}
+        %% Number of contexts
+        %% Default: erlang:system_info(schedulers)
+        {num_contexts, 8}
     ]}
 ].
 ```
@@ -330,8 +267,8 @@ For CPU-bound workloads on Python 3.12+, erlang_python provides true parallelism
 %% Check if subinterpreters are supported (Python 3.12+)
 true = py:subinterp_supported().
 
-%% Check current execution mode
-subinterp = py:execution_mode().
+%% Check current execution mode (mirrors context_mode app env)
+worker = py:execution_mode().  %% or owngil
 ```
 
 ### Using the Context Router
@@ -447,7 +384,10 @@ PYTHON_CONFIG=/path/to/python3.13-config rebar3 compile
 ```erlang
 1> application:ensure_all_started(erlang_python).
 2> py:execution_mode().
-free_threaded
+worker
+%% Free-threaded Python is detected internally; the public mode mirrors
+%% the configured context_mode (worker | owngil), and worker mode
+%% automatically benefits from the free-threaded build.
 ```
 
 ## Performance Tuning
@@ -460,9 +400,9 @@ free_threaded
 
 ### For I/O-Bound Workloads
 
-- Multi-executor mode works well (GIL released during I/O)
-- Increase `num_executors` to handle more concurrent I/O
+- Worker mode works well (GIL released during I/O)
 - Use asyncio integration for async I/O
+- Increase `num_contexts` for more concurrent I/O capacity
 
 ### For Mixed Workloads
 
@@ -481,8 +421,7 @@ io:format("Python load: ~.1f%~n", [Utilization]).
 
 %% Execution mode info
 Mode = py:execution_mode(),
-Executors = py:num_executors(),
-io:format("Mode: ~p, Executors: ~p~n", [Mode, Executors]).
+io:format("Mode: ~p~n", [Mode]).
 
 %% Memory stats
 {ok, Stats} = py:memory_stats(),

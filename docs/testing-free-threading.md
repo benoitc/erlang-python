@@ -99,10 +99,13 @@ rebar3 compile
 {ok, [erlang_python]}
 
 2> py:execution_mode().
-free_threaded  % Should show 'free_threaded' instead of 'subinterp' or 'multi_executor'
+worker  %% public mode, mirrors context_mode app env
 
-3> py:num_executors().
-1  % In free_threaded mode, no executor pool is used
+3> py_nif:execution_mode().
+free_threaded  %% internal capability — confirms the no-GIL build was detected
+
+4> py_context_router:num_contexts().
+8  %% one pthread per context
 ```
 
 ## Running Tests
@@ -180,21 +183,23 @@ Ensure `PYTHON_CONFIG` points to the free-threaded Python installation:
 ls $(dirname $(which python3))/../include/*/Python.h
 ```
 
-### Mode Shows 'multi_executor' Instead of 'free_threaded'
+### `py_nif:execution_mode/0` does not return `free_threaded`
 
 The Python build may not have `Py_GIL_DISABLED` defined. Verify:
 ```bash
 python3 -c "import sysconfig; print(sysconfig.get_config_var('Py_GIL_DISABLED'))"
 ```
 
-Should print `1` for free-threaded builds.
+Should print `1` for free-threaded builds. The public `py:execution_mode/0`
+will still return `worker | owngil` regardless — it reflects the configured
+context mode, not the underlying Python capability.
 
 ### Crashes Under Load
 
 Some extensions may not be thread-safe. Try:
 1. Isolate the problematic extension
 2. Check if a thread-safe version exists
-3. Fall back to sub-interpreter mode for those calls
+3. Switch to `owngil` mode (Python 3.14+) for stronger isolation
 
 ## See Also
 

@@ -7,7 +7,7 @@
 %%% Tests the new py_event_loop async task API:
 %%%   - py_event_loop:run/3,4 (blocking)
 %%%   - py_event_loop:create_task/3,4 + await (non-blocking)
-%%%   - py_event_loop:spawn/3,4 (fire-and-forget)
+%%%   - py_event_loop:spawn_task/3,4 (fire-and-forget)
 %%%
 %%% Run with:
 %%%   rebar3 compile && escript examples/bench_async_task.erl

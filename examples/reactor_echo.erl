@@ -25,7 +25,7 @@ main(_) ->
     io:format("~n=== Erlang Reactor Echo Server ===~n~n"),
 
     %% Start a reactor context
-    {ok, Ctx} = py_reactor_context:start_link(1, auto),
+    {ok, Ctx} = py_reactor_context:start_link(1, worker),
 
     %% Set up Python echo protocol
     ok = py:exec(Ctx, <<"

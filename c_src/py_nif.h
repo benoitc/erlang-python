@@ -179,20 +179,13 @@ typedef enum {
     PY_MODE_FREE_THREADED,
 
     /**
-     * @brief Sub-interpreter mode (Python 3.12+)
+     * @brief Conventional GIL mode (every other supported build)
      *
-     * Each sub-interpreter has its own GIL, allowing parallel execution
-     * across interpreters while maintaining GIL semantics within each.
+     * Coordinator-side work runs through the single executor thread.
+     * Per-context worker / OWN_GIL pthreads handle the public context
+     * APIs directly; this mode label only governs the coordinator path.
      */
-    PY_MODE_SUBINTERP,
-
-    /**
-     * @brief Multi-executor mode (all Python versions)
-     *
-     * Multiple executor threads share the GIL using a work-stealing
-     * pattern. This is the fallback mode for older Python versions.
-     */
-    PY_MODE_MULTI_EXECUTOR
+    PY_MODE_GIL
 } py_execution_mode_t;
 
 /** @} */
@@ -387,9 +380,6 @@ typedef struct {
 
     /** @brief Environment for building callback messages */
     ErlNifEnv *callback_env;
-
-    /** @brief Assigned executor ID for thread affinity (-1 = round-robin) */
-    int executor_id;
 } py_worker_t;
 
 /* async_pending_t and py_async_worker_t removed - async workers replaced by event loop model */
@@ -639,10 +629,10 @@ typedef struct {
     size_t result_len;
 
     /** @brief Flag: result is available for replay */
-    volatile bool has_result;
+    _Atomic bool has_result;
 
     /** @brief Flag: result represents an error */
-    volatile bool is_error;
+    _Atomic bool is_error;
 
     /* Synchronization */
 
@@ -664,40 +654,6 @@ typedef struct {
  * @brief Structures for Python 3.12+ sub-interpreters
  * @{
  */
-
-#ifdef HAVE_SUBINTERPRETERS
-/**
- * @struct py_subinterp_worker_t
- * @brief Worker running in an isolated sub-interpreter
- *
- * Sub-interpreters provide true isolation with their own GIL,
- * enabling parallel Python execution on Python 3.12+.
- *
- * The mutex ensures thread-safe access when multiple dirty scheduler
- * threads attempt to use the same worker concurrently.
- *
- * @note Only available when compiled with Python 3.12+
- *
- * @see nif_subinterp_worker_new
- * @see nif_subinterp_call
- */
-typedef struct {
-    /** @brief Mutex for thread-safe access from multiple dirty schedulers */
-    pthread_mutex_t mutex;
-
-    /** @brief Python interpreter state */
-    PyInterpreterState *interp;
-
-    /** @brief Thread state for this interpreter */
-    PyThreadState *tstate;
-
-    /** @brief Global namespace dictionary */
-    PyObject *globals;
-
-    /** @brief Local namespace dictionary */
-    PyObject *locals;
-} py_subinterp_worker_t;
-#endif
 
 /**
  * @enum py_cmd_type_t
@@ -740,6 +696,172 @@ typedef enum {
     CTX_REQ_APPLY_IMPORTS,      /**< Apply imports to module cache */
     CTX_REQ_APPLY_PATHS         /**< Apply paths to sys.path */
 } ctx_request_type_t;
+
+/**
+ * @struct ctx_request_t
+ * @brief Heap-allocated request for worker/owngil context queue
+ *
+ * Each request is heap-allocated with its own mutex/condvar for completion
+ * signaling. This replaces the single-slot pattern that had race conditions
+ * with multiple concurrent callers.
+ *
+ * Lifecycle:
+ * 1. Caller allocates request with ctx_request_create()
+ * 2. Caller fills in request data and copies terms to request_env
+ * 3. Caller enqueues request and increments refcount (now 2: caller + queue)
+ * 4. Worker dequeues request, processes it, fills result_env/result
+ * 5. Worker sends result via enif_send() and releases queue's ref
+ * 6. Caller receives result and releases its ref
+ * 7. When refcount hits 0, request is freed
+ *
+ * For OWN_GIL mode, the worker thread sends results via enif_send() to avoid
+ * blocking dirty schedulers. For worker mode (main interpreter), the same
+ * pattern is used for consistency.
+ */
+typedef struct ctx_request {
+    /** @brief Type of request */
+    ctx_request_type_t type;
+
+    /** @brief Per-request mutex for completion synchronization */
+    pthread_mutex_t mutex;
+
+    /** @brief Per-request condition for completion signaling */
+    pthread_cond_t cond;
+
+    /** @brief Set by worker when done (for blocking wait mode) */
+    _Atomic bool completed;
+
+    /** @brief Set by caller on timeout/destroy to skip processing */
+    _Atomic bool cancelled;
+
+    /* Request data (owned by this struct, not caller) */
+
+    /** @brief Environment for request terms (created by caller) */
+    ErlNifEnv *request_env;
+
+    /** @brief Request parameters (in request_env) */
+    ERL_NIF_TERM request_data;
+
+    /** @brief Process-local env pointer for WITH_ENV requests */
+    void *local_env_ptr;
+
+    /** @brief Reactor buffer pointer for reactor requests */
+    void *reactor_buffer_ptr;
+
+    /** @brief FD for reactor requests */
+    int reactor_fd;
+
+    /* Result data (owned by this struct) */
+
+    /** @brief Environment for result terms (created by worker) */
+    ErlNifEnv *result_env;
+
+    /** @brief Result term (in result_env) */
+    ERL_NIF_TERM result;
+
+    /** @brief True if request succeeded */
+    bool success;
+
+    /* Async delivery (for non-blocking dispatch) */
+
+    /** @brief Caller's PID for async result delivery */
+    ErlNifPid caller_pid;
+
+    /** @brief Request ID for correlating async responses */
+    ERL_NIF_TERM request_id;
+
+    /** @brief Whether to use async delivery vs blocking wait */
+    bool async_mode;
+
+    /* Queue management */
+
+    /** @brief Reference count (2=caller+queue, 1=one side, 0=free) */
+    _Atomic int refcount;
+
+    /** @brief Next request in queue */
+    struct ctx_request *next;
+} ctx_request_t;
+
+/**
+ * @brief Create a new context request
+ *
+ * Rolls back partial state on any init failure: pthread_mutex_init,
+ * pthread_cond_init, or enif_alloc_env() can each fail under resource
+ * pressure. Returning NULL keeps callers safe — every call site
+ * already tests the result.
+ *
+ * @return Newly allocated request with refcount=1, or NULL on failure
+ */
+static inline ctx_request_t *ctx_request_create(void) {
+    ctx_request_t *req = enif_alloc(sizeof(ctx_request_t));
+    if (req == NULL) {
+        return NULL;
+    }
+    memset(req, 0, sizeof(ctx_request_t));
+
+    if (pthread_mutex_init(&req->mutex, NULL) != 0) {
+        enif_free(req);
+        return NULL;
+    }
+    if (pthread_cond_init(&req->cond, NULL) != 0) {
+        pthread_mutex_destroy(&req->mutex);
+        enif_free(req);
+        return NULL;
+    }
+    req->request_env = enif_alloc_env();
+    if (req->request_env == NULL) {
+        pthread_cond_destroy(&req->cond);
+        pthread_mutex_destroy(&req->mutex);
+        enif_free(req);
+        return NULL;
+    }
+
+    atomic_store(&req->completed, false);
+    atomic_store(&req->cancelled, false);
+    atomic_store(&req->refcount, 1);
+    req->result_env = NULL;  /* Created by worker when processing */
+    req->next = NULL;
+    req->async_mode = false;
+    req->reactor_fd = -1;
+    req->local_env_ptr = NULL;
+    req->reactor_buffer_ptr = NULL;
+
+    return req;
+}
+
+/**
+ * @brief Add a reference to a context request
+ * @param req The request
+ */
+static inline void ctx_request_addref(ctx_request_t *req) {
+    if (req) {
+        atomic_fetch_add(&req->refcount, 1);
+    }
+}
+
+/**
+ * @brief Release a reference to a context request
+ * @param req The request (may be NULL)
+ *
+ * When refcount reaches 0, frees mutex/cond/envs and the request struct.
+ */
+static inline void ctx_request_release(ctx_request_t *req) {
+    if (req == NULL) return;
+
+    int prev = atomic_fetch_sub(&req->refcount, 1);
+    if (prev == 1) {
+        /* Last reference - free everything */
+        pthread_mutex_destroy(&req->mutex);
+        pthread_cond_destroy(&req->cond);
+        if (req->request_env) {
+            enif_free_env(req->request_env);
+        }
+        if (req->result_env) {
+            enif_free_env(req->result_env);
+        }
+        enif_free(req);
+    }
+}
 
 /**
  * @struct py_cmd_t
@@ -804,8 +926,11 @@ struct py_context {
     /** @brief Context mode: true=subinterpreter, false=worker */
     bool is_subinterp;
 
-    /** @brief Flag indicating context has been destroyed */
-    bool destroyed;
+    /** @brief Flag indicating context has been destroyed (atomic for thread safety) */
+    _Atomic bool destroyed;
+
+    /** @brief Flag: context resources leaked due to unresponsive worker */
+    _Atomic bool leaked;
 
     /** @brief Flag: callback handler is configured */
     bool has_callback_handler;
@@ -816,70 +941,79 @@ struct py_context {
     /** @brief Pipe for callback responses [read, write] */
     int callback_pipe[2];
 
+    /* ========== Worker thread fields (used by both worker and owngil modes) ========== */
+
+    /** @brief Dedicated pthread for this context */
+    pthread_t worker_thread;
+
+    /** @brief True when worker thread is running */
+    _Atomic bool worker_running;
+
+    /** @brief True when shutdown has been requested */
+    _Atomic bool shutdown_requested;
+
+    /** @brief True if this context uses a dedicated worker thread (worker mode) */
+    bool uses_worker_thread;
+
+    /** @brief True if thread initialization failed */
+    _Atomic bool init_error;
+
+    /* ========== Request queue (replaces single-slot pattern) ========== */
+
+    /** @brief Mutex protecting the request queue */
+    pthread_mutex_t queue_mutex;
+
+    /** @brief Condition variable: work available in queue */
+    pthread_cond_t queue_not_empty;
+
+    /** @brief Head of request queue (dequeue from here) */
+    ctx_request_t *queue_head;
+
+    /** @brief Tail of request queue (enqueue here) */
+    ctx_request_t *queue_tail;
+
+    /** @brief Environment for sending messages back to Erlang */
+    ErlNifEnv *msg_env;
+
+    /* ========== Legacy compatibility fields (populated from queue request) ========== */
+    /* These fields are populated by the worker thread from the current request
+     * for compatibility with existing execute functions. They will be removed
+     * once all execute functions are refactored to use ctx_request_t directly. */
+
+    /** @brief Shared env for current request (points to current req->request_env) */
+    ErlNifEnv *shared_env;
+
+    /** @brief Current request type */
+    int request_type;
+
+    /** @brief Current request data term */
+    ERL_NIF_TERM request_term;
+
+    /** @brief Response term for current request */
+    ERL_NIF_TERM response_term;
+
+    /** @brief Success flag for current request */
+    bool response_ok;
+
+    /** @brief Reactor buffer pointer for current request */
+    void *reactor_buffer_ptr;
+
+    /** @brief Process-local env pointer for current request */
+    void *local_env_ptr;
+
 #ifdef HAVE_SUBINTERPRETERS
-    /* ========== OWN_GIL mode fields ========== */
+    /* ========== OWN_GIL specific fields ========== */
 
-    /** @brief Whether this context uses OWN_GIL mode (dedicated pthread) */
+    /** @brief Whether this context uses OWN_GIL mode (subinterpreter with own GIL) */
     bool uses_own_gil;
-
-    /** @brief Dedicated pthread for OWN_GIL mode */
-    pthread_t own_gil_thread;
 
     /** @brief Thread state for OWN_GIL subinterpreter */
     PyThreadState *own_gil_tstate;
 
     /** @brief Interpreter state for OWN_GIL subinterpreter */
     PyInterpreterState *own_gil_interp;
-
-    /* IPC via condition variables */
-
-    /** @brief Mutex for request/response synchronization */
-    pthread_mutex_t request_mutex;
-
-    /** @brief Condition variable: request ready for processing */
-    pthread_cond_t request_ready;
-
-    /** @brief Condition variable: response ready for caller */
-    pthread_cond_t response_ready;
-
-    /* Request/response state */
-
-    /** @brief Current request type (CTX_REQ_*) */
-    int request_type;
-
-    /** @brief Shared environment for zero-copy term passing */
-    ErlNifEnv *shared_env;
-
-    /** @brief Request term (copied into shared_env) */
-    ERL_NIF_TERM request_term;
-
-    /** @brief Additional request data (e.g., modules list for flush) */
-    ERL_NIF_TERM request_data;
-
-    /** @brief Response term (created in shared_env) */
-    ERL_NIF_TERM response_term;
-
-    /** @brief True if response indicates success */
-    bool response_ok;
-
-    /** @brief Auxiliary pointer for reactor buffer (OWN_GIL dispatch) */
-    void *reactor_buffer_ptr;
-
-    /** @brief Process-local env pointer for OWN_GIL dispatch (py_env_resource_t*) */
-    void *local_env_ptr;
-
-    /* Lifecycle flags */
-
-    /** @brief True when worker thread is running */
-    _Atomic bool thread_running;
-
-    /** @brief True if thread initialization failed */
-    _Atomic bool init_error;
-
-    /** @brief True when shutdown has been requested */
-    _Atomic bool shutdown_requested;
 #else
-    /** @brief Worker thread state (non-subinterp mode) */
+    /** @brief Worker thread state (non-subinterp mode, kept for compatibility) */
     PyThreadState *thread_state;
 #endif
 
@@ -891,9 +1025,6 @@ struct py_context {
 
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
-
-    /** @brief Assigned executor ID for thread affinity (-1 = not assigned) */
-    int executor_id;
 };
 
 /* ============================================================================
@@ -1005,7 +1136,7 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
         .acquired = false
     };
 
-    if (ctx == NULL || ctx->destroyed) {
+    if (ctx == NULL || atomic_load(&ctx->destroyed)) {
         return guard;
     }
 
@@ -1107,10 +1238,10 @@ typedef struct {
     size_t result_len;
 
     /** @brief Flag: result is available for replay */
-    volatile bool has_result;
+    _Atomic bool has_result;
 
     /** @brief Flag: result represents an error */
-    volatile bool is_error;
+    _Atomic bool is_error;
 
     /* Sequential callback support - stores all accumulated callback results */
 
@@ -1201,63 +1332,6 @@ typedef struct {
 /** @} */
 
 /* ============================================================================
- * Executor Pool
- * ============================================================================ */
-
-/**
- * @defgroup executor Executor Pool
- * @brief Multi-executor thread pool for GIL management
- * @{
- */
-
-/**
- * @def MIN_EXECUTORS
- * @brief Minimum number of executor threads in the pool
- */
-#define MIN_EXECUTORS 2
-
-/**
- * @def MAX_EXECUTORS
- * @brief Maximum number of executor threads in the pool
- */
-#define MAX_EXECUTORS 32
-
-/**
- * @struct executor_t
- * @brief Single executor thread in the multi-executor pool
- *
- * Each executor has its own request queue and processes requests
- * independently. The GIL is acquired/released around queue operations.
- */
-typedef struct {
-    /** @brief Executor thread handle */
-    pthread_t thread;
-
-    /** @brief Mutex protecting the request queue */
-    pthread_mutex_t mutex;
-
-    /** @brief Condition variable for queue signaling */
-    pthread_cond_t cond;
-
-    /** @brief Head of request queue */
-    struct py_request *queue_head;
-
-    /** @brief Tail of request queue */
-    struct py_request *queue_tail;
-
-    /** @brief Flag: executor is running */
-    volatile bool running;
-
-    /** @brief Flag: executor should shut down */
-    volatile bool shutdown;
-
-    /** @brief Executor ID (0 to MAX_EXECUTORS-1) */
-    int id;
-} executor_t;
-
-/** @} */
-
-/* ============================================================================
  * Global State Declarations
  * ============================================================================ */
 
@@ -1277,11 +1351,6 @@ extern ErlNifResourceType *PYOBJ_RESOURCE_TYPE;
 
 /** @brief Resource type for suspended_state_t */
 extern ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE;
-
-#ifdef HAVE_SUBINTERPRETERS
-/** @brief Resource type for py_subinterp_worker_t */
-extern ErlNifResourceType *SUBINTERP_WORKER_RESOURCE_TYPE;
-#endif
 
 /** @brief Resource type for py_context_t (process-per-context) */
 extern ErlNifResourceType *PY_CONTEXT_RESOURCE_TYPE;
@@ -1363,18 +1432,6 @@ extern PyThreadState *g_main_thread_state;
 
 /** @brief Current execution mode */
 extern py_execution_mode_t g_execution_mode;
-
-/** @brief Number of active executors */
-extern int g_num_executors;
-
-/** @brief Multi-executor pool array */
-extern executor_t g_executors[MAX_EXECUTORS];
-
-/** @brief Round-robin counter for executor selection */
-extern _Atomic int g_next_executor;
-
-/** @brief Flag: multi-executor pool is initialized (atomic for thread-safe access) */
-extern _Atomic bool g_multi_executor_initialized;
 
 /* Single executor state */
 
@@ -1840,90 +1897,6 @@ static int executor_start(void);
  * Sends shutdown request and waits for thread to terminate.
  */
 static void executor_stop(void);
-
-/**
- * @brief Main function for multi-executor threads
- *
- * Thread entry point for executor pool threads. Processes
- * requests from its queue until shutdown.
- *
- * @param arg Pointer to executor_t for this thread
- * @return NULL
- */
-static void *multi_executor_thread_main(void *arg);
-
-/**
- * @brief Start the multi-executor pool
- *
- * Creates and starts num_executors threads.
- *
- * @param num_executors Number of executors (capped at MAX_EXECUTORS)
- * @return 0 on success, -1 on failure
- */
-static int multi_executor_start(int num_executors);
-
-/**
- * @brief Stop the multi-executor pool
- *
- * Signals shutdown and waits for all executor threads.
- */
-static void multi_executor_stop(void);
-
-/**
- * @brief Select an executor using round-robin
- *
- * @return Executor index (0 to g_num_executors-1)
- */
-static int select_executor(void);
-
-/**
- * @brief Submit a request to a specific executor
- *
- * @param exec_id Executor index
- * @param req Request to submit
- */
-static void multi_executor_enqueue(int exec_id, struct py_request *req);
-
-/**
- * @brief Dispatch a context call operation to the executor
- *
- * Used when a context has thread affinity (executor_id >= 0) to ensure
- * numpy/torch thread-local state consistency.
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param module_bin Module name binary
- * @param func_bin Function name binary
- * @param args_term Arguments list
- * @param kwargs_term Keyword arguments map
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_call(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *module_bin, ErlNifBinary *func_bin,
-                                    ERL_NIF_TERM args_term, ERL_NIF_TERM kwargs_term);
-
-/**
- * @brief Dispatch a context eval operation to the executor
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param code_bin Code string binary
- * @param locals_term Local variables map
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_eval(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *code_bin, ERL_NIF_TERM locals_term);
-
-/**
- * @brief Dispatch a context exec operation to the executor
- *
- * @param env Caller's NIF environment
- * @param ctx Context with thread affinity
- * @param code_bin Code string binary
- * @return Result term
- */
-ERL_NIF_TERM context_dispatch_exec(ErlNifEnv *env, py_context_t *ctx,
-                                    ErlNifBinary *code_bin);
 
 /** @} */
 

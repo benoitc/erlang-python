@@ -251,31 +251,57 @@ class TestErlangModuleFunctions(unittest.TestCase):
         self.assertEqual(result, 'debug_test')
 
     def test_install_function(self):
-        """Test erlang.install() function."""
+        """Test erlang.install() function across supported Python versions."""
         erlang = _get_erlang_module()
 
-        old_policy = asyncio.get_event_loop_policy()
+        if sys.version_info >= (3, 14):
+            # 3.14 deprecated set_event_loop_policy and 3.16 removes it,
+            # so erlang.install() now raises with a migration message.
+            with self.assertRaises(RuntimeError) as cm:
+                erlang.install()
+            msg = str(cm.exception)
+            self.assertIn("3.14+", msg)
+            return
+
+        # 3.9-3.13: install() still works (DeprecationWarning on 3.12+).
+        # Suppress the asyncio DeprecationWarning emitted by the
+        # get_event_loop_policy() probe itself on those versions.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            old_policy = asyncio.get_event_loop_policy()
 
         try:
             if sys.version_info >= (3, 12):
-                # Should emit deprecation warning
                 with warnings.catch_warnings(record=True) as w:
                     warnings.simplefilter("always")
                     erlang.install()
-                    self.assertTrue(len(w) >= 1)
                     self.assertTrue(
                         any(issubclass(warning.category, DeprecationWarning)
                             for warning in w)
                     )
+
+                # silent=True must suppress the warning even with
+                # simplefilter("always").
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    erlang.install(silent=True)
+                    install_warnings = [
+                        warning for warning in w
+                        if "erlang.install()" in str(warning.message)
+                    ]
+                    self.assertEqual(install_warnings, [])
             else:
                 erlang.install()
 
-            # Policy should be ErlangEventLoopPolicy
-            policy = asyncio.get_event_loop_policy()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                policy = asyncio.get_event_loop_policy()
             self.assertIsInstance(policy, erlang.EventLoopPolicy)
 
         finally:
-            asyncio.set_event_loop_policy(old_policy)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                asyncio.set_event_loop_policy(old_policy)
 
 
 class TestErlangLoopSpecificFeatures(tb.ErlangTestCase):

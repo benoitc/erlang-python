@@ -75,28 +75,10 @@
     async_await/1,
     async_await/2,
     async_gather/1,
-    async_stream/3,
-    async_stream/4,
-    %% Parallel execution (Python 3.12+ sub-interpreters)
+    async_gather/2,
+    %% Parallel execution + capability probe
     parallel/1,
     subinterp_supported/0,
-    %% OWN_GIL subinterpreter API (true parallelism)
-    subinterp_create/0,
-    subinterp_destroy/1,
-    subinterp_call/4,
-    subinterp_call/5,
-    subinterp_eval/2,
-    subinterp_eval/3,
-    subinterp_exec/2,
-    subinterp_cast/4,
-    subinterp_async_call/4,
-    subinterp_await/1,
-    subinterp_await/2,
-    subinterp_pool_start/0,
-    subinterp_pool_start/1,
-    subinterp_pool_stop/0,
-    subinterp_pool_ready/0,
-    subinterp_pool_stats/0,
     %% Virtual environment
     ensure_venv/2,
     ensure_venv/3,
@@ -107,7 +89,6 @@
     venv_info/0,
     %% Execution info
     execution_mode/0,
-    num_executors/0,
     %% Shared state (accessible from Python workers)
     state_fetch/1,
     state_store/2,
@@ -320,7 +301,7 @@ eval(Code, Locals, Timeout) ->
 %%
 %% In worker mode, the code runs in a process-local Python environment.
 %% Variables defined via exec persist within the calling Erlang process.
-%% In subinterpreter mode, each context has its own isolated namespace.
+%% In owngil mode, each context has its own isolated namespace.
 -spec exec(string() | binary()) -> ok | {error, term()}.
 exec(Code) ->
     %% Always route through context process - it handles callbacks inline using
@@ -721,28 +702,33 @@ async_call(Module, Func, Args) ->
 %% @doc Call a Python async function with keyword arguments.
 -spec async_call(py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
 async_call(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_call, Ref, self(), Module, Func, Args, Kwargs}),
-    Ref.
+    py_event_loop:create_task(Module, Func, Args, Kwargs).
 
 %% @doc Wait for an async call to complete.
 -spec async_await(py_ref()) -> py_result().
 async_await(Ref) ->
-    await(Ref, ?DEFAULT_TIMEOUT).
+    async_await(Ref, ?DEFAULT_TIMEOUT).
 
 %% @doc Wait for an async call with timeout.
-%% Note: Identical to await/2 - provided for API symmetry with async_call.
 -spec async_await(py_ref(), timeout()) -> py_result().
 async_await(Ref, Timeout) ->
-    await(Ref, Timeout).
+    py_event_loop:await(Ref, Timeout).
 
-%% @doc Execute multiple async calls concurrently using asyncio.gather.
-%% Takes a list of {Module, Func, Args} tuples and executes them all
-%% concurrently, returning when all are complete.
+%% @doc Execute multiple async Python calls concurrently.
+%%
+%% Each call is submitted to the event loop independently, so they run
+%% concurrently. Results are collected in the order of the input list.
+%% Sync functions are accepted and resolve immediately (the event loop
+%% short-circuits non-coroutines).
+%%
+%% Returns `{ok, [Result1, Result2, ...]}' when every call succeeds, where
+%% each `ResultN' is the value returned by the corresponding call.
+%% Returns `{error, {gather_failed, Errors}}' if any call fails, where
+%% `Errors' is a list of `{Index, Reason}' tuples for each failure.
 %%
 %% Example:
 %% ```
-%% {ok, Results} = py:async_gather([
+%% {ok, [R1, R2, R3]} = py:async_gather([
 %%     {aiohttp, get, [Url1]},
 %%     {aiohttp, get, [Url2]},
 %%     {aiohttp, get, [Url3]}
@@ -750,37 +736,21 @@ async_await(Ref, Timeout) ->
 %% '''
 -spec async_gather([{py_module(), py_func(), py_args()}]) -> py_result().
 async_gather(Calls) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_gather, Ref, self(), Calls}),
-    async_await(Ref, ?DEFAULT_TIMEOUT).
+    async_gather(Calls, ?DEFAULT_TIMEOUT).
 
-%% @doc Stream results from a Python async generator.
-%% Returns a list of all yielded values.
--spec async_stream(py_module(), py_func(), py_args()) -> py_result().
-async_stream(Module, Func, Args) ->
-    async_stream(Module, Func, Args, #{}).
-
-%% @doc Stream results from a Python async generator with kwargs.
--spec async_stream(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
-async_stream(Module, Func, Args, Kwargs) ->
-    Ref = make_ref(),
-    py_async_pool:request({async_stream, Ref, self(), Module, Func, Args, Kwargs}),
-    async_stream_collect(Ref, []).
-
-%% @private
-async_stream_collect(Ref, Acc) ->
-    receive
-        {py_response, Ref, {ok, Result}} ->
-            %% Got final result (async generator collected)
-            {ok, Result};
-        {py_chunk, Ref, Chunk} ->
-            async_stream_collect(Ref, [Chunk | Acc]);
-        {py_end, Ref} ->
-            {ok, lists:reverse(Acc)};
-        {py_error, Ref, Error} ->
-            {error, Error}
-    after ?DEFAULT_TIMEOUT ->
-        {error, timeout}
+%% @doc Like async_gather/1 with explicit per-call timeout.
+-spec async_gather([{py_module(), py_func(), py_args()}], timeout()) -> py_result().
+async_gather(Calls, Timeout) when is_list(Calls) ->
+    Refs = [async_call(M, F, A) || {M, F, A} <- Calls],
+    Results = [async_await(R, Timeout) || R <- Refs],
+    Errors = [{Idx, Reason}
+              || {Idx, {error, Reason}} <- lists:zip(lists:seq(1, length(Results)), Results)],
+    case Errors of
+        [] ->
+            Values = [V || {ok, V} <- Results],
+            {ok, Values};
+        _ ->
+            {error, {gather_failed, Errors}}
     end.
 
 %%% ============================================================================
@@ -848,126 +818,6 @@ parallel(Calls) when is_list(Calls) ->
                 false -> {ok, SortedResults}
             end
     end.
-
-%%% ============================================================================
-%%% OWN_GIL Subinterpreter API (True Parallelism)
-%%% ============================================================================
-
-%% @doc Create an isolated subinterpreter with OWN_GIL.
-%% Returns a handle for making calls. The subinterpreter runs
-%% in a dedicated pthread with true parallelism.
-%%
-%% Requires the thread pool to be started first via subinterp_pool_start/0.
-%%
-%% Example:
-%% ```
-%% ok = py:subinterp_pool_start().
-%% {ok, Sub} = py:subinterp_create().
-%% {ok, Result} = py:subinterp_call(Sub, math, sqrt, [16.0]).
-%% ok = py:subinterp_destroy(Sub).
-%% '''
--spec subinterp_create() -> {ok, reference()} | {error, term()}.
-subinterp_create() ->
-    py_nif:subinterp_thread_create().
-
-%% @doc Destroy a subinterpreter handle.
-%% Cleans up namespace, releases worker binding.
--spec subinterp_destroy(reference()) -> ok.
-subinterp_destroy(Handle) ->
-    py_nif:subinterp_thread_destroy(Handle),
-    ok.
-
-%% @doc Call a function in a subinterpreter (blocking).
--spec subinterp_call(reference(), py_module(), py_func(), py_args()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(Handle, Module, Func, Args) ->
-    subinterp_call(Handle, Module, Func, Args, #{}).
-
-%% @doc Call a function in a subinterpreter with kwargs (blocking).
--spec subinterp_call(reference(), py_module(), py_func(), py_args(), py_kwargs()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(Handle, Module, Func, Args, Kwargs) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    py_nif:subinterp_thread_call(Handle, ModuleBin, FuncBin, Args, Kwargs).
-
-%% @doc Evaluate expression in subinterpreter (blocking).
--spec subinterp_eval(reference(), binary() | string()) ->
-    {ok, term()} | {error, term()}.
-subinterp_eval(Handle, Code) ->
-    subinterp_eval(Handle, Code, #{}).
-
-%% @doc Evaluate expression with locals in subinterpreter (blocking).
--spec subinterp_eval(reference(), binary() | string(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_eval(Handle, Code, Locals) ->
-    CodeBin = ensure_binary(Code),
-    py_nif:subinterp_thread_eval(Handle, CodeBin, Locals).
-
-%% @doc Execute statements in subinterpreter (blocking, no return).
--spec subinterp_exec(reference(), binary() | string()) -> ok | {error, term()}.
-subinterp_exec(Handle, Code) ->
-    CodeBin = ensure_binary(Code),
-    py_nif:subinterp_thread_exec(Handle, CodeBin).
-
-%% @doc Cast a call to subinterpreter (fire-and-forget, no result).
-%% Returns immediately. Use for side-effects where result is not needed.
--spec subinterp_cast(reference(), py_module(), py_func(), py_args()) -> ok.
-subinterp_cast(Handle, Module, Func, Args) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    py_nif:subinterp_thread_cast(Handle, ModuleBin, FuncBin, Args).
-
-%% @doc Async call - returns immediately with a reference.
-%% Use subinterp_await/1,2 to get the result.
-%% Worker uses erlang.send() to deliver result.
--spec subinterp_async_call(reference(), py_module(), py_func(), py_args()) -> reference().
-subinterp_async_call(Handle, Module, Func, Args) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    Ref = make_ref(),
-    py_nif:subinterp_thread_async_call(Handle, ModuleBin, FuncBin, Args, self(), Ref),
-    Ref.
-
-%% @doc Wait for async call result.
--spec subinterp_await(reference()) -> {ok, term()} | {error, term()}.
-subinterp_await(Ref) ->
-    subinterp_await(Ref, ?DEFAULT_TIMEOUT).
-
-%% @doc Wait for async call result with timeout.
--spec subinterp_await(reference(), timeout()) -> {ok, term()} | {error, term()}.
-subinterp_await(Ref, Timeout) ->
-    receive
-        {py_subinterp_result, Ref, Result} -> Result
-    after Timeout ->
-        {error, timeout}
-    end.
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with default workers.
-%% Must be called before creating subinterpreter handles.
--spec subinterp_pool_start() -> ok | {error, term()}.
-subinterp_pool_start() ->
-    py_nif:subinterp_thread_pool_start().
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with N workers.
--spec subinterp_pool_start(non_neg_integer()) -> ok | {error, term()}.
-subinterp_pool_start(NumWorkers) ->
-    py_nif:subinterp_thread_pool_start(NumWorkers).
-
-%% @doc Stop the OWN_GIL subinterpreter thread pool.
--spec subinterp_pool_stop() -> ok.
-subinterp_pool_stop() ->
-    py_nif:subinterp_thread_pool_stop().
-
-%% @doc Check if the OWN_GIL thread pool is ready.
--spec subinterp_pool_ready() -> boolean().
-subinterp_pool_ready() ->
-    py_nif:subinterp_thread_pool_ready().
-
-%% @doc Get OWN_GIL thread pool statistics.
--spec subinterp_pool_stats() -> map().
-subinterp_pool_stats() ->
-    py_nif:subinterp_thread_pool_stats().
 
 %%% ============================================================================
 %%% Virtual Environment Support
@@ -1257,29 +1107,21 @@ ensure_binary(S) ->
 
 %% @doc Get the current execution mode.
 %% Returns one of:
-%% - `free_threaded': Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - `worker': Contexts use main interpreter namespaces (default)
-%% - `owngil': Contexts use dedicated threads with own GIL (Python 3.14+)
-%% - `multi_executor': Traditional Python with N executor threads (Python < 3.12)
--spec execution_mode() -> free_threaded | worker | owngil | multi_executor.
+%% - `worker': Contexts use dedicated pthread per context (default).
+%%   Provides stable thread affinity for numpy/torch/tensorflow compatibility.
+%% - `owngil': Contexts use dedicated pthread + subinterpreter with own GIL.
+%%   Enables true parallelism (Python 3.12+ with subinterpreter support).
+%%
+%% The mode is determined by the `context_mode' application config:
+%% ```
+%% application:set_env(erlang_python, context_mode, owngil).
+%% '''
+-spec execution_mode() -> worker | owngil.
 execution_mode() ->
-    case py_nif:execution_mode() of
-        free_threaded -> free_threaded;
-        multi_executor -> multi_executor;
-        subinterp ->
-            %% Check actual context_mode config
-            case application:get_env(erlang_python, context_mode, worker) of
-                owngil -> owngil;
-                _ -> worker
-            end
+    case application:get_env(erlang_python, context_mode, worker) of
+        owngil -> owngil;
+        _ -> worker
     end.
-
-%% @doc Get the number of executor threads.
-%% For `multi_executor' mode, this is the number of executor threads.
-%% For other modes, returns 1.
--spec num_executors() -> pos_integer().
-num_executors() ->
-    py_nif:num_executors().
 
 %%% ============================================================================
 %%% Shared State
@@ -1475,8 +1317,8 @@ clear_traces() ->
 %%% Ctx = py:context(),
 %%% {ok, Result} = py:call(Ctx, math, sqrt, [16]),
 %%%
-%%% %% Or bind a specific context to this process
-%%% ok = py:bind_context(py:context(1)),
+%%% %% Or bind a specific context to this process via the router
+%%% ok = py_context_router:bind_context(py:context(1)),
 %%% {ok, Result} = py:call(py:context(), math, sqrt, [16]).
 %%% '''
 %%% ============================================================================
@@ -1494,7 +1336,7 @@ start_contexts() ->
 %%
 %% Options:
 %% - `contexts' - Number of contexts to create (default: number of schedulers)
-%% - `mode' - Context mode: `worker', `subinterp', or `owngil' (default: `worker')
+%% - `mode' - Context mode: `worker' or `owngil' (default: `worker')
 %%
 %% @param Opts Start options
 %% @returns {ok, [Context]} | {error, Reason}

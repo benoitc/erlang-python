@@ -70,7 +70,7 @@ test_process_isolation(_Config) ->
     {ok, <<"main_process">>} = py:eval(Ctx, <<"isolation_test">>),
 
     %% Spawn another process using the same context
-    Pid = spawn(fun() ->
+    _Pid = spawn(fun() ->
         %% This process should have its own environment
         ok = py:exec(Ctx, <<"isolation_test = 'spawned_process'">>),
         {ok, Value} = py:eval(Ctx, <<"isolation_test">>),

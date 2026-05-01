@@ -33,19 +33,28 @@ class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     This policy creates ErlangEventLoop instances for the main thread
     and optionally for child threads depending on configuration.
 
-    Usage:
-        import asyncio
+    Recommended usage on Python 3.12+ (no policy required):
+
         import erlang
+        erlang.run(main())
 
-        # Install the policy
+        # or, equivalently:
+        import asyncio
+        with asyncio.Runner(loop_factory=erlang.new_event_loop) as r:
+            r.run(main())
+
+    Legacy pattern for Python 3.9–3.11 (also works through 3.13 with a
+    DeprecationWarning, raises on 3.14+):
+
+        import asyncio, erlang
         asyncio.set_event_loop_policy(erlang.EventLoopPolicy())
-
-        # Now asyncio.run() uses Erlang event loop
         asyncio.run(main())
 
-    Note:
-        This approach is deprecated in Python 3.12+.
-        Use erlang.run() instead.
+    Notes:
+        ``asyncio.set_event_loop_policy`` is deprecated in Python 3.14
+        and removed in 3.16, so only ``erlang.run`` /
+        ``asyncio.Runner(loop_factory=...)`` are guaranteed to work
+        across the full supported range.
     """
 
     def __init__(self):
@@ -137,60 +146,3 @@ class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
             self._watcher = asyncio.ThreadedChildWatcher()
         elif hasattr(asyncio, 'SafeChildWatcher'):
             self._watcher = asyncio.SafeChildWatcher()
-
-
-class _ErlangChildWatcher:
-    """Child watcher that delegates to Erlang for process monitoring.
-
-    This watcher uses Erlang ports and monitors instead of SIGCHLD,
-    making it compatible with subinterpreters and free-threaded Python.
-    """
-
-    def __init__(self):
-        self._callbacks = {}
-        self._loop = None
-
-    def attach_loop(self, loop):
-        """Attach to an event loop."""
-        self._loop = loop
-
-    def close(self):
-        """Close the watcher."""
-        self._callbacks.clear()
-        self._loop = None
-
-    def is_active(self):
-        """Return True if the watcher is active."""
-        return self._loop is not None and not self._loop.is_closed()
-
-    def add_child_handler(self, pid, callback, *args):
-        """Register a callback for when a child process exits.
-
-        Args:
-            pid: Process ID to watch.
-            callback: Callback function(pid, returncode, *args).
-            *args: Additional arguments for the callback.
-        """
-        self._callbacks[pid] = (callback, args)
-        # TODO: Use Erlang port monitoring
-
-    def remove_child_handler(self, pid):
-        """Remove the handler for a child process.
-
-        Returns:
-            bool: True if handler was removed, False if not found.
-        """
-        return self._callbacks.pop(pid, None) is not None
-
-    def _do_waitpid(self, pid, returncode):
-        """Called when a child process exits.
-
-        Args:
-            pid: Process ID that exited.
-            returncode: Exit code of the process.
-        """
-        entry = self._callbacks.pop(pid, None)
-        if entry is not None:
-            callback, args = entry
-            if self._loop is not None and not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(callback, pid, returncode, *args)

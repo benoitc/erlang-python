@@ -135,7 +135,7 @@ start() ->
 %%
 %% Options:
 %% - `contexts' - Number of contexts to create (default: number of schedulers)
-%% - `mode' - Context mode: `worker', `subinterp', or `owngil' (default: `worker')
+%% - `mode' - Context mode: `worker' or `owngil' (default: `worker')
 %%
 %% @param Opts Start options
 %% @returns {ok, [Context]} | {error, Reason}
@@ -279,7 +279,7 @@ start_pool(Pool, Size) ->
 %%
 %% @param Pool Pool name (default, io, or custom)
 %% @param Size Number of contexts in the pool
-%% @param Mode Context mode (worker, subinterp, owngil)
+%% @param Mode Context mode (worker, owngil)
 %% @returns {ok, [Context]} | {error, Reason}
 -spec start_pool(pool_name(), pos_integer(), py_context:context_mode()) ->
     {ok, [pid()]} | {error, term()}.

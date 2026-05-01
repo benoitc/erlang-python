@@ -288,7 +288,7 @@ test_callback_with_try_except(_Config) ->
     end),
 
     %% Add test directory to Python path so we can import the test module
-    TestDir = code:lib_dir(erlang_python, test),
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
     ok = py:exec(iolist_to_binary(io_lib:format(
         "import sys; sys.path.insert(0, '~s')", [TestDir]))),
 
@@ -324,7 +324,7 @@ test_async_call(_Config) ->
     py:register_function(async_multiply, fun([X, Y]) -> X * Y end),
 
     %% Add test directory to Python path
-    TestDir = code:lib_dir(erlang_python, test),
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
     ok = py:exec(iolist_to_binary(io_lib:format(
         "import sys; sys.path.insert(0, '~s')", [TestDir]))),
 

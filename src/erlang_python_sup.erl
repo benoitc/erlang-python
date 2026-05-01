@@ -19,7 +19,7 @@
 %%%   <li>py_callback - Callback registry for Python to Erlang calls</li>
 %%%   <li>py_state - Shared state storage accessible from Python</li>
 %%%   <li>py_context_sup - Supervisor for process-per-context workers</li>
-%%%   <li>py_async_pool - Worker pool for asyncio coroutines</li>
+%%%   <li>py_event_loop / py_event_loop_pool - Asyncio dispatch</li>
 %%% </ul>
 %%% @private
 -module(erlang_python_sup).
@@ -35,14 +35,9 @@ init([]) ->
     NumContexts = application:get_env(erlang_python, num_contexts,
                                        erlang:system_info(schedulers)),
     ContextMode = application:get_env(erlang_python, context_mode, worker),
-    NumAsyncWorkers = application:get_env(erlang_python, num_async_workers, 2),
-
-    %% Default executors: 4 (benchmarked sweet spot for most workloads)
-    %% Can be overridden via {erlang_python, [{num_executors, N}]}
-    NumExecutors = application:get_env(erlang_python, num_executors, 4),
 
     %% Initialize Python runtime first
-    ok = py_nif:init(#{num_executors => NumExecutors}),
+    ok = py_nif:init(#{}),
 
     %% Initialize the semaphore ETS table for rate limiting
     ok = py_semaphore:init(),
@@ -123,16 +118,6 @@ init([]) ->
         modules => [py_context_init]
     },
 
-    %% Async worker pool (for asyncio coroutines)
-    AsyncPoolSpec = #{
-        id => py_async_pool,
-        start => {py_async_pool, start_link, [NumAsyncWorkers]},
-        restart => permanent,
-        shutdown => 5000,
-        type => worker,
-        modules => [py_async_pool]
-    },
-
     %% Event worker registry (for scalable I/O model)
     WorkerRegistrySpec = #{
         id => py_event_worker_registry,
@@ -176,7 +161,7 @@ init([]) ->
     Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
                 ContextSupSpec, ContextRouterInitSpec,
                 WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec,
-                EventLoopPoolSpec, AsyncPoolSpec],
+                EventLoopPoolSpec],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

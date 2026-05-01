@@ -107,12 +107,12 @@ end).
 | **Explicit** | `create_local_env` + `py_nif:context_*` | OWN_GIL, fine-grained control, multiple envs per process |
 
 **Use implicit (py:exec)** when:
-- Using worker or subinterp modes
+- Using worker mode
 - One environment per process is sufficient
 - You want automatic lifecycle management
 
 **Use explicit (create_local_env)** when:
-- Using OWN_GIL mode for parallel execution
+- Using `owngil` mode for parallel execution
 - Need multiple environments in a single process
 - Want to pass environments between processes
 - Need direct NIF-level control
@@ -461,7 +461,7 @@ This design prioritizes safety over avoiding minor memory leaks during edge case
 ## See Also
 
 - [OWN_GIL Internals](owngil_internals.md) - Architecture and safety mechanisms for OWN_GIL mode
-- [Scalability](scalability.md) - Mode comparison (owngil vs subinterp vs worker)
+- [Scalability](scalability.md) - Mode comparison (worker vs owngil)
 - [Event Loop Architecture](event_loop_architecture.md) - Per-process namespace management
 - [Context Affinity](context-affinity.md) - Context binding and routing
 - [Scheduling](asyncio.md) - Cooperative scheduling for long operations

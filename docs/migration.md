@@ -1,6 +1,107 @@
-# Migration Guide: v1.8.x to v2.0+
+# Migration Guide
 
-This guide covers breaking changes and migration steps when upgrading from erlang_python v1.8.x to v2.0 and later.
+This guide covers breaking changes and migration steps when upgrading erlang_python.
+
+## v2.x to v3.0 Migration
+
+### Quick Checklist
+
+- [ ] Update `py:execution_mode/0` usage - now returns `worker | owngil` only
+- [ ] Remove any `py:num_executors/0` calls (function removed)
+- [ ] Update code that checks for `free_threaded` or `multi_executor` modes
+- [ ] Review `context_mode` configuration (now `worker | owngil`)
+
+### Execution Mode Changes
+
+**v2.x:** `py:execution_mode/0` returned internal capabilities:
+```erlang
+py:execution_mode().
+%% => free_threaded | subinterp | multi_executor
+```
+
+**v3.0:** Returns simplified public modes based on configuration:
+```erlang
+py:execution_mode().
+%% => worker | owngil
+```
+
+The mode is determined by the `context_mode` application config:
+```erlang
+%% Default: worker mode
+application:set_env(erlang_python, context_mode, worker).
+
+%% For true parallelism (Python 3.14+)
+application:set_env(erlang_python, context_mode, owngil).
+```
+
+### Removed Functions
+
+**`py:num_executors/0`** - Removed. Contexts now use per-context worker threads.
+
+```erlang
+%% v2.x - check executor count
+N = py:num_executors().
+
+%% v3.0 - not needed, each context has its own worker thread
+```
+
+### Worker Thread Architecture
+
+In v3.0, each context gets a dedicated pthread that handles all Python operations:
+
+- **Stable thread affinity**: All calls to the same context run on the same OS thread
+- **numpy/torch compatibility**: Thread-local state is preserved
+- **No executor pool**: No shared executor threads to manage
+
+```erlang
+%% Create contexts - each gets its own worker thread
+Ctx1 = py:context(1),
+Ctx2 = py:context(2),
+
+%% All calls to Ctx1 run on Ctx1's worker thread
+%% All calls to Ctx2 run on Ctx2's worker thread
+{ok, _} = py:call(Ctx1, math, sqrt, [16]),
+{ok, _} = py:call(Ctx2, math, sqrt, [25]).
+```
+
+### Configuration Changes
+
+**v2.x configuration:**
+```erlang
+{erlang_python, [
+    {num_executors, 8},  %% Removed in v3.0
+    {context_mode, worker}
+]}
+```
+
+**v3.0 configuration:**
+```erlang
+{erlang_python, [
+    {context_mode, worker},  %% worker | owngil
+    {num_contexts, 8},       %% Number of contexts to create
+    {max_concurrent, 17}     %% Optional rate-limit ceiling
+]}
+```
+
+`num_executors` and `num_async_workers` were both removed in v3.0; the
+supervisor no longer reads them.
+
+### Python Version Compatibility
+
+| Python Version | v2.x Mode | v3.0 Mode |
+|---------------|-----------|-----------|
+| 3.9 - 3.11 | `multi_executor` | `worker` |
+| 3.12 - 3.13 | `subinterp` | `worker` (default) or `owngil` |
+| 3.14+ | `subinterp` | `worker` (default) or `owngil` |
+| 3.13t (free-threaded) | `free_threaded` | `worker` |
+
+All Python versions now use the same public mode (`worker` or `owngil`) based on configuration, not Python capabilities.
+
+---
+
+# v1.8.x to v2.0 Migration
+
+This section covers breaking changes when upgrading from erlang_python v1.8.x to v2.0.
 
 ## Quick Checklist
 
@@ -16,17 +117,18 @@ This guide covers breaking changes and migration steps when upgrading from erlan
 
 ## Python Version Compatibility
 
-| Python Version | GIL Mode | Notes |
-|---------------|----------|-------|
-| 3.9 - 3.11 | Shared GIL | Multi-executor mode, `py:execution_mode()` returns `multi_executor` |
-| 3.12 - 3.13 | OWN_GIL subinterpreters | True parallelism, `py:execution_mode()` returns `subinterp` |
-| 3.13t | Free-threaded | No GIL, `py:execution_mode()` returns `free_threaded` |
-| 3.14+ | SHARED_GIL subinterpreters | Subinterpreters with shared GIL for C extension compatibility |
+| Python Version | Support | Notes |
+|---------------|---------|-------|
+| 3.9 - 3.11 | Full | Worker mode with dedicated pthread per context |
+| 3.12 - 3.13 | Full | Worker mode (default) or owngil mode |
+| 3.14+ | Full | Worker mode (default) or owngil mode with true parallelism |
+| 3.13t | Full | Worker mode (free-threaded builds supported) |
 
-**Python 3.14 Support**: Full support for Python 3.14 including:
-- SHARED_GIL subinterpreter mode for C extension compatibility
-- Proper `sys.path` initialization in subinterpreters
-- All asyncio features work correctly
+**Python 3.14+ OWN_GIL Support**: For true parallelism, use owngil mode:
+```erlang
+application:set_env(erlang_python, context_mode, owngil).
+```
+Each context gets a subinterpreter with its own GIL, enabling parallel Python execution.
 
 **FreeBSD Support**: Improved fd handling on FreeBSD/kqueue platforms:
 - Automatic fd duplication in `py_reactor_context` to prevent fd stealing errors
@@ -83,11 +185,10 @@ The most significant change in v2.0 is the new execution model. On Python 3.12+,
 Check which mode is active:
 
 ```erlang
-%% Check execution mode
+%% Check execution mode (v3.0+)
 py:execution_mode().
-%% => subinterp     (Python 3.12+ with OWN_GIL)
-%% => free_threaded (Python 3.13t with --disable-gil)
-%% => multi_executor (Python < 3.12)
+%% => worker  (default, dedicated pthread per context)
+%% => owngil  (dedicated pthread + subinterpreter with own GIL)
 
 %% Check if subinterpreters are supported
 py:subinterp_supported().
@@ -440,20 +541,25 @@ erlang.send(("my_server", "node@host"), {"event": "user_login", "user": 123})
 erlang.send(pid, "hello")
 ```
 
-### `erlang.sleep()` with Dirty Scheduler Release
+### `erlang.sleep()` cooperates with the BEAM scheduler
 
-Synchronous sleep that releases the Erlang dirty scheduler thread:
+Synchronous sleep that lets other Erlang processes and Python
+contexts make progress during the wait:
 
 ```python
 import erlang
 
 def slow_handler():
-    # Sleep without blocking Erlang scheduler
-    erlang.sleep(1.0)  # Releases dirty scheduler during sleep
+    erlang.sleep(1.0)
     return "done"
 ```
 
-Unlike `time.sleep()`, `erlang.sleep()` releases the dirty NIF thread while waiting, allowing other Python calls to use the scheduler slot.
+The BEAM dirty scheduler is never held during the sleep. The exact
+thread that blocks depends on context — the Erlang process for
+`py:exec` / `py:eval`, or the context's private worker pthread for
+`py:call`. See the [behavior-by-context table in the asyncio
+guide](asyncio.md#erlangsleepseconds) for the full breakdown. In all
+cases, other contexts and other Erlang processes continue running.
 
 ### `erlang.call()` Blocking with Explicit Scheduling
 
@@ -517,21 +623,24 @@ async def async_handler():
 
 ### Async Task API (Erlang Side)
 
-Submit and manage async Python tasks from Erlang:
+Submit and manage async Python tasks from Erlang. Tasks always run on the
+shared `py_event_loop`; routing happens via `py_event_loop_pool` for the
+pool-based variant. The `(Module, Func, Args[, Opts/Kwargs])` signature does
+not take a context — coroutines are scheduled on the loop, not on a context.
 
 ```erlang
 %% Blocking run
-{ok, Result} = py_event_loop:run(Ctx, my_module, my_async_func, [Arg1]).
+{ok, Result} = py_event_loop:run(my_module, my_async_func, [Arg1]).
 
 %% Non-blocking with reference
-Ref = py_event_loop:create_task(Ctx, my_module, my_async_func, [Arg1]),
+Ref = py_event_loop:create_task(my_module, my_async_func, [Arg1]),
 {ok, Result} = py_event_loop:await(Ref, 5000).
 
 %% Fire-and-forget
-py_event_loop:spawn_task(Ctx, my_module, my_async_func, [Arg1]).
+py_event_loop:spawn_task(my_module, my_async_func, [Arg1]).
 
 %% Message-based result delivery
-Ref = py_event_loop:create_task(Ctx, my_module, my_async_func, [Arg1]),
+Ref = py_event_loop:create_task(my_module, my_async_func, [Arg1]),
 receive
     {async_result, Ref, {ok, Result}} -> handle(Result);
     {async_result, Ref, {error, Reason}} -> handle_error(Reason)

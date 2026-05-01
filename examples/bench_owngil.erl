@@ -2,7 +2,7 @@
 %% -*- erlang -*-
 %%! -pa _build/default/lib/erlang_python/ebin
 
-%%% @doc Benchmark comparing SHARED_GIL vs OWN_GIL context modes.
+%%% @doc Benchmark comparing worker vs OWN_GIL context modes.
 %%%
 %%% OWN_GIL mode creates a dedicated pthread with its own Python GIL,
 %%% enabling true parallel execution for CPU-bound workloads.
@@ -15,7 +15,7 @@
 main(_Args) ->
     io:format("~n"),
     io:format("========================================================~n"),
-    io:format("  OWN_GIL vs SHARED_GIL Benchmark~n"),
+    io:format("  OWN_GIL vs Worker Benchmark~n"),
     io:format("========================================================~n~n"),
 
     %% Start the application
@@ -24,14 +24,14 @@ main(_Args) ->
     %% Print system info
     print_system_info(),
 
-    case py_nif:subinterp_supported() of
+    case py_nif:owngil_supported() of
         true ->
             bench_single_latency(),
             bench_parallel_throughput(),
             bench_cpu_speedup();
         false ->
-            io:format("~n[ERROR] OWN_GIL requires Python 3.12+~n"),
-            io:format("        Current Python version does not support subinterpreters.~n~n")
+            io:format("~n[ERROR] OWN_GIL requires Python 3.14+~n"),
+            io:format("        Current Python build does not support OWN_GIL subinterpreters.~n~n")
     end,
 
     halt(0).
@@ -43,7 +43,7 @@ print_system_info() ->
     io:format("  Schedulers:       ~p~n", [erlang:system_info(schedulers)]),
     {ok, PyVer} = py:version(),
     io:format("  Python:           ~s~n", [PyVer]),
-    io:format("  Subinterp:        ~p~n", [py_nif:subinterp_supported()]),
+    io:format("  OWN_GIL:          ~p~n", [py_nif:owngil_supported()]),
     io:format("~n").
 
 %% ============================================================================
@@ -72,7 +72,7 @@ bench_single_latency() ->
         io:format("   ~-15s ~10.1f ~12w~n", [Label, UsPerCall, CallsPerSec]),
 
         py_context:stop(Ctx)
-    end, [{subinterp, subinterp}, {owngil, owngil}]),
+    end, [{worker, worker}, {owngil, owngil}]),
     io:format("~n").
 
 %% ============================================================================
@@ -114,7 +114,7 @@ bench_parallel_throughput() ->
         io:format("   ~-15s ~10w ~12w~n", [Label, Elapsed, CallsPerSec]),
 
         [py_context:stop(Ctx) || Ctx <- Contexts]
-    end, [{subinterp, subinterp}, {owngil, owngil}]),
+    end, [{worker, worker}, {owngil, owngil}]),
     io:format("~n").
 
 %% ============================================================================
@@ -154,11 +154,11 @@ bench_cpu_speedup() ->
         io:format("   ~-15s ~10w ~10w ~10.2fx~n", [Label, SeqTime, ParTime, Speedup]),
 
         [py_context:stop(Ctx) || Ctx <- Contexts]
-    end, [{subinterp, subinterp}, {owngil, owngil}]),
+    end, [{worker, worker}, {owngil, owngil}]),
 
     io:format("~n"),
     io:format("Notes:~n"),
-    io:format("  - SHARED_GIL (subinterp) contexts share Python's GIL~n"),
+    io:format("  - Worker contexts share Python's GIL on the main interpreter~n"),
     io:format("  - OWN_GIL contexts have independent GILs for true parallelism~n"),
     io:format("  - OWN_GIL speedup should approach number of CPU cores~n"),
     io:format("~n").

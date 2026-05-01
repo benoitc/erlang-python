@@ -41,7 +41,6 @@
     test_venv_pth/1,
     %% New scalability tests
     test_execution_mode/1,
-    test_num_executors/1,
     test_semaphore_basic/1,
     test_semaphore_acquire_release/1,
     test_semaphore_concurrent/1,
@@ -101,7 +100,6 @@ all() ->
         test_venv_pth,
         %% Scalability tests
         test_execution_mode,
-        test_num_executors,
         test_semaphore_basic,
         test_semaphore_acquire_release,
         test_semaphore_concurrent,
@@ -578,40 +576,21 @@ test_erlang_attr_syntax(_Config) ->
     ok.
 
 test_asyncio_call(_Config) ->
-    %% Test async call to asyncio coroutine
-    %% The async pool runs async functions in a background asyncio event loop
-    Ref = py:async_call('__main__', 'eval', [<<"1 + 1">>]),
+    %% Sync function dispatched through the event loop short-circuits to
+    %% the result, so async_call/async_await round-trips end-to-end.
+    Ref = py:async_call(math, sqrt, [16]),
     true = is_reference(Ref),
-
-    %% We may not get a result for simple eval since it's not a real coroutine
-    %% Just verify the call mechanism works
-    _Result = py:async_await(Ref, 5000),
+    {ok, 4.0} = py:async_await(Ref, 5000),
     ok.
 
 test_asyncio_gather(_Config) ->
-    %% Test gathering multiple async calls
-    %% This tests the async_gather functionality
     Calls = [
         {math, sqrt, [16]},
         {math, sqrt, [25]},
         {math, sqrt, [36]}
     ],
-    Result = py:async_gather(Calls),
-    ct:pal("async_gather result: ~p~n", [Result]),
-
-    %% Verify the result structure
-    case Result of
-        {ok, Results} when is_list(Results) ->
-            %% Should have 3 results
-            3 = length(Results),
-            %% Verify the values if they're successful
-            ct:pal("Gathered results: ~p~n", [Results]),
-            ok;
-        {error, Reason} ->
-            %% Async pool might not be fully functional in test env
-            ct:pal("async_gather returned error (may be expected): ~p~n", [Reason]),
-            ok
-    end.
+    {ok, [4.0, 5.0, 6.0]} = py:async_gather(Calls),
+    ok.
 
 test_subinterp_supported(_Config) ->
     %% Test that subinterp_supported returns a boolean
@@ -733,15 +712,7 @@ test_execution_mode(_Config) ->
     %% Test that execution_mode returns a valid mode
     Mode = py:execution_mode(),
     ct:pal("Execution mode: ~p~n", [Mode]),
-    true = lists:member(Mode, [free_threaded, subinterp, multi_executor]),
-    ok.
-
-test_num_executors(_Config) ->
-    %% Test that num_executors returns a positive integer
-    Num = py:num_executors(),
-    ct:pal("Number of executors: ~p~n", [Num]),
-    true = is_integer(Num),
-    true = Num > 0,
+    true = lists:member(Mode, [worker, owngil]),
     ok.
 
 test_semaphore_basic(_Config) ->

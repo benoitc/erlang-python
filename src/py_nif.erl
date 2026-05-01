@@ -52,28 +52,15 @@
     async_call/6,
     async_gather/3,
     async_stream/6,
-    %% Sub-interpreters (Python 3.12+) - shared GIL pool model
+    %% Subinterpreter capability probes (Python 3.12+ / 3.14+)
     subinterp_supported/0,
     owngil_supported/0,
-    subinterp_worker_new/0,
-    subinterp_worker_destroy/1,
-    subinterp_call/5,
-    parallel_execute/2,
-    %% OWN_GIL subinterpreter thread pool (true parallelism)
+    %% OWN_GIL thread pool (internal, used by py_event_loop_pool)
     subinterp_thread_pool_start/0,
     subinterp_thread_pool_start/1,
     subinterp_thread_pool_stop/0,
     subinterp_thread_pool_ready/0,
     subinterp_thread_pool_stats/0,
-    subinterp_thread_create/0,
-    subinterp_thread_destroy/1,
-    subinterp_thread_call/4,
-    subinterp_thread_call/5,
-    subinterp_thread_eval/2,
-    subinterp_thread_eval/3,
-    subinterp_thread_exec/2,
-    subinterp_thread_cast/4,
-    subinterp_thread_async_call/6,
     %% OWN_GIL session management for event loop pool
     owngil_create_session/1,
     owngil_submit_task/7,
@@ -82,7 +69,6 @@
     owngil_apply_paths/3,
     %% Execution mode info
     execution_mode/0,
-    num_executors/0,
     %% Thread worker support (ThreadPoolExecutor)
     thread_worker_set_coordinator/1,
     thread_worker_write/2,
@@ -176,6 +162,13 @@
     context_eval/4,
     context_exec/2,
     context_exec/3,
+    %% Async dispatch (non-blocking)
+    context_call_async/7,
+    context_eval_async/5,
+    context_exec_async/4,
+    context_call_with_env_async/8,
+    context_eval_with_env_async/6,
+    context_exec_with_env_async/5,
     context_call_method/4,
     create_local_env/1,
     context_to_term/1,
@@ -498,114 +491,38 @@ subinterp_supported() ->
 owngil_supported() ->
     ?NIF_STUB.
 
-%% @doc Create a new sub-interpreter worker with its own GIL.
-%% Returns an opaque reference to be used with subinterp functions.
--spec subinterp_worker_new() -> {ok, reference()} | {error, term()}.
-subinterp_worker_new() ->
-    ?NIF_STUB.
-
-%% @doc Destroy a sub-interpreter worker.
--spec subinterp_worker_destroy(reference()) -> ok | {error, term()}.
-subinterp_worker_destroy(_WorkerRef) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function in a sub-interpreter.
-%% Args: WorkerRef, Module (binary), Func (binary), Args (list), Kwargs (map)
--spec subinterp_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Execute multiple calls in parallel across sub-interpreters.
-%% Args: WorkerRefs (list of refs), Calls (list of {Module, Func, Args})
-%% Returns: List of results (one per call)
--spec parallel_execute([reference()], [{binary(), binary(), list()}]) ->
-    {ok, list()} | {error, term()}.
-parallel_execute(_WorkerRefs, _Calls) ->
-    ?NIF_STUB.
-
 %%% ============================================================================
-%%% OWN_GIL Subinterpreter Thread Pool (True Parallelism)
+%%% OWN_GIL Thread Pool (internal, used by py_event_loop_pool)
 %%% ============================================================================
 
 %% @doc Start the OWN_GIL subinterpreter thread pool with default workers.
-%% Creates a pool of pthreads, each with an OWN_GIL subinterpreter.
+%% @private
 -spec subinterp_thread_pool_start() -> ok | {error, term()}.
 subinterp_thread_pool_start() ->
     ?NIF_STUB.
 
 %% @doc Start the OWN_GIL subinterpreter thread pool with N workers.
+%% @private
 -spec subinterp_thread_pool_start(non_neg_integer()) -> ok | {error, term()}.
 subinterp_thread_pool_start(_NumWorkers) ->
     ?NIF_STUB.
 
 %% @doc Stop the OWN_GIL subinterpreter thread pool.
+%% @private
 -spec subinterp_thread_pool_stop() -> ok.
 subinterp_thread_pool_stop() ->
     ?NIF_STUB.
 
 %% @doc Check if the OWN_GIL thread pool is ready.
+%% @private
 -spec subinterp_thread_pool_ready() -> boolean().
 subinterp_thread_pool_ready() ->
     ?NIF_STUB.
 
 %% @doc Get OWN_GIL thread pool statistics.
+%% @private
 -spec subinterp_thread_pool_stats() -> map().
 subinterp_thread_pool_stats() ->
-    ?NIF_STUB.
-
-%% @doc Create a new OWN_GIL subinterpreter handle.
-%% The handle is bound to a worker thread and has isolated namespace.
--spec subinterp_thread_create() -> {ok, reference()} | {error, term()}.
-subinterp_thread_create() ->
-    ?NIF_STUB.
-
-%% @doc Destroy an OWN_GIL subinterpreter handle.
--spec subinterp_thread_destroy(reference()) -> ok | {error, term()}.
-subinterp_thread_destroy(_Handle) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function through OWN_GIL subinterpreter (blocking).
--spec subinterp_thread_call(reference(), binary(), binary(), list()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_call(_Handle, _Module, _Func, _Args) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function through OWN_GIL subinterpreter with kwargs.
--spec subinterp_thread_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_call(_Handle, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Evaluate Python expression through OWN_GIL subinterpreter.
--spec subinterp_thread_eval(reference(), binary()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_eval(_Handle, _Code) ->
-    ?NIF_STUB.
-
-%% @doc Evaluate Python expression with locals through OWN_GIL subinterpreter.
--spec subinterp_thread_eval(reference(), binary(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_thread_eval(_Handle, _Code, _Locals) ->
-    ?NIF_STUB.
-
-%% @doc Execute Python statements through OWN_GIL subinterpreter (no return).
--spec subinterp_thread_exec(reference(), binary()) -> ok | {error, term()}.
-subinterp_thread_exec(_Handle, _Code) ->
-    ?NIF_STUB.
-
-%% @doc Cast (fire-and-forget) through OWN_GIL subinterpreter.
-%% Returns immediately, result is discarded.
--spec subinterp_thread_cast(reference(), binary(), binary(), list()) -> ok.
-subinterp_thread_cast(_Handle, _Module, _Func, _Args) ->
-    ?NIF_STUB.
-
-%% @doc Async call through OWN_GIL subinterpreter.
-%% Args: Handle, Module, Func, Args, CallerPid, Ref
-%% Result is sent to CallerPid as {py_subinterp_result, Ref, Result}.
--spec subinterp_thread_async_call(reference(), binary(), binary(), list(), pid(), reference()) ->
-    ok | {error, term()}.
-subinterp_thread_async_call(_Handle, _Module, _Func, _Args, _CallerPid, _Ref) ->
     ?NIF_STUB.
 
 %%% ============================================================================
@@ -653,20 +570,16 @@ owngil_apply_paths(_WorkerId, _HandleId, _Paths) ->
 %%% Execution Mode Info
 %%% ============================================================================
 
-%% @doc Get the current execution mode.
-%% Returns one of: free_threaded | subinterp | multi_executor
+%% @doc Get Python capability (internal use).
+%% Returns the detected Python runtime capability:
 %% - free_threaded: Python 3.13+ with no GIL (Py_GIL_DISABLED)
-%% - subinterp: Python 3.12+ with per-interpreter GIL
-%% - multi_executor: Traditional Python with N executor threads
--spec execution_mode() -> free_threaded | subinterp | multi_executor.
+%% - gil: Conventional GIL build (any other supported version)
+%%
+%% For public execution mode, use py:execution_mode/0 which returns
+%% `worker | owngil' based on the application configuration.
+%% @private
+-spec execution_mode() -> free_threaded | gil.
 execution_mode() ->
-    ?NIF_STUB.
-
-%% @doc Get the number of executor threads.
-%% For multi_executor mode, this is the number of executor threads.
-%% For other modes, returns 1.
--spec num_executors() -> pos_integer().
-num_executors() ->
     ?NIF_STUB.
 
 %%% ============================================================================
@@ -1335,6 +1248,86 @@ context_exec(_ContextRef, _Code) ->
 %% @returns ok | {error, Reason}
 -spec context_exec(reference(), binary(), reference()) -> ok | {error, term()}.
 context_exec(_ContextRef, _Code, _EnvRef) ->
+    ?NIF_STUB.
+
+%% @doc Async call - enqueue and return immediately.
+%%
+%% Dispatches a Python function call to the worker thread and returns
+%% immediately with {enqueued, RequestId}. The worker thread will send
+%% {py_result, RequestId, Result} to CallerPid when done.
+%%
+%% @param ContextRef Context reference
+%% @param CallerPid PID to send result to
+%% @param RequestId Request ID for correlation
+%% @param Module Python module name
+%% @param Func Function name
+%% @param Args List of arguments
+%% @param Kwargs Keyword arguments map
+%% @returns {enqueued, RequestId} | {error, Reason}
+-spec context_call_async(reference(), pid(), term(), binary(), binary(), list(), map()) ->
+    {enqueued, term()} | {error, term()}.
+context_call_async(_ContextRef, _CallerPid, _RequestId, _Module, _Func, _Args, _Kwargs) ->
+    ?NIF_STUB.
+
+%% @doc Async eval - enqueue and return immediately.
+%%
+%% Dispatches a Python eval to the worker thread and returns immediately
+%% with {enqueued, RequestId}. The worker thread will send
+%% {py_result, RequestId, Result} to CallerPid when done.
+%%
+%% @param ContextRef Context reference
+%% @param CallerPid PID to send result to
+%% @param RequestId Request ID for correlation
+%% @param Code Python expression to evaluate
+%% @param Locals Local variables map
+%% @returns {enqueued, RequestId} | {error, Reason}
+-spec context_eval_async(reference(), pid(), term(), binary(), map()) ->
+    {enqueued, term()} | {error, term()}.
+context_eval_async(_ContextRef, _CallerPid, _RequestId, _Code, _Locals) ->
+    ?NIF_STUB.
+
+%% @doc Async exec - enqueue and return immediately.
+%%
+%% Dispatches Python code execution to the worker thread and returns
+%% immediately with {enqueued, RequestId}. The worker thread will send
+%% {py_result, RequestId, Result} to CallerPid when done.
+%%
+%% @param ContextRef Context reference
+%% @param CallerPid PID to send result to
+%% @param RequestId Request ID for correlation
+%% @param Code Python code to execute
+%% @returns {enqueued, RequestId} | {error, Reason}
+-spec context_exec_async(reference(), pid(), term(), binary()) ->
+    {enqueued, term()} | {error, term()}.
+context_exec_async(_ContextRef, _CallerPid, _RequestId, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Async call with process-local environment.
+%% @private
+-spec context_call_with_env_async(reference(), pid(), term(),
+                                   binary(), binary(), list(), map(),
+                                   reference()) ->
+    {enqueued, term()} | {error, term()}.
+context_call_with_env_async(_CtxRef, _CallerPid, _RequestId,
+                             _Module, _Func, _Args, _Kwargs, _EnvRef) ->
+    ?NIF_STUB.
+
+%% @doc Async eval with process-local environment.
+%% @private
+-spec context_eval_with_env_async(reference(), pid(), term(),
+                                   binary(), map(), reference()) ->
+    {enqueued, term()} | {error, term()}.
+context_eval_with_env_async(_CtxRef, _CallerPid, _RequestId,
+                             _Code, _Locals, _EnvRef) ->
+    ?NIF_STUB.
+
+%% @doc Async exec with process-local environment.
+%% @private
+-spec context_exec_with_env_async(reference(), pid(), term(),
+                                   binary(), reference()) ->
+    {enqueued, term()} | {error, term()}.
+context_exec_with_env_async(_CtxRef, _CallerPid, _RequestId,
+                             _Code, _EnvRef) ->
     ?NIF_STUB.
 
 %% @doc Call a method on a Python object in a context.

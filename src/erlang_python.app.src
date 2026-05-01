@@ -1,17 +1,13 @@
 {application, erlang_python, [
     {description, "Execute Python applications from Erlang using dirty NIFs"},
-    {vsn, "2.3.1"},
-    {registered, [py_pool]},
+    {vsn, "3.0.0"},
+    {registered, []},
     {mod, {erlang_python_app, []}},
     {applications, [
         kernel,
         stdlib
     ]},
-    {env, [
-        {num_workers, 4},
-        {python_path, ""},
-        {worker_timeout, 30000}
-    ]},
+    {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, [{"GitHub", "https://github.com/benoitc/erlang-python"}]},

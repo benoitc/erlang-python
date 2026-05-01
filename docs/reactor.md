@@ -573,11 +573,11 @@ Internal - called by NIF to close connection.
 
 ## Subinterpreter Support
 
-The reactor supports isolated subinterpreters via `py_reactor_context`. Each subinterpreter has its own reactor module cache, ensuring protocol factories are isolated between contexts.
+The reactor supports isolated subinterpreters via `py_reactor_context` in `owngil` mode. Each subinterpreter has its own reactor module cache, ensuring protocol factories are isolated between contexts.
 
 ```erlang
-%% Create context with subinterpreter mode
-{ok, Ctx1} = py_reactor_context:start_link(1, subinterp, #{
+%% Create context with OWN_GIL subinterpreter (Python 3.14+)
+{ok, Ctx1} = py_reactor_context:start_link(1, owngil, #{
     setup_code => <<"
 import erlang.reactor as reactor
 reactor.set_protocol_factory(EchoProtocol)
@@ -585,7 +585,7 @@ reactor.set_protocol_factory(EchoProtocol)
 }),
 
 %% Create another context with different protocol
-{ok, Ctx2} = py_reactor_context:start_link(2, subinterp, #{
+{ok, Ctx2} = py_reactor_context:start_link(2, owngil, #{
     setup_code => <<"
 import erlang.reactor as reactor
 reactor.set_protocol_factory(HttpProtocol)
@@ -593,7 +593,7 @@ reactor.set_protocol_factory(HttpProtocol)
 }).
 ```
 
-Each context runs in its own subinterpreter with isolated protocol factory and connection state. This enables running multiple protocol handlers in the same BEAM VM without interference.
+Each `owngil` context runs in its own subinterpreter with isolated protocol factory and connection state. For Python <3.14, use `worker` mode — contexts share the main interpreter but each owns a dedicated pthread.
 
 ## See Also
 

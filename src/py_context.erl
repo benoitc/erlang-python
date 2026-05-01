@@ -125,7 +125,7 @@ stop(Ctx) when is_pid(Ctx) ->
 %% @doc Create a new context with options map.
 %%
 %% Options:
-%% - `mode' - Context mode (worker | subinterp | owngil), default: worker
+%% - `mode' - Context mode (worker | owngil), default: worker
 %%
 %% @param Opts Options map
 %% @returns {ok, Pid} | {error, Reason}
@@ -563,13 +563,14 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
             loop(State);
 
         {exec, From, MRef, Code} ->
-            Result = py_nif:context_exec(Ref, Code),
+            Result = handle_exec_with_async(Ref, Code),
             From ! {MRef, Result},
             loop(State);
 
-        %% Exec with process-local environment (worker mode)
+        %% Exec with process-local environment (worker mode).
+        %% Async dispatch with sync fallback (mirrors call/eval).
         {exec, From, MRef, Code, EnvRef} ->
-            Result = py_nif:context_exec(Ref, Code, EnvRef),
+            Result = handle_exec_with_async_and_env(Ref, Code, EnvRef),
             From ! {MRef, Result},
             loop(State);
 
@@ -723,7 +724,23 @@ handle_blocking_callback(Ref, FuncName, Args) ->
 
 %% @private
 %% Handle call with potential suspension for callbacks
+%% Uses async dispatch to avoid blocking dirty schedulers when possible.
 handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
+    RequestId = make_ref(),
+    case py_nif:context_call_async(Ref, self(), RequestId, Module, Func, Args, Kwargs) of
+        {enqueued, RequestId} ->
+            %% Async dispatch succeeded - wait for result message
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            %% Fall back to blocking call for non-worker-thread contexts
+            handle_call_blocking(Ref, Module, Func, Args, Kwargs);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+%% Blocking call handler (used when async is not available)
+handle_call_blocking(Ref, Module, Func, Args, Kwargs) ->
     case py_nif:context_call(Ref, Module, Func, Args, Kwargs) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
             %% Callback needed - handle it with recursive receive
@@ -740,7 +757,36 @@ handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
 
 %% @private
 %% Handle eval with potential suspension for callbacks
+%% Uses async dispatch to avoid blocking dirty schedulers when possible.
 handle_eval_with_suspension(Ref, Code, Locals) ->
+    RequestId = make_ref(),
+    case py_nif:context_eval_async(Ref, self(), RequestId, Code, Locals) of
+        {enqueued, RequestId} ->
+            %% Async dispatch succeeded - wait for result message
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            %% Fall back to blocking call for non-worker-thread contexts
+            handle_eval_blocking(Ref, Code, Locals);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+%% Handle exec with async dispatch
+handle_exec_with_async(Ref, Code) ->
+    RequestId = make_ref(),
+    case py_nif:context_exec_async(Ref, self(), RequestId, Code) of
+        {enqueued, RequestId} ->
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            py_nif:context_exec(Ref, Code);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+%% Blocking eval handler (used when async is not available)
+handle_eval_blocking(Ref, Code, Locals) ->
     case py_nif:context_eval(Ref, Code, Locals) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
             %% Callback needed - handle it with recursive receive
@@ -756,8 +802,68 @@ handle_eval_with_suspension(Ref, Code, Locals) ->
     end.
 
 %% @private
-%% Handle call with process-local environment
+%% Wait for async result from worker thread
+%% The worker thread sends {py_result, RequestId, Result} when done.
+%%
+%% Drains stale {py_result, _, _} messages from prior timed-out
+%% requests before the matching receive so a context that experiences
+%% repeat timeouts doesn't grow an unbounded mailbox: when
+%% wait_for_async_result/2 returns {error, async_timeout}, the C
+%% worker can still finish later and deliver the result; without the
+%% drain those messages would accumulate forever.
+%%
+%% Safe because the context process is the sole receiver for its own
+%% async results and only one wait_for_async_result/2 is in flight at
+%% a time, so the drain cannot consume the result of a concurrent live
+%% request.
+wait_for_async_result(Ref, RequestId) ->
+    drain_stale_async_results(RequestId),
+    receive
+        {py_result, RequestId, Result} ->
+            process_async_result(Ref, Result)
+    after 300000 ->  %% 5 minute timeout
+        {error, async_timeout}
+    end.
+
+%% @private
+drain_stale_async_results(CurrentId) ->
+    receive
+        {py_result, OldId, _} when OldId =/= CurrentId ->
+            drain_stale_async_results(CurrentId)
+    after 0 ->
+        ok
+    end.
+
+%% @private
+%% Process the result from async dispatch
+%% Handles suspension, schedule markers, and normal results.
+process_async_result(Ref, {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}}) ->
+    CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
+    resume_and_continue(Ref, StateRef, CallbackResult);
+process_async_result(Ref, {schedule, CallbackName, CallbackArgs}) ->
+    handle_schedule(Ref, CallbackName, CallbackArgs);
+process_async_result(_Ref, Result) ->
+    Result.
+
+%% @private
+%% Handle call with process-local environment.
+%% Tries async dispatch first (no 30 s NIF timeout); falls back to the
+%% blocking NIF only when the worker thread isn't available.
 handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
+    RequestId = make_ref(),
+    case py_nif:context_call_with_env_async(Ref, self(), RequestId,
+                                              Module, Func, Args, Kwargs,
+                                              EnvRef) of
+        {enqueued, RequestId} ->
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            handle_call_with_env_blocking(Ref, Module, Func, Args, Kwargs, EnvRef);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+handle_call_with_env_blocking(Ref, Module, Func, Args, Kwargs, EnvRef) ->
     case py_nif:context_call(Ref, Module, Func, Args, Kwargs, EnvRef) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
             CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
@@ -769,8 +875,23 @@ handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
     end.
 
 %% @private
-%% Handle eval with process-local environment
+%% Handle eval with process-local environment.
+%% Tries async dispatch first; falls back to the blocking NIF only when
+%% the worker thread isn't available.
 handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
+    RequestId = make_ref(),
+    case py_nif:context_eval_with_env_async(Ref, self(), RequestId,
+                                              Code, Locals, EnvRef) of
+        {enqueued, RequestId} ->
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            handle_eval_with_env_blocking(Ref, Code, Locals, EnvRef);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+handle_eval_with_env_blocking(Ref, Code, Locals, EnvRef) ->
     case py_nif:context_eval(Ref, Code, Locals, EnvRef) of
         {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}} ->
             CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
@@ -779,6 +900,21 @@ handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
             handle_schedule(Ref, CallbackName, CallbackArgs);
         Result ->
             Result
+    end.
+
+%% @private
+%% Handle exec with process-local environment via the same async-first
+%% path used for call/eval.
+handle_exec_with_async_and_env(Ref, Code, EnvRef) ->
+    RequestId = make_ref(),
+    case py_nif:context_exec_with_env_async(Ref, self(), RequestId,
+                                              Code, EnvRef) of
+        {enqueued, RequestId} ->
+            wait_for_async_result(Ref, RequestId);
+        {error, async_requires_worker_thread} ->
+            py_nif:context_exec(Ref, Code, EnvRef);
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% @private

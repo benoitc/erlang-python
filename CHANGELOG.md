@@ -1,23 +1,91 @@
 # Changelog
 
-## 2.4.0 (Unreleased)
+## 3.0.0 (Unreleased)
 
-### Added
+### Breaking Changes
 
-- **Context thread affinity** - Contexts in MULTI_EXECUTOR mode are now assigned a
-  fixed executor thread at creation. All operations (call, eval, exec) from the same
-  context run on the same OS thread, preventing thread state corruption in libraries
-  like numpy and PyTorch that have thread-local state.
+- **Simplified execution model** - Only two public execution modes: `worker` and `owngil`
+  - `worker`: Dedicated pthread per context with stable thread affinity (default)
+  - `owngil`: Dedicated pthread + subinterpreter with own GIL (Python 3.14+)
+  - Removed `multi_executor` and `free_threaded` from public API
+  - Internal capability detection still tracks Python features
+
+- **Removed `py:num_executors/0`** - Contexts now use per-context worker threads
+  instead of a shared executor pool. This function is no longer needed.
+
+- **`py:execution_mode/0` returns `worker | owngil`** - Based on the `context_mode`
+  application configuration. Previously returned internal capabilities like
+  `free_threaded`, `subinterp`, or `multi_executor`.
+
+- **Removed `py:async_stream/3,4`** - Streaming async generators was never
+  implemented behind the API and always returned `{error, stream_not_implemented}`.
+  Use `py:stream_start/3,4` for sync generators; async-generator support may
+  return in a later release.
+
+- **Removed `num_executors` / `num_async_workers` configuration** - Both keys
+  were no-ops after the v3.0 worker rework. Configure context count via
+  `num_contexts` and the rate-limit ceiling via `max_concurrent`.
+
+- **Strict context-mode validation at the NIF boundary** - `py_nif:context_create/1`
+  now returns `{error, {invalid_mode, Atom}}` for anything other than `worker | owngil`.
+  Previously, callers that bypassed `py_context` (notably `py_reactor_context`)
+  silently mapped any unknown atom — including legacy `auto` and `subinterp` —
+  to worker mode. Code that relied on that loophole must pass `worker` (or
+  `owngil`) explicitly.
+
+### Fixed
+
+- **`py:async_call/3,4` + `py:async_await/1,2` round-trip** - Previously the
+  await receive matched `{py_response, _, _}` while the event loop sent
+  `{async_result, _, _}`, causing every async call to silently time out.
+  Async calls now go directly through `py_event_loop:create_task` and
+  `py_event_loop:await`.
+
+- **`py:async_gather/1,2` actually executes** - Reimplemented as concurrent
+  `async_call` submission with sequential `async_await`. Returns
+  `{ok, [Result1, ...]}` on success or `{error, {gather_failed, [{Idx, Reason}, ...]}}`
+  if any call fails. The previous implementation returned `gather_not_implemented`.
 
 ### Changed
 
-- **`py:execution_mode/0` now returns actual mode** - Returns `worker` (default),
-  `owngil`, `free_threaded`, or `multi_executor` based on actual configuration
-  instead of Python capability. Previously returned `subinterp` even when using
-  worker mode.
+- **Per-context worker threads** - Each context now gets its own dedicated pthread
+  that handles all Python operations. This provides stable thread affinity for
+  numpy/torch/tensorflow compatibility without needing a shared executor pool.
 
-- **Removed obsolete subinterp test references** - Test suites updated to reflect
-  the removal of subinterpreter mode. Tests now use `worker` or `owngil` modes.
+- **Async NIF dispatch** - Context operations use async NIFs with message passing
+  instead of blocking dirty schedulers. This improves concurrency under load.
+
+- **Request queue per context** - Replaced single-slot request pattern with proper
+  request queues that support multiple concurrent callers.
+
+- **No global asyncio policy install on Python 3.14+.** `asyncio.set_event_loop_policy`
+  was deprecated in 3.14 and is removed in 3.16. The Erlang integration's run path
+  already uses `loop_factory=` (`erlang.run/1`, `asyncio.Runner`) so the global
+  policy was only a convenience for bare `asyncio.run()` inside `py:exec`. We now
+  skip the install on 3.14+ to avoid the deprecation warning. On 3.14+ use
+  `erlang.run(main)` or `asyncio.Runner(loop_factory=erlang.new_event_loop)`
+  explicitly. Behavior on Python 3.9–3.13 is unchanged. `erlang.install()` raises
+  `RuntimeError` on 3.14+ (still emits a `DeprecationWarning` and works on 3.12–3.13).
+
+### Removed
+
+- Multi-executor pool (`g_executors[]`, `multi_executor_start/stop`)
+- `context_dispatch_call/eval/exec` functions (dead code)
+- References to `PY_MODE_MULTI_EXECUTOR` in context operations
+- `py_async_pool` legacy gen_server (unused after async API rewire)
+- **Explicit `py:subinterp_*` handle API removed.** `py:subinterp_create/0`,
+  `subinterp_destroy/1`, `subinterp_call/4,5`, `subinterp_eval/2,3`,
+  `subinterp_exec/2`, `subinterp_cast/4`, `subinterp_async_call/4`,
+  `subinterp_await/1,2`, and `subinterp_pool_*` are all gone. Use
+  `py_context:new(#{mode => owngil})` instead — it gives the same
+  parallelism with OTP supervision and automatic cleanup.
+  `py:subinterp_supported/0` (capability probe) and `py:parallel/1`
+  (which routes through the context API) stay.
+- Internal `py_execution_mode_t` collapsed from 3 values to 2 (`free_threaded`
+  / `gil`); `py_nif:execution_mode/0` returns `free_threaded | gil` instead
+  of the old `free_threaded | subinterp | multi_executor`.
+- `examples/reactor_owngil_example.erl` deleted (called nonexistent
+  `py:subinterp_reactor_*` functions; pre-existing breakage).
 
 ## 2.3.1 (2026-04-01)
 
