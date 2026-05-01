@@ -247,7 +247,7 @@ reactor.set_protocol_factory(AsyncPendingProtocol)
 ">>,
 
     %% Start reactor context with protocol factory setup
-    {ok, ReactorCtx} = py_reactor_context:start_link(1, auto, #{
+    {ok, ReactorCtx} = py_reactor_context:start_link(1, worker, #{
         setup_code => SetupCode
     }),
 

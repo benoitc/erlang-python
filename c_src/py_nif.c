@@ -4629,13 +4629,24 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "python_not_running");
     }
 
-    /* Parse mode atom */
+    /* Parse mode atom — reject anything other than worker | owngil so
+     * callers that bypass py_context (e.g. py_reactor_context) get the
+     * same strict validation py_context:create_context/1 already enforces. */
     char mode_str[32];
     if (!enif_get_atom(env, argv[0], mode_str, sizeof(mode_str), ERL_NIF_LATIN1)) {
         return make_error(env, "invalid_mode");
     }
 
-    bool use_owngil = (strcmp(mode_str, "owngil") == 0);
+    bool use_owngil;
+    if (strcmp(mode_str, "worker") == 0) {
+        use_owngil = false;
+    } else if (strcmp(mode_str, "owngil") == 0) {
+        use_owngil = true;
+    } else {
+        return enif_make_tuple2(
+            env, ATOM_ERROR,
+            enif_make_tuple2(env, enif_make_atom(env, "invalid_mode"), argv[0]));
+    }
 
     /* Allocate context resource */
     py_context_t *ctx = enif_alloc_resource(PY_CONTEXT_RESOURCE_TYPE, sizeof(py_context_t));
