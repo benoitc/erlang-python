@@ -629,10 +629,10 @@ typedef struct {
     size_t result_len;
 
     /** @brief Flag: result is available for replay */
-    volatile bool has_result;
+    _Atomic bool has_result;
 
     /** @brief Flag: result represents an error */
-    volatile bool is_error;
+    _Atomic bool is_error;
 
     /* Synchronization */
 
@@ -1216,10 +1216,10 @@ typedef struct {
     size_t result_len;
 
     /** @brief Flag: result is available for replay */
-    volatile bool has_result;
+    _Atomic bool has_result;
 
     /** @brief Flag: result represents an error */
-    volatile bool is_error;
+    _Atomic bool is_error;
 
     /* Sequential callback support - stores all accumulated callback results */
 
