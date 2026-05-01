@@ -707,14 +707,15 @@ def sync_handler():
     return "done"
 ```
 
-**Behavior by Context:**
+**Behavior by context (v3.0 worker-pthread architecture):**
 
-| Context | Mechanism | Effect |
-|---------|-----------|--------|
-| Async (`await erlang.sleep()`) | `asyncio.sleep()` via `call_later()` | Yields to event loop, dirty scheduler released |
-| Sync (`erlang.sleep()`) | `erlang.call('_py_sleep')` with `receive/after` | Blocks Python, Erlang process suspends, dirty scheduler released |
+| Context | Mechanism | What blocks |
+|---------|-----------|-------------|
+| Async (`await erlang.sleep()`) | `asyncio.sleep()` via Erlang `send_after` | Yields to the event loop. The worker pthread is free to handle other tasks. |
+| Sync from `py:exec` / `py:eval` | `erlang.call('_py_sleep', secs)` triggers suspension; the dirty scheduler is released and an Erlang `receive ... after` parks the caller | Caller's Erlang process. Dirty scheduler free for other work. |
+| Sync from `py:call` (worker mode) | Falls back to `time.sleep`; replaying the Python frame around a suspension would change time-measurement semantics | The context's worker pthread for the sleep duration. Async NIF dispatch returns immediately so the BEAM dirty scheduler is **not** held; other Erlang processes and other contexts run normally. |
 
-Both modes allow other Erlang processes and Python contexts to run during the sleep.
+In every case the BEAM dirty scheduler is freed during the sleep — the difference is which thread blocks (Erlang process, dirty scheduler, or worker pthread).
 
 #### asyncio.sleep(delay)
 

@@ -226,17 +226,26 @@ def sleep(seconds):
     - Async context: Returns an awaitable (use with await)
     - Sync context: Blocks synchronously
 
-    **Dirty Scheduler Release:**
+    **Behavior by context (v3.0 worker-pthread architecture)**:
 
-    In async context, uses asyncio.sleep() which routes through the Erlang
-    timer system via erlang:send_after. The dirty scheduler is released
-    because the Python code yields back to the event loop.
+    The BEAM dirty scheduler is never held during the sleep — the
+    difference is which thread blocks.
 
-    In sync context (when called from py:exec or py:eval), the sleep uses
-    Erlang's receive/after via erlang.call('_py_sleep', seconds), which
-    releases the dirty NIF scheduler thread. When called from py:call
-    contexts, falls back to Python's time.sleep() which blocks the dirty
-    scheduler but ensures correct time measurement behavior.
+    - Async (``await erlang.sleep()``) uses ``asyncio.sleep()``, which
+      routes through Erlang's ``send_after`` timer. The coroutine
+      yields to the event loop; the worker pthread handles other tasks.
+    - Sync from ``py:exec`` / ``py:eval`` calls
+      ``erlang.call('_py_sleep', seconds)``. The suspension machinery
+      releases the dirty scheduler and parks the caller's Erlang
+      process in a ``receive ... after``.
+    - Sync from ``py:call`` falls back to ``time.sleep`` — the worker
+      pthread blocks for the sleep duration. The BEAM dirty scheduler
+      is *not* held here either: the NIF dispatch returned immediately
+      and the caller is waiting in an Erlang ``receive`` on the
+      context process. Other Erlang processes and other contexts run
+      normally during the sleep. (Replaying a suspended Python frame
+      around ``time.time()`` would change time-measurement semantics,
+      which is why ``py:call`` doesn't take the suspension path.)
 
     Args:
         seconds: Duration to sleep in seconds (float or int).
@@ -246,13 +255,13 @@ def sleep(seconds):
         In sync context: None (blocks until sleep completes).
 
     Example:
-        # Async context - releases dirty scheduler via event loop yield
+        # Async context
         async def main():
-            await erlang.sleep(0.5)  # Uses Erlang timer system
+            await erlang.sleep(0.5)
 
         # Sync context
         def handler():
-            erlang.sleep(0.5)  # Blocks for 0.5 seconds
+            erlang.sleep(0.5)
     """
     try:
         asyncio.get_running_loop()
@@ -396,7 +405,7 @@ def _run_async_from_erlang(module, func, args, kwargs):
     return run(coro)
 
 
-def install():
+def install(*, silent=False):
     """Install ErlangEventLoopPolicy as the default event loop policy.
 
     Deprecated in Python 3.12+; raises ``RuntimeError`` on Python 3.14+
@@ -408,12 +417,20 @@ def install():
     both work on every supported Python version and don't touch the
     global policy.
 
+    Args:
+        silent: If True (keyword-only), suppress the per-call
+            ``DeprecationWarning`` on Python 3.12-3.13. Useful when
+            you knowingly rely on the legacy pattern and don't want
+            to silence ``DeprecationWarning`` globally. The 3.14+
+            ``RuntimeError`` is *not* suppressible — that pattern
+            won't work on 3.16 and the call has no fallback there.
+
     Example (legacy pattern, Python 3.9–3.13 only):
         import asyncio
         import erlang
 
-        erlang.install()
-        asyncio.run(main())  # Uses Erlang event loop
+        erlang.install(silent=True)  # opt out of the warning
+        asyncio.run(main())          # Uses Erlang event loop
     """
     if sys.version_info >= (3, 14):
         raise RuntimeError(
@@ -421,10 +438,11 @@ def install():
             "Use erlang.run(main) or "
             "asyncio.Runner(loop_factory=erlang.new_event_loop) instead."
         )
-    if sys.version_info >= (3, 12):
+    if sys.version_info >= (3, 12) and not silent:
         warnings.warn(
             "erlang.install() is deprecated in Python 3.12+. "
-            "Use erlang.run(main()) instead.",
+            "Use erlang.run(main()) instead, or pass silent=True "
+            "to suppress this warning.",
             DeprecationWarning,
             stacklevel=2
         )

@@ -279,6 +279,17 @@ class TestErlangModuleFunctions(unittest.TestCase):
                         any(issubclass(warning.category, DeprecationWarning)
                             for warning in w)
                     )
+
+                # silent=True must suppress the warning even with
+                # simplefilter("always").
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    erlang.install(silent=True)
+                    install_warnings = [
+                        warning for warning in w
+                        if "erlang.install()" in str(warning.message)
+                    ]
+                    self.assertEqual(install_warnings, [])
             else:
                 erlang.install()
 

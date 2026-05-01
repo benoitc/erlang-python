@@ -541,20 +541,25 @@ erlang.send(("my_server", "node@host"), {"event": "user_login", "user": 123})
 erlang.send(pid, "hello")
 ```
 
-### `erlang.sleep()` with Dirty Scheduler Release
+### `erlang.sleep()` cooperates with the BEAM scheduler
 
-Synchronous sleep that releases the Erlang dirty scheduler thread:
+Synchronous sleep that lets other Erlang processes and Python
+contexts make progress during the wait:
 
 ```python
 import erlang
 
 def slow_handler():
-    # Sleep without blocking Erlang scheduler
-    erlang.sleep(1.0)  # Releases dirty scheduler during sleep
+    erlang.sleep(1.0)
     return "done"
 ```
 
-Unlike `time.sleep()`, `erlang.sleep()` releases the dirty NIF thread while waiting, allowing other Python calls to use the scheduler slot.
+The BEAM dirty scheduler is never held during the sleep. The exact
+thread that blocks depends on context — the Erlang process for
+`py:exec` / `py:eval`, or the context's private worker pthread for
+`py:call`. See the [behavior-by-context table in the asyncio
+guide](asyncio.md#erlangsleepseconds) for the full breakdown. In all
+cases, other contexts and other Erlang processes continue running.
 
 ### `erlang.call()` Blocking with Explicit Scheduling
 
