@@ -50,9 +50,6 @@ ErlNifResourceType *WORKER_RESOURCE_TYPE = NULL;
 ErlNifResourceType *PYOBJ_RESOURCE_TYPE = NULL;
 /* ASYNC_WORKER_RESOURCE_TYPE removed - async workers replaced by event loop model */
 ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE = NULL;
-#ifdef HAVE_SUBINTERPRETERS
-ErlNifResourceType *SUBINTERP_WORKER_RESOURCE_TYPE = NULL;
-#endif
 
 /* Process-per-context resource type (no mutex) */
 ErlNifResourceType *PY_CONTEXT_RESOURCE_TYPE = NULL;
@@ -337,35 +334,9 @@ static void pyobj_destructor(ErlNifEnv *env, void *obj) {
     atomic_fetch_add(&g_counters.pyobj_destroyed, 1);
 }
 
-/* async_worker_destructor removed - async workers replaced by event loop model */
-
-#ifdef HAVE_SUBINTERPRETERS
-static void subinterp_worker_destructor(ErlNifEnv *env, void *obj) {
-    (void)env;
-    py_subinterp_worker_t *worker = (py_subinterp_worker_t *)obj;
-
-    /* For OWN_GIL subinterpreters, we cannot safely acquire the GIL from the
-     * GC thread (destructor may run on any thread). PyGILState_Ensure only
-     * works for the main interpreter, and PyThreadState_Swap doesn't actually
-     * acquire the GIL.
-     *
-     * If the user didn't call the explicit destroy function, the subinterpreter
-     * leaks. This is a known limitation - users must call destroy explicitly. */
-    if (worker->tstate != NULL && runtime_is_running()) {
-#ifdef DEBUG
-        fprintf(stderr, "Warning: subinterp_worker leaked - not destroyed "
-                "via explicit destroy. Use subinterp_worker_destroy/1.\n");
-#endif
-        /* Skip Python cleanup - we can't safely acquire the subinterpreter's GIL */
-        worker->tstate = NULL;
-        worker->globals = NULL;
-        worker->locals = NULL;
-    }
-
-    /* Destroy the mutex */
-    pthread_mutex_destroy(&worker->mutex);
-}
-#endif
+/* async_worker_destructor and subinterp_worker_destructor removed —
+ * async workers replaced by event loop model; subinterp_worker resource
+ * type retired with the explicit handle API. */
 
 /**
  * @brief Destructor for py_context_t (process-per-context)
@@ -1834,312 +1805,6 @@ static ERL_NIF_TERM nif_owngil_supported(ErlNifEnv *env, int argc, const ERL_NIF
 #endif
 }
 
-#ifdef HAVE_SUBINTERPRETERS
-
-static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-
-    if (!runtime_is_running()) {
-        return make_error(env, "python_not_running");
-    }
-
-    py_subinterp_worker_t *worker = enif_alloc_resource(SUBINTERP_WORKER_RESOURCE_TYPE,
-                                                         sizeof(py_subinterp_worker_t));
-    if (worker == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Initialize mutex for thread-safe access */
-    if (pthread_mutex_init(&worker->mutex, NULL) != 0) {
-        enif_release_resource(worker);
-        return make_error(env, "mutex_init_failed");
-    }
-
-    /* Need the main GIL to create sub-interpreter */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Save current thread state so we can restore it after creating sub-interp */
-    PyThreadState *main_tstate = PyThreadState_Get();
-
-    /* Configure sub-interpreter with its own GIL */
-    PyInterpreterConfig config = {
-        .use_main_obmalloc = 0,
-        .allow_fork = 0,
-        .allow_exec = 0,
-        .allow_threads = 1,
-        .allow_daemon_threads = 0,
-        .check_multi_interp_extensions = 1,
-        .gil = PyInterpreterConfig_OWN_GIL,  /* This is the key - own GIL! */
-    };
-
-    PyThreadState *tstate = NULL;
-    PyStatus status = Py_NewInterpreterFromConfig(&tstate, &config);
-
-    if (PyStatus_Exception(status) || tstate == NULL) {
-        /* We're still in main interpreter on error */
-        PyGILState_Release(gstate);
-        enif_release_resource(worker);
-        return make_error(env, "subinterp_create_failed");
-    }
-
-    worker->interp = PyThreadState_GetInterpreter(tstate);
-    worker->tstate = tstate;
-
-    /* Create global/local namespaces in the new interpreter */
-    worker->globals = PyDict_New();
-    worker->locals = PyDict_New();
-
-    /* Import __builtins__ */
-    PyObject *builtins = PyEval_GetBuiltins();
-    PyDict_SetItemString(worker->globals, "__builtins__", builtins);
-
-    /* Initialize event loop for this subinterpreter */
-    if (init_subinterpreter_event_loop(env) < 0) {
-        /* Clean up Python objects before ending interpreter */
-        Py_XDECREF(worker->globals);
-        worker->globals = NULL;
-        Py_XDECREF(worker->locals);
-        worker->locals = NULL;
-        Py_EndInterpreter(tstate);
-        /* Re-acquire main interpreter's GIL after subinterpreter was destroyed */
-        PyEval_RestoreThread(main_tstate);
-        PyGILState_Release(gstate);
-        enif_release_resource(worker);
-        return make_error(env, "event_loop_init_failed");
-    }
-
-    /* Switch back to main interpreter - release subinterp's GIL and acquire main's */
-    PyEval_SaveThread();  /* Release subinterpreter's GIL */
-    PyEval_RestoreThread(main_tstate);  /* Acquire main interpreter's GIL */
-
-    PyGILState_Release(gstate);
-
-    ERL_NIF_TERM result = enif_make_resource(env, worker);
-    enif_release_resource(worker);
-
-    return enif_make_tuple2(env, ATOM_OK, result);
-}
-
-static ERL_NIF_TERM nif_subinterp_worker_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    py_subinterp_worker_t *worker;
-
-    if (!enif_get_resource(env, argv[0], SUBINTERP_WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-
-    if (!runtime_is_running()) {
-        return make_error(env, "python_not_running");
-    }
-
-    /* Lock mutex for thread-safe access */
-    pthread_mutex_lock(&worker->mutex);
-
-    if (worker->tstate != NULL) {
-        /* For subinterpreters with OWN_GIL, directly acquire the subinterpreter's
-         * GIL. We don't use PyGILState_Ensure because that only works for the
-         * main interpreter. */
-        PyEval_RestoreThread(worker->tstate);
-
-        /* Clean up Python objects while holding the subinterpreter's GIL */
-        Py_XDECREF(worker->globals);
-        worker->globals = NULL;
-        Py_XDECREF(worker->locals);
-        worker->locals = NULL;
-
-        /* End the interpreter - this releases its GIL */
-        Py_EndInterpreter(worker->tstate);
-        worker->tstate = NULL;
-    }
-
-    pthread_mutex_unlock(&worker->mutex);
-
-    return ATOM_OK;
-}
-
-static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    py_subinterp_worker_t *worker;
-    ErlNifBinary module_bin, func_bin;
-
-    if (!runtime_is_running()) {
-        return make_error(env, "python_not_running");
-    }
-
-    if (!enif_get_resource(env, argv[0], SUBINTERP_WORKER_RESOURCE_TYPE, (void **)&worker)) {
-        return make_error(env, "invalid_worker");
-    }
-    if (!enif_inspect_binary(env, argv[1], &module_bin)) {
-        return make_error(env, "invalid_module");
-    }
-    if (!enif_inspect_binary(env, argv[2], &func_bin)) {
-        return make_error(env, "invalid_func");
-    }
-
-    /* Lock mutex for thread-safe access */
-    pthread_mutex_lock(&worker->mutex);
-
-    /* Enter the sub-interpreter with proper GIL acquisition (safe for OWN_GIL) */
-    PyEval_RestoreThread(worker->tstate);
-
-    char *module_name = binary_to_string(&module_bin);
-    char *func_name = binary_to_string(&func_bin);
-    if (module_name == NULL || func_name == NULL) {
-        enif_free(module_name);
-        enif_free(func_name);
-        PyEval_SaveThread();
-        pthread_mutex_unlock(&worker->mutex);
-        return make_error(env, "alloc_failed");
-    }
-
-    ERL_NIF_TERM result;
-
-    /* Import module */
-    PyObject *module = PyImport_ImportModule(module_name);
-    if (module == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Get function */
-    PyObject *func = PyObject_GetAttrString(module, func_name);
-    Py_DECREF(module);
-    if (func == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Convert args */
-    unsigned int args_len;
-    if (!enif_get_list_length(env, argv[3], &args_len)) {
-        Py_DECREF(func);
-        result = make_error(env, "invalid_args");
-        goto cleanup;
-    }
-
-    PyObject *args = PyTuple_New(args_len);
-    ERL_NIF_TERM head, tail = argv[3];
-    for (unsigned int i = 0; i < args_len; i++) {
-        enif_get_list_cell(env, tail, &head, &tail);
-        PyObject *arg = term_to_py(env, head);
-        if (arg == NULL) {
-            Py_DECREF(args);
-            Py_DECREF(func);
-            result = make_error(env, "arg_conversion_failed");
-            goto cleanup;
-        }
-        PyTuple_SET_ITEM(args, i, arg);
-    }
-
-    /* Convert kwargs */
-    PyObject *kwargs = NULL;
-    if (argc > 4 && enif_is_map(env, argv[4])) {
-        kwargs = term_to_py(env, argv[4]);
-    }
-
-    /* Call the function */
-    PyObject *py_result = PyObject_Call(func, args, kwargs);
-    Py_DECREF(func);
-    Py_DECREF(args);
-    Py_XDECREF(kwargs);
-
-    if (py_result == NULL) {
-        result = make_py_error(env);
-    } else {
-        ERL_NIF_TERM term_result = py_to_term(env, py_result);
-        Py_DECREF(py_result);
-        result = enif_make_tuple2(env, ATOM_OK, term_result);
-    }
-
-cleanup:
-    enif_free(module_name);
-    enif_free(func_name);
-
-    /* Exit the sub-interpreter with proper GIL release (safe for OWN_GIL) */
-    PyEval_SaveThread();
-
-    /* Unlock mutex */
-    pthread_mutex_unlock(&worker->mutex);
-
-    return result;
-}
-
-static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    unsigned int workers_len, calls_len;
-
-    if (!enif_get_list_length(env, argv[0], &workers_len)) {
-        return make_error(env, "invalid_workers_list");
-    }
-    if (!enif_get_list_length(env, argv[1], &calls_len)) {
-        return make_error(env, "invalid_calls_list");
-    }
-    if (workers_len == 0 || calls_len == 0) {
-        return enif_make_tuple2(env, ATOM_OK, enif_make_list(env, 0));
-    }
-    if (workers_len < calls_len) {
-        return make_error(env, "not_enough_workers");
-    }
-
-    ERL_NIF_TERM *results = enif_alloc(sizeof(ERL_NIF_TERM) * calls_len);
-    if (results == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-    ERL_NIF_TERM worker_head, worker_tail = argv[0];
-    ERL_NIF_TERM call_head, call_tail = argv[1];
-
-    for (unsigned int i = 0; i < calls_len; i++) {
-        enif_get_list_cell(env, worker_tail, &worker_head, &worker_tail);
-        enif_get_list_cell(env, call_tail, &call_head, &call_tail);
-
-        int arity;
-        const ERL_NIF_TERM *tuple;
-        if (!enif_get_tuple(env, call_head, &arity, &tuple) || arity < 3) {
-            enif_free(results);
-            return make_error(env, "invalid_call_tuple");
-        }
-
-        /* Build args array for subinterp_call */
-        ERL_NIF_TERM call_args[5] = {worker_head, tuple[0], tuple[1], tuple[2],
-                                      (arity > 3) ? tuple[3] : enif_make_new_map(env)};
-
-        results[i] = nif_subinterp_call(env, 5, call_args);
-    }
-
-    ERL_NIF_TERM result_list = enif_make_list_from_array(env, results, calls_len);
-    enif_free(results);
-
-    return enif_make_tuple2(env, ATOM_OK, result_list);
-}
-
-#else /* !HAVE_SUBINTERPRETERS */
-
-/* Stub implementations for older Python versions */
-static ERL_NIF_TERM nif_subinterp_worker_new(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-    return make_error(env, "subinterpreters_not_supported");
-}
-
-static ERL_NIF_TERM nif_subinterp_worker_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-    return make_error(env, "subinterpreters_not_supported");
-}
-
-static ERL_NIF_TERM nif_subinterp_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-    return make_error(env, "subinterpreters_not_supported");
-}
-
-static ERL_NIF_TERM nif_parallel_execute(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-    return make_error(env, "subinterpreters_not_supported");
-}
-
-#endif /* HAVE_SUBINTERPRETERS */
 
 /* ============================================================================
  * Shared-GIL Pool Model for Subinterpreters
@@ -7275,180 +6940,6 @@ cleanup:
 #ifdef HAVE_SUBINTERPRETERS
 
 /**
- * @brief Destructor for py_subinterp_handle_t resource
- */
-static void subinterp_handle_destructor(ErlNifEnv *env, void *obj) {
-    (void)env;
-    py_subinterp_handle_t *handle = (py_subinterp_handle_t *)obj;
-
-    /* Clean up the namespace in the worker */
-    if (!atomic_load(&handle->destroyed)) {
-        subinterp_thread_handle_destroy(handle);
-    }
-}
-
-/**
- * @brief NIF: Create a new OWN_GIL subinterpreter handle
- *
- * Returns a handle that can be used with subinterp_call/eval/exec.
- * The handle is bound to a worker thread with its own GIL.
- */
-static ERL_NIF_TERM nif_subinterp_thread_create(ErlNifEnv *env, int argc,
-                                                  const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-
-    if (!subinterp_thread_pool_is_ready()) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "pool_not_initialized"));
-    }
-
-    py_subinterp_handle_t *handle = enif_alloc_resource(
-        PY_SUBINTERP_HANDLE_RESOURCE_TYPE, sizeof(py_subinterp_handle_t));
-    if (handle == NULL) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "alloc_failed"));
-    }
-
-    if (subinterp_thread_handle_create(handle) != 0) {
-        enif_release_resource(handle);
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "create_failed"));
-    }
-
-    ERL_NIF_TERM ref = enif_make_resource(env, handle);
-    enif_release_resource(handle);
-
-    return enif_make_tuple2(env, ATOM_OK, ref);
-}
-
-/**
- * @brief NIF: Destroy an OWN_GIL subinterpreter handle
- */
-static ERL_NIF_TERM nif_subinterp_thread_destroy(ErlNifEnv *env, int argc,
-                                                   const ERL_NIF_TERM argv[]) {
-    (void)argc;
-
-    py_subinterp_handle_t *handle;
-    if (!enif_get_resource(env, argv[0], PY_SUBINTERP_HANDLE_RESOURCE_TYPE,
-                           (void **)&handle)) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "invalid_handle"));
-    }
-
-    subinterp_thread_handle_destroy(handle);
-    return ATOM_OK;
-}
-
-/**
- * @brief NIF: Call a Python function through OWN_GIL subinterpreter
- */
-static ERL_NIF_TERM nif_subinterp_thread_call(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    if (argc < 4 || argc > 5) {
-        return enif_make_badarg(env);
-    }
-
-    py_subinterp_handle_t *handle;
-    if (!enif_get_resource(env, argv[0], PY_SUBINTERP_HANDLE_RESOURCE_TYPE,
-                           (void **)&handle)) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "invalid_handle"));
-    }
-
-    ERL_NIF_TERM module = argv[1];
-    ERL_NIF_TERM func = argv[2];
-    ERL_NIF_TERM args = argv[3];
-    ERL_NIF_TERM kwargs = argc > 4 ? argv[4] : enif_make_new_map(env);
-
-    return subinterp_thread_call(env, handle, module, func, args, kwargs);
-}
-
-/**
- * @brief NIF: Evaluate Python expression through OWN_GIL subinterpreter
- */
-static ERL_NIF_TERM nif_subinterp_thread_eval(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    if (argc < 2 || argc > 3) {
-        return enif_make_badarg(env);
-    }
-
-    py_subinterp_handle_t *handle;
-    if (!enif_get_resource(env, argv[0], PY_SUBINTERP_HANDLE_RESOURCE_TYPE,
-                           (void **)&handle)) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "invalid_handle"));
-    }
-
-    ERL_NIF_TERM code = argv[1];
-    ERL_NIF_TERM locals = argc > 2 ? argv[2] : enif_make_new_map(env);
-
-    return subinterp_thread_eval(env, handle, code, locals);
-}
-
-/**
- * @brief NIF: Execute Python statements through OWN_GIL subinterpreter
- */
-static ERL_NIF_TERM nif_subinterp_thread_exec(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    if (argc != 2) {
-        return enif_make_badarg(env);
-    }
-
-    py_subinterp_handle_t *handle;
-    if (!enif_get_resource(env, argv[0], PY_SUBINTERP_HANDLE_RESOURCE_TYPE,
-                           (void **)&handle)) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "invalid_handle"));
-    }
-
-    return subinterp_thread_exec(env, handle, argv[1]);
-}
-
-/**
- * @brief NIF: Cast (fire-and-forget) through OWN_GIL subinterpreter
- */
-static ERL_NIF_TERM nif_subinterp_thread_cast(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    if (argc != 4) {
-        return enif_make_badarg(env);
-    }
-
-    py_subinterp_handle_t *handle;
-    if (!enif_get_resource(env, argv[0], PY_SUBINTERP_HANDLE_RESOURCE_TYPE,
-                           (void **)&handle)) {
-        return ATOM_OK;  /* Silently ignore for cast */
-    }
-
-    return subinterp_thread_cast(env, handle, argv[1], argv[2], argv[3]);
-}
-
-/**
- * @brief NIF: Async call through OWN_GIL subinterpreter
- */
-static ERL_NIF_TERM nif_subinterp_thread_async_call(ErlNifEnv *env, int argc,
-                                                      const ERL_NIF_TERM argv[]) {
-    if (argc != 6) {
-        return enif_make_badarg(env);
-    }
-
-    py_subinterp_handle_t *handle;
-    if (!enif_get_resource(env, argv[0], PY_SUBINTERP_HANDLE_RESOURCE_TYPE,
-                           (void **)&handle)) {
-        return enif_make_tuple2(env, ATOM_ERROR,
-                                enif_make_atom(env, "invalid_handle"));
-    }
-
-    ErlNifPid caller_pid;
-    if (!enif_get_local_pid(env, argv[4], &caller_pid)) {
-        return enif_make_badarg(env);
-    }
-
-    return subinterp_thread_async_call(env, handle, argv[1], argv[2], argv[3],
-                                        &caller_pid, argv[5]);
-}
-
-/**
  * @brief NIF: Check if OWN_GIL thread pool is available
  */
 static ERL_NIF_TERM nif_subinterp_thread_pool_ready(ErlNifEnv *env, int argc,
@@ -7859,53 +7350,6 @@ static ERL_NIF_TERM nif_owngil_apply_paths(ErlNifEnv *env, int argc,
 #else /* !HAVE_SUBINTERPRETERS */
 
 /* Stub implementations for Python < 3.12 */
-static ERL_NIF_TERM nif_subinterp_thread_create(ErlNifEnv *env, int argc,
-                                                  const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return enif_make_tuple2(env, ATOM_ERROR,
-                            enif_make_atom(env, "not_supported"));
-}
-
-static ERL_NIF_TERM nif_subinterp_thread_destroy(ErlNifEnv *env, int argc,
-                                                   const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return enif_make_tuple2(env, ATOM_ERROR,
-                            enif_make_atom(env, "not_supported"));
-}
-
-static ERL_NIF_TERM nif_subinterp_thread_call(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return enif_make_tuple2(env, ATOM_ERROR,
-                            enif_make_atom(env, "not_supported"));
-}
-
-static ERL_NIF_TERM nif_subinterp_thread_eval(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return enif_make_tuple2(env, ATOM_ERROR,
-                            enif_make_atom(env, "not_supported"));
-}
-
-static ERL_NIF_TERM nif_subinterp_thread_exec(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return enif_make_tuple2(env, ATOM_ERROR,
-                            enif_make_atom(env, "not_supported"));
-}
-
-static ERL_NIF_TERM nif_subinterp_thread_cast(ErlNifEnv *env, int argc,
-                                                const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return ATOM_OK;
-}
-
-static ERL_NIF_TERM nif_subinterp_thread_async_call(ErlNifEnv *env, int argc,
-                                                      const ERL_NIF_TERM argv[]) {
-    (void)argc; (void)argv;
-    return enif_make_tuple2(env, ATOM_ERROR,
-                            enif_make_atom(env, "not_supported"));
-}
 
 static ERL_NIF_TERM nif_subinterp_thread_pool_ready(ErlNifEnv *env, int argc,
                                                       const ERL_NIF_TERM argv[]) {
@@ -7992,17 +7436,6 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         env, NULL, "py_suspended_state", suspended_state_destructor,
         ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
 
-#ifdef HAVE_SUBINTERPRETERS
-    SUBINTERP_WORKER_RESOURCE_TYPE = enif_open_resource_type(
-        env, NULL, "py_subinterp_worker", subinterp_worker_destructor,
-        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
-
-    /* OWN_GIL subinterpreter handle resource type */
-    PY_SUBINTERP_HANDLE_RESOURCE_TYPE = enif_open_resource_type(
-        env, NULL, "py_subinterp_handle", subinterp_handle_destructor,
-        ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER, NULL);
-#endif
-
     /* Process-per-context resource type (no mutex) */
     PY_CONTEXT_RESOURCE_TYPE = enif_open_resource_type(
         env, NULL, "py_context", context_destructor,
@@ -8043,12 +7476,6 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info) {
         PY_SHARED_DICT_RESOURCE_TYPE == NULL) {
         return -1;
     }
-#ifdef HAVE_SUBINTERPRETERS
-    if (SUBINTERP_WORKER_RESOURCE_TYPE == NULL ||
-        PY_SUBINTERP_HANDLE_RESOURCE_TYPE == NULL) {
-        return -1;
-    }
-#endif
 
     /* Initialize atoms */
     ATOM_OK = enif_make_atom(env, "ok");
@@ -8191,29 +7618,16 @@ static ErlNifFunc nif_funcs[] = {
     {"async_gather", 3, nif_async_gather, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"async_stream", 6, nif_async_stream, ERL_NIF_DIRTY_JOB_IO_BOUND},
 
-    /* Sub-interpreter support (shared GIL pool model) */
+    /* Subinterpreter capability probes */
     {"subinterp_supported", 0, nif_subinterp_supported, 0},
     {"owngil_supported", 0, nif_owngil_supported, 0},
-    {"subinterp_worker_new", 0, nif_subinterp_worker_new, 0},
-    {"subinterp_worker_destroy", 1, nif_subinterp_worker_destroy, 0},
-    {"subinterp_call", 5, nif_subinterp_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"parallel_execute", 2, nif_parallel_execute, ERL_NIF_DIRTY_JOB_CPU_BOUND},
 
-    /* OWN_GIL subinterpreter thread pool (true parallelism) */
+    /* OWN_GIL thread pool (used internally by py_event_loop_pool) */
     {"subinterp_thread_pool_start", 0, nif_subinterp_thread_pool_start, 0},
     {"subinterp_thread_pool_start", 1, nif_subinterp_thread_pool_start, 0},
     {"subinterp_thread_pool_stop", 0, nif_subinterp_thread_pool_stop, 0},
     {"subinterp_thread_pool_ready", 0, nif_subinterp_thread_pool_ready, 0},
     {"subinterp_thread_pool_stats", 0, nif_subinterp_thread_pool_stats, 0},
-    {"subinterp_thread_create", 0, nif_subinterp_thread_create, 0},
-    {"subinterp_thread_destroy", 1, nif_subinterp_thread_destroy, 0},
-    {"subinterp_thread_call", 4, nif_subinterp_thread_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_thread_call", 5, nif_subinterp_thread_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_thread_eval", 2, nif_subinterp_thread_eval, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_thread_eval", 3, nif_subinterp_thread_eval, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_thread_exec", 2, nif_subinterp_thread_exec, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"subinterp_thread_cast", 4, nif_subinterp_thread_cast, 0},
-    {"subinterp_thread_async_call", 6, nif_subinterp_thread_async_call, 0},
 
     /* OWN_GIL session management for event loop pool */
     {"owngil_create_session", 1, nif_owngil_create_session, 0},

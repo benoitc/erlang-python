@@ -87,12 +87,6 @@ Simple echo server using Reactor API.
 escript examples/reactor_echo.erl
 ```
 
-### reactor_owngil_example.erl
-Reactor with OWN_GIL subinterpreters (Python 3.14+).
-```bash
-escript examples/reactor_owngil_example.erl
-```
-
 ## Benchmarks
 
 ### benchmark.erl

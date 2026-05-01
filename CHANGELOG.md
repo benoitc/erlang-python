@@ -57,6 +57,19 @@
 - `context_dispatch_call/eval/exec` functions (dead code)
 - References to `PY_MODE_MULTI_EXECUTOR` in context operations
 - `py_async_pool` legacy gen_server (unused after async API rewire)
+- **Explicit `py:subinterp_*` handle API removed.** `py:subinterp_create/0`,
+  `subinterp_destroy/1`, `subinterp_call/4,5`, `subinterp_eval/2,3`,
+  `subinterp_exec/2`, `subinterp_cast/4`, `subinterp_async_call/4`,
+  `subinterp_await/1,2`, and `subinterp_pool_*` are all gone. Use
+  `py_context:new(#{mode => owngil})` instead — it gives the same
+  parallelism with OTP supervision and automatic cleanup.
+  `py:subinterp_supported/0` (capability probe) and `py:parallel/1`
+  (which routes through the context API) stay.
+- Internal `py_execution_mode_t` collapsed from 3 values to 2 (`free_threaded`
+  / `gil`); `py_nif:execution_mode/0` returns `free_threaded | gil` instead
+  of the old `free_threaded | subinterp | multi_executor`.
+- `examples/reactor_owngil_example.erl` deleted (called nonexistent
+  `py:subinterp_reactor_*` functions; pre-existing breakage).
 
 ## 2.3.1 (2026-04-01)
 

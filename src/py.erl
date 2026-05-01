@@ -76,26 +76,9 @@
     async_await/2,
     async_gather/1,
     async_gather/2,
-    %% Parallel execution (Python 3.12+ sub-interpreters)
+    %% Parallel execution + capability probe
     parallel/1,
     subinterp_supported/0,
-    %% OWN_GIL subinterpreter API (true parallelism)
-    subinterp_create/0,
-    subinterp_destroy/1,
-    subinterp_call/4,
-    subinterp_call/5,
-    subinterp_eval/2,
-    subinterp_eval/3,
-    subinterp_exec/2,
-    subinterp_cast/4,
-    subinterp_async_call/4,
-    subinterp_await/1,
-    subinterp_await/2,
-    subinterp_pool_start/0,
-    subinterp_pool_start/1,
-    subinterp_pool_stop/0,
-    subinterp_pool_ready/0,
-    subinterp_pool_stats/0,
     %% Virtual environment
     ensure_venv/2,
     ensure_venv/3,
@@ -835,126 +818,6 @@ parallel(Calls) when is_list(Calls) ->
                 false -> {ok, SortedResults}
             end
     end.
-
-%%% ============================================================================
-%%% OWN_GIL Subinterpreter API (True Parallelism)
-%%% ============================================================================
-
-%% @doc Create an isolated subinterpreter with OWN_GIL.
-%% Returns a handle for making calls. The subinterpreter runs
-%% in a dedicated pthread with true parallelism.
-%%
-%% Requires the thread pool to be started first via subinterp_pool_start/0.
-%%
-%% Example:
-%% ```
-%% ok = py:subinterp_pool_start().
-%% {ok, Sub} = py:subinterp_create().
-%% {ok, Result} = py:subinterp_call(Sub, math, sqrt, [16.0]).
-%% ok = py:subinterp_destroy(Sub).
-%% '''
--spec subinterp_create() -> {ok, reference()} | {error, term()}.
-subinterp_create() ->
-    py_nif:subinterp_thread_create().
-
-%% @doc Destroy a subinterpreter handle.
-%% Cleans up namespace, releases worker binding.
--spec subinterp_destroy(reference()) -> ok.
-subinterp_destroy(Handle) ->
-    py_nif:subinterp_thread_destroy(Handle),
-    ok.
-
-%% @doc Call a function in a subinterpreter (blocking).
--spec subinterp_call(reference(), py_module(), py_func(), py_args()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(Handle, Module, Func, Args) ->
-    subinterp_call(Handle, Module, Func, Args, #{}).
-
-%% @doc Call a function in a subinterpreter with kwargs (blocking).
--spec subinterp_call(reference(), py_module(), py_func(), py_args(), py_kwargs()) ->
-    {ok, term()} | {error, term()}.
-subinterp_call(Handle, Module, Func, Args, Kwargs) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    py_nif:subinterp_thread_call(Handle, ModuleBin, FuncBin, Args, Kwargs).
-
-%% @doc Evaluate expression in subinterpreter (blocking).
--spec subinterp_eval(reference(), binary() | string()) ->
-    {ok, term()} | {error, term()}.
-subinterp_eval(Handle, Code) ->
-    subinterp_eval(Handle, Code, #{}).
-
-%% @doc Evaluate expression with locals in subinterpreter (blocking).
--spec subinterp_eval(reference(), binary() | string(), map()) ->
-    {ok, term()} | {error, term()}.
-subinterp_eval(Handle, Code, Locals) ->
-    CodeBin = ensure_binary(Code),
-    py_nif:subinterp_thread_eval(Handle, CodeBin, Locals).
-
-%% @doc Execute statements in subinterpreter (blocking, no return).
--spec subinterp_exec(reference(), binary() | string()) -> ok | {error, term()}.
-subinterp_exec(Handle, Code) ->
-    CodeBin = ensure_binary(Code),
-    py_nif:subinterp_thread_exec(Handle, CodeBin).
-
-%% @doc Cast a call to subinterpreter (fire-and-forget, no result).
-%% Returns immediately. Use for side-effects where result is not needed.
--spec subinterp_cast(reference(), py_module(), py_func(), py_args()) -> ok.
-subinterp_cast(Handle, Module, Func, Args) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    py_nif:subinterp_thread_cast(Handle, ModuleBin, FuncBin, Args).
-
-%% @doc Async call - returns immediately with a reference.
-%% Use subinterp_await/1,2 to get the result.
-%% Worker uses erlang.send() to deliver result.
--spec subinterp_async_call(reference(), py_module(), py_func(), py_args()) -> reference().
-subinterp_async_call(Handle, Module, Func, Args) ->
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    Ref = make_ref(),
-    py_nif:subinterp_thread_async_call(Handle, ModuleBin, FuncBin, Args, self(), Ref),
-    Ref.
-
-%% @doc Wait for async call result.
--spec subinterp_await(reference()) -> {ok, term()} | {error, term()}.
-subinterp_await(Ref) ->
-    subinterp_await(Ref, ?DEFAULT_TIMEOUT).
-
-%% @doc Wait for async call result with timeout.
--spec subinterp_await(reference(), timeout()) -> {ok, term()} | {error, term()}.
-subinterp_await(Ref, Timeout) ->
-    receive
-        {py_subinterp_result, Ref, Result} -> Result
-    after Timeout ->
-        {error, timeout}
-    end.
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with default workers.
-%% Must be called before creating subinterpreter handles.
--spec subinterp_pool_start() -> ok | {error, term()}.
-subinterp_pool_start() ->
-    py_nif:subinterp_thread_pool_start().
-
-%% @doc Start the OWN_GIL subinterpreter thread pool with N workers.
--spec subinterp_pool_start(non_neg_integer()) -> ok | {error, term()}.
-subinterp_pool_start(NumWorkers) ->
-    py_nif:subinterp_thread_pool_start(NumWorkers).
-
-%% @doc Stop the OWN_GIL subinterpreter thread pool.
--spec subinterp_pool_stop() -> ok.
-subinterp_pool_stop() ->
-    py_nif:subinterp_thread_pool_stop().
-
-%% @doc Check if the OWN_GIL thread pool is ready.
--spec subinterp_pool_ready() -> boolean().
-subinterp_pool_ready() ->
-    py_nif:subinterp_thread_pool_ready().
-
-%% @doc Get OWN_GIL thread pool statistics.
--spec subinterp_pool_stats() -> map().
-subinterp_pool_stats() ->
-    py_nif:subinterp_thread_pool_stats().
 
 %%% ============================================================================
 %%% Virtual Environment Support
