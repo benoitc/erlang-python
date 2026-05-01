@@ -26,6 +26,13 @@
   were no-ops after the v3.0 worker rework. Configure context count via
   `num_contexts` and the rate-limit ceiling via `max_concurrent`.
 
+- **Strict context-mode validation at the NIF boundary** - `py_nif:context_create/1`
+  now returns `{error, {invalid_mode, Atom}}` for anything other than `worker | owngil`.
+  Previously, callers that bypassed `py_context` (notably `py_reactor_context`)
+  silently mapped any unknown atom — including legacy `auto` and `subinterp` —
+  to worker mode. Code that relied on that loophole must pass `worker` (or
+  `owngil`) explicitly.
+
 ### Fixed
 
 - **`py:async_call/3,4` + `py:async_await/1,2` round-trip** - Previously the
