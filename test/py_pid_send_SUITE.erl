@@ -84,7 +84,7 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
     %% Add test directory to Python path on ALL contexts
     %% (subinterpreters have isolated sys.path)
-    TestDir = code:lib_dir(erlang_python, test),
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
     PathCmd = iolist_to_binary(io_lib:format(
         "import sys; sys.path.insert(0, '~s')", [TestDir])),
     NumContexts = py_context_router:num_contexts(),

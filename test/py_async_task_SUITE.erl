@@ -164,7 +164,7 @@ test_async_coroutine(_Config) ->
     Ref = py_event_loop:create_task(math, sin, [0.0]),
     Result = py_event_loop:await(Ref, 5000),
     ct:log("math.sin(0.0) = ~p", [Result]),
-    {ok, 0.0} = Result.
+    {ok, +0.0} = Result.
 
 test_async_with_args(_Config) ->
     %% Test with args using operator module
@@ -328,7 +328,7 @@ test_interleaved_sync_async(_Config) ->
     R4 = py_event_loop:create_task(math, sqrt, [64.0]),
 
     {ok, 3} = py_event_loop:await(R1, 5000),
-    {ok, 0.0} = py_event_loop:await(R2, 5000),
+    {ok, +0.0} = py_event_loop:await(R2, 5000),
     {ok, 30} = py_event_loop:await(R3, 5000),
     {ok, 8.0} = py_event_loop:await(R4, 5000),
     ct:log("Interleaved sync/async tests passed").
