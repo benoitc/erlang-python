@@ -166,6 +166,9 @@
     context_call_async/7,
     context_eval_async/5,
     context_exec_async/4,
+    context_call_with_env_async/8,
+    context_eval_with_env_async/6,
+    context_exec_with_env_async/5,
     context_call_method/4,
     create_local_env/1,
     context_to_term/1,
@@ -1297,6 +1300,34 @@ context_eval_async(_ContextRef, _CallerPid, _RequestId, _Code, _Locals) ->
 -spec context_exec_async(reference(), pid(), term(), binary()) ->
     {enqueued, term()} | {error, term()}.
 context_exec_async(_ContextRef, _CallerPid, _RequestId, _Code) ->
+    ?NIF_STUB.
+
+%% @doc Async call with process-local environment.
+%% @private
+-spec context_call_with_env_async(reference(), pid(), term(),
+                                   binary(), binary(), list(), map(),
+                                   reference()) ->
+    {enqueued, term()} | {error, term()}.
+context_call_with_env_async(_CtxRef, _CallerPid, _RequestId,
+                             _Module, _Func, _Args, _Kwargs, _EnvRef) ->
+    ?NIF_STUB.
+
+%% @doc Async eval with process-local environment.
+%% @private
+-spec context_eval_with_env_async(reference(), pid(), term(),
+                                   binary(), map(), reference()) ->
+    {enqueued, term()} | {error, term()}.
+context_eval_with_env_async(_CtxRef, _CallerPid, _RequestId,
+                             _Code, _Locals, _EnvRef) ->
+    ?NIF_STUB.
+
+%% @doc Async exec with process-local environment.
+%% @private
+-spec context_exec_with_env_async(reference(), pid(), term(),
+                                   binary(), reference()) ->
+    {enqueued, term()} | {error, term()}.
+context_exec_with_env_async(_CtxRef, _CallerPid, _RequestId,
+                             _Code, _EnvRef) ->
     ?NIF_STUB.
 
 %% @doc Call a method on a Python object in a context.

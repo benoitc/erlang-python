@@ -5211,6 +5211,134 @@ static ERL_NIF_TERM nif_context_exec_async(ErlNifEnv *env, int argc, const ERL_N
 }
 
 /**
+ * @brief Async call with process-local environment
+ *
+ * nif_context_call_with_env_async(ContextRef, CallerPid, RequestId,
+ *                                  Module, Func, Args, Kwargs, EnvRef)
+ *     -> {enqueued, RequestId} | {error, Reason}
+ *
+ * Same contract as nif_context_call_async but threads the process-local
+ * env through to the worker. Replaces the 30-second pthread_cond_timedwait
+ * dispatch path; the Erlang side waits in a normal receive.
+ */
+static ERL_NIF_TERM nif_context_call_with_env_async(ErlNifEnv *env, int argc,
+                                                      const ERL_NIF_TERM argv[]) {
+    py_context_t *ctx;
+    py_env_resource_t *penv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+    if (argc < 8) {
+        return make_error(env, "badarg");
+    }
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+    ErlNifPid caller_pid;
+    if (!enif_get_local_pid(env, argv[1], &caller_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+    ERL_NIF_TERM request_id = argv[2];
+    if (!enif_get_resource(env, argv[7], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
+        return make_error(env, "invalid_env");
+    }
+
+    if (!ctx->uses_worker_thread) {
+        return make_error(env, "async_requires_worker_thread");
+    }
+
+    ERL_NIF_TERM kwargs = enif_is_map(env, argv[6])
+        ? argv[6] : enif_make_new_map(env);
+    ERL_NIF_TERM request = enif_make_tuple4(env,
+        argv[3],  /* Module */
+        argv[4],  /* Func */
+        argv[5],  /* Args */
+        kwargs);
+    return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_CALL_WITH_ENV,
+        request, caller_pid, request_id, penv);
+}
+
+/**
+ * @brief Async eval with process-local environment
+ *
+ * nif_context_eval_with_env_async(ContextRef, CallerPid, RequestId,
+ *                                  Code, Locals, EnvRef)
+ *     -> {enqueued, RequestId} | {error, Reason}
+ */
+static ERL_NIF_TERM nif_context_eval_with_env_async(ErlNifEnv *env, int argc,
+                                                      const ERL_NIF_TERM argv[]) {
+    py_context_t *ctx;
+    py_env_resource_t *penv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+    if (argc < 6) {
+        return make_error(env, "badarg");
+    }
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+    ErlNifPid caller_pid;
+    if (!enif_get_local_pid(env, argv[1], &caller_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+    ERL_NIF_TERM request_id = argv[2];
+    if (!enif_get_resource(env, argv[5], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
+        return make_error(env, "invalid_env");
+    }
+
+    if (!ctx->uses_worker_thread) {
+        return make_error(env, "async_requires_worker_thread");
+    }
+
+    ERL_NIF_TERM locals = enif_is_map(env, argv[4])
+        ? argv[4] : enif_make_new_map(env);
+    ERL_NIF_TERM request = enif_make_tuple2(env, argv[3], locals);
+    return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EVAL_WITH_ENV,
+        request, caller_pid, request_id, penv);
+}
+
+/**
+ * @brief Async exec with process-local environment
+ *
+ * nif_context_exec_with_env_async(ContextRef, CallerPid, RequestId,
+ *                                  Code, EnvRef)
+ *     -> {enqueued, RequestId} | {error, Reason}
+ */
+static ERL_NIF_TERM nif_context_exec_with_env_async(ErlNifEnv *env, int argc,
+                                                      const ERL_NIF_TERM argv[]) {
+    py_context_t *ctx;
+    py_env_resource_t *penv;
+
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+    if (argc < 5) {
+        return make_error(env, "badarg");
+    }
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+    ErlNifPid caller_pid;
+    if (!enif_get_local_pid(env, argv[1], &caller_pid)) {
+        return make_error(env, "invalid_pid");
+    }
+    ERL_NIF_TERM request_id = argv[2];
+    if (!enif_get_resource(env, argv[4], PY_ENV_RESOURCE_TYPE, (void **)&penv)) {
+        return make_error(env, "invalid_env");
+    }
+
+    if (!ctx->uses_worker_thread) {
+        return make_error(env, "async_requires_worker_thread");
+    }
+
+    return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EXEC_WITH_ENV,
+        argv[3], caller_pid, request_id, penv);
+}
+
+/**
  * @brief Evaluate a Python expression in a context
  *
  * nif_context_eval(ContextRef, Code, Locals) -> {ok, Result} | {error, Reason} | {suspended, ...}
@@ -7772,6 +7900,9 @@ static ErlNifFunc nif_funcs[] = {
     {"context_call_async", 7, nif_context_call_async, 0},
     {"context_eval_async", 5, nif_context_eval_async, 0},
     {"context_exec_async", 4, nif_context_exec_async, 0},
+    {"context_call_with_env_async", 8, nif_context_call_with_env_async, 0},
+    {"context_eval_with_env_async", 6, nif_context_eval_with_env_async, 0},
+    {"context_exec_with_env_async", 5, nif_context_exec_with_env_async, 0},
     {"create_local_env", 1, nif_create_local_env, 0},
     {"interp_apply_imports", 2, nif_interp_apply_imports, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"interp_apply_paths", 2, nif_interp_apply_paths, ERL_NIF_DIRTY_JOB_CPU_BOUND},
