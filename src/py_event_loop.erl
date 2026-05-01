@@ -340,19 +340,28 @@ init([]) ->
 
 %% @doc Set ErlangEventLoop as the default asyncio event loop policy.
 %% Also extends the C 'erlang' module with Python event loop exports.
+%%
+%% Python 3.14 deprecated `asyncio.set_event_loop_policy` and 3.16 removes
+%% it. The integration's run path uses `loop_factory=` directly via
+%% `erlang.run/1` and `asyncio.Runner`, so the global policy install is
+%% only a convenience for user code that calls bare asyncio APIs inside
+%% `py:exec`. We skip the install on 3.14+ to avoid the warning; users
+%% on 3.14+ should call `erlang.run(main)` or
+%% `asyncio.Runner(loop_factory=erlang.new_event_loop)` explicitly.
 set_default_policy() ->
     PrivDir = code:priv_dir(erlang_python),
     %% First, extend the erlang module with Python event loop exports
     extend_erlang_module(PrivDir),
-    %% Then set the event loop policy
+    %% Then set the event loop policy (only on Python < 3.14)
     Code = iolist_to_binary([
         "import sys\n",
         "priv_dir = '", PrivDir, "'\n",
         "if priv_dir not in sys.path:\n",
         "    sys.path.insert(0, priv_dir)\n",
-        "from _erlang_impl import get_event_loop_policy\n",
         "import asyncio\n",
-        "asyncio.set_event_loop_policy(get_event_loop_policy())\n"
+        "if sys.version_info < (3, 14):\n",
+        "    from _erlang_impl import get_event_loop_policy\n",
+        "    asyncio.set_event_loop_policy(get_event_loop_policy())\n"
     ]),
     case py:exec(Code) of
         ok -> ok;
@@ -425,10 +434,13 @@ terminate(_Reason, #state{loop_ref = LoopRef, worker_pid = WorkerPid}) ->
     ok.
 
 %% @doc Reset asyncio back to the default event loop policy.
+%% Skipped on Python 3.14+ since we never installed one (see
+%% set_default_policy/0).
 reset_default_policy() ->
     Code = <<"
-import asyncio
-asyncio.set_event_loop_policy(None)
+import sys, asyncio
+if sys.version_info < (3, 14):
+    asyncio.set_event_loop_policy(None)
 ">>,
     catch py:exec(Code),
     ok.

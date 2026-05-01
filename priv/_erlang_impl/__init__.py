@@ -399,15 +399,28 @@ def _run_async_from_erlang(module, func, args, kwargs):
 def install():
     """Install ErlangEventLoopPolicy as the default event loop policy.
 
-    This function is deprecated in Python 3.12+. Use run() instead.
+    Deprecated in Python 3.12+; raises ``RuntimeError`` on Python 3.14+
+    where the underlying ``asyncio.set_event_loop_policy`` is itself
+    deprecated and slated for removal in 3.16.
 
-    Example (legacy pattern):
+    Use ``erlang.run(main)`` or
+    ``asyncio.Runner(loop_factory=erlang.new_event_loop)`` instead —
+    both work on every supported Python version and don't touch the
+    global policy.
+
+    Example (legacy pattern, Python 3.9–3.13 only):
         import asyncio
         import erlang
 
         erlang.install()
         asyncio.run(main())  # Uses Erlang event loop
     """
+    if sys.version_info >= (3, 14):
+        raise RuntimeError(
+            "erlang.install() is not supported on Python 3.14+. "
+            "Use erlang.run(main) or "
+            "asyncio.Runner(loop_factory=erlang.new_event_loop) instead."
+        )
     if sys.version_info >= (3, 12):
         warnings.warn(
             "erlang.install() is deprecated in Python 3.12+. "

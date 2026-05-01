@@ -33,19 +33,28 @@ class ErlangEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     This policy creates ErlangEventLoop instances for the main thread
     and optionally for child threads depending on configuration.
 
-    Usage:
-        import asyncio
+    Recommended usage on Python 3.12+ (no policy required):
+
         import erlang
+        erlang.run(main())
 
-        # Install the policy
+        # or, equivalently:
+        import asyncio
+        with asyncio.Runner(loop_factory=erlang.new_event_loop) as r:
+            r.run(main())
+
+    Legacy pattern for Python 3.9–3.11 (also works through 3.13 with a
+    DeprecationWarning, raises on 3.14+):
+
+        import asyncio, erlang
         asyncio.set_event_loop_policy(erlang.EventLoopPolicy())
-
-        # Now asyncio.run() uses Erlang event loop
         asyncio.run(main())
 
-    Note:
-        This approach is deprecated in Python 3.12+.
-        Use erlang.run() instead.
+    Notes:
+        ``asyncio.set_event_loop_policy`` is deprecated in Python 3.14
+        and removed in 3.16, so only ``erlang.run`` /
+        ``asyncio.Runner(loop_factory=...)`` are guaranteed to work
+        across the full supported range.
     """
 
     def __init__(self):

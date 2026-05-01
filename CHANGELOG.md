@@ -51,6 +51,15 @@
 - **Request queue per context** - Replaced single-slot request pattern with proper
   request queues that support multiple concurrent callers.
 
+- **No global asyncio policy install on Python 3.14+.** `asyncio.set_event_loop_policy`
+  was deprecated in 3.14 and is removed in 3.16. The Erlang integration's run path
+  already uses `loop_factory=` (`erlang.run/1`, `asyncio.Runner`) so the global
+  policy was only a convenience for bare `asyncio.run()` inside `py:exec`. We now
+  skip the install on 3.14+ to avoid the deprecation warning. On 3.14+ use
+  `erlang.run(main)` or `asyncio.Runner(loop_factory=erlang.new_event_loop)`
+  explicitly. Behavior on Python 3.9–3.13 is unchanged. `erlang.install()` raises
+  `RuntimeError` on 3.14+ (still emits a `DeprecationWarning` and works on 3.12–3.13).
+
 ### Removed
 
 - Multi-executor pool (`g_executors[]`, `multi_executor_start/stop`)
