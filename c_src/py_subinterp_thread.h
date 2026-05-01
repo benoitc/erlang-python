@@ -192,23 +192,6 @@ typedef struct {
 } subinterp_thread_pool_t;
 
 /* ============================================================================
- * Handle Resource (Erlang side)
- * ============================================================================ */
-
-/**
- * @struct py_subinterp_handle_t
- * @brief Erlang resource representing a subinterpreter handle
- *
- * A handle is bound to a specific worker at creation and has its own
- * isolated namespace within that worker.
- */
-typedef struct {
-    int worker_id;               /**< Bound worker index (fixed at creation) */
-    uint64_t handle_id;          /**< Unique ID for namespace lookup */
-    _Atomic bool destroyed;      /**< Handle has been destroyed */
-} py_subinterp_handle_t;
-
-/* ============================================================================
  * Pool Management API
  * ============================================================================ */
 
@@ -252,117 +235,12 @@ void subinterp_thread_pool_stats(int *num_workers, uint64_t *total_requests,
  * Handle Management API
  * ============================================================================ */
 
-/**
- * @brief Create a new subinterpreter handle
- *
- * Allocates a handle bound to a worker (round-robin selection) and
- * creates a namespace for it within that worker.
- *
- * @param handle Output: handle structure to initialize
- * @return 0 on success, -1 on failure
- */
-int subinterp_thread_handle_create(py_subinterp_handle_t *handle);
-
-/**
- * @brief Destroy a subinterpreter handle
- *
- * Cleans up the handle's namespace within its worker.
- *
- * @param handle Handle to destroy
- */
-void subinterp_thread_handle_destroy(py_subinterp_handle_t *handle);
-
-/* ============================================================================
- * Execution API
- * ============================================================================ */
-
-/**
- * @brief Synchronous call through subinterpreter handle
- *
- * Sends a call request to the worker and blocks until response.
- * The dispatch_mutex ensures serialization per worker.
- *
- * @param env NIF environment
- * @param handle Subinterpreter handle
- * @param module Module name term (atom or binary)
- * @param func Function name term (atom or binary)
- * @param args Arguments list term
- * @param kwargs Keyword arguments map term
- * @return Result term: {ok, Result} | {error, Reason}
- */
-ERL_NIF_TERM subinterp_thread_call(ErlNifEnv *env, py_subinterp_handle_t *handle,
-                                    ERL_NIF_TERM module, ERL_NIF_TERM func,
-                                    ERL_NIF_TERM args, ERL_NIF_TERM kwargs);
-
-/**
- * @brief Synchronous eval through subinterpreter handle
- *
- * @param env NIF environment
- * @param handle Subinterpreter handle
- * @param code Code string term (binary)
- * @param locals Local variables map term
- * @return Result term: {ok, Result} | {error, Reason}
- */
-ERL_NIF_TERM subinterp_thread_eval(ErlNifEnv *env, py_subinterp_handle_t *handle,
-                                    ERL_NIF_TERM code, ERL_NIF_TERM locals);
-
-/**
- * @brief Synchronous exec through subinterpreter handle
- *
- * @param env NIF environment
- * @param handle Subinterpreter handle
- * @param code Code string term (binary)
- * @return Result term: ok | {error, Reason}
- */
-ERL_NIF_TERM subinterp_thread_exec(ErlNifEnv *env, py_subinterp_handle_t *handle,
-                                    ERL_NIF_TERM code);
-
-/**
- * @brief Fire-and-forget call (no result)
- *
- * Sends request to worker but returns immediately without waiting.
- * Used for side-effects where result is not needed.
- *
- * @param env NIF environment
- * @param handle Subinterpreter handle
- * @param module Module name term
- * @param func Function name term
- * @param args Arguments list term
- * @return ok
- */
-ERL_NIF_TERM subinterp_thread_cast(ErlNifEnv *env, py_subinterp_handle_t *handle,
-                                    ERL_NIF_TERM module, ERL_NIF_TERM func,
-                                    ERL_NIF_TERM args);
-
-/**
- * @brief Async call - returns immediately with reference
- *
- * Sends request to worker. Worker uses erlang.send() to deliver result
- * to caller_pid with the given ref.
- *
- * @param env NIF environment
- * @param handle Subinterpreter handle
- * @param module Module name term
- * @param func Function name term
- * @param args Arguments list term
- * @param caller_pid PID to send result to
- * @param ref Reference for result correlation
- * @return ok
- */
-ERL_NIF_TERM subinterp_thread_async_call(ErlNifEnv *env, py_subinterp_handle_t *handle,
-                                          ERL_NIF_TERM module, ERL_NIF_TERM func,
-                                          ERL_NIF_TERM args, ErlNifPid *caller_pid,
-                                          ERL_NIF_TERM ref);
-
 /* ============================================================================
  * Global Pool Instance
  * ============================================================================ */
 
 /** @brief Global thread pool (defined in py_subinterp_thread.c) */
 extern subinterp_thread_pool_t g_thread_pool;
-
-/** @brief Resource type for py_subinterp_handle_t */
-extern ErlNifResourceType *PY_SUBINTERP_HANDLE_RESOURCE_TYPE;
 
 #endif /* HAVE_SUBINTERPRETERS */
 
