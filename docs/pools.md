@@ -165,14 +165,15 @@ default = py_context_router:lookup_pool(json, dumps).  %% Function override
 
 ## Configuration
 
-Configure default pool size via application environment:
+Configure the default pool size via the application environment:
 
 ```erlang
 %% sys.config
 [
     {erlang_python, [
-        %% Default pool size (default: erlang:system_info(schedulers))
-        {default_pool_size, 8}
+        %% Number of contexts in the default pool
+        %% (default: erlang:system_info(schedulers))
+        {num_contexts, 8}
     ]}
 ].
 ```

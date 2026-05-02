@@ -125,8 +125,7 @@ The event loop API also supports per-process namespaces. Each Erlang process get
 
 ```erlang
 %% Get the event loop reference
-{ok, Loop} = py_event_loop:get_loop(),
-LoopRef = py_event_loop:get_nif_ref(Loop),
+{ok, LoopRef} = py_event_loop:get_loop(),
 
 %% Define a function in this process's namespace
 ok = py_nif:event_loop_exec(LoopRef, <<"

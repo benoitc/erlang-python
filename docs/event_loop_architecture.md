@@ -253,8 +253,7 @@ Define functions and state for async tasks in your process's namespace:
 
 ```erlang
 %% Get event loop reference
-{ok, Loop} = py_event_loop:get_loop(),
-LoopRef = py_event_loop:get_nif_ref(Loop),
+{ok, LoopRef} = py_event_loop:get_loop(),
 
 %% Define async functions in this process's namespace
 ok = py_nif:event_loop_exec(LoopRef, <<"
