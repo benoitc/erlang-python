@@ -158,24 +158,26 @@ handle_info({async_callback, CallbackId, FuncName, Args, WriteFd}, State0) ->
     end,
     {noreply, State1};
 
-%% Handle linked sync handler exit.
-handle_info({'EXIT', Pid, _Reason}, #state{handlers = Handlers} = State) ->
+%% Linked-process exit: covers both sync handlers and async writers.
+%% Both are spawn_link'd so a coordinator crash takes them with it
+%% (no leaked writer holding the async pipe fd after the gen_server
+%% restarts). When THEY die independently we trap the EXIT here and
+%% remove the dead pid from whichever map it lives in.
+handle_info({'EXIT', Pid, _Reason},
+            #state{handlers      = Handlers,
+                   async_writers = Writers,
+                   writer_fds    = WriterFds} = State) ->
     NewHandlers = maps:filter(
         fun(_WorkerId, {HandlerPid, _Fd}) -> HandlerPid =/= Pid end,
         Handlers),
-    {noreply, State#state{handlers = NewHandlers}};
-
-%% Handle monitored async writer exit (writer hits a hard write error).
-handle_info({'DOWN', _MRef, process, Pid, _Reason},
-            #state{async_writers = Writers,
-                   writer_fds    = WriterFds} = State) ->
     case maps:take(Pid, WriterFds) of
         {WriteFd, NewWriterFds} ->
             NewWriters = maps:remove(WriteFd, Writers),
-            {noreply, State#state{async_writers = NewWriters,
+            {noreply, State#state{handlers      = NewHandlers,
+                                  async_writers = NewWriters,
                                   writer_fds    = NewWriterFds}};
         error ->
-            {noreply, State}
+            {noreply, State#state{handlers = NewHandlers}}
     end;
 
 handle_info(_Info, State) ->
@@ -270,18 +272,22 @@ run_async_callback(FuncName, Args) ->
     end.
 
 %% Look up or spawn the async writer for a given WriteFd. Writers are
-%% monitored (not linked) so a writer death does not take the
-%% coordinator down; the 'DOWN' clause cleans up the maps. Each
-%% writer gets its own atomics counter that bounds total in-flight
-%% async callbacks (executors + queued responses) on that pipe.
+%% spawn_link'd from the coordinator (which traps exits): a writer
+%% death surfaces as `{'EXIT', WriterPid, _}' for cleanup, and a
+%% coordinator crash propagates the EXIT signal back to the writer
+%% (which does not trap) so it dies with the gen_server instead of
+%% leaking the pipe fd. Supervision then restarts the gen_server with
+%% an empty `async_writers' map and writers are respawned lazily on
+%% the next callback. Each writer gets its own atomics counter that
+%% bounds total in-flight async callbacks (executors + queued
+%% responses) on that pipe.
 ensure_async_writer(WriteFd,
                     #state{async_writers = Writers,
                            writer_fds    = WriterFds} = State) ->
     case maps:get(WriteFd, Writers, undefined) of
         undefined ->
             Counter = atomics:new(1, [{signed, false}]),
-            Writer = spawn(fun() -> async_writer_loop(WriteFd) end),
-            erlang:monitor(process, Writer),
+            Writer = spawn_link(fun() -> async_writer_loop(WriteFd) end),
             {Writer, Counter, State#state{
                 async_writers = Writers#{WriteFd => {Writer, Counter}},
                 writer_fds    = WriterFds#{Writer => WriteFd}}};
@@ -301,10 +307,16 @@ ensure_async_writer(WriteFd,
 %% un-reserved before sending — and the writer just emits the
 %% error frame.
 %%
-%% Exits on hard write errors so the coordinator's 'DOWN' clause can
-%% drop the entry; the next callback respawns the writer (with a
-%% fresh counter, so any leaked count from the previous instance is
-%% discarded with the dead writer).
+%% Lifecycle:
+%%   - spawn_link'd from the coordinator: a coordinator crash
+%%     propagates an unhandled EXIT here (we do NOT trap_exit) and
+%%     the writer dies with it, releasing the fd before supervision
+%%     restarts the gen_server.
+%%   - On hard write errors the writer exits normally. The
+%%     coordinator's trap_exit clause catches the EXIT, drops the
+%%     map entry, and the next callback respawns the writer with a
+%%     fresh atomics counter so any leaked count from the previous
+%%     instance is discarded with the dead writer.
 async_writer_loop(WriteFd) ->
     receive
         {respond, CallbackId, Response, Counter} ->
