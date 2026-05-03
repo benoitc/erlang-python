@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.0.0 (Unreleased)
+## 3.0.0 (2026-05-03)
 
 ### Breaking Changes
 
@@ -46,6 +46,33 @@
   `{ok, [Result1, ...]}` on success or `{error, {gather_failed, [{Idx, Reason}, ...]}}`
   if any call fails. The previous implementation returned `gather_not_implemented`.
 
+- **Thread-callback flakes (issue #63)** - Six layered defects in the
+  `erlang.call`/`erlang.async_call` plumbing could deliver wrong values to
+  the wrong caller under load. Reads now loop on partial/EINTR with a
+  monotonic deadline; sync writes use a single length-prefixed frame on a
+  dirty I/O scheduler with deadlined non-blocking writes; the sync wire
+  carries the originating callback id and the receiver discards mismatched
+  frames; the async pipe has one writer process per fd with an
+  atomics-bounded mailbox (`?ASYNC_WRITER_MAX_QUEUE = 10000`) and a
+  resumable nonblocking parser on the read end; workers that fail to
+  resync are unlinked from the pool, freed, and bounded by
+  `MAX_POISONED_WORKERS = 64`.
+
+### Documentation
+
+- Audited every fenced code block in `README.md` and `docs/*.md` for
+  current-API references. Fixed `Py_GIL_OWN` to `PyInterpreterConfig_OWN_GIL`
+  in `docs/scalability.md`, corrected the `multi_executor` fallback claim
+  in `docs/migration.md`, and repaired a broken `SharedDict` example in
+  `docs/shared-dict.md`.
+- New `test/coverage_audit.md` maps every public `py:*` and `erlang.*` API
+  to its test suite. Added cases for `py:cast/4`, `py:async_gather/2`, and
+  `py:dup_fd/1` so each documented API has a regression test.
+- New `scripts/lint_doc_snippets.escript` (driven by `make lint-docs` and
+  CI) statically validates every Erlang `py:Fn(/N)` call and parses every
+  Python block in the docs. Snippets that intentionally show removed APIs
+  or REPL output opt out via `<!-- skip-lint -->`.
+
 ### Changed
 
 - **Per-context worker threads** - Each context now gets its own dedicated pthread
@@ -73,6 +100,11 @@
 - `context_dispatch_call/eval/exec` functions (dead code)
 - References to `PY_MODE_MULTI_EXECUTOR` in context operations
 - `py_async_pool` legacy gen_server (unused after async API rewire)
+- `priv/_erlang_impl/_ssl.py` (`SSLTransport`, `create_ssl_transport`) had no
+  importer and was never wired into the asyncio event loop. Removed.
+- Internal `py_util` exports `send_response/3`, `normalize_timeout/1`, and
+  `normalize_timeout/2` had no callers anywhere. Removed. The module is
+  marked `@private`; no external API changes.
 - **Explicit `py:subinterp_*` handle API removed.** `py:subinterp_create/0`,
   `subinterp_destroy/1`, `subinterp_call/4,5`, `subinterp_eval/2,3`,
   `subinterp_exec/2`, `subinterp_cast/4`, `subinterp_async_call/4`,

@@ -437,9 +437,11 @@ Run benchmark: `escript examples/bench_owngil_pool.erl`
 **Use OWN_GIL when:**
 - Running CPU-bound Python code from multiple Erlang processes
 - Need true parallel execution (not just concurrency)
-- Python 3.12+ is available
+- Python 3.14+ is available (subinterpreters require 3.14+ due to C
+  extension global-state bugs in 3.12/3.13)
 
 **Use regular mode when:**
 - Primarily I/O-bound operations
 - Single-process workload
 - Need shared state across all tasks
+- Running on Python 3.12 or 3.13
