@@ -57,6 +57,11 @@ jobs:
         run: |
           brew install erlang rebar3
 
+      - name: Install numpy (for ML thread-affinity tests)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install numpy
+
       - name: Verify versions
         run: |
           echo "Erlang/OTP version:"
@@ -112,6 +117,13 @@ jobs:
           usesh: true
           prepare: |
             pkg install -y erlang ${{ matrix.python_pkg }} cmake
+            # numpy package follows the py<noDot>-numpy convention.
+            # Non-fatal: not every FreeBSD pkg snapshot ships numpy for
+            # every Python flavor; the ML SUITE self-skips when numpy
+            # is missing, which is the right behavior here.
+            NUMPY_PKG="$(echo '${{ matrix.python_pkg }}' | sed 's/^python/py/')-numpy"
+            pkg install -y "$NUMPY_PKG" || \
+              echo "WARN: $NUMPY_PKG unavailable; ML cases will skip"
           run: |
             # Set up environment
             export PYTHON_CONFIG=python${{ matrix.python }}-config
@@ -158,6 +170,11 @@ jobs:
           python3 --version
           python3 -c "import sys; print('GIL enabled:', sys._is_gil_enabled())"
           python3 -c "import sysconfig; print('Py_GIL_DISABLED:', sysconfig.get_config_var('Py_GIL_DISABLED'))"
+
+      - name: Install numpy (for ML thread-affinity tests)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install numpy
 
       - name: Set Python library path
         run: |
@@ -221,6 +238,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake
+
+      - name: Install numpy (for ML thread-affinity tests)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install numpy
 
       - name: Set Python library path
         run: |
