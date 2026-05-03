@@ -383,19 +383,30 @@ static thread_worker_t *acquire_thread_worker(void) {
  *
  * Called by thread_worker_call when the read path cannot guarantee
  * frame integrity (id mismatch + corrupted payload, partial-frame
- * timeout, EOF mid-frame). Closes both pipe ends so any further write
- * by the existing handler fails loudly, marks the worker as out of
- * service, and bumps the global counter for diagnostics.
+ * timeout, EOF mid-frame). The worker is unlinked from the pool,
+ * its pipes are closed (so the Erlang handler's next write fails and
+ * the gen_server's trap_exit clause reaps it), its mutex is
+ * destroyed, and the struct itself is freed — so a hot loop of
+ * synchronisation failures cannot grow runtime memory until NIF
+ * unload.
  *
- * @note Caller must clear tl_thread_worker before returning to Python so
- *       the next call from this thread acquires a fresh worker.
+ * The lifetime counter g_poisoned_workers_count still increments
+ * monotonically so the diagnostic ceiling
+ * (MAX_POISONED_WORKERS) and stderr warning still fire even when
+ * structs are reclaimed.
+ *
+ * @note Caller MUST clear tl_thread_worker (and the pthread-key
+ *       binding) BEFORE calling this function. Once the worker is
+ *       unlinked it cannot be referenced again — the pointer is
+ *       freed and any later access is use-after-free.
  */
 static void poison_thread_worker(thread_worker_t *tw) {
+    /* Mark + unlink atomically under the pool lock so a racing
+     * acquire_thread_worker either runs before us (sees a healthy
+     * worker that we then unlink, but never returns it again) or
+     * after us (cannot find tw in the list). */
+    pthread_mutex_lock(&g_thread_pool_mutex);
     pthread_mutex_lock(&tw->mutex);
-    if (tw->poisoned) {
-        pthread_mutex_unlock(&tw->mutex);
-        return;
-    }
     tw->poisoned = true;
     tw->in_use = false;
     int read_fd  = tw->response_pipe[0];
@@ -404,19 +415,38 @@ static void poison_thread_worker(thread_worker_t *tw) {
     tw->response_pipe[1] = -1;
     pthread_mutex_unlock(&tw->mutex);
 
+    if (g_thread_pool_head == tw) {
+        g_thread_pool_head = tw->next;
+    } else {
+        thread_worker_t *prev = g_thread_pool_head;
+        while (prev != NULL && prev->next != tw) {
+            prev = prev->next;
+        }
+        if (prev != NULL) {
+            prev->next = tw->next;
+        }
+    }
+    pthread_mutex_unlock(&g_thread_pool_mutex);
+
+    /* No other thread can reach tw now: not via the pool list, not
+     * via tl_thread_worker (caller cleared it), not via the pthread
+     * key (caller cleared it). Safe to destroy and free. */
     if (read_fd  >= 0) close(read_fd);
     if (write_fd >= 0) close(write_fd);
+    pthread_mutex_destroy(&tw->mutex);
 
-    uint64_t prev = atomic_fetch_add(&g_poisoned_workers_count, 1);
-    if (prev + 1 >= MAX_POISONED_WORKERS) {
+    uint64_t prev_count = atomic_fetch_add(&g_poisoned_workers_count, 1);
+    if (prev_count + 1 >= MAX_POISONED_WORKERS) {
         enif_fprintf(stderr,
             "[erlang_python] WARNING: %llu thread-callback workers have been "
             "poisoned. The thread-callback subsystem is unhealthy; please "
             "file a bug report with the failing test case.\n",
-            (unsigned long long)(prev + 1));
+            (unsigned long long)(prev_count + 1));
     }
     PY_THREAD_CB_LOG("poison tw_id=%llu count=%llu",
-        (unsigned long long)tw->id, (unsigned long long)(prev + 1));
+        (unsigned long long)tw->id, (unsigned long long)(prev_count + 1));
+
+    enif_free(tw);
 }
 
 /* ============================================================================
@@ -604,11 +634,14 @@ static PyObject *thread_worker_call(const char *func_name, size_t func_name_len,
         PY_THREAD_CB_LOG("desync tw_id=%llu cb_id=%llu errno=%d",
             (unsigned long long)tw->id,
             (unsigned long long)expected_id, errno);
-        poison_thread_worker(tw);
+        /* poison_thread_worker frees `tw`; clear every reference to
+         * it BEFORE calling so the pthread-key destructor cannot
+         * later observe a dangling pointer. */
         tl_thread_worker = NULL;
         if (g_thread_worker_key_created) {
             pthread_setspecific(g_thread_worker_key, NULL);
         }
+        poison_thread_worker(tw);
         PyErr_SetString(PyExc_RuntimeError,
             "callback synchronisation lost; retry");
         return NULL;
