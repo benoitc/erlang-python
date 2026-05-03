@@ -2200,7 +2200,31 @@ extern bool g_has_thread_coordinator;
  * (process_async_callback_response) is event-driven from the asyncio
  * loop and the read end is O_NONBLOCK; partial frames are buffered
  * across invocations in hdr_buf/body_buf so the reader resumes on the
- * next loop tick when more data arrives. */
+ * next loop tick when more data arrives.
+ *
+ * == Recovery on hard read error ==
+ *
+ * `pipe_broken` is set when the reader hits an unrecoverable error
+ * (EIO/EBADF/EOF mid-frame). The behaviour is fail-loud, no rebuild:
+ *
+ *   1. Pending futures are failed with RuntimeError("async callback
+ *      pipe broken") (see async_pipe_break_and_fail_pending).
+ *   2. New erlang.async_call invocations short-circuit with the same
+ *      error before reaching the pipe (see the gate in
+ *      send_async_callback_message).
+ *   3. The reader keeps draining and discarding any bytes Erlang
+ *      still writes so the asyncio loop's fd-readable callback does
+ *      not busy-fire. Once Erlang's writer process hits its NIF
+ *      write timeout (30s) and dies, the gen_server reaps it via
+ *      'DOWN'; from that point the fd is quiet.
+ *   4. The asyncio reader registration stays in place — there is no
+ *      reference to the loop stored in this struct, no
+ *      remove_reader call, and no `async_pipe_renewed` protocol.
+ *      Recovery requires restarting the erlang_python application
+ *      (or the interpreter) so a fresh state struct is created.
+ *
+ * No existing event-loop reference is mutated; there is no
+ * re-registration path that could fail. */
 typedef struct {
     int async_callback_pipe[2];      /* [0]=read, [1]=write - per-interpreter pipe */
     PyObject *async_pending_futures; /* Dict: callback_id -> Future */
@@ -2429,7 +2453,20 @@ static int process_async_callback_response(void) {
         return -1;
     }
     if (state->pipe_broken) {
-        return -1;
+        /* Drain and discard whatever Erlang still writes so the
+         * asyncio loop's fd-readable callback stops firing once the
+         * writer process times out and dies. Returning 0 (instead of
+         * -1) lets async_callback_reader's `while(... > 0)` loop
+         * exit cleanly without flagging an error. */
+        char scratch[256];
+        for (;;) {
+            ssize_t n = read(state->async_callback_pipe[0],
+                             scratch, sizeof(scratch));
+            if (n  > 0) continue;
+            if (n  < 0 && errno == EINTR) continue;
+            break;
+        }
+        return 0;
     }
 
     /* Stage 1: header (12 bytes). */
