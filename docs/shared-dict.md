@@ -279,16 +279,21 @@ ok = py:shared_dict_destroy(Session).
 %% Create shared cache
 {ok, Cache} = py:shared_dict_new(),
 
-%% Python can populate the cache
+%% Inject the handle into Python globals (py:exec/1 has no locals
+%% argument, so we stash it via py:eval with a side effect).
+{ok, _} = py:eval(
+    <<"(globals().__setitem__('_cache_handle', handle), None)[-1]">>,
+    #{handle => Cache}),
+
+%% Python can now populate the cache
 ok = py:exec(<<"
 from erlang import SharedDict
-cache = SharedDict(handle)
-cache['computed'] = expensive_computation()
-">>,
-ok = py:eval(<<"1">>, #{<<"handle">> => Cache}),
+cache = SharedDict(_cache_handle)
+cache['computed'] = 42
+">>),
 
 %% Erlang can read cached values
-CachedValue = py:shared_dict_get(Cache, <<"computed">>).
+42 = py:shared_dict_get(Cache, <<"computed">>).
 ```
 
 ## See Also

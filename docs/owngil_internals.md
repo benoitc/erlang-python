@@ -425,22 +425,53 @@ class EchoProtocol(reactor.Protocol):
 
 ## Performance Characteristics
 
-| Operation | Shared-GIL | OWN_GIL |
-|-----------|-----------|---------|
+| Operation | Worker (shared GIL) | OWN_GIL |
+|-----------|--------------------|---------|
 | Call overhead | ~2.5μs | ~10μs |
-| Throughput (single) | 400K/s | 100K/s |
-| Parallelism | None | True |
-| Resource usage | Lower | Higher (1 pthread per context) |
+| Throughput (single context) | ~400K/s | ~100K/s |
+| Parallelism (N contexts) | GIL-bound | Linear up to N cores |
+| Resource usage | One pthread per context | One pthread + one subinterpreter per context |
 
-Use OWN_GIL when:
-- CPU-bound Python work that benefits from parallelism
-- Long-running computations
-- Need true concurrent Python execution
+## Pros and Cons
 
-Use worker mode when:
-- I/O-bound or short operations
-- High call frequency
-- Resource constraints
+### Pros
+
+- **True CPU parallelism.** Each context owns its GIL, so N contexts run on N cores at once. Worker mode serialises on the main GIL unless Python is built free-threaded (3.13t+).
+- **Crash isolation.** A C-level fault in one subinterpreter leaves the others alive. Worker mode shares the main interpreter, so a corrupt module state can take everything down.
+- **Clean namespace per context.** Each subinterpreter has its own `sys.modules`, so module-level state cannot bleed between contexts. Useful when running adversarial or untrusted code paths side by side.
+- **Predictable scheduling.** Requests are dispatched via mutex/condvar IPC, not dirty schedulers, so OWN_GIL contexts will not be starved by other dirty NIF traffic.
+
+### Cons
+
+- **Python 3.14+ only.** Earlier versions have C-extension global-state bugs (`_decimal`, `numpy`, etc.) that crash inside subinterpreters. See [cpython#106078](https://github.com/python/cpython/issues/106078).
+- **Higher per-call latency.** ~4x the round-trip cost of worker mode (~10μs vs ~2.5μs) because every call crosses a mutex/condvar handoff to the dedicated thread.
+- **Higher memory.** Each subinterpreter imports its own copy of every module. A 50 MB module set across 8 contexts is ~400 MB resident, not 50 MB.
+- **C-extension compatibility is not universal.** Extensions must opt in via the multi-phase init protocol (PEP 489) and `Py_mod_multiple_interpreters`. Pure-Python and well-behaved C extensions work; older ones fail at import inside the subinterpreter.
+- **No shared Python state.** Module globals, class definitions, and cached objects are per-interpreter. Use `py:state_store/2` (ETS-backed) or `erlang.send` for cross-context data.
+- **Callback re-entry is restricted.** When Python in an OWN_GIL context calls `erlang.call`, the callback runs on a thread worker, not back on the OWN_GIL thread (which cannot suspend). Re-entrant Python -> Erlang -> *same* OWN_GIL context calls will not work; use a different context for the nested call, or use `erlang.async_call` from asyncio code.
+- **Process-local envs do not span interpreters.** A `py_env_resource_t` is bound to the interpreter that created it. Reusing one across contexts returns `{error, env_wrong_interpreter}`.
+
+### When to Use Each
+
+Use **OWN_GIL** when:
+
+- The workload is CPU-bound Python (ML inference, numpy/torch compute, parsing, codecs) and you want N-way parallelism per BEAM scheduler.
+- You can pin the per-context memory budget and the modules in use are subinterpreter-safe.
+- You are on Python 3.14+.
+
+Use **worker** (default) when:
+
+- You are on Python 3.12 or 3.13.
+- Calls are short and frequent (every microsecond of overhead matters).
+- You are running modules that are not subinterpreter-safe (some scientific stacks, older C extensions).
+- You are already running free-threaded Python (3.13t+); worker mode gets parallelism for free without the per-interpreter memory cost.
+
+### Common Pitfalls
+
+- **Importing once is not enough.** Imports happen per subinterpreter. Pre-warming a worker context will not pre-warm the OWN_GIL contexts; do it inside each `py_context`.
+- **Sharing Python objects across contexts.** Passing a `PyObject*` reference (via `py_state` or otherwise) between OWN_GIL contexts is undefined behaviour. Round-trip through Erlang terms or ETS-backed state.
+- **Long-running tasks block the dispatcher.** A single OWN_GIL context processes one request at a time. If you have a 30-second compute job, parallelise across contexts; do not queue everything onto context 1.
+- **Callback storms.** Heavy `erlang.call` use inside an OWN_GIL context routes to thread workers, which is fine, but the round-trip cost is then worker-style on top of OWN_GIL dispatch. For tight callback loops, prefer worker mode end-to-end.
 
 ## Benchmarking
 
