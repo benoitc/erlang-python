@@ -42,6 +42,7 @@ This provides defense-in-depth - even if Python code tries to import `os` or `su
 
 When blocked operations are attempted, you'll see:
 
+<!-- skip-lint -->
 ```python
 >>> import subprocess
 >>> subprocess.run(['ls'])
@@ -50,6 +51,7 @@ fork()/exec() would corrupt the Erlang runtime.
 Use Erlang ports (open_port/2) for subprocess management.
 ```
 
+<!-- skip-lint -->
 ```python
 >>> import os
 >>> os.fork()

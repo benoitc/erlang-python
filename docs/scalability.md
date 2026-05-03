@@ -108,6 +108,10 @@ Ctx = py:context(1),
 - Higher memory usage (each interpreter loads modules separately)
 - Some C extensions don't support subinterpreters
 - Requires Python 3.14+
+- Higher per-call latency (~4x worker)
+- Callback re-entry to the same context is restricted (`erlang.call` from inside an OWN_GIL context routes to a thread worker, not back to that context)
+
+For a fuller breakdown of OWN_GIL tradeoffs, common pitfalls, and a usage decision guide, see [OWN_GIL Internals: Pros and Cons](owngil_internals.md#pros-and-cons).
 
 ## Subinterpreter Architecture
 
@@ -144,7 +148,7 @@ Ctx = py:context(1),
 │  │ └──────────┘ │  │ └──────────┘ │  │ └──────────┘ │         │
 │  └──────────────┘  └──────────────┘  └──────────────┘         │
 │                                                                 │
-│  Each thread owns its interpreter's GIL (Py_GIL_OWN)           │
+│  Each thread owns its GIL (PyInterpreterConfig_OWN_GIL)        │
 │  No GIL contention between threads                              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -155,7 +159,7 @@ Ctx = py:context(1),
 
 **py_context_process**: Gen_server that owns a Python context reference and handles call/eval/exec operations.
 
-**Subinterpreter Thread Pool (C)**: Manages N threads, each with its own Python subinterpreter created with `Py_NewInterpreterFromConfig()` and `Py_GIL_OWN`.
+**Subinterpreter Thread Pool (C)**: Manages N threads, each with its own Python subinterpreter created with `Py_NewInterpreterFromConfig()` and `PyInterpreterConfig_OWN_GIL`.
 
 ### Request Flow
 

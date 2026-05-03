@@ -18,14 +18,8 @@
 -module(py_util).
 
 -export([
-    to_binary/1,
-    send_response/3,
-    normalize_timeout/1,
-    normalize_timeout/2
+    to_binary/1
 ]).
-
-%% Default timeout (30 seconds)
--define(DEFAULT_TIMEOUT, 30000).
 
 %%% ============================================================================
 %%% API
@@ -39,27 +33,3 @@ to_binary(List) when is_list(List) ->
     list_to_binary(List);
 to_binary(Bin) when is_binary(Bin) ->
     Bin.
-
-%% @doc Send a response to a caller.
--spec send_response(pid(), reference(), {ok, term()} | {error, term()} | ok) -> ok.
-send_response(Caller, Ref, {ok, Value}) ->
-    Caller ! {py_response, Ref, {ok, Value}},
-    ok;
-send_response(Caller, Ref, {error, Error}) ->
-    Caller ! {py_error, Ref, Error},
-    ok;
-send_response(Caller, Ref, ok) ->
-    Caller ! {py_response, Ref, {ok, none}},
-    ok.
-
-%% @doc Normalize a timeout value, returning milliseconds or 0 for infinity.
-%% Uses the default timeout for invalid values.
--spec normalize_timeout(timeout()) -> non_neg_integer().
-normalize_timeout(Timeout) ->
-    normalize_timeout(Timeout, ?DEFAULT_TIMEOUT).
-
-%% @doc Normalize a timeout value with a custom default.
--spec normalize_timeout(timeout(), non_neg_integer()) -> non_neg_integer().
-normalize_timeout(infinity, _Default) -> 0;
-normalize_timeout(Ms, _Default) when is_integer(Ms), Ms > 0 -> Ms;
-normalize_timeout(_, Default) -> Default.

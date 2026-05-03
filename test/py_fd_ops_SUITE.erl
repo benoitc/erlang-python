@@ -27,7 +27,8 @@
     socketpair_test/1,
     fd_read_write_test/1,
     fd_close_test/1,
-    fd_select_test/1
+    fd_select_test/1,
+    dup_fd_test/1
 ]).
 
 all() ->
@@ -35,7 +36,8 @@ all() ->
         socketpair_test,
         fd_read_write_test,
         fd_close_test,
-        fd_select_test
+        fd_select_test,
+        dup_fd_test
     ].
 
 init_per_suite(Config) ->
@@ -141,4 +143,36 @@ fd_select_test(_Config) ->
     %% Clean up
     ok = py_nif:fd_close(Fd1),
     ok = py_nif:fd_close(Fd2),
+    ok.
+
+%% @doc Test py:dup_fd/1 — duplicates an fd so caller and dup can be
+%% closed independently and both refer to the same kernel descriptor.
+dup_fd_test(_Config) ->
+    {ok, {Fd1, Fd2}} = py_nif:socketpair(),
+
+    %% Duplicate Fd2; the dup must be a different integer.
+    {ok, DupFd2} = py:dup_fd(Fd2),
+    true = is_integer(DupFd2),
+    true = DupFd2 =/= Fd2,
+    true = DupFd2 >= 0,
+
+    %% Write through Fd1 — both Fd2 and DupFd2 see the same data
+    %% because they reference the same socket end.
+    Payload = <<"dup_fd round-trip">>,
+    {ok, _} = py_nif:fd_write(Fd1, Payload),
+    timer:sleep(10),
+    {ok, ReadFromOriginal} = py_nif:fd_read(Fd2, 1024),
+    Payload = ReadFromOriginal,
+
+    %% Close the original fd. The duplicate must remain usable.
+    ok = py_nif:fd_close(Fd2),
+    Payload2 = <<"after-close">>,
+    {ok, _} = py_nif:fd_write(Fd1, Payload2),
+    timer:sleep(10),
+    {ok, ReadFromDup} = py_nif:fd_read(DupFd2, 1024),
+    Payload2 = ReadFromDup,
+
+    %% Clean up
+    ok = py_nif:fd_close(DupFd2),
+    ok = py_nif:fd_close(Fd1),
     ok.

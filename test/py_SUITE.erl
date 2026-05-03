@@ -17,6 +17,7 @@
     test_eval_complex_locals/1,
     test_exec/1,
     test_cast/1,
+    test_cast_kwargs/1,
     test_spawn_call/1,
     test_type_conversions/1,
     test_nested_types/1,
@@ -35,6 +36,7 @@
     test_erlang_attr_syntax/1,
     test_asyncio_call/1,
     test_asyncio_gather/1,
+    test_asyncio_gather_timeout/1,
     test_subinterp_supported/1,
     test_parallel_execution/1,
     test_venv/1,
@@ -76,6 +78,7 @@ all() ->
         test_eval_complex_locals,
         test_exec,
         test_cast,
+        test_cast_kwargs,
         test_spawn_call,
         test_type_conversions,
         test_nested_types,
@@ -94,6 +97,7 @@ all() ->
         test_erlang_attr_syntax,
         test_asyncio_call,
         test_asyncio_gather,
+        test_asyncio_gather_timeout,
         test_subinterp_supported,
         test_parallel_execution,
         test_venv,
@@ -228,6 +232,17 @@ test_cast(_Config) ->
     R1 = receive {<<"result">>, V1} -> V1 after 5000 -> ct:fail(timeout1) end,
     R2 = receive {<<"result">>, V2} -> V2 after 5000 -> ct:fail(timeout2) end,
     true = lists:sort([R1, R2]) =:= [<<"msg1">>, <<"msg2">>],
+    ok.
+
+test_cast_kwargs(_Config) ->
+    %% py:cast/4 must accept and forward a kwargs map without crashing.
+    %% The kwargs marshaling itself is exercised by test_call_kwargs/1; this
+    %% covers the cast/4 wrapper whose only difference from cast/3 is the
+    %% Kwargs map.
+    ok = py:cast(json, dumps, [#{<<"a">> => 1}], #{indent => 2}),
+    ok = py:cast(json, dumps, [[1, 2, 3]], #{separators => [<<", ">>, <<": ">>]}),
+    %% Allow the spawned executors to actually run the calls.
+    timer:sleep(100),
     ok.
 
 test_spawn_call(_Config) ->
@@ -590,6 +605,17 @@ test_asyncio_gather(_Config) ->
         {math, sqrt, [36]}
     ],
     {ok, [4.0, 5.0, 6.0]} = py:async_gather(Calls),
+    ok.
+
+test_asyncio_gather_timeout(_Config) ->
+    %% py:async_gather/2 with an explicit timeout returns inside the budget
+    %% on success.
+    Calls = [
+        {math, sqrt, [4]},
+        {math, sqrt, [9]},
+        {math, sqrt, [16]}
+    ],
+    {ok, [2.0, 3.0, 4.0]} = py:async_gather(Calls, 5000),
     ok.
 
 test_subinterp_supported(_Config) ->

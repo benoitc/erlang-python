@@ -38,6 +38,7 @@ application:set_env(erlang_python, context_mode, owngil).
 
 **`py:num_executors/0`** - Removed. Contexts now use per-context worker threads.
 
+<!-- skip-lint -->
 ```erlang
 %% v2.x - check executor count
 N = py:num_executors().
@@ -254,6 +255,7 @@ N = py_context_router:num_contexts().
 The function for non-blocking Python calls has been renamed to follow gen_server conventions:
 
 **Before (v1.8.x):**
+<!-- skip-lint -->
 ```erlang
 Ref = py:call_async(math, factorial, [100]),
 {ok, Result} = py:await(Ref).
@@ -355,6 +357,7 @@ For more sophisticated web framework integration, consider the [Reactor API](rea
 The process-binding functions have been removed. The new architecture uses `py_context_router` for automatic scheduler-affinity routing.
 
 **Before (v1.8.x):**
+<!-- skip-lint -->
 ```erlang
 ok = py:bind(),
 ok = py:exec(<<"x = 42">>),
@@ -760,9 +763,9 @@ ImportError: module does not support subinterpreters
 ```
 
 Options:
-1. Use Python < 3.12 (falls back to multi_executor mode)
-2. Check if the library has a subinterpreter-compatible version
-3. Isolate the library usage to a single context
+1. Use Python 3.12 or 3.13: the runtime uses `worker` mode (subinterpreters require Python 3.14+).
+2. Check if the library has a subinterpreter-compatible version.
+3. Isolate the library usage to a single context.
 
 ### Python 3.14: `erlang_loop_import_failed`
 

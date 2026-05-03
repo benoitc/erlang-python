@@ -92,6 +92,9 @@ jobs:
       - name: Run xref
         run: rebar3 xref
 
+      - name: Lint docs
+        run: escript scripts/lint_doc_snippets.escript
+
   # FreeBSD test using cross-platform action
   test-freebsd:
     name: FreeBSD 14 / Python ${{ matrix.python }}
