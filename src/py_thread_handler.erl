@@ -50,21 +50,24 @@
 
 %% State:
 %%   handlers       — sync thread workers: WorkerId => {HandlerPid, WriteFd}
-%%   async_writers  — async pipes: WriteFd => WriterPid (one writer process
-%%                    per pipe; serialises py_nif:async_callback_response/3
-%%                    so frames cannot interleave on the wire).
+%%   async_writers  — async pipes: WriteFd => {WriterPid, Counter} where
+%%                    Counter is an atomics ref tracking in-flight async
+%%                    callbacks (incremented at submission, decremented
+%%                    after the writer hands the frame to the NIF).
 %%   writer_fds     — reverse map: WriterPid => WriteFd (fast lookup on
 %%                    'DOWN' messages).
 -record(state, {
     handlers      = #{} :: #{non_neg_integer() => {pid(), integer()}},
-    async_writers = #{} :: #{integer() => pid()},
+    async_writers = #{} :: #{integer() => {pid(), atomics:atomics_ref()}},
     writer_fds    = #{} :: #{pid() => integer()}
 }).
 
-%% Bound on async-writer mailbox length. Submissions beyond this point
-%% are failed inline (the writer serialises an error frame for the
-%% callback) so a stalled Python event loop cannot grow the writer's
-%% mailbox without bound.
+%% Bound on combined async in-flight + writer-mailbox depth. The
+%% atomics counter covers BOTH executors that have spawned but not
+%% yet enqueued AND messages already sitting in the writer's mailbox,
+%% so the bound holds even when many parallel callbacks complete
+%% before the writer drains. Submissions beyond this point are failed
+%% inline with an "async callback queue full" error frame.
 -define(ASYNC_WRITER_MAX_QUEUE, 10000).
 
 %%% ============================================================================
@@ -132,18 +135,25 @@ handle_info({thread_callback, WorkerId, CallbackId, FuncName, Args},
 %% through a single writer process per WriteFd: callback execution
 %% stays parallel, only the pipe write is serialised.
 handle_info({async_callback, CallbackId, FuncName, Args, WriteFd}, State0) ->
-    {Writer, State1} = ensure_async_writer(WriteFd, State0),
-    case writer_overload(Writer) of
-        true ->
-            %% Backpressure: surface "queue full" as a normal error
-            %% frame on the pipe so the Future resolves with a clear
-            %% RuntimeError instead of growing the writer's mailbox
-            %% indefinitely.
-            Writer ! {overflow, CallbackId};
-        false ->
+    {Writer, Counter, State1} = ensure_async_writer(WriteFd, State0),
+    %% Reserve a slot in the in-flight counter. atomics:add_get is
+    %% atomic and gives us the post-increment value, so the check is
+    %% race-free across submissions on different schedulers.
+    case atomics:add_get(Counter, 1, 1) of
+        N when N > ?ASYNC_WRITER_MAX_QUEUE ->
+            %% Already at the bound: undo the reservation and fail
+            %% this callback with a queue-full error frame. The
+            %% writer still serialises the error frame on the pipe
+            %% (so the Future resolves with a clear RuntimeError
+            %% rather than hanging), and we use the same atomics ref
+            %% so the queued overflow message stays accounted for
+            %% until the writer drains it.
+            atomics:sub(Counter, 1, 1),
+            Writer ! {overflow, CallbackId, Counter};
+        _ ->
             spawn(fun() ->
                 Response = run_async_callback(FuncName, Args),
-                Writer ! {respond, CallbackId, Response}
+                Writer ! {respond, CallbackId, Response, Counter}
             end)
     end,
     {noreply, State1};
@@ -261,36 +271,46 @@ run_async_callback(FuncName, Args) ->
 
 %% Look up or spawn the async writer for a given WriteFd. Writers are
 %% monitored (not linked) so a writer death does not take the
-%% coordinator down; the 'DOWN' clause cleans up the maps.
+%% coordinator down; the 'DOWN' clause cleans up the maps. Each
+%% writer gets its own atomics counter that bounds total in-flight
+%% async callbacks (executors + queued responses) on that pipe.
 ensure_async_writer(WriteFd,
                     #state{async_writers = Writers,
                            writer_fds    = WriterFds} = State) ->
     case maps:get(WriteFd, Writers, undefined) of
         undefined ->
+            Counter = atomics:new(1, [{signed, false}]),
             Writer = spawn(fun() -> async_writer_loop(WriteFd) end),
             erlang:monitor(process, Writer),
-            {Writer, State#state{
-                async_writers = Writers#{WriteFd => Writer},
+            {Writer, Counter, State#state{
+                async_writers = Writers#{WriteFd => {Writer, Counter}},
                 writer_fds    = WriterFds#{Writer => WriteFd}}};
-        Existing ->
-            {Existing, State}
+        {Writer, Counter} ->
+            {Writer, Counter, State}
     end.
 
-%% Backpressure check: bound the writer's mailbox.
-writer_overload(Writer) ->
-    case erlang:process_info(Writer, message_queue_len) of
-        {message_queue_len, N} when N >= ?ASYNC_WRITER_MAX_QUEUE -> true;
-        _ -> false
-    end.
-
-%% Per-fd writer process. Owns one async pipe write fd; its mailbox is
-%% the implicit serialisation point for all responses on that fd.
+%% Per-fd writer process. Owns one async pipe write fd and is the only
+%% process that calls py_nif:async_callback_response/3 for it; its
+%% mailbox is the serialisation point for all responses on that fd.
+%%
+%% The {respond, ...} message carries the per-pipe atomics counter
+%% from ensure_async_writer/2. The writer ALWAYS decrements after
+%% handing the frame to the NIF (success or error) so the in-flight
+%% bound is honoured even when the underlying write fails. {overflow,
+%% ...} messages do not carry the counter — the gen_server already
+%% un-reserved before sending — and the writer just emits the
+%% error frame.
+%%
 %% Exits on hard write errors so the coordinator's 'DOWN' clause can
-%% drop the entry; the next callback respawns it.
+%% drop the entry; the next callback respawns the writer (with a
+%% fresh counter, so any leaked count from the previous instance is
+%% discarded with the dead writer).
 async_writer_loop(WriteFd) ->
     receive
-        {respond, CallbackId, Response} ->
-            case py_nif:async_callback_response(WriteFd, CallbackId, Response) of
+        {respond, CallbackId, Response, Counter} ->
+            R = py_nif:async_callback_response(WriteFd, CallbackId, Response),
+            atomics:sub(Counter, 1, 1),
+            case R of
                 ok -> async_writer_loop(WriteFd);
                 {error, _} = Err ->
                     exit({async_callback_response_failed, Err})
