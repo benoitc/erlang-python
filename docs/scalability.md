@@ -21,7 +21,7 @@ py:execution_mode().
 
 ### Worker Mode (Default)
 
-Each context gets a dedicated pthread that handles all Python operations. This provides stable thread affinity, which is critical for libraries like numpy, torch, and tensorflow that maintain thread-local state.
+Each context gets a dedicated pthread that handles all Python operations. This provides stable thread affinity, which is critical for libraries like numpy, torch, and tensorflow that maintain thread-local state. The regression contract for that guarantee lives in `test/py_ml_libs_SUITE.erl`, which drives real numpy and tensorflow operations through `exec` / `eval` / `call` and across multiple Erlang processes targeting the same context.
 
 ### OWN_GIL Mode (Python 3.12+)
 
