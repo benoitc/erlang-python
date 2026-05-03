@@ -2228,6 +2228,29 @@ extern bool g_has_thread_coordinator;
 typedef struct {
     int async_callback_pipe[2];      /* [0]=read, [1]=write - per-interpreter pipe */
     PyObject *async_pending_futures; /* Dict: callback_id -> Future */
+    /*
+     * async_futures_mutex protects async_pending_futures.
+     *
+     * INVARIANT: never call a Future method (set_result, set_exception,
+     * cancel, ...) while holding this lock. set_exception in particular
+     * can run done-callbacks that re-enter user code, which may then
+     * call back into erlang.* — and any path that takes this same mutex
+     * would deadlock or expose a partially-mutated dict.
+     *
+     * The supported pattern at every call site is:
+     *   1. lock
+     *   2. allocate keys, snapshot/transfer ownership of futures
+     *      (PyDict_Items + INCREF; or PyDict_GetItem + INCREF + DelItem),
+     *      clear/modify the dict
+     *   3. unlock
+     *   4. THEN call set_result / set_exception on the snapshotted
+     *      futures and release the snapshot's references.
+     *
+     * See process_async_callback_response and
+     * async_pipe_break_and_fail_pending for the two read sides;
+     * register_async_future is the write side and only does a dict
+     * insert under the lock.
+     */
     pthread_mutex_t async_futures_mutex;
     bool pipe_initialized;
 
