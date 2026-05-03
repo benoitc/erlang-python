@@ -23,7 +23,10 @@
     threadpool_thread_reuse_test/1,
     simple_thread_basic_test/1,
     simple_thread_multiple_calls_test/1,
-    simple_thread_concurrent_test/1
+    simple_thread_concurrent_test/1,
+    threadpool_high_concurrency_test/1,
+    async_callback_concurrent_test/1,
+    async_callback_large_payload_test/1
 ]).
 
 all() ->
@@ -36,7 +39,10 @@ all() ->
         threadpool_thread_reuse_test,
         simple_thread_basic_test,
         simple_thread_multiple_calls_test,
-        simple_thread_concurrent_test
+        simple_thread_concurrent_test,
+        threadpool_high_concurrency_test,
+        async_callback_concurrent_test,
+        async_callback_large_payload_test
     ].
 
 init_per_suite(Config) ->
@@ -63,6 +69,8 @@ end_per_testcase(_TestCase, _Config) ->
     catch py:unregister_function(square_in_erlang),
     catch py:unregister_function(maybe_fail),
     catch py:unregister_function(get_id),
+    catch py:unregister_function(async_double),
+    catch py:unregister_function(async_blob),
     ok.
 
 %%% ============================================================================
@@ -203,4 +211,105 @@ simple_thread_concurrent_test(_Config) ->
 ">>,
     {ok, Results} = py:eval(Code),
     [0, 2, 4, 6, 8] = Results,
+    ok.
+
+%%% ============================================================================
+%%% Regression tests for issue #63 (sync + async pipe race / interleave)
+%%% ============================================================================
+
+%% @doc Stress the sync thread-callback path:
+%%   - 8 worker threads,
+%%   - 200 tasks per repetition, each task makes 5 sequential
+%%     erl.call('add_one', x) invocations,
+%%   - 10 repetitions per case.
+%%
+%% Without the Phase 2-5 fixes (looped reads, combined write,
+%% callback_id correlation, worker poisoning), short-read or
+%% length-then-data races deliver wrong values to the wrong caller —
+%% the symptom captured in issue #63. With the fixes, every result
+%% must equal x + 5.
+threadpool_high_concurrency_test(_Config) ->
+    py:register_function(add_one, fun([X]) -> X + 1 end),
+    Code = <<
+      "(lambda cf, erl: list("
+      "cf.ThreadPoolExecutor(max_workers=8).__enter__().map("
+      "lambda x: erl.call('add_one', erl.call('add_one', "
+      "erl.call('add_one', erl.call('add_one', erl.call('add_one', x))))), "
+      "range(200))))(__import__('concurrent.futures', "
+      "fromlist=['ThreadPoolExecutor']), __import__('erlang'))"
+    >>,
+    Expected = [X + 5 || X <- lists:seq(0, 199)],
+    lists:foreach(
+        fun(I) ->
+            {ok, Results} = py:eval(Code),
+            case Results of
+                Expected -> ok;
+                _ -> ct:fail({wrong_results_iter, I, Results})
+            end
+        end,
+        lists:seq(1, 10)),
+    ok.
+
+%% @doc Stress the async thread-callback path (erlang.async_call from
+%% Python). 50 concurrent invocations through a single
+%% asyncio.gather; without the Phase 4a per-fd writer process or
+%% Phase 4c resumable parser, frame-on-the-wire interleaving on the
+%% shared async_callback_pipe corrupts results.
+async_callback_concurrent_test(_Config) ->
+    py:register_function(async_double, fun([X]) -> X * 2 end),
+    %% Add the existing test/ directory to sys.path so the Python
+    %% helper module is importable.
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    %% Define a Python coroutine that gathers 50 erlang.async_call
+    %% invocations and returns the result list.
+    ok = py:exec(<<
+        "import asyncio, erlang\n"
+        "async def _gather50():\n"
+        "    return await asyncio.gather(*[\n"
+        "        erlang.async_call('async_double', i)\n"
+        "        for i in range(50)\n"
+        "    ])\n"
+        "def _run_gather50():\n"
+        "    return asyncio.run(_gather50())\n"
+    >>),
+    {ok, Results} = py:call('__main__', '_run_gather50', []),
+    Expected = [I * 2 || I <- lists:seq(0, 49)],
+    Expected = Results,
+    py:unregister_function(async_double),
+    ok.
+
+%% @doc Async callback with a payload larger than PIPE_BUF (4 KiB on
+%% Linux, 512 on FreeBSD per POSIX minimum). Combined with concurrent
+%% submissions, this exercises the looped non-blocking write under
+%% the single-writer-process invariant: the kernel may chunk the
+%% write but no other writer can interleave, so the resumable parser
+%% on the Python side reassembles the frame intact.
+async_callback_large_payload_test(_Config) ->
+    Size = 64 * 1024,
+    %% Printable ASCII only — the goal is wire-frame integrity across
+    %% the chunked write boundary, not arbitrary-byte encoding through
+    %% term_to_python_repr (which double-quotes binaries as Python
+    %% string literals).
+    Payload = list_to_binary([($a + (I rem 26)) || I <- lists:seq(1, Size)]),
+    py:register_function(async_blob, fun([_]) -> Payload end),
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(<<
+        "import asyncio, erlang\n"
+        "async def _gather_blobs():\n"
+        "    return await asyncio.gather(*[\n"
+        "        erlang.async_call('async_blob', i)\n"
+        "        for i in range(8)\n"
+        "    ])\n"
+        "def _run_gather_blobs():\n"
+        "    blobs = asyncio.run(_gather_blobs())\n"
+        "    return [len(b) for b in blobs]\n"
+    >>),
+    {ok, Lengths} = py:call('__main__', '_run_gather_blobs', []),
+    Expected = lists:duplicate(8, Size),
+    Expected = Lengths,
+    py:unregister_function(async_blob),
     ok.
