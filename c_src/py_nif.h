@@ -1683,62 +1683,108 @@ static char *binary_to_string(const ErlNifBinary *bin) {
 }
 
 /**
- * @brief Read from a file descriptor with optional timeout
+ * @brief Read exactly @p count bytes from a file descriptor with a deadline.
  *
- * Uses select() to implement a timeout on blocking read operations.
- * This prevents indefinite blocking on pipe reads.
+ * Loops on partial reads and EINTR until @p count bytes are received or
+ * the deadline expires. Uses a monotonic deadline (not a per-call
+ * timeout) so retries cannot extend the wait indefinitely.
  *
  * @param fd         File descriptor to read from
  * @param buf        Buffer to read into
  * @param count      Number of bytes to read
- * @param timeout_ms Timeout in milliseconds (0 = no timeout, wait indefinitely)
+ * @param timeout_ms Total timeout in milliseconds (0 = no timeout)
  *
- * @return Number of bytes read on success, 0 on timeout, -1 on error
+ * @return Bytes read so far on timeout/EOF (0 to count), -1 on hard error.
+ *         A return value < count with errno == ETIMEDOUT signals timeout;
+ *         < count with errno == 0 signals clean EOF.
  *
- * @note On timeout, errno is set to ETIMEDOUT
+ * @note Callers MUST treat any return < count as a desynchronised pipe.
+ *       There is no in-band recovery: the leftover bytes (if any) of a
+ *       partial frame stay in the pipe.
  */
 static ssize_t read_with_timeout(int fd, void *buf, size_t count, int timeout_ms) {
-    if (timeout_ms > 0) {
-        struct timeval tv;
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
+    char *p = buf;
+    size_t got = 0;
+    struct timespec deadline = {0};
+    bool have_deadline = (timeout_ms > 0);
 
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
-
-        int ret = select(fd + 1, &fds, NULL, NULL, &tv);
-        if (ret < 0) {
-            return -1;  /* select error */
-        }
-        if (ret == 0) {
-            errno = ETIMEDOUT;
-            return 0;  /* timeout */
+    if (have_deadline) {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec  += timeout_ms / 1000;
+        deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec  += 1;
+            deadline.tv_nsec -= 1000000000L;
         }
     }
 
-    return read(fd, buf, count);
+    while (got < count) {
+        if (have_deadline) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long remain_ms =
+                (deadline.tv_sec  - now.tv_sec)  * 1000L +
+                (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+            if (remain_ms <= 0) {
+                errno = ETIMEDOUT;
+                return (ssize_t)got;
+            }
+            struct timeval tv;
+            tv.tv_sec  = remain_ms / 1000;
+            tv.tv_usec = (remain_ms % 1000) * 1000;
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            int s = select(fd + 1, &fds, NULL, NULL, &tv);
+            if (s < 0) {
+                if (errno == EINTR) continue;
+                return -1;
+            }
+            if (s == 0) {
+                errno = ETIMEDOUT;
+                return (ssize_t)got;
+            }
+        }
+        ssize_t n = read(fd, p + got, count - got);
+        if (n > 0) {
+            got += (size_t)n;
+            continue;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        /* n == 0: writer closed pipe (clean EOF) */
+        errno = 0;
+        return (ssize_t)got;
+    }
+    return (ssize_t)got;
 }
 
 /**
- * @brief Read length-prefixed data from a file descriptor
+ * @brief Read length-prefixed data from a file descriptor.
  *
- * Reads a 4-byte length prefix followed by the data payload.
- * Uses read_with_timeout for optional timeout support.
+ * Wire format: 4-byte length prefix (native endianness) followed by
+ * @p len bytes of payload. Built on top of read_with_timeout, so
+ * partial reads / EINTR are handled transparently.
  *
  * @param fd         File descriptor to read from
- * @param data_out   Pointer to store allocated data buffer (caller must free with enif_free)
+ * @param data_out   Pointer to store allocated data buffer
  * @param len_out    Pointer to store data length
- * @param timeout_ms Timeout in milliseconds (0 = no timeout)
+ * @param timeout_ms Total timeout in milliseconds (0 = no timeout)
  *
  * @return 0 on success, -1 on read error/timeout, -2 on allocation failure
  *
- * @note On success with len > 0, caller must call enif_free(*data_out)
+ * @note Updated contract: on -1, the calling layer MUST treat the pipe as
+ *       desynchronised. There is no resync attempt here. Callers (sync
+ *       thread-callback, suspended-callback) react: poison the worker or
+ *       destroy the context. On success with len > 0, caller must free
+ *       *data_out via enif_free().
  */
 static int read_length_prefixed_data(int fd, char **data_out, uint32_t *len_out, int timeout_ms) {
     uint32_t len;
     ssize_t n = read_with_timeout(fd, &len, sizeof(len), timeout_ms);
-    if (n != sizeof(len)) {
+    if (n != (ssize_t)sizeof(len)) {
         return -1;
     }
 
@@ -1760,6 +1806,91 @@ static int read_length_prefixed_data(int fd, char **data_out, uint32_t *len_out,
     }
 
     return 0;
+}
+
+/**
+ * @brief Write status codes for write_all_with_deadline().
+ */
+typedef enum {
+    WRITE_OK      = 0,
+    WRITE_TIMEOUT = -1,
+    WRITE_ERROR   = -2
+} write_result_t;
+
+/**
+ * @brief Write exactly @p count bytes to a (typically non-blocking) fd
+ *        with a deadline.
+ *
+ * Loops on partial writes / EINTR / EAGAIN. On EAGAIN, uses select() for
+ * write-readiness with the remaining deadline. Used by the thread-worker
+ * write path to avoid pinning a dirty I/O scheduler thread on a stalled
+ * Python reader.
+ *
+ * @param fd         File descriptor to write to
+ * @param buf        Buffer to write
+ * @param count      Number of bytes to write
+ * @param timeout_ms Total timeout in milliseconds (0 = no timeout)
+ *
+ * @return WRITE_OK on full write, WRITE_TIMEOUT on deadline expiry,
+ *         WRITE_ERROR on hard error (errno preserved).
+ */
+static write_result_t write_all_with_deadline(int fd, const void *buf,
+                                              size_t count, int timeout_ms) {
+    const char *p = buf;
+    size_t sent = 0;
+    struct timespec deadline = {0};
+    bool have_deadline = (timeout_ms > 0);
+
+    if (have_deadline) {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec  += timeout_ms / 1000;
+        deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec  += 1;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
+
+    while (sent < count) {
+        ssize_t n = write(fd, p + sent, count - sent);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                return WRITE_ERROR;
+            }
+            /* Pipe full: wait for write-readiness within the deadline. */
+            if (!have_deadline) {
+                return WRITE_ERROR;       /* would block, no deadline */
+            }
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long remain_ms =
+                (deadline.tv_sec  - now.tv_sec)  * 1000L +
+                (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+            if (remain_ms <= 0) return WRITE_TIMEOUT;
+            struct timeval tv;
+            tv.tv_sec  = remain_ms / 1000;
+            tv.tv_usec = (remain_ms % 1000) * 1000;
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            int s = select(fd + 1, NULL, &fds, NULL, &tv);
+            if (s < 0) {
+                if (errno == EINTR) continue;
+                return WRITE_ERROR;
+            }
+            if (s == 0) return WRITE_TIMEOUT;
+            /* fd writable; loop back. */
+            continue;
+        }
+        /* n == 0: shouldn't happen for write(); treat as error. */
+        return WRITE_ERROR;
+    }
+    return WRITE_OK;
 }
 
 /** @} */

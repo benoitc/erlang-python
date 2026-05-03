@@ -55,6 +55,15 @@ option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 
+# Optional thread-callback I/O tracing. Compiled out by default; turn on
+# locally to debug py_thread_callback_SUITE-style flakiness. Logs one
+# line per send/receive on stderr.
+option(ENABLE_PY_THREAD_CB_TRACE "Trace thread-callback I/O on stderr" OFF)
+if(ENABLE_PY_THREAD_CB_TRACE)
+    message(STATUS "Thread-callback I/O tracing enabled")
+    add_compile_definitions(PY_THREAD_CB_TRACE=1)
+endif()
+
 if(ENABLE_ASAN)
     message(STATUS "AddressSanitizer enabled")
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g -O1)

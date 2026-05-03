@@ -7801,13 +7801,19 @@ static ErlNifFunc nif_funcs[] = {
     /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},
 
-    /* Thread worker support (ThreadPoolExecutor) */
+    /* Thread worker support (ThreadPoolExecutor).
+     * Writes are ERL_NIF_DIRTY_JOB_IO_BOUND because the response pipe
+     * has a non-blocking write end and the looped write may briefly
+     * wait for write-readiness when the Python reader is slow. */
     {"thread_worker_set_coordinator", 1, nif_thread_worker_set_coordinator, 0},
-    {"thread_worker_write", 2, nif_thread_worker_write, 0},
-    {"thread_worker_signal_ready", 1, nif_thread_worker_signal_ready, 0},
+    {"thread_worker_write_with_id",   3, nif_thread_worker_write_with_id,
+        ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"thread_worker_signal_ready",    1, nif_thread_worker_signal_ready, 0},
 
-    /* Async callback support (for erlang.async_call) */
-    {"async_callback_response", 3, nif_async_callback_response, 0},
+    /* Async callback support (for erlang.async_call). Same dirty-IO
+     * rationale as thread_worker_write_with_id above. */
+    {"async_callback_response", 3, nif_async_callback_response,
+        ERL_NIF_DIRTY_JOB_IO_BOUND},
 
     /* Callback name registry (prevents torch introspection issues) */
     {"register_callback_name", 1, nif_register_callback_name, 0},

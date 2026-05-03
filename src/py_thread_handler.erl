@@ -48,10 +48,24 @@
     terminate/2
 ]).
 
-%% State: map of WorkerId => {HandlerPid, WriteFd}
+%% State:
+%%   handlers       — sync thread workers: WorkerId => {HandlerPid, WriteFd}
+%%   async_writers  — async pipes: WriteFd => WriterPid (one writer process
+%%                    per pipe; serialises py_nif:async_callback_response/3
+%%                    so frames cannot interleave on the wire).
+%%   writer_fds     — reverse map: WriterPid => WriteFd (fast lookup on
+%%                    'DOWN' messages).
 -record(state, {
-    handlers = #{} :: #{non_neg_integer() => {pid(), integer()}}
+    handlers      = #{} :: #{non_neg_integer() => {pid(), integer()}},
+    async_writers = #{} :: #{integer() => pid()},
+    writer_fds    = #{} :: #{pid() => integer()}
 }).
+
+%% Bound on async-writer mailbox length. Submissions beyond this point
+%% are failed inline (the writer serialises an error frame for the
+%% callback) so a stalled Python event loop cannot grow the writer's
+%% mailbox without bound.
+-define(ASYNC_WRITER_MAX_QUEUE, 10000).
 
 %%% ============================================================================
 %%% API
@@ -66,6 +80,11 @@ start_link() ->
 %%% ============================================================================
 
 init([]) ->
+    %% Trap exits so a dying handler / async writer is reaped via
+    %% handle_info({'EXIT', ...}) instead of taking the coordinator
+    %% down. (Also enables the 'DOWN' clause for monitored writers,
+    %% which we route through the same cleanup logic.)
+    process_flag(trap_exit, true),
     %% Register ourselves as the thread worker coordinator
     case py_nif:thread_worker_set_coordinator(self()) of
         ok ->
@@ -105,24 +124,49 @@ handle_info({thread_callback, WorkerId, CallbackId, FuncName, Args},
     end,
     {noreply, State};
 
-%% Handle async callback request from Python async_call()
-%% Unlike thread_callback, this uses a global pipe for all async callbacks.
-%% Each response includes the callback_id so Python can match it to the right Future.
-handle_info({async_callback, CallbackId, FuncName, Args, WriteFd}, State) ->
-    %% Spawn a process to handle this callback asynchronously
-    %% This allows multiple async callbacks to be processed concurrently
-    spawn_link(fun() ->
-        handle_async_callback(WriteFd, CallbackId, FuncName, Args)
-    end),
-    {noreply, State};
+%% Handle async callback request from Python async_call().
+%%
+%% Unlike thread_callback, this uses one shared per-interpreter pipe
+%% for all async callbacks. To prevent frame-on-the-wire interleaving
+%% from concurrent writers (issue #63), every response is funnelled
+%% through a single writer process per WriteFd: callback execution
+%% stays parallel, only the pipe write is serialised.
+handle_info({async_callback, CallbackId, FuncName, Args, WriteFd}, State0) ->
+    {Writer, State1} = ensure_async_writer(WriteFd, State0),
+    case writer_overload(Writer) of
+        true ->
+            %% Backpressure: surface "queue full" as a normal error
+            %% frame on the pipe so the Future resolves with a clear
+            %% RuntimeError instead of growing the writer's mailbox
+            %% indefinitely.
+            Writer ! {overflow, CallbackId};
+        false ->
+            spawn(fun() ->
+                Response = run_async_callback(FuncName, Args),
+                Writer ! {respond, CallbackId, Response}
+            end)
+    end,
+    {noreply, State1};
 
-%% Handle handler process exit
+%% Handle linked sync handler exit.
 handle_info({'EXIT', Pid, _Reason}, #state{handlers = Handlers} = State) ->
-    %% Remove handler from map
     NewHandlers = maps:filter(
         fun(_WorkerId, {HandlerPid, _Fd}) -> HandlerPid =/= Pid end,
         Handlers),
     {noreply, State#state{handlers = NewHandlers}};
+
+%% Handle monitored async writer exit (writer hits a hard write error).
+handle_info({'DOWN', _MRef, process, Pid, _Reason},
+            #state{async_writers = Writers,
+                   writer_fds    = WriterFds} = State) ->
+    case maps:take(Pid, WriterFds) of
+        {WriteFd, NewWriterFds} ->
+            NewWriters = maps:remove(WriteFd, Writers),
+            {noreply, State#state{async_writers = NewWriters,
+                                  writer_fds    = NewWriterFds}};
+        error ->
+            {noreply, State}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -138,9 +182,12 @@ terminate(_Reason, _State) ->
 %% Each handler is dedicated to one Python thread and has its own response pipe.
 handler_loop(WorkerId, WriteFd) ->
     receive
-        {thread_callback, _CallbackId, FuncName, Args} ->
-            %% Execute the callback and send response
-            handle_thread_callback(WriteFd, FuncName, Args),
+        {thread_callback, CallbackId, FuncName, Args} ->
+            %% Execute the callback and send response. If the write fails
+            %% (pipe closed by the C side after worker poisoning, or
+            %% write_timeout) we exit so the coordinator's trap_exit
+            %% clause removes us from its handler map.
+            handle_thread_callback(WriteFd, CallbackId, FuncName, Args),
             handler_loop(WorkerId, WriteFd);
 
         {pipe_closed} ->
@@ -154,8 +201,8 @@ handler_loop(WorkerId, WriteFd) ->
             handler_loop(WorkerId, WriteFd)
     end.
 
-%% Execute a callback and write response to the pipe
-handle_thread_callback(WriteFd, FuncName, Args) ->
+%% Execute a callback and write the id-prefixed response to the pipe.
+handle_thread_callback(WriteFd, CallbackId, FuncName, Args) ->
     %% Convert Args from tuple to list if needed
     ArgsList = case Args of
         T when is_tuple(T) -> tuple_to_list(T);
@@ -180,25 +227,26 @@ handle_thread_callback(WriteFd, FuncName, Args) ->
             <<1, ErrMsg/binary>>
     end,
 
-    %% Write response to pipe
-    py_nif:thread_worker_write(WriteFd, Response).
+    %% Write response to pipe; exit on failure so we are reaped.
+    case py_nif:thread_worker_write_with_id(WriteFd, CallbackId, Response) of
+        ok -> ok;
+        {error, Reason1} ->
+            exit({thread_worker_write_failed, Reason1})
+    end.
 
-%% Execute an async callback and write response to the async callback pipe.
-%% Unlike handle_thread_callback, this includes the callback_id in the response
-%% so Python can match it to the correct Future.
-handle_async_callback(WriteFd, CallbackId, FuncName, Args) ->
-    %% Convert Args from tuple to list if needed
+%% Execute the user's registered function and encode the result as a
+%% wire-format response body (`<<Status, PythonRepr/binary>>`).
+%% Used by async_writer_loop (and indirectly by handle_thread_callback
+%% via the same encoding shape — the sync path keeps its own copy
+%% close to the write call site).
+run_async_callback(FuncName, Args) ->
     ArgsList = case Args of
         T when is_tuple(T) -> tuple_to_list(T);
         L when is_list(L) -> L;
         _ -> [Args]
     end,
-
-    %% Execute the registered function
-    Response = case py_callback:execute(FuncName, ArgsList) of
+    case py_callback:execute(FuncName, ArgsList) of
         {ok, Result} ->
-            %% Encode result as Python-parseable string
-            %% Format: status_byte (0=ok) + python_repr
             ResultStr = term_to_python_repr(Result),
             <<0, ResultStr/binary>>;
         {error, {not_found, Name}} ->
@@ -209,10 +257,56 @@ handle_async_callback(WriteFd, CallbackId, FuncName, Args) ->
             ErrMsg = iolist_to_binary(
                 io_lib:format("~p: ~p", [Class, Reason])),
             <<1, ErrMsg/binary>>
-    end,
+    end.
 
-    %% Write response to async callback pipe (includes callback_id)
-    py_nif:async_callback_response(WriteFd, CallbackId, Response).
+%% Look up or spawn the async writer for a given WriteFd. Writers are
+%% monitored (not linked) so a writer death does not take the
+%% coordinator down; the 'DOWN' clause cleans up the maps.
+ensure_async_writer(WriteFd,
+                    #state{async_writers = Writers,
+                           writer_fds    = WriterFds} = State) ->
+    case maps:get(WriteFd, Writers, undefined) of
+        undefined ->
+            Writer = spawn(fun() -> async_writer_loop(WriteFd) end),
+            erlang:monitor(process, Writer),
+            {Writer, State#state{
+                async_writers = Writers#{WriteFd => Writer},
+                writer_fds    = WriterFds#{Writer => WriteFd}}};
+        Existing ->
+            {Existing, State}
+    end.
+
+%% Backpressure check: bound the writer's mailbox.
+writer_overload(Writer) ->
+    case erlang:process_info(Writer, message_queue_len) of
+        {message_queue_len, N} when N >= ?ASYNC_WRITER_MAX_QUEUE -> true;
+        _ -> false
+    end.
+
+%% Per-fd writer process. Owns one async pipe write fd; its mailbox is
+%% the implicit serialisation point for all responses on that fd.
+%% Exits on hard write errors so the coordinator's 'DOWN' clause can
+%% drop the entry; the next callback respawns it.
+async_writer_loop(WriteFd) ->
+    receive
+        {respond, CallbackId, Response} ->
+            case py_nif:async_callback_response(WriteFd, CallbackId, Response) of
+                ok -> async_writer_loop(WriteFd);
+                {error, _} = Err ->
+                    exit({async_callback_response_failed, Err})
+            end;
+        {overflow, CallbackId} ->
+            Response = <<1, "async callback queue full">>,
+            case py_nif:async_callback_response(WriteFd, CallbackId, Response) of
+                ok -> async_writer_loop(WriteFd);
+                {error, _} = Err ->
+                    exit({async_callback_response_failed, Err})
+            end;
+        shutdown ->
+            ok;
+        _Other ->
+            async_writer_loop(WriteFd)
+    end.
 
 %%% ============================================================================
 %%% Term to Python repr conversion

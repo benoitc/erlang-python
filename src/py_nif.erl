@@ -71,7 +71,7 @@
     execution_mode/0,
     %% Thread worker support (ThreadPoolExecutor)
     thread_worker_set_coordinator/1,
-    thread_worker_write/2,
+    thread_worker_write_with_id/3,
     thread_worker_signal_ready/1,
     %% Async callback support (for erlang.async_call)
     async_callback_response/3,
@@ -593,11 +593,18 @@ execution_mode() ->
 thread_worker_set_coordinator(_Pid) ->
     ?NIF_STUB.
 
-%% @doc Write a callback response to a thread worker's pipe.
-%% Fd is the write end of the response pipe.
-%% Response is the result binary (status byte + python repr).
--spec thread_worker_write(integer(), binary()) -> ok | {error, term()}.
-thread_worker_write(_Fd, _Response) ->
+%% @doc Write a callback response to a thread worker's pipe, prefixed
+%% with the callback id so the Python reader can correlate responses
+%% to outstanding requests.
+%%
+%% Wire format: `<<CallbackId:8/binary, Len:4/binary, Response/binary>>'.
+%% The whole frame is written in one looped non-blocking write; this
+%% NIF is registered as `ERL_NIF_DIRTY_JOB_IO_BOUND' so a stalled
+%% Python reader produces `{error, write_timeout}' rather than pinning
+%% a scheduler.
+-spec thread_worker_write_with_id(integer(), non_neg_integer(), binary()) ->
+    ok | {error, term()}.
+thread_worker_write_with_id(_Fd, _CallbackId, _Response) ->
     ?NIF_STUB.
 
 %% @doc Signal that a thread worker handler is ready.

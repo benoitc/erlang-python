@@ -2195,12 +2195,33 @@ extern ErlNifPid g_thread_coordinator_pid;
 extern bool g_has_thread_coordinator;
 
 /* Per-interpreter module state for async callbacks.
- * Each subinterpreter gets its own pipe and futures dict. */
+ *
+ * Each subinterpreter gets its own pipe and futures dict. The reader
+ * (process_async_callback_response) is event-driven from the asyncio
+ * loop and the read end is O_NONBLOCK; partial frames are buffered
+ * across invocations in hdr_buf/body_buf so the reader resumes on the
+ * next loop tick when more data arrives. */
 typedef struct {
     int async_callback_pipe[2];      /* [0]=read, [1]=write - per-interpreter pipe */
     PyObject *async_pending_futures; /* Dict: callback_id -> Future */
     pthread_mutex_t async_futures_mutex;
     bool pipe_initialized;
+
+    /* Set on hard read error (EIO/EBADF/EOF mid-frame). New
+     * erlang.async_call invocations short-circuit with a clear
+     * RuntimeError; pending futures are failed with the same error. */
+    bool pipe_broken;
+
+    /* Resumable frame parser state. The wire format is
+     *   <<callback_id:8/binary, len:4/binary, data:len/binary>>
+     * The header lives in a fixed buffer; the body is heap-allocated
+     * once the header arrives. EAGAIN preserves all of these so the
+     * next reader tick continues from the same offset. */
+    uint8_t  hdr_buf[12];            /* 8-byte id + 4-byte len */
+    size_t   hdr_have;               /* 0..12 */
+    char    *body_buf;               /* allocated once header parsed */
+    uint32_t body_len;               /* parsed from header */
+    size_t   body_have;              /* 0..body_len */
 } erlang_module_state_t;
 
 /* Forward declaration for module state accessor */
@@ -2254,10 +2275,17 @@ static int async_callback_init(void) {
         return -1;
     }
 
-    /* Set the read end to non-blocking for asyncio compatibility */
-    int flags = fcntl(state->async_callback_pipe[0], F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(state->async_callback_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    /* Set the read end non-blocking for asyncio compatibility, and
+     * the write end non-blocking so the dirty-IO NIF write path can
+     * timeout instead of pinning a scheduler on a stalled Python
+     * reader. */
+    int rflags = fcntl(state->async_callback_pipe[0], F_GETFL, 0);
+    if (rflags >= 0) {
+        fcntl(state->async_callback_pipe[0], F_SETFL, rflags | O_NONBLOCK);
+    }
+    int wflags = fcntl(state->async_callback_pipe[1], F_GETFL, 0);
+    if (wflags >= 0) {
+        fcntl(state->async_callback_pipe[1], F_SETFL, wflags | O_NONBLOCK);
     }
 
     state->async_pending_futures = PyDict_New();
@@ -2276,119 +2304,232 @@ static int async_callback_init(void) {
 }
 
 /**
- * Process a single async callback response from the pipe.
- * Called by the asyncio reader callback.
- * Returns: 1 if processed, 0 if no data, -1 on error
+ * Resolve a Future with a result or, if @p result is NULL, with the
+ * current Python exception (or a generic RuntimeError fallback).
+ * Borrows @p future; caller still owns its reference.
+ */
+static void resolve_future_with_result(PyObject *future, PyObject *result) {
+    if (result != NULL) {
+        PyObject *set_result = PyObject_GetAttrString(future, "set_result");
+        if (set_result != NULL) {
+            PyObject *ret = PyObject_CallFunctionObjArgs(set_result, result, NULL);
+            Py_XDECREF(ret);
+            Py_DECREF(set_result);
+        }
+        return;
+    }
+
+    /* Result was NULL: carry the Python exception over to the future. */
+    PyObject *exc_type = NULL, *exc_value = NULL, *exc_tb = NULL;
+    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+
+    PyObject *set_exception = PyObject_GetAttrString(future, "set_exception");
+    if (set_exception != NULL) {
+        if (exc_value != NULL) {
+            PyObject *ret = PyObject_CallFunctionObjArgs(set_exception, exc_value, NULL);
+            Py_XDECREF(ret);
+        } else {
+            PyObject *runtime_err = PyObject_CallFunction(
+                PyExc_RuntimeError, "s", "Erlang callback failed");
+            PyObject *ret = PyObject_CallFunctionObjArgs(
+                set_exception, runtime_err, NULL);
+            Py_XDECREF(ret);
+            Py_XDECREF(runtime_err);
+        }
+        Py_DECREF(set_exception);
+    }
+
+    Py_XDECREF(exc_type);
+    Py_XDECREF(exc_value);
+    Py_XDECREF(exc_tb);
+    PyErr_Clear();
+}
+
+/**
+ * Mark the async pipe broken and fail every pending future with
+ * RuntimeError("async callback pipe broken").
+ *
+ * Mutex policy: snapshot the futures dict under
+ * async_futures_mutex (incref each future, then clear the dict),
+ * release the mutex, then call set_exception on the snapshotted
+ * list. Calling Python methods while holding the mutex is forbidden
+ * because future callbacks may re-enter any code path that takes
+ * the same mutex.
+ */
+static void async_pipe_break_and_fail_pending(erlang_module_state_t *state) {
+    if (state->pipe_broken) {
+        return;
+    }
+
+    /* Reset frame buffer; any in-flight body is unrecoverable. */
+    state->hdr_have = 0;
+    if (state->body_buf != NULL) {
+        enif_free(state->body_buf);
+        state->body_buf = NULL;
+    }
+    state->body_have = 0;
+    state->body_len = 0;
+    state->pipe_broken = true;
+
+    PyObject *items = NULL;
+    pthread_mutex_lock(&state->async_futures_mutex);
+    if (state->async_pending_futures != NULL) {
+        items = PyDict_Items(state->async_pending_futures);
+        if (items != NULL) {
+            Py_ssize_t n = PyList_GET_SIZE(items);
+            for (Py_ssize_t i = 0; i < n; i++) {
+                PyObject *pair = PyList_GET_ITEM(items, i);
+                PyObject *fut  = PyTuple_GET_ITEM(pair, 1);
+                Py_INCREF(fut);  /* survive the dict clear */
+            }
+            PyDict_Clear(state->async_pending_futures);
+        }
+    }
+    pthread_mutex_unlock(&state->async_futures_mutex);
+
+    if (items == NULL) {
+        return;
+    }
+
+    Py_ssize_t n = PyList_GET_SIZE(items);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *pair = PyList_GET_ITEM(items, i);
+        PyObject *fut  = PyTuple_GET_ITEM(pair, 1);  /* borrowed */
+        PyObject *exc  = PyObject_CallFunction(
+            PyExc_RuntimeError, "s", "async callback pipe broken");
+        PyObject *set_exception = PyObject_GetAttrString(fut, "set_exception");
+        if (set_exception != NULL && exc != NULL) {
+            PyObject *ret = PyObject_CallFunctionObjArgs(set_exception, exc, NULL);
+            Py_XDECREF(ret);
+        }
+        Py_XDECREF(set_exception);
+        Py_XDECREF(exc);
+        Py_DECREF(fut);  /* match the INCREF in the snapshot loop */
+    }
+    Py_DECREF(items);
+}
+
+/**
+ * Resumable nonblocking parser of the async-callback pipe.
+ *
+ * Wire format (matches nif_async_callback_response in py_thread_worker.c):
+ *   <<callback_id:8/binary, len:4/binary, data:len/binary>>
+ *
+ * Each invocation reads what the kernel will give without blocking and
+ * advances the parser state held in @c erlang_module_state_t. EAGAIN
+ * preserves the state for the next reader tick from the asyncio loop.
+ *
+ * Returns 1 when a frame was completed, 0 when no progress was made
+ * (EAGAIN at a frame boundary), -1 on hard error after marking the
+ * pipe broken and failing pending futures.
  */
 static int process_async_callback_response(void) {
     erlang_module_state_t *state = get_erlang_module_state();
     if (state == NULL || !state->pipe_initialized) {
         return -1;
     }
-
-    /* Read callback_id (8 bytes) + response_len (4 bytes) + response_data */
-    uint64_t callback_id;
-    uint32_t response_len;
-    ssize_t n;
-
-    n = read(state->async_callback_pipe[0], &callback_id, sizeof(callback_id));
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;  /* No data available (non-blocking) */
-        }
-        return -1;  /* Error */
-    }
-    if (n == 0) {
-        return 0;  /* EOF / No data */
-    }
-    if (n != sizeof(callback_id)) {
-        return -1;  /* Partial read - error */
-    }
-
-    n = read(state->async_callback_pipe[0], &response_len, sizeof(response_len));
-    if (n != sizeof(response_len)) {
+    if (state->pipe_broken) {
         return -1;
     }
 
-    char *response_data = NULL;
-    if (response_len > 0) {
-        response_data = enif_alloc(response_len);
-        if (response_data == NULL) {
+    /* Stage 1: header (12 bytes). */
+    while (state->hdr_have < sizeof(state->hdr_buf)) {
+        ssize_t n = read(state->async_callback_pipe[0],
+                         state->hdr_buf + state->hdr_have,
+                         sizeof(state->hdr_buf) - state->hdr_have);
+        if (n > 0) {
+            state->hdr_have += (size_t)n;
+            continue;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+            async_pipe_break_and_fail_pending(state);
             return -1;
         }
-        n = read(state->async_callback_pipe[0], response_data, response_len);
-        if (n != (ssize_t)response_len) {
-            enif_free(response_data);
-            return -1;
-        }
+        /* n == 0 (EOF). Clean only at a frame boundary. */
+        if (state->hdr_have == 0) return 0;
+        async_pipe_break_and_fail_pending(state);
+        return -1;
     }
 
-    /* Look up and resolve the Future */
+    uint64_t callback_id;
+    uint32_t body_len;
+    memcpy(&callback_id, state->hdr_buf,                       sizeof(callback_id));
+    memcpy(&body_len,    state->hdr_buf + sizeof(callback_id), sizeof(body_len));
+
+    if (state->body_buf == NULL && body_len > 0) {
+        state->body_buf = enif_alloc(body_len);
+        if (state->body_buf == NULL) {
+            async_pipe_break_and_fail_pending(state);
+            return -1;
+        }
+        state->body_have = 0;
+    }
+    state->body_len = body_len;
+
+    /* Stage 2: body (body_len bytes). */
+    while (state->body_have < state->body_len) {
+        ssize_t n = read(state->async_callback_pipe[0],
+                         state->body_buf + state->body_have,
+                         state->body_len - state->body_have);
+        if (n > 0) {
+            state->body_have += (size_t)n;
+            continue;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+            async_pipe_break_and_fail_pending(state);
+            return -1;
+        }
+        /* n == 0 mid-body is always an error. */
+        async_pipe_break_and_fail_pending(state);
+        return -1;
+    }
+
+    /* Detach frame buffers and reset parser state BEFORE any Python
+     * re-entry. A recursive call from set_result / GC will then see a
+     * clean parser. */
+    char    *body = state->body_buf;
+    uint32_t blen = state->body_len;
+    state->hdr_have = 0;
+    state->body_buf = NULL;
+    state->body_have = 0;
+    state->body_len = 0;
+
+    /* Look up the future; copy it out under the mutex, resolve
+     * outside (review #4). */
+    PyObject *future = NULL;
     pthread_mutex_lock(&state->async_futures_mutex);
-
     PyObject *key = PyLong_FromUnsignedLongLong(callback_id);
-    PyObject *future = PyDict_GetItem(state->async_pending_futures, key);
-
-    if (future != NULL) {
-        Py_INCREF(future);  /* Keep reference while we use it */
-        PyDict_DelItem(state->async_pending_futures, key);
+    if (key != NULL && state->async_pending_futures != NULL) {
+        PyObject *found = PyDict_GetItem(state->async_pending_futures, key);
+        if (found != NULL) {
+            Py_INCREF(found);
+            PyDict_DelItem(state->async_pending_futures, key);
+            future = found;
+        }
     }
-    Py_DECREF(key);
-
+    Py_XDECREF(key);
     pthread_mutex_unlock(&state->async_futures_mutex);
 
     if (future != NULL) {
-        /* Parse response and resolve Future */
         PyObject *result = NULL;
-        if (response_data != NULL) {
-            result = parse_callback_response((unsigned char *)response_data, response_len);
+        if (blen > 0) {
+            result = parse_callback_response((unsigned char *)body, blen);
         } else {
             Py_INCREF(Py_None);
             result = Py_None;
         }
-
-        if (result != NULL) {
-            /* Call future.set_result(result) */
-            PyObject *set_result = PyObject_GetAttrString(future, "set_result");
-            if (set_result != NULL) {
-                PyObject *ret = PyObject_CallFunctionObjArgs(set_result, result, NULL);
-                Py_XDECREF(ret);
-                Py_DECREF(set_result);
-            }
-            Py_DECREF(result);
-        } else {
-            /* Error occurred - set exception on Future */
-            PyObject *exc_type, *exc_value, *exc_tb;
-            PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
-
-            PyObject *set_exception = PyObject_GetAttrString(future, "set_exception");
-            if (set_exception != NULL) {
-                if (exc_value != NULL) {
-                    PyObject *ret = PyObject_CallFunctionObjArgs(set_exception, exc_value, NULL);
-                    Py_XDECREF(ret);
-                } else {
-                    PyObject *runtime_err = PyObject_CallFunction(PyExc_RuntimeError,
-                        "s", "Erlang callback failed");
-                    PyObject *ret = PyObject_CallFunctionObjArgs(set_exception, runtime_err, NULL);
-                    Py_XDECREF(ret);
-                    Py_XDECREF(runtime_err);
-                }
-                Py_DECREF(set_exception);
-            }
-
-            Py_XDECREF(exc_type);
-            Py_XDECREF(exc_value);
-            Py_XDECREF(exc_tb);
-            PyErr_Clear();
-        }
-
+        resolve_future_with_result(future, result);
+        Py_XDECREF(result);
         Py_DECREF(future);
     }
 
-    if (response_data != NULL) {
-        enif_free(response_data);
+    if (body != NULL) {
+        enif_free(body);
     }
-
     return 1;
 }
 
@@ -2472,6 +2613,12 @@ static PyObject *send_async_callback_request(PyObject *self, PyObject *args) {
     erlang_module_state_t *state = get_erlang_module_state();
     if (state == NULL || !state->pipe_initialized) {
         PyErr_SetString(PyExc_RuntimeError, "Async callback system not initialized");
+        return NULL;
+    }
+    if (state->pipe_broken) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "async callback pipe broken; restart the erlang_python "
+            "application to recover");
         return NULL;
     }
 
