@@ -609,6 +609,24 @@ The `PERF_BUILD` option enables:
 {ok, 2}
 ```
 
+### Erlang/OTP Version
+
+erlang_python is built and tested on **Erlang/OTP 28 and 29** (minimum OTP 28).
+The heavy lifting happens in the C NIF, so the BEAM-side glue is light, but newer
+OTP releases still help for free:
+
+- **OTP 29 JIT and scheduler improvements** apply to the Erlang side (routing,
+  context bookkeeping, callback dispatch) with no code change. Just run on OTP 29.
+- **Consistent map iteration order** is now guaranteed across map operations in
+  OTP 29. The router and state modules do not depend on iteration order, so this
+  changes nothing here, but it removes a class of subtle bugs if you build on top.
+- **Building the NIF stays the same** across OTP 28/29 (NIF API 2.18); no version
+  guards are needed in `c_src`.
+
+For doc-example testing, OTP 29 ships `ct_doctest`. This project keeps its own
+`scripts/lint_doc_snippets.escript` because that linter also validates the Python
+blocks in the docs, which `ct_doctest` does not cover.
+
 ## See Also
 
 - [Getting Started](getting-started.md) - Basic usage

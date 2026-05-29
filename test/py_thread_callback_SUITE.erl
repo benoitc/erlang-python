@@ -63,14 +63,14 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
     %% Cleanup any registered functions
-    catch py:unregister_function(double_it),
-    catch py:unregister_function(add_one),
-    catch py:unregister_function(call_python_square),
-    catch py:unregister_function(square_in_erlang),
-    catch py:unregister_function(maybe_fail),
-    catch py:unregister_function(get_id),
-    catch py:unregister_function(async_double),
-    catch py:unregister_function(async_blob),
+    try py:unregister_function(double_it) catch _:_ -> ok end,
+    try py:unregister_function(add_one) catch _:_ -> ok end,
+    try py:unregister_function(call_python_square) catch _:_ -> ok end,
+    try py:unregister_function(square_in_erlang) catch _:_ -> ok end,
+    try py:unregister_function(maybe_fail) catch _:_ -> ok end,
+    try py:unregister_function(get_id) catch _:_ -> ok end,
+    try py:unregister_function(async_double) catch _:_ -> ok end,
+    try py:unregister_function(async_blob) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================

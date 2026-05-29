@@ -102,7 +102,7 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    catch py:unregister_function(test_pid_echo),
+    try py:unregister_function(test_pid_echo) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================

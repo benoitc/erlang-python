@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Support Erlang/OTP 28 and 29** - Validated builds and the full Common Test
+  suite on OTP 28 and 29. Minimum supported OTP is now 28 (`minimum_otp_vsn`).
+  CI tests OTP 28 and 29 across Python 3.12/3.13/3.14.
+- Replaced deprecated `catch Expr` cleanup calls with `try ... catch ... end`
+  to silence the new OTP 29 default warning; behavior is unchanged.
+
 ## 3.0.0 (2026-05-03)
 
 ### Breaking Changes

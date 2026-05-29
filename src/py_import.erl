@@ -404,7 +404,7 @@ apply_import_to_interpreters(ModuleBin) ->
     %% Apply to main event loop
     case py_event_loop:get_loop() of
         {ok, LoopRef} ->
-            catch py_nif:interp_apply_imports(LoopRef, Imports);
+            try py_nif:interp_apply_imports(LoopRef, Imports) catch _:_ -> ok end;
         _ -> ok
     end,
     %% Apply to all pool event loops
@@ -412,7 +412,7 @@ apply_import_to_interpreters(ModuleBin) ->
         {ok, Loops} ->
             lists:foreach(
                 fun({LoopRef, _WorkerPid}) ->
-                    catch py_nif:interp_apply_imports(LoopRef, Imports)
+                    try py_nif:interp_apply_imports(LoopRef, Imports) catch _:_ -> ok end
                 end,
                 Loops
             );
@@ -423,7 +423,7 @@ apply_import_to_interpreters(ModuleBin) ->
         true ->
             lists:foreach(
                 fun({WorkerId, HandleId}) ->
-                    catch py_nif:owngil_apply_imports(WorkerId, HandleId, Imports)
+                    try py_nif:owngil_apply_imports(WorkerId, HandleId, Imports) catch _:_ -> ok end
                 end,
                 py_event_loop_pool:get_all_sessions()
             );
@@ -449,7 +449,7 @@ apply_path_to_interpreters(PathBin) ->
     %% Apply to main event loop
     case py_event_loop:get_loop() of
         {ok, LoopRef} ->
-            catch py_nif:interp_apply_paths(LoopRef, Paths);
+            try py_nif:interp_apply_paths(LoopRef, Paths) catch _:_ -> ok end;
         _ -> ok
     end,
     %% Apply to all pool event loops
@@ -457,7 +457,7 @@ apply_path_to_interpreters(PathBin) ->
         {ok, Loops} ->
             lists:foreach(
                 fun({LoopRef, _WorkerPid}) ->
-                    catch py_nif:interp_apply_paths(LoopRef, Paths)
+                    try py_nif:interp_apply_paths(LoopRef, Paths) catch _:_ -> ok end
                 end,
                 Loops
             );
@@ -468,7 +468,7 @@ apply_path_to_interpreters(PathBin) ->
         true ->
             lists:foreach(
                 fun({WorkerId, HandleId}) ->
-                    catch py_nif:owngil_apply_paths(WorkerId, HandleId, Paths)
+                    try py_nif:owngil_apply_paths(WorkerId, HandleId, Paths) catch _:_ -> ok end
                 end,
                 py_event_loop_pool:get_all_sessions()
             );

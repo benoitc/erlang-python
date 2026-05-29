@@ -651,12 +651,12 @@ terminate(_Reason, #state{ref = Ref, event_state = EventState, callback_handler 
     %% Stop the event worker first (if it exists and is still alive)
     case EventState of
         #{worker_pid := WorkerPid} ->
-            catch gen_server:stop(WorkerPid, normal, 5000);
+            try gen_server:stop(WorkerPid, normal, 5000) catch _:_ -> ok end;
         _ ->
             ok
     end,
     %% Destroy the Python context
-    catch py_nif:context_destroy(Ref),
+    try py_nif:context_destroy(Ref) catch _:_ -> ok end,
     ok.
 
 %% ============================================================================

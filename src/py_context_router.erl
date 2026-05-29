@@ -355,7 +355,7 @@ stop_pool(Pool) when is_atom(Pool) ->
         Contexts ->
             lists:foreach(
                 fun(Ctx) ->
-                    catch py_context_sup:stop_context(Ctx)
+                    try py_context_sup:stop_context(Ctx) catch _:_ -> ok end
                 end,
                 Contexts
             )
@@ -365,12 +365,12 @@ stop_pool(Pool) when is_atom(Pool) ->
     Size = persistent_term:get(?POOL_SIZE_KEY(Pool), 0),
     lists:foreach(
         fun(N) ->
-            catch persistent_term:erase(?POOL_CONTEXT_KEY(Pool, N))
+            try persistent_term:erase(?POOL_CONTEXT_KEY(Pool, N)) catch _:_ -> ok end
         end,
         lists:seq(1, Size)
     ),
-    catch persistent_term:erase(?POOL_SIZE_KEY(Pool)),
-    catch persistent_term:erase(?POOL_CONTEXTS_KEY(Pool)),
+    try persistent_term:erase(?POOL_SIZE_KEY(Pool)) catch _:_ -> ok end,
+    try persistent_term:erase(?POOL_CONTEXTS_KEY(Pool)) catch _:_ -> ok end,
     ok.
 
 %% @doc Check if a pool has been started and is still alive.

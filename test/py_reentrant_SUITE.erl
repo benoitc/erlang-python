@@ -55,16 +55,16 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
     %% Cleanup any registered functions
-    catch py:unregister_function(double_via_python),
-    catch py:unregister_function(triple),
-    catch py:unregister_function(call_level),
-    catch py:unregister_function(may_fail),
-    catch py:unregister_function(transform),
-    catch py:unregister_function(add_ten),
-    catch py:unregister_function(multiply_by_two),
-    catch py:unregister_function(subtract_five),
-    catch py:unregister_function(async_multiply),
-    catch py:unregister_function(test_registry_func),
+    try py:unregister_function(double_via_python) catch _:_ -> ok end,
+    try py:unregister_function(triple) catch _:_ -> ok end,
+    try py:unregister_function(call_level) catch _:_ -> ok end,
+    try py:unregister_function(may_fail) catch _:_ -> ok end,
+    try py:unregister_function(transform) catch _:_ -> ok end,
+    try py:unregister_function(add_ten) catch _:_ -> ok end,
+    try py:unregister_function(multiply_by_two) catch _:_ -> ok end,
+    try py:unregister_function(subtract_five) catch _:_ -> ok end,
+    try py:unregister_function(async_multiply) catch _:_ -> ok end,
+    try py:unregister_function(test_registry_func) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================

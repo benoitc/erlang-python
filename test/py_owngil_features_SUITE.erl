@@ -246,12 +246,12 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
     %% Cleanup registered functions
-    catch py:unregister_function(owngil_double),
-    catch py:unregister_function(owngil_triple),
-    catch py:unregister_function(owngil_level),
-    catch py:unregister_function(owngil_transform),
-    catch py:unregister_function(owngil_get_value),
-    catch py:unregister_function(owngil_echo),
+    try py:unregister_function(owngil_double) catch _:_ -> ok end,
+    try py:unregister_function(owngil_triple) catch _:_ -> ok end,
+    try py:unregister_function(owngil_level) catch _:_ -> ok end,
+    try py:unregister_function(owngil_transform) catch _:_ -> ok end,
+    try py:unregister_function(owngil_get_value) catch _:_ -> ok end,
+    try py:unregister_function(owngil_echo) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================
