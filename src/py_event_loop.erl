@@ -442,7 +442,7 @@ import sys, asyncio
 if sys.version_info < (3, 14):
     asyncio.set_event_loop_policy(None)
 ">>,
-    catch py:exec(Code),
+    try py:exec(Code) catch _:_ -> ok end,
     ok.
 
 code_change(_OldVsn, State, _Extra) ->

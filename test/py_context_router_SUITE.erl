@@ -49,12 +49,12 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Ensure router is stopped before each test
-    catch py_context_router:stop(),
+    try py_context_router:stop() catch _:_ -> ok end,
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
     %% Clean up after each test
-    catch py_context_router:stop(),
+    try py_context_router:stop() catch _:_ -> ok end,
     ok.
 
 %% ============================================================================

@@ -68,13 +68,13 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Ensure fresh contexts are available for each test
-    catch py:stop_contexts(),
+    try py:stop_contexts() catch _:_ -> ok end,
     {ok, _} = py:start_contexts(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
     %% Clean up after each test
-    catch py:stop_contexts(),
+    try py:stop_contexts() catch _:_ -> ok end,
     ok.
 
 %% ============================================================================

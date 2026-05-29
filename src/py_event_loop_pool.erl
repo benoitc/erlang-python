@@ -510,7 +510,7 @@ handle_info({'DOWN', MonRef, process, Pid, _Reason}, State) ->
                 case SessionPid =:= Pid andalso SessionMonRef =:= MonRef of
                     true ->
                         %% Destroy session in worker
-                        catch py_nif:owngil_destroy_session(WorkerId, HandleId),
+                        try py_nif:owngil_destroy_session(WorkerId, HandleId) catch _:_ -> ok end,
                         %% Remove from ETS
                         ets:delete(Tid, Key);
                     false ->
@@ -531,15 +531,15 @@ terminate(_Reason, State) ->
         Tid ->
             %% Destroy all sessions
             ets:foldl(fun(#owngil_session{worker_id = WorkerId, handle_id = HandleId}, _) ->
-                catch py_nif:owngil_destroy_session(WorkerId, HandleId),
+                try py_nif:owngil_destroy_session(WorkerId, HandleId) catch _:_ -> ok end,
                 ok
             end, ok, Tid),
-            catch ets:delete(Tid)
+            try ets:delete(Tid) catch _:_ -> ok end
     end,
 
     %% Stop OWN_GIL thread pool if it was started
     case State#state.owngil_enabled of
-        true -> catch py_nif:subinterp_thread_pool_stop();
+        true -> try py_nif:subinterp_thread_pool_stop() catch _:_ -> ok end;
         false -> ok
     end,
 
@@ -548,15 +548,15 @@ terminate(_Reason, State) ->
         {} -> ok;
         Loops ->
             lists:foreach(fun({LoopRef, WorkerPid}) ->
-                catch py_event_worker:stop(WorkerPid),
-                catch py_nif:event_loop_destroy(LoopRef)
+                try py_event_worker:stop(WorkerPid) catch _:_ -> ok end,
+                try py_nif:event_loop_destroy(LoopRef) catch _:_ -> ok end
             end, tuple_to_list(Loops))
     end,
 
-    catch persistent_term:erase(?PT_LOOPS),
-    catch persistent_term:erase(?PT_NUM_LOOPS),
-    catch persistent_term:erase(?PT_OWNGIL_ENABLED),
-    catch persistent_term:erase(?PT_SESSIONS),
+    try persistent_term:erase(?PT_LOOPS) catch _:_ -> ok end,
+    try persistent_term:erase(?PT_NUM_LOOPS) catch _:_ -> ok end,
+    try persistent_term:erase(?PT_OWNGIL_ENABLED) catch _:_ -> ok end,
+    try persistent_term:erase(?PT_SESSIONS) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================
@@ -638,7 +638,7 @@ create_session(Tid, Pid, LoopIdx) ->
                 false ->
                     %% Another process created the session first, destroy ours
                     erlang:demonitor(MonRef, [flush]),
-                    catch py_nif:owngil_destroy_session(WorkerId, HandleId),
+                    try py_nif:owngil_destroy_session(WorkerId, HandleId) catch _:_ -> ok end,
                     %% Retry lookup
                     case ets:lookup(Tid, {Pid, LoopIdx}) of
                         [#owngil_session{worker_id = W, handle_id = H}] ->

@@ -15,25 +15,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux with different OTP/Python combinations
+          # Linux - OTP 28
           - os: ubuntu-24.04
-            otp: "27.0"
+            otp: "28"
             python: "3.12"
           - os: ubuntu-24.04
-            otp: "27.0"
+            otp: "28"
             python: "3.13"
           - os: ubuntu-24.04
-            otp: "27.0"
+            otp: "28"
             python: "3.14"
-          # macOS
+          # Linux - OTP 29
+          - os: ubuntu-24.04
+            otp: "29"
+            python: "3.12"
+          - os: ubuntu-24.04
+            otp: "29"
+            python: "3.13"
+          - os: ubuntu-24.04
+            otp: "29"
+            python: "3.14"
+          # macOS (brew installs the latest OTP)
           - os: macos-15
-            otp: "27"
+            otp: "29"
             python: "3.12"
           - os: macos-15
-            otp: "27"
+            otp: "29"
             python: "3.13"
           - os: macos-15
-            otp: "27"
+            otp: "29"
             python: "3.14"
 
     steps:
@@ -50,7 +60,7 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.otp }}
-          rebar3-version: "3.24"
+          rebar3-version: "3.25"
 
       - name: Set up Erlang (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -139,7 +149,7 @@ jobs:
             python${{ matrix.python }} --version
 
             # Build with rebar3
-            fetch https://github.com/erlang/rebar3/releases/download/3.24.0/rebar3 -o rebar3
+            fetch https://github.com/erlang/rebar3/releases/download/3.25.0/rebar3 -o rebar3
             chmod +x rebar3
 
             # Compile and test (uses CMake-based build)
@@ -160,8 +170,8 @@ jobs:
       - name: Set up Erlang
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "27.0"
-          rebar3-version: "3.24"
+          otp-version: "29"
+          rebar3-version: "3.25"
 
       - name: Set up free-threaded Python
         uses: actions/setup-python@v5
@@ -234,8 +244,8 @@ jobs:
       - name: Set up Erlang
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "27.0"
-          rebar3-version: "3.24"
+          otp-version: "29"
+          rebar3-version: "3.25"
 
       - name: Install dependencies
         run: |
@@ -280,8 +290,8 @@ jobs:
       - name: Set up Erlang
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "27.0"
-          rebar3-version: "3.24"
+          otp-version: "29"
+          rebar3-version: "3.25"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -313,8 +323,8 @@ jobs:
       - name: Set up Erlang
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "27.0"
-          rebar3-version: "3.24"
+          otp-version: "29"
+          rebar3-version: "3.25"
 
       - name: Set up Python
         uses: actions/setup-python@v5

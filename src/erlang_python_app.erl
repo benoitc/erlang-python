@@ -25,6 +25,6 @@ start(_StartType, _StartArgs) ->
 stop(_State) ->
     %% Stop pools before application shutdown to ensure proper cleanup
     %% of subinterpreters before NIF resources are garbage collected
-    catch py_context_router:stop_pool(io),
-    catch py_context_router:stop_pool(default),
+    try py_context_router:stop_pool(io) catch _:_ -> ok end,
+    try py_context_router:stop_pool(default) catch _:_ -> ok end,
     ok.
