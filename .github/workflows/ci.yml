@@ -114,10 +114,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python: "3.11"
-            python_pkg: "python311"
           - python: "3.12"
             python_pkg: "python312"
+          - python: "3.13"
+            python_pkg: "python313"
 
     steps:
       - name: Checkout
@@ -129,7 +129,9 @@ jobs:
           release: "14.1"
           usesh: true
           prepare: |
-            pkg install -y erlang ${{ matrix.python_pkg }} cmake
+            # Stock `erlang` pkg lags at OTP 26; use the versioned runtime
+            # package so we test on a supported OTP (28+).
+            pkg install -y erlang-runtime28 ${{ matrix.python_pkg }} cmake
             # numpy package follows the py<noDot>-numpy convention.
             # Non-fatal: not every FreeBSD pkg snapshot ships numpy for
             # every Python flavor; the ML SUITE self-skips when numpy
@@ -140,7 +142,9 @@ jobs:
           run: |
             # Set up environment
             export PYTHON_CONFIG=python${{ matrix.python }}-config
-            export PATH="/usr/local/bin:$PATH"
+            # erlang-runtime28 installs outside the default PATH; add its bin dir.
+            ERL_BIN="$(dirname "$(pkg info -l erlang-runtime28 | tr -d '[:blank:]' | grep -E '/bin/erl$' | grep -v 'erts-' | head -1)")"
+            export PATH="$ERL_BIN:/usr/local/bin:$PATH"
 
             # Verify versions
             echo "Erlang version:"
