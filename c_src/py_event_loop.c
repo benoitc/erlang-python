@@ -2101,6 +2101,11 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[5];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -3109,6 +3114,11 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            return_pooled_env(loop, term_env);
+            continue;
+        }
         ERL_NIF_TERM head, tail = tuple_elems[4];
         bool args_ok = true;
         for (unsigned int i = 0; i < args_len && args_ok; i++) {

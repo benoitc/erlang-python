@@ -2030,6 +2030,14 @@ static void owngil_execute_call(py_context_t *ctx) {
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
+        ctx->response_ok = false;
+        return;
+    }
     ERL_NIF_TERM head, tail = args_term;
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
@@ -2729,6 +2737,15 @@ static void owngil_execute_call_with_env(py_context_t *ctx) {
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        tl_current_local_env = prev_local_env;
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
+        ctx->response_ok = false;
+        return;
+    }
     ERL_NIF_TERM head, tail = args_term;
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
@@ -4975,6 +4992,11 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[3];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -6244,6 +6266,11 @@ static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ER
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[3];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -6402,6 +6429,11 @@ static ERL_NIF_TERM nif_context_call_method(ErlNifEnv *env, int argc, const ERL_
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(method);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[3];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -6686,6 +6718,13 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            enif_free(module_name);
+            enif_free(func_name);
+            result = make_error(env, "alloc_failed");
+            goto cleanup;
+        }
         ERL_NIF_TERM head, tail = state->orig_args;
         for (unsigned int i = 0; i < args_len; i++) {
             enif_get_list_cell(state->orig_env, tail, &head, &tail);
@@ -7060,6 +7099,11 @@ static ERL_NIF_TERM nif_ref_call_method(ErlNifEnv *env, int argc, const ERL_NIF_
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(method);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[2];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);

@@ -4430,6 +4430,11 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            result = make_error(env, "alloc_failed");
+            goto call_cleanup;
+        }
         ERL_NIF_TERM head, tail = state->orig_args;
         for (unsigned int i = 0; i < args_len; i++) {
             enif_get_list_cell(state->orig_env, tail, &head, &tail);

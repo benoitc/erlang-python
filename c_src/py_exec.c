@@ -248,6 +248,11 @@ static void process_request(py_request_t *req) {
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            req->result = make_error(env, "alloc_failed");
+            goto call_cleanup;
+        }
         ERL_NIF_TERM head, tail = req->args_term;
         for (unsigned int i = 0; i < args_len; i++) {
             enif_get_list_cell(env, tail, &head, &tail);

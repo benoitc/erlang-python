@@ -4,6 +4,13 @@
 
 ### Security
 
+- **Bounded recursion in type conversion** - The Erlang<->Python converters now cap
+  nesting depth, so a deeply nested term (or Python structure) returns a clean error
+  instead of overflowing the C stack and crashing the whole node.
+- **NULL-checked tuple allocation** - Argument-tuple allocations in the call/eval paths
+  are checked before use, and the Python->Erlang map conversion is bounded against
+  mid-iteration dict mutation, closing two ways an allocation failure or re-entrant
+  `__str__` could corrupt memory.
 - **Safe term decoding at the NIF boundary** - All `enif_binary_to_term` calls now
   pass `ERL_NIF_BIN2TERM_SAFE`, preventing attacker-influenced data (notably a Python
   `"__etf__:<base64>"` callback result) from minting new, non-GC'd atoms and exhausting

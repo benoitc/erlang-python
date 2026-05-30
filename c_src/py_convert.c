@@ -55,6 +55,15 @@
 /* Capsule name for shared dict references */
 #define SHARED_DICT_CAPSULE_NAME "py_shared_dict"
 
+/* Maximum nesting depth for recursive term<->Python conversion. Guards the C
+ * stack against unbounded recursion on deeply nested (possibly attacker-supplied)
+ * data, which would otherwise overflow the dirty-scheduler stack and crash the
+ * whole node. Far deeper than any realistic data structure. */
+#define PY_CONVERT_MAX_DEPTH 200
+
+static ERL_NIF_TERM py_to_term_d(ErlNifEnv *env, PyObject *obj, int depth);
+static PyObject *term_to_py_d(ErlNifEnv *env, ERL_NIF_TERM term, int depth);
+
 /**
  * @brief PyCapsule destructor for channel references
  *
@@ -164,6 +173,13 @@ static inline bool is_numpy_ndarray(PyObject *obj) {
  * @see term_to_py() for the reverse conversion
  */
 ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
+    return py_to_term_d(env, obj, 0);
+}
+
+static ERL_NIF_TERM py_to_term_d(ErlNifEnv *env, PyObject *obj, int depth) {
+    if (depth > PY_CONVERT_MAX_DEPTH) {
+        return ATOM_ERROR;
+    }
     /*
      * Type check ordering optimized for common workloads:
      * 1. Strings (most common in HTTP headers, bodies, JSON)
@@ -218,15 +234,19 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         PyObject *key, *value;
         Py_ssize_t pos = 0;
         Py_ssize_t i = 0;
-        while (PyDict_Next(obj, &pos, &key, &value)) {
-            keys[i] = py_to_term(env, key);
-            values[i] = py_to_term(env, value);
+        while (i < size && PyDict_Next(obj, &pos, &key, &value)) {
+            keys[i] = py_to_term_d(env, key, depth + 1);
+            values[i] = py_to_term_d(env, value, depth + 1);
             i++;
         }
 
-        /* Build map from arrays - more efficient than iterative puts */
+        /* Build map from arrays - more efficient than iterative puts.
+         * Use the actual filled count `i`, not the sampled `size`: converting a
+         * key/value can run user code (__str__/.tolist()) that mutates the dict,
+         * so the real pair count may differ. The loop is bounded by `size` so we
+         * never write past the arrays. */
         ERL_NIF_TERM map;
-        int result = enif_make_map_from_arrays(env, keys, values, size, &map);
+        int result = enif_make_map_from_arrays(env, keys, values, i, &map);
 
         if (keys != stack_keys) enif_free(keys);
         if (values != stack_values) enif_free(values);
@@ -287,7 +307,7 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
         ERL_NIF_TERM list = enif_make_list(env, 0);  /* Start with empty list */
         for (Py_ssize_t i = len - 1; i >= 0; i--) {
             PyObject *item = PyList_GetItem(obj, i);  /* Borrowed ref */
-            ERL_NIF_TERM term = py_to_term(env, item);
+            ERL_NIF_TERM term = py_to_term_d(env, item, depth + 1);
             list = enif_make_list_cell(env, term, list);
         }
         return list;
@@ -344,7 +364,7 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
 
         for (Py_ssize_t i = 0; i < len; i++) {
             PyObject *item = PyTuple_GetItem(obj, i);  /* Borrowed ref */
-            items[i] = py_to_term(env, item);
+            items[i] = py_to_term_d(env, item, depth + 1);
         }
 
         ERL_NIF_TERM result = enif_make_tuple_from_array(env, items, len);
@@ -388,7 +408,7 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
     if (is_numpy_ndarray(obj)) {
         PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
         if (tolist != NULL) {
-            ERL_NIF_TERM result = py_to_term(env, tolist);
+            ERL_NIF_TERM result = py_to_term_d(env, tolist, depth + 1);
             Py_DECREF(tolist);
             return result;
         }
@@ -487,6 +507,15 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
  * @see py_to_term() for the reverse conversion
  */
 static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
+    return term_to_py_d(env, term, 0);
+}
+
+static PyObject *term_to_py_d(ErlNifEnv *env, ERL_NIF_TERM term, int depth) {
+    if (depth > PY_CONVERT_MAX_DEPTH) {
+        PyErr_SetString(PyExc_RecursionError, "Erlang term nesting too deep");
+        return NULL;
+    }
+
     double d_val;
     ErlNifBinary bin;
     unsigned int list_len;
@@ -581,7 +610,7 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
         ERL_NIF_TERM head, tail = term;
         for (unsigned int i = 0; i < list_len; i++) {
             enif_get_list_cell(env, tail, &head, &tail);
-            PyObject *item = term_to_py(env, head);
+            PyObject *item = term_to_py_d(env, head, depth + 1);
             if (item == NULL) {
                 Py_DECREF(list);
                 return NULL;
@@ -598,7 +627,7 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
             return NULL;
         }
         for (int i = 0; i < arity; i++) {
-            PyObject *item = term_to_py(env, tuple[i]);
+            PyObject *item = term_to_py_d(env, tuple[i], depth + 1);
             if (item == NULL) {
                 Py_DECREF(py_tuple);
                 return NULL;
@@ -619,8 +648,8 @@ static PyObject *term_to_py(ErlNifEnv *env, ERL_NIF_TERM term) {
 
         enif_map_iterator_create(env, term, &iter, ERL_NIF_MAP_ITERATOR_FIRST);
         while (enif_map_iterator_get_pair(env, &iter, &key, &value)) {
-            PyObject *py_key = term_to_py(env, key);
-            PyObject *py_value = term_to_py(env, value);
+            PyObject *py_key = term_to_py_d(env, key, depth + 1);
+            PyObject *py_value = term_to_py_d(env, value, depth + 1);
             if (py_key == NULL || py_value == NULL) {
                 Py_XDECREF(py_key);
                 Py_XDECREF(py_value);
