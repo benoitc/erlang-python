@@ -825,13 +825,22 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
             enif_make_tuple2(env, ATOM_STOP_ITERATION, ATOM_NONE));
     }
 
-    /* Get exception message */
+    /* Get exception message. PyUnicode_AsUTF8 can return NULL (e.g. a str with
+     * lone surrogates); never pass NULL to enif_make_string. */
     PyObject *str = PyObject_Str(value);
-    const char *err_msg = str ? PyUnicode_AsUTF8(str) : "unknown";
+    const char *err_msg = (str != NULL) ? PyUnicode_AsUTF8(str) : NULL;
+    if (err_msg == NULL) {
+        PyErr_Clear();
+        err_msg = "unknown";
+    }
 
-    /* Get exception type name */
-    PyObject *type_name = PyObject_GetAttrString(type, "__name__");
-    const char *type_str = type_name ? PyUnicode_AsUTF8(type_name) : "Exception";
+    /* Get exception type name (type itself may be NULL after PyErr_Fetch). */
+    PyObject *type_name = (type != NULL) ? PyObject_GetAttrString(type, "__name__") : NULL;
+    const char *type_str = (type_name != NULL) ? PyUnicode_AsUTF8(type_name) : NULL;
+    if (type_str == NULL) {
+        PyErr_Clear();
+        type_str = "Exception";
+    }
 
     /* Build error tuple: {error, {TypeAtom, MessageString}} */
     ERL_NIF_TERM error_tuple = enif_make_tuple2(env,

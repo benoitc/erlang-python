@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- **NIF robustness hardening** - `make_py_error` no longer passes a NULL message/type
+  to `enif_make_string`/`enif_make_atom` when a Python exception's text isn't
+  UTF-8-encodable; `binary_to_string` rejects names/code containing an embedded NUL
+  (which would silently truncate a module/function/attr/code string) rather than
+  truncating; a leaked `split` method object in the reactor buffer is released; and a
+  stray debug `fprintf` on the normal worker send path is removed.
+
 ### Security
 
 - **No shell for venv/installer commands** - `py:ensure_venv` and dependency

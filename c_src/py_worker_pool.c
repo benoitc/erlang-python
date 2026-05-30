@@ -219,9 +219,9 @@ static void py_pool_send_response(py_pool_request_t *req, ERL_NIF_TERM result) {
          * Set to NULL to prevent double-free in py_pool_request_free. */
         req->msg_env = NULL;
     } else {
+        /* enif_send fails normally when the caller has already died; the
+         * g_responses_failed counter records it (no stderr spam). */
         atomic_fetch_add(&g_responses_failed, 1);
-        fprintf(stderr, "[DEBUG] enif_send FAILED for req_id=%llu\n",
-                (unsigned long long)req->request_id);
         /* On failure, msg_env is still valid and will be freed in request_free */
     }
 }
@@ -579,6 +579,9 @@ cleanup:
  * ============================================================================ */
 
 static int py_pool_init(int num_workers) {
+    /* Init/shutdown are serialized by the single Erlang gen_server that owns the
+     * pool, so this check-then-init runs without a concurrent caller and needs no
+     * extra lock. */
     if (g_pool.initialized) {
         return 0;  /* Already initialized */
     }

@@ -620,8 +620,13 @@ static PyObject *ReactorBuffer_split(ReactorBufferObject *self, PyObject *args, 
         return NULL;
     }
 
-    PyObject *result = PyObject_Call(
-        PyObject_GetAttrString(bytes_obj, "split"), args, kwargs);
+    PyObject *split_meth = PyObject_GetAttrString(bytes_obj, "split");
+    if (split_meth == NULL) {
+        Py_DECREF(bytes_obj);
+        return NULL;
+    }
+    PyObject *result = PyObject_Call(split_meth, args, kwargs);
+    Py_DECREF(split_meth);
     Py_DECREF(bytes_obj);
     return result;
 }
