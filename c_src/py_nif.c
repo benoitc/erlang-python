@@ -1724,6 +1724,10 @@ static ERL_NIF_TERM nif_set_callback_handler(ErlNifEnv *env, int argc, const ERL
  * dirty scheduler forever (the pipe write ends are set non-blocking). */
 #define CALLBACK_RESPONSE_IO_TIMEOUT_MS 30000
 
+/* Bound for OWN_GIL dispatch pipe I/O so a stalled/dead worker thread can't
+ * block the dispatching dirty scheduler forever. */
+#define OWNGIL_IO_TIMEOUT_MS 30000
+
 static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     int fd;
@@ -7292,16 +7296,19 @@ static ERL_NIF_TERM nif_owngil_create_session(ErlNifEnv *env, int argc,
         .payload_len = 0,
     };
 
-    /* Write header */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) != sizeof(header)) {
+    /* Write header (non-blocking write end + deadline so a stalled/dead worker
+     * can't block this dirty scheduler forever). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) != WRITE_OK) {
         pthread_mutex_unlock(&w->dispatch_mutex);
         return enif_make_tuple2(env, ATOM_ERROR,
                                 enif_make_atom(env, "write_failed"));
     }
 
-    /* Wait for response */
+    /* Wait for response, bounded by a deadline. */
     owngil_header_t resp;
-    if (read(w->result_pipe[0], &resp, sizeof(resp)) != sizeof(resp)) {
+    if (read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                          OWNGIL_IO_TIMEOUT_MS) != (ssize_t)sizeof(resp)) {
         pthread_mutex_unlock(&w->dispatch_mutex);
         return enif_make_tuple2(env, ATOM_ERROR,
                                 enif_make_atom(env, "read_failed"));
@@ -7385,9 +7392,11 @@ static ERL_NIF_TERM nif_owngil_submit_task(ErlNifEnv *env, int argc,
         .payload_len = payload_bin.size,
     };
 
-    /* Write header and payload */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) != sizeof(header) ||
-        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size) != (ssize_t)payload_bin.size) {
+    /* Write header and payload (non-blocking write end + deadline). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) != WRITE_OK ||
+        write_all_with_deadline(w->cmd_pipe[1], payload_bin.data, payload_bin.size,
+                                OWNGIL_IO_TIMEOUT_MS) != WRITE_OK) {
         pthread_mutex_unlock(&w->dispatch_mutex);
         enif_release_binary(&payload_bin);
         return enif_make_tuple2(env, ATOM_ERROR,
@@ -7443,11 +7452,13 @@ static ERL_NIF_TERM nif_owngil_destroy_session(ErlNifEnv *env, int argc,
         .payload_len = 0,
     };
 
-    /* Write header */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
-        /* Wait for response */
+    /* Write header (best-effort, bounded). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) == WRITE_OK) {
+        /* Wait for response (best-effort, bounded). */
         owngil_header_t resp;
-        read(w->result_pipe[0], &resp, sizeof(resp));
+        (void)read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                                OWNGIL_IO_TIMEOUT_MS);
     }
 
     pthread_mutex_unlock(&w->dispatch_mutex);
@@ -7504,12 +7515,15 @@ static ERL_NIF_TERM nif_owngil_apply_imports(ErlNifEnv *env, int argc,
         .payload_len = payload_bin.size,
     };
 
-    /* Write header and payload */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
-        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size);
-        /* Wait for response */
+    /* Write header and payload (best-effort, bounded). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) == WRITE_OK) {
+        (void)write_all_with_deadline(w->cmd_pipe[1], payload_bin.data, payload_bin.size,
+                                      OWNGIL_IO_TIMEOUT_MS);
+        /* Wait for response (best-effort, bounded). */
         owngil_header_t resp;
-        read(w->result_pipe[0], &resp, sizeof(resp));
+        (void)read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                                OWNGIL_IO_TIMEOUT_MS);
     }
 
     enif_release_binary(&payload_bin);
@@ -7567,12 +7581,15 @@ static ERL_NIF_TERM nif_owngil_apply_paths(ErlNifEnv *env, int argc,
         .payload_len = payload_bin.size,
     };
 
-    /* Write header and payload */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
-        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size);
-        /* Wait for response */
+    /* Write header and payload (best-effort, bounded). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) == WRITE_OK) {
+        (void)write_all_with_deadline(w->cmd_pipe[1], payload_bin.data, payload_bin.size,
+                                      OWNGIL_IO_TIMEOUT_MS);
+        /* Wait for response (best-effort, bounded). */
         owngil_header_t resp;
-        read(w->result_pipe[0], &resp, sizeof(resp));
+        (void)read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                                OWNGIL_IO_TIMEOUT_MS);
     }
 
     enif_release_binary(&payload_bin);
@@ -7866,11 +7883,11 @@ static ErlNifFunc nif_funcs[] = {
     {"subinterp_thread_pool_stats", 0, nif_subinterp_thread_pool_stats, 0},
 
     /* OWN_GIL session management for event loop pool */
-    {"owngil_create_session", 1, nif_owngil_create_session, 0},
-    {"owngil_submit_task", 7, nif_owngil_submit_task, 0},
-    {"owngil_destroy_session", 2, nif_owngil_destroy_session, 0},
-    {"owngil_apply_imports", 3, nif_owngil_apply_imports, 0},
-    {"owngil_apply_paths", 3, nif_owngil_apply_paths, 0},
+    {"owngil_create_session", 1, nif_owngil_create_session, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_submit_task", 7, nif_owngil_submit_task, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_destroy_session", 2, nif_owngil_destroy_session, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_apply_imports", 3, nif_owngil_apply_imports, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_apply_paths", 3, nif_owngil_apply_paths, ERL_NIF_DIRTY_JOB_IO_BOUND},
 
     /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},

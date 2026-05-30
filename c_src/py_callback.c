@@ -147,6 +147,33 @@ static PyObject *get_current_process_error(void) {
     return exc_class;
 }
 
+/**
+ * Get the SuspensionRequired exception class from the current interpreter's
+ * erlang module. Under OWN_GIL subinterpreters each interpreter has its own
+ * erlang module/class, so raising the process-global object (which belongs to
+ * whichever interpreter initialized last) is cross-interpreter UB. Mirrors
+ * get_current_process_error().
+ */
+static PyObject *get_current_suspension_required(void) {
+    PyObject *erlang_module = PyImport_ImportModule("erlang");
+    if (erlang_module == NULL) {
+        PyErr_Clear();
+        return SuspensionRequiredException;  /* Fallback to global */
+    }
+
+    PyObject *exc_class = PyObject_GetAttrString(erlang_module, "SuspensionRequired");
+    Py_DECREF(erlang_module);
+
+    if (exc_class == NULL) {
+        PyErr_Clear();
+        return SuspensionRequiredException;  /* Fallback to global */
+    }
+
+    /* See get_current_process_error: decref and rely on the module keeping it alive. */
+    Py_DECREF(exc_class);
+    return exc_class;
+}
+
 /* ============================================================================
  * Callback Name Registry
  *
@@ -2117,7 +2144,7 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     Py_XSETREF(tl_pending_args, call_args);
 
     /* Raise exception to abort Python execution */
-    PyErr_SetString(SuspensionRequiredException, "callback pending");
+    PyErr_SetString(get_current_suspension_required(), "callback pending");
     return NULL;
 }
 

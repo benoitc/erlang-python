@@ -4,6 +4,13 @@
 
 ### Security
 
+- **OWN_GIL worker robustness** (Python 3.14+) - A per-request allocation failure in
+  a subinterpreter worker no longer `break`s (and permanently kills) the worker command
+  loop; it returns an error and keeps serving. The `owngil_*` dispatch NIFs now run on
+  dirty IO schedulers and use non-blocking, deadline-bounded pipe reads and writes, so a
+  stalled or dead worker can't wedge a scheduler forever. The internal `SuspensionRequired`
+  exception is now looked up per-interpreter (like `ProcessError`), avoiding cross-
+  interpreter object use under OWN_GIL.
 - **Callback suspend/resume lifetime hardening** - The worker resource is now kept
   alive for the lifetime of a suspended callback (it could previously be GC'd mid-
   suspension, causing a use-after-free on resume). A resume frees any prior result
