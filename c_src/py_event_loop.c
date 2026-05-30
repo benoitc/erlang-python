@@ -2838,7 +2838,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
         ERL_NIF_TERM task_term;
         if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
-                                &task_term, 0) == 0) {
+                                &task_term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             return_pooled_env(loop, term_env);
             /* Dequeue and skip this malformed task */
             enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);

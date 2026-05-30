@@ -365,7 +365,7 @@ ERL_NIF_TERM py_to_term(ErlNifEnv *env, PyObject *obj) {
     if (Py_IS_TYPE(obj, &ErlangRefType)) {
         ErlangRefObject *ref_obj = (ErlangRefObject *)obj;
         ERL_NIF_TERM result;
-        if (enif_binary_to_term(env, ref_obj->data, ref_obj->size, &result, 0) > 0) {
+        if (enif_binary_to_term(env, ref_obj->data, ref_obj->size, &result, ERL_NIF_BIN2TERM_SAFE) > 0) {
             return result;
         }
         /* Failed to deserialize - return undefined */

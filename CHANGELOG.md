@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Security
+
+- **Safe term decoding at the NIF boundary** - All `enif_binary_to_term` calls now
+  pass `ERL_NIF_BIN2TERM_SAFE`, preventing attacker-influenced data (notably a Python
+  `"__etf__:<base64>"` callback result) from minting new, non-GC'd atoms and exhausting
+  the atom table. Local-node pids/refs and already-existing atoms still round-trip
+  unchanged; only brand-new atoms, remote-node pids/refs, and external funs in
+  Python-supplied payloads are now rejected.
+
 ### Changed
 
 - **Support Erlang/OTP 28 and 29** - Validated builds and the full Common Test

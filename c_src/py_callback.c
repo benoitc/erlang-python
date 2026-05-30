@@ -977,7 +977,7 @@ static PyObject *decode_etf_string(const char *str, Py_ssize_t len) {
 
     /* Decode the ETF binary to an Erlang term */
     ERL_NIF_TERM term;
-    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, 0) == 0) {
+    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
         /* Decoding failed */
         enif_free_env(tmp_env);
         Py_DECREF(decoded);
@@ -2859,7 +2859,7 @@ static PyObject *erlang_channel_try_receive_impl(PyObject *self, PyObject *args)
         }
 
         ERL_NIF_TERM term;
-        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+        if (enif_binary_to_term(tmp_env, data, size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             enif_free(data);
             enif_free_env(tmp_env);
             PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
@@ -2939,7 +2939,7 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
         }
 
         ERL_NIF_TERM term;
-        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+        if (enif_binary_to_term(tmp_env, data, size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             enif_free(data);
             enif_free_env(tmp_env);
             PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
@@ -3251,7 +3251,7 @@ static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
             }
 
             ERL_NIF_TERM term;
-            if (enif_binary_to_term(tmp_env, data, msg_size, &term, 0) == 0) {
+            if (enif_binary_to_term(tmp_env, data, msg_size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
                 enif_free(data);
                 enif_free_env(tmp_env);
                 PyErr_SetString(PyExc_RuntimeError, "failed to decode term");

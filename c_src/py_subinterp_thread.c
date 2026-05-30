@@ -430,7 +430,7 @@ static void *worker_thread_main(void *arg) {
                 if (tmp_env != NULL) {
                     ERL_NIF_TERM imports_list;
                     if (enif_binary_to_term(tmp_env, payload, header.payload_len,
-                                            &imports_list, 0) != 0) {
+                                            &imports_list, ERL_NIF_BIN2TERM_SAFE) != 0) {
                         ERL_NIF_TERM head, tail = imports_list;
                         int arity;
                         const ERL_NIF_TERM *tuple;
@@ -482,7 +482,7 @@ static void *worker_thread_main(void *arg) {
                 if (tmp_env != NULL) {
                     ERL_NIF_TERM paths_list;
                     if (enif_binary_to_term(tmp_env, payload, header.payload_len,
-                                            &paths_list, 0) != 0) {
+                                            &paths_list, ERL_NIF_BIN2TERM_SAFE) != 0) {
                         PyObject *sys_path = PySys_GetObject("path");
                         if (sys_path != NULL && PyList_Check(sys_path)) {
                             ERL_NIF_TERM head, tail = paths_list;
@@ -549,7 +549,7 @@ static void *worker_thread_main(void *arg) {
 
         if (tmp_env != NULL && header.payload_len > 0) {
             if (enif_binary_to_term(tmp_env, payload, header.payload_len,
-                                     &payload_term, 0) != 0) {
+                                     &payload_term, ERL_NIF_BIN2TERM_SAFE) != 0) {
                 if (enif_get_tuple(tmp_env, payload_term, &arity, &elements)) {
                     /* Execute based on request type */
                     PyObject *result = NULL;
