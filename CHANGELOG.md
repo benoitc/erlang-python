@@ -4,6 +4,11 @@
 
 ### Security
 
+- **Validated event-loop fd handles** - The asyncio reader/writer integration no longer
+  hands Python a raw `fd_resource` pointer as an integer key. Each handle is an opaque id
+  validated against a registry on every use, so a stale, duplicate, or fabricated id is a
+  safe no-op (or clean error) instead of a double-free or arbitrary-pointer dereference
+  that crashed the node. `fd_read`/`fd_write` also moved to dirty IO schedulers.
 - **OWN_GIL worker robustness** (Python 3.14+) - A per-request allocation failure in
   a subinterpreter worker no longer `break`s (and permanently kills) the worker command
   loop; it returns an error and keeps serving. The `owngil_*` dispatch NIFs now run on

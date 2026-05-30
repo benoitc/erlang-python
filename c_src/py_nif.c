@@ -8032,8 +8032,8 @@ static ErlNifFunc nif_funcs[] = {
     {"reactor_close_fd", 2, nif_reactor_close_fd, 0},
 
     /* Direct FD operations */
-    {"fd_read", 2, nif_fd_read, 0},
-    {"fd_write", 2, nif_fd_write, 0},
+    {"fd_read", 2, nif_fd_read, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"fd_write", 2, nif_fd_write, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"fd_select_read", 1, nif_fd_select_read, 0},
     {"fd_select_write", 1, nif_fd_select_write, 0},
     {"fd_close", 1, nif_fd_close, 0},

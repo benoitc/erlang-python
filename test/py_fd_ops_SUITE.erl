@@ -28,7 +28,8 @@
     fd_read_write_test/1,
     fd_close_test/1,
     fd_select_test/1,
-    dup_fd_test/1
+    dup_fd_test/1,
+    fd_registry_invalid_id_test/1
 ]).
 
 all() ->
@@ -37,7 +38,8 @@ all() ->
         fd_read_write_test,
         fd_close_test,
         fd_select_test,
-        dup_fd_test
+        dup_fd_test,
+        fd_registry_invalid_id_test
     ].
 
 init_per_suite(Config) ->
@@ -175,4 +177,19 @@ dup_fd_test(_Config) ->
     %% Clean up
     ok = py_nif:fd_close(DupFd2),
     ok = py_nif:fd_close(Fd1),
+    ok.
+
+%% @doc A stale, duplicate, or fabricated fd id must be a safe no-op (or clean
+%% error), not a raw-pointer dereference. Regression for the validating
+%% fd-handle registry: pre-fix the id was cast straight to a pointer and
+%% dereferenced, so a bogus id crashed the node.
+fd_registry_invalid_id_test(_Config) ->
+    {ok, none} = py:eval(<<"__import__('py_event_loop')._remove_reader(999999999)">>),
+    {ok, none} = py:eval(<<"__import__('py_event_loop')._remove_writer(123456789)">>),
+    {ok, none} = py:eval(<<"__import__('py_event_loop')._release_fd_resource(42)">>),
+    {ok, none} = py:eval(<<"__import__('py_event_loop')._clear_fd_read(7)">>),
+    %% _update_fd_* rejects an unknown id with a clean ValueError, not a crash.
+    {error, _} = py:eval(<<"__import__('py_event_loop')._update_fd_read(54321, 1)">>),
+    %% Node still alive and usable.
+    {ok, 2} = py:eval(<<"1+1">>),
     ok.
