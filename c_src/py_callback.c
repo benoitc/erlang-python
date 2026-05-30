@@ -399,6 +399,14 @@ static suspended_state_t *create_suspended_state_ex(
     } else {
         state->worker = source->data.existing->worker;
     }
+    /* Keep the worker resource alive for as long as the suspended state exists.
+     * Without this the worker can be GC'd while a callback is suspended, and
+     * nif_resume_callback_dirty would dereference a freed worker (use-after-free
+     * with the GIL held). Mirrors the enif_keep_resource(ctx) on the context path;
+     * suspended_state_destructor releases it. */
+    if (state->worker != NULL) {
+        enif_keep_resource(state->worker);
+    }
 
     state->callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
 
@@ -4316,7 +4324,14 @@ static ERL_NIF_TERM nif_resume_callback(ErlNifEnv *env, int argc, const ERL_NIF_
     /* Store the result in the suspended state */
     pthread_mutex_lock(&state->mutex);
 
-    /* Copy result data */
+    /* Copy result data. Free any prior result first: a duplicate/raced resume
+     * would otherwise leak the previous buffer. (has_result is not a one-shot
+     * flag -- it toggles during nested replay -- so result_data is the real
+     * pending-result indicator.) */
+    if (state->result_data != NULL) {
+        enif_free(state->result_data);
+        state->result_data = NULL;
+    }
     state->result_data = enif_alloc(result_bin.size);
     if (state->result_data == NULL) {
         pthread_mutex_unlock(&state->mutex);
@@ -4362,6 +4377,12 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
     /* Verify the state has a result */
     if (!state->has_result) {
         return make_error(env, "no_result");
+    }
+
+    /* The worker is kept alive for the lifetime of the suspended state, but
+     * guard rather than dereference NULL in the replay below. */
+    if (state->worker == NULL) {
+        return make_error(env, "no_worker");
     }
 
     /* Set up thread-local state for replay */

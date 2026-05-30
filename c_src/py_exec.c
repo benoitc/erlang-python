@@ -304,11 +304,14 @@ static void process_request(py_request_t *req) {
                     suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
                     Py_DECREF(exc_args);
                     if (suspended == NULL) {
-                        tl_pending_callback = false;
-                        Py_CLEAR(tl_pending_args);
+                        clear_pending_callback_tls();
                         req->result = make_error(env, "create_suspended_state_failed");
                     } else {
                         req->result = build_suspended_result(env, suspended);
+                        /* func_name/args are copied into the suspended state; clear
+                         * the pending-callback TLS so a later request on this reused
+                         * worker thread doesn't trip the stale-TLS entry invariant. */
+                        clear_pending_callback_tls();
                     }
                 }
             } else {
@@ -408,11 +411,11 @@ static void process_request(py_request_t *req) {
                         suspended_state_t *suspended = create_suspended_state(env, exc_args, req);
                         Py_DECREF(exc_args);
                         if (suspended == NULL) {
-                            tl_pending_callback = false;
-                            Py_CLEAR(tl_pending_args);
+                            clear_pending_callback_tls();
                             req->result = make_error(env, "create_suspended_state_failed");
                         } else {
                             req->result = build_suspended_result(env, suspended);
+                            clear_pending_callback_tls();
                         }
                     }
                 } else {

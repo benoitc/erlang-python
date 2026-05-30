@@ -25,7 +25,8 @@
     test_callback_with_try_except/1,
     test_async_call/1,
     test_callback_name_registry/1,
-    test_etf_decode_safe/1
+    test_etf_decode_safe/1,
+    test_reentrant_resume_stress/1
 ]).
 
 all() ->
@@ -40,7 +41,8 @@ all() ->
         test_callback_with_try_except,
         test_async_call,
         test_callback_name_registry,
-        test_etf_decode_safe
+        test_etf_decode_safe,
+        test_reentrant_resume_stress
     ].
 
 init_per_suite(Config) ->
@@ -69,6 +71,7 @@ end_per_testcase(_TestCase, _Config) ->
     try py:unregister_function(test_registry_func) catch _:_ -> ok end,
     try py:unregister_function(etf_probe_ok) catch _:_ -> ok end,
     try py:unregister_function(etf_probe_novel) catch _:_ -> ok end,
+    try py:unregister_function(rs_double) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================
@@ -91,6 +94,25 @@ test_basic_reentrant(_Config) ->
     {ok, Result} = py:eval(<<"__import__('erlang').call('double_via_python', 10) + 1">>),
     21 = Result,  %% 10 * 2 + 1 = 21
 
+    ok.
+
+%% @doc Many reentrant suspend/resume cycles must all succeed with no leak,
+%% stale-TLS invariant trip, or crash. Regression for the suspend/resume lifetime
+%% fixes (worker keep, TLS clear, result_data free, hardened callback-pipe writes);
+%% exercises the callback pipe and context resume under repetition.
+test_reentrant_resume_stress(_Config) ->
+    py:register_function(rs_double, fun([X]) ->
+        {ok, R} = py:eval(iolist_to_binary(io_lib:format("~p * 2", [X]))),
+        R
+    end),
+    Got = [begin
+        Code = iolist_to_binary(
+            io_lib:format("__import__('erlang').call('rs_double', ~p) + 1", [N])),
+        {ok, V} = py:eval(Code),
+        V
+    end || N <- lists:seq(1, 100)],
+    Got = [N * 2 + 1 || N <- lists:seq(1, 100)],
+    py:unregister_function(rs_double),
     ok.
 
 %% @doc Regression for the binary_to_term SAFE-flag hardening (atom exhaustion).

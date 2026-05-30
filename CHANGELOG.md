@@ -4,6 +4,14 @@
 
 ### Security
 
+- **Callback suspend/resume lifetime hardening** - The worker resource is now kept
+  alive for the lifetime of a suspended callback (it could previously be GC'd mid-
+  suspension, causing a use-after-free on resume). A resume frees any prior result
+  before storing a new one (no leak/double-replay on a duplicate resume), the
+  pending-callback thread-local is cleared at the worker request boundary, and the
+  callback-response pipe writes run on dirty schedulers with non-blocking, deadline-
+  bounded writes so a stalled reader or large payload can't wedge a scheduler or
+  desync the framed protocol.
 - **Zero-copy buffer pinning** - `py_buffer` no longer relocates (and frees) its
   storage while a Python `memoryview` points into it. A write that would grow the
   buffer while a view is held now returns an error instead of dangling the view into

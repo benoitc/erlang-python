@@ -513,11 +513,18 @@ static void suspended_state_destructor(ErlNifEnv *env, void *obj) {
     (void)env;
     suspended_state_t *state = (suspended_state_t *)obj;
 
+    /* Release the worker resource kept alive in create_suspended_state_ex. */
+    if (state->worker != NULL) {
+        enif_release_resource(state->worker);
+        state->worker = NULL;
+    }
+
     /* Clean up Python objects if Python is still initialized.
      * suspended_state_t is used with the worker-based API which runs in
      * the main interpreter, so we always use PyGILState_Ensure. */
     if (runtime_is_running() && state->callback_args != NULL) {
         if (PyGILState_GetThisThreadState() != NULL || PyGILState_Check()) {
+            Py_XDECREF(state->callback_args);
             state->callback_args = NULL;
         } else {
             PyGILState_STATE gstate = PyGILState_Ensure();
@@ -1700,6 +1707,11 @@ static ERL_NIF_TERM nif_set_callback_handler(ErlNifEnv *env, int argc, const ERL
     if (pipe(worker->callback_pipe) < 0) {
         return make_error(env, "pipe_failed");
     }
+    /* Non-blocking write end so write_all_with_deadline can bound the write. */
+    {
+        int wfl = fcntl(worker->callback_pipe[1], F_GETFL, 0);
+        if (wfl >= 0) (void)fcntl(worker->callback_pipe[1], F_SETFL, wfl | O_NONBLOCK);
+    }
 
     worker->has_callback_handler = true;
 
@@ -1707,6 +1719,10 @@ static ERL_NIF_TERM nif_set_callback_handler(ErlNifEnv *env, int argc, const ERL
     return enif_make_tuple2(env, ATOM_OK,
         enif_make_int(env, worker->callback_pipe[1]));
 }
+
+/* Bound for callback-response pipe writes: a stalled reader must not block a
+ * dirty scheduler forever (the pipe write ends are set non-blocking). */
+#define CALLBACK_RESPONSE_IO_TIMEOUT_MS 30000
 
 static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
@@ -1721,15 +1737,16 @@ static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const E
         return make_error(env, "invalid_response");
     }
 
-    /* Write length then data */
+    /* Write length then data with a timed, non-blocking writer (the pipe write
+     * end is O_NONBLOCK) so a stalled reader or a large payload can't block a
+     * dirty scheduler forever or desync the length-framed protocol on EINTR. */
     uint32_t len = (uint32_t)response.size;
-    ssize_t n = write(fd, &len, sizeof(len));
-    if (n != sizeof(len)) {
+    if (write_all_with_deadline(fd, &len, sizeof(len),
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_length_failed");
     }
-
-    n = write(fd, response.data, response.size);
-    if (n != (ssize_t)response.size) {
+    if (write_all_with_deadline(fd, response.data, response.size,
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_data_failed");
     }
 
@@ -4702,6 +4719,11 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         enif_release_resource(ctx);
         return make_error(env, "pipe_create_failed");
     }
+    /* Non-blocking write end so write_all_with_deadline can bound the write. */
+    {
+        int wfl = fcntl(ctx->callback_pipe[1], F_GETFL, 0);
+        if (wfl >= 0) (void)fcntl(ctx->callback_pipe[1], F_SETFL, wfl | O_NONBLOCK);
+    }
 
 #ifdef HAVE_SUBINTERPRETERS
     ctx->uses_own_gil = false;
@@ -6579,15 +6601,17 @@ static ERL_NIF_TERM nif_context_write_callback_response(ErlNifEnv *env, int argc
         return make_error(env, "pipe_not_initialized");
     }
 
-    /* Write length prefix (4 bytes, native endianness - must match read_length_prefixed_data) */
+    /* Write length prefix + data with a timed, non-blocking writer (the pipe
+     * write end is O_NONBLOCK) so a stalled reader or large payload can't block a
+     * dirty scheduler forever or desync the framed protocol. 4-byte native-endian
+     * length must match read_length_prefixed_data. */
     uint32_t len = (uint32_t)data.size;
-    ssize_t written = write(ctx->callback_pipe[1], &len, sizeof(len));
-    if (written != sizeof(len)) {
+    if (write_all_with_deadline(ctx->callback_pipe[1], &len, sizeof(len),
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_failed");
     }
-
-    written = write(ctx->callback_pipe[1], data.data, data.size);
-    if (written != (ssize_t)data.size) {
+    if (write_all_with_deadline(ctx->callback_pipe[1], data.data, data.size,
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_failed");
     }
 
@@ -6639,7 +6663,13 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "context_mismatch");
     }
 
-    /* Store the callback result */
+    /* Store the callback result. Free any prior result first to avoid leaking it
+     * on a duplicate/raced resume (result_data, not the toggling has_result flag,
+     * is the real pending-result indicator). */
+    if (state->result_data != NULL) {
+        enif_free(state->result_data);
+        state->result_data = NULL;
+    }
     state->result_data = enif_alloc(result_bin.size);
     if (state->result_data == NULL) {
         return make_error(env, "alloc_failed");
@@ -7812,7 +7842,7 @@ static ErlNifFunc nif_funcs[] = {
 
     /* Callback support */
     {"set_callback_handler", 2, nif_set_callback_handler, 0},
-    {"send_callback_response", 2, nif_send_callback_response, 0},
+    {"send_callback_response", 2, nif_send_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"resume_callback", 2, nif_resume_callback, 0},
 
     /* Async worker management */
@@ -7961,7 +7991,7 @@ static ErlNifFunc nif_funcs[] = {
     {"context_interp_id", 1, nif_context_interp_id, 0},
     {"context_set_callback_handler", 2, nif_context_set_callback_handler, 0},
     {"context_get_callback_pipe", 1, nif_context_get_callback_pipe, 0},
-    {"context_write_callback_response", 2, nif_context_write_callback_response, 0},
+    {"context_write_callback_response", 2, nif_context_write_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"context_resume", 3, nif_context_resume, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_cancel_resume", 2, nif_context_cancel_resume, 0},
     {"context_get_event_loop", 1, nif_context_get_event_loop, 0},
