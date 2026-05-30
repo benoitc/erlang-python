@@ -4,6 +4,11 @@
 
 ### Security
 
+- **No shell for venv/installer commands** - `py:ensure_venv` and dependency
+  installation now run the executables via `open_port({spawn_executable, ...})` with an
+  argument list instead of building a shell string for `os:cmd`. Venv paths, requirement
+  files, and extras are passed literally, so shell metacharacters can't be injected. For
+  `uv`, `VIRTUAL_ENV` is passed via the port `{env, ...}` option rather than a shell prefix.
 - **Bounded shared state + safe stream/log builders** - `py_state` gained an optional
   `max_state_entries` cap (default `infinity`, unchanged behavior) enforced with atomic
   admission so Python-driven `state_set` can't exhaust node memory, and its size counter

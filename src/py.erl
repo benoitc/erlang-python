@@ -900,14 +900,13 @@ create_venv(Path, Opts) ->
         undefined -> get_python_executable();
         P -> P
     end,
-    Cmd = case Installer of
+    case Installer of
         uv ->
             %% uv venv is faster, use --python to match the running interpreter
-            io_lib:format("uv venv --python ~s ~s", [quote(Python), quote(Path)]);
+            run_cmd(uv_exe(), ["venv", "--python", Python, Path], []);
         pip ->
-            io_lib:format("~s -m venv ~s", [quote(Python), quote(Path)])
-    end,
-    run_cmd(lists:flatten(Cmd)).
+            run_cmd(Python, ["-m", "venv", Path], [])
+    end.
 
 %% @private Get the Python executable path
 %% When embedded, sys.executable returns the embedding app (beam.smp)
@@ -927,30 +926,28 @@ get_python_executable() ->
 -spec install_deps(string(), string(), list()) -> ok | {error, term()}.
 install_deps(Path, RequirementsFile, Opts) ->
     Installer = detect_installer(Opts),
-    PipPath = pip_path(Path, Installer),
+    {Exe, BaseArgs, PortOpts} = pip_command(Path, Installer),
     Extras = proplists:get_value(extras, Opts, []),
 
-    %% Determine file type and build install command
-    Cmd = case filename:extension(RequirementsFile) of
+    %% Determine file type and build the install argument list (no shell).
+    Args = case filename:extension(RequirementsFile) of
         ".txt" ->
-            %% requirements.txt
-            io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)]);
+            BaseArgs ++ ["install", "-r", RequirementsFile];
         ".toml" ->
-            %% pyproject.toml - install as editable
+            %% pyproject.toml - install as editable.
             %% filename:dirname returns "." for files without directory component
             InstallPath = filename:dirname(RequirementsFile),
             case Extras of
                 [] ->
-                    io_lib:format("~s install -e ~s", [PipPath, quote(InstallPath)]);
+                    BaseArgs ++ ["install", "-e", InstallPath];
                 _ ->
                     ExtrasStr = string:join(Extras, ","),
-                    io_lib:format("~s install -e \"~s[~s]\"", [PipPath, InstallPath, ExtrasStr])
+                    BaseArgs ++ ["install", "-e", InstallPath ++ "[" ++ ExtrasStr ++ "]"]
             end;
         _ ->
-            %% Assume requirements.txt format
-            io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)])
+            BaseArgs ++ ["install", "-r", RequirementsFile]
     end,
-    run_cmd(lists:flatten(Cmd)).
+    run_cmd(Exe, Args, PortOpts).
 
 %% @private Detect which installer to use (uv or pip)
 -spec detect_installer(list()) -> uv | pip.
@@ -965,40 +962,74 @@ detect_installer(Opts) ->
             Installer
     end.
 
-%% @private Get pip/uv pip command path
--spec pip_path(string(), uv | pip) -> string().
-pip_path(VenvPath, uv) ->
-    %% uv pip uses venv from env var or --python flag
-    "VIRTUAL_ENV=" ++ quote(VenvPath) ++ " uv pip";
-pip_path(VenvPath, pip) ->
-    %% Use pip from the venv
-    case os:type() of
+%% @private Resolve the installer into {Executable, BaseArgs, PortOpts}.
+%% For uv the venv is selected via the VIRTUAL_ENV port env option (not a shell
+%% prefix); for pip we use the venv's own pip binary.
+-spec pip_command(string(), uv | pip) -> {string(), [string()], list()}.
+pip_command(VenvPath, uv) ->
+    {uv_exe(), ["pip"], [{env, [{"VIRTUAL_ENV", VenvPath}]}]};
+pip_command(VenvPath, pip) ->
+    PipExe = case os:type() of
         {win32, _} ->
             filename:join([VenvPath, "Scripts", "pip"]);
         _ ->
             filename:join([VenvPath, "bin", "pip"])
+    end,
+    {PipExe, [], []}.
+
+%% @private Full path to the uv executable (falls back to the bare name).
+-spec uv_exe() -> string().
+uv_exe() ->
+    case os:find_executable("uv") of
+        false -> "uv";
+        P -> P
     end.
 
-%% @private Quote a path for shell
--spec quote(string()) -> string().
-quote(S) ->
-    "'" ++ S ++ "'".
+%% @private Run an executable with an argv list (no shell) and return ok or error.
+-spec run_cmd(string(), [string()], list()) -> ok | {error, term()}.
+run_cmd(Exe, Args, ExtraOpts) ->
+    case resolve_exe(Exe) of
+        {error, _} = Err ->
+            Err;
+        ExeFull ->
+            try open_port({spawn_executable, ExeFull},
+                          [exit_status, stderr_to_stdout, binary, {args, Args} | ExtraOpts]) of
+                Port -> collect_port(Port, [])
+            catch
+                error:Reason -> {error, {spawn_failed, Exe, Reason}}
+            end
+    end.
 
-%% @private Run a shell command and return ok or error
--spec run_cmd(string()) -> ok | {error, term()}.
-run_cmd(Cmd) ->
-    %% Use os:cmd but check for errors
-    Result = os:cmd(Cmd ++ " 2>&1; echo \"::exitcode::$?\""),
-    %% Parse exit code from end of output
-    case string:split(Result, "::exitcode::", trailing) of
-        [Output, ExitCodeStr] ->
-            case string:trim(ExitCodeStr) of
-                "0" -> ok;
-                Code -> {error, {exit_code, list_to_integer(Code), string:trim(Output)}}
+%% @private Resolve an executable name/path to a full path (spawn_executable does
+%% not search PATH).
+-spec resolve_exe(string()) -> string() | {error, term()}.
+resolve_exe(Exe) ->
+    case filename:pathtype(Exe) of
+        absolute ->
+            case filelib:is_file(Exe) of
+                true -> Exe;
+                false -> {error, {executable_not_found, Exe}}
             end;
         _ ->
-            %% Fallback - assume success if no error marker
-            ok
+            case os:find_executable(Exe) of
+                false -> {error, {executable_not_found, Exe}};
+                Found -> Found
+            end
+    end.
+
+%% @private Collect a spawned port's output and exit status.
+-spec collect_port(port(), [binary()]) -> ok | {error, term()}.
+collect_port(Port, Acc) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_port(Port, [Data | Acc]);
+        {Port, {exit_status, 0}} ->
+            ok;
+        {Port, {exit_status, Code}} ->
+            {error, {exit_code, Code, iolist_to_binary(lists:reverse(Acc))}}
+    after 300000 ->
+        try port_close(Port) catch _:_ -> ok end,
+        {error, timeout}
     end.
 
 %% @private Convert to string

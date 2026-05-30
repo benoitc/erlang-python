@@ -36,7 +36,8 @@
     test_ensure_venv_force_recreate/1,
     test_activate_venv/1,
     test_deactivate_venv/1,
-    test_venv_info/1
+    test_venv_info/1,
+    test_venv_path_metacharacters/1
 ]).
 
 all() ->
@@ -51,7 +52,8 @@ groups() ->
         test_ensure_venv_force_recreate,
         test_activate_venv,
         test_deactivate_venv,
-        test_venv_info
+        test_venv_info,
+        test_venv_path_metacharacters
     ]}].
 
 init_per_suite(Config) ->
@@ -121,6 +123,21 @@ test_ensure_venv_creates_venv(Config) ->
     %% Verify venv is active
     {ok, Info} = py:venv_info(),
     true = maps:get(<<"active">>, Info),
+    ok.
+
+%% @doc A venv path containing a shell metacharacter (a single quote) must be
+%% treated literally by spawn_executable, not interpreted by a shell. Pre-fix
+%% this went through os:cmd with quote/1, where the embedded quote broke out of
+%% the quoting (and could inject). (A space is avoided here only because it
+%% breaks the venv's own pip shebang, which is unrelated to the shell fix.)
+test_venv_path_metacharacters(Config) ->
+    TempDir = ?config(temp_dir, Config),
+    VenvPath = filename:join(TempDir, "venv'q$x"),
+    ReqFile = filename:join(TempDir, "requirements_meta.txt"),
+    ok = file:write_file(ReqFile, <<"# empty\n">>),
+    %% Created and used at the exact literal path (a shell would have broken it).
+    ok = py:ensure_venv(VenvPath, ReqFile, [{installer, pip}]),
+    true = filelib:is_file(filename:join(VenvPath, "pyvenv.cfg")),
     ok.
 
 test_ensure_venv_activates_existing(Config) ->
