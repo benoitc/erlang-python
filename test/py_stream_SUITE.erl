@@ -17,7 +17,8 @@
     test_stream_cancel/1,
     test_stream_error/1,
     test_stream_empty/1,
-    test_stream_large/1
+    test_stream_large/1,
+    test_stream_rejects_injection/1
 ]).
 
 all() ->
@@ -29,7 +30,8 @@ all() ->
         test_stream_cancel,
         test_stream_error,
         test_stream_empty,
-        test_stream_large
+        test_stream_large,
+        test_stream_rejects_injection
     ].
 
 init_per_suite(Config) ->
@@ -38,6 +40,18 @@ init_per_suite(Config) ->
 
 end_per_suite(_Config) ->
     ok = application:stop(erlang_python),
+    ok.
+
+%% @doc A module/func name (or kwarg key) that isn't a valid Python identifier
+%% must be rejected, not interpolated into the generated source where it could
+%% inject code. Regression for the stream source-builder hardening.
+test_stream_rejects_injection(_Config) ->
+    {'EXIT', {{invalid_python_identifier, _}, _}} =
+        (catch py:stream(<<"os'); __import__('os').system('x">>, <<"walk">>, [], #{k => 1})),
+    {'EXIT', {{invalid_python_identifier, _}, _}} =
+        (catch py:stream(<<"math">>, <<"sqrt'); evil(">>, [], #{k => 1})),
+    {'EXIT', {{invalid_python_identifier, _}, _}} =
+        (catch py:stream(<<"math">>, <<"sqrt">>, [], #{<<"bad key)">> => 1})),
     ok.
 
 %% Helper to collect all stream events

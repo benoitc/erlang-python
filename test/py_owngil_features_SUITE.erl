@@ -47,6 +47,7 @@
     owngil_reentrant_basic_test/1,
     owngil_reentrant_nested_test/1,
     owngil_reentrant_concurrent_test/1,
+    owngil_reentrant_multi_stress_test/1,
     owngil_reentrant_complex_types_test/1,
     owngil_reentrant_thread_callback_test/1,
     owngil_reentrant_try_except_test/1
@@ -156,6 +157,7 @@ groups() ->
         owngil_reentrant_basic_test,
         owngil_reentrant_nested_test,
         owngil_reentrant_concurrent_test,
+        owngil_reentrant_multi_stress_test,
         owngil_reentrant_complex_types_test,
         owngil_reentrant_thread_callback_test,
         owngil_reentrant_try_except_test
@@ -704,6 +706,36 @@ owngil_reentrant_nested_test(_Config) ->
         <<"__import__('erlang').call('owngil_level', 1, 5)">>, #{}),
 
     py_context:stop(Ctx).
+
+%% @doc Stress the per-interpreter exception machinery (H8) and the bounded
+%% OWN_GIL dispatch (H7): many reentrant suspend/resume cycles across several
+%% subinterpreter contexts concurrently. A cross-interpreter exception object or
+%% a dispatch read/write desync would corrupt or crash the node under this load.
+owngil_reentrant_multi_stress_test(_Config) ->
+    py:register_function(owngil_level, fun([Level, N]) ->
+        case Level >= N of
+            true -> Level;
+            false ->
+                Code = iolist_to_binary(io_lib:format(
+                    "__import__('erlang').call('owngil_level', ~p, ~p)", [Level + 1, N])),
+                {ok, R} = py:eval(Code),
+                R
+        end
+    end),
+    %% Kept light so it stays fast and non-flaky on slow CI hosts while still
+    %% driving concurrent reentrant suspend/resume across distinct subinterpreters.
+    Parent = self(),
+    Pids = [spawn(fun() ->
+        {ok, Ctx} = py_context:start_link(CtxId, owngil),
+        Ok = lists:all(fun(_) ->
+            {ok, 4} =:= py_context:eval(Ctx,
+                <<"__import__('erlang').call('owngil_level', 1, 4)">>, #{})
+        end, lists:seq(1, 5)),
+        py_context:stop(Ctx),
+        Parent ! {self(), Ok}
+    end) || CtxId <- lists:seq(1, 2)],
+    [receive {P, true} -> ok after 120000 -> error({stress_failed, P}) end || P <- Pids],
+    ok.
 
 %% @doc Concurrent callbacks from multiple owngil contexts
 owngil_reentrant_concurrent_test(_Config) ->

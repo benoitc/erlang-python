@@ -513,11 +513,18 @@ static void suspended_state_destructor(ErlNifEnv *env, void *obj) {
     (void)env;
     suspended_state_t *state = (suspended_state_t *)obj;
 
+    /* Release the worker resource kept alive in create_suspended_state_ex. */
+    if (state->worker != NULL) {
+        enif_release_resource(state->worker);
+        state->worker = NULL;
+    }
+
     /* Clean up Python objects if Python is still initialized.
      * suspended_state_t is used with the worker-based API which runs in
      * the main interpreter, so we always use PyGILState_Ensure. */
     if (runtime_is_running() && state->callback_args != NULL) {
         if (PyGILState_GetThisThreadState() != NULL || PyGILState_Check()) {
+            Py_XDECREF(state->callback_args);
             state->callback_args = NULL;
         } else {
             PyGILState_STATE gstate = PyGILState_Ensure();
@@ -1700,6 +1707,11 @@ static ERL_NIF_TERM nif_set_callback_handler(ErlNifEnv *env, int argc, const ERL
     if (pipe(worker->callback_pipe) < 0) {
         return make_error(env, "pipe_failed");
     }
+    /* Non-blocking write end so write_all_with_deadline can bound the write. */
+    {
+        int wfl = fcntl(worker->callback_pipe[1], F_GETFL, 0);
+        if (wfl >= 0) (void)fcntl(worker->callback_pipe[1], F_SETFL, wfl | O_NONBLOCK);
+    }
 
     worker->has_callback_handler = true;
 
@@ -1707,6 +1719,14 @@ static ERL_NIF_TERM nif_set_callback_handler(ErlNifEnv *env, int argc, const ERL
     return enif_make_tuple2(env, ATOM_OK,
         enif_make_int(env, worker->callback_pipe[1]));
 }
+
+/* Bound for callback-response pipe writes: a stalled reader must not block a
+ * dirty scheduler forever (the pipe write ends are set non-blocking). */
+#define CALLBACK_RESPONSE_IO_TIMEOUT_MS 30000
+
+/* Bound for OWN_GIL dispatch pipe I/O so a stalled/dead worker thread can't
+ * block the dispatching dirty scheduler forever. */
+#define OWNGIL_IO_TIMEOUT_MS 30000
 
 static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
@@ -1721,15 +1741,16 @@ static ERL_NIF_TERM nif_send_callback_response(ErlNifEnv *env, int argc, const E
         return make_error(env, "invalid_response");
     }
 
-    /* Write length then data */
+    /* Write length then data with a timed, non-blocking writer (the pipe write
+     * end is O_NONBLOCK) so a stalled reader or a large payload can't block a
+     * dirty scheduler forever or desync the length-framed protocol on EINTR. */
     uint32_t len = (uint32_t)response.size;
-    ssize_t n = write(fd, &len, sizeof(len));
-    if (n != sizeof(len)) {
+    if (write_all_with_deadline(fd, &len, sizeof(len),
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_length_failed");
     }
-
-    n = write(fd, response.data, response.size);
-    if (n != (ssize_t)response.size) {
+    if (write_all_with_deadline(fd, response.data, response.size,
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_data_failed");
     }
 
@@ -2030,6 +2051,14 @@ static void owngil_execute_call(py_context_t *ctx) {
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
+        ctx->response_ok = false;
+        return;
+    }
     ERL_NIF_TERM head, tail = args_term;
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
@@ -2729,6 +2758,15 @@ static void owngil_execute_call_with_env(py_context_t *ctx) {
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        tl_current_local_env = prev_local_env;
+        ctx->response_term = enif_make_tuple2(ctx->shared_env,
+            enif_make_atom(ctx->shared_env, "error"),
+            enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
+        ctx->response_ok = false;
+        return;
+    }
     ERL_NIF_TERM head, tail = args_term;
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
@@ -4685,6 +4723,11 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
         enif_release_resource(ctx);
         return make_error(env, "pipe_create_failed");
     }
+    /* Non-blocking write end so write_all_with_deadline can bound the write. */
+    {
+        int wfl = fcntl(ctx->callback_pipe[1], F_GETFL, 0);
+        if (wfl >= 0) (void)fcntl(ctx->callback_pipe[1], F_SETFL, wfl | O_NONBLOCK);
+    }
 
 #ifdef HAVE_SUBINTERPRETERS
     ctx->uses_own_gil = false;
@@ -4975,6 +5018,11 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[3];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -6244,6 +6292,11 @@ static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ER
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[3];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -6402,6 +6455,11 @@ static ERL_NIF_TERM nif_context_call_method(ErlNifEnv *env, int argc, const ERL_
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(method);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[3];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -6547,15 +6605,17 @@ static ERL_NIF_TERM nif_context_write_callback_response(ErlNifEnv *env, int argc
         return make_error(env, "pipe_not_initialized");
     }
 
-    /* Write length prefix (4 bytes, native endianness - must match read_length_prefixed_data) */
+    /* Write length prefix + data with a timed, non-blocking writer (the pipe
+     * write end is O_NONBLOCK) so a stalled reader or large payload can't block a
+     * dirty scheduler forever or desync the framed protocol. 4-byte native-endian
+     * length must match read_length_prefixed_data. */
     uint32_t len = (uint32_t)data.size;
-    ssize_t written = write(ctx->callback_pipe[1], &len, sizeof(len));
-    if (written != sizeof(len)) {
+    if (write_all_with_deadline(ctx->callback_pipe[1], &len, sizeof(len),
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_failed");
     }
-
-    written = write(ctx->callback_pipe[1], data.data, data.size);
-    if (written != (ssize_t)data.size) {
+    if (write_all_with_deadline(ctx->callback_pipe[1], data.data, data.size,
+                                CALLBACK_RESPONSE_IO_TIMEOUT_MS) != WRITE_OK) {
         return make_error(env, "write_failed");
     }
 
@@ -6607,7 +6667,13 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
         return make_error(env, "context_mismatch");
     }
 
-    /* Store the callback result */
+    /* Store the callback result. Free any prior result first to avoid leaking it
+     * on a duplicate/raced resume (result_data, not the toggling has_result flag,
+     * is the real pending-result indicator). */
+    if (state->result_data != NULL) {
+        enif_free(state->result_data);
+        state->result_data = NULL;
+    }
     state->result_data = enif_alloc(result_bin.size);
     if (state->result_data == NULL) {
         return make_error(env, "alloc_failed");
@@ -6686,6 +6752,13 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            enif_free(module_name);
+            enif_free(func_name);
+            result = make_error(env, "alloc_failed");
+            goto cleanup;
+        }
         ERL_NIF_TERM head, tail = state->orig_args;
         for (unsigned int i = 0; i < args_len; i++) {
             enif_get_list_cell(state->orig_env, tail, &head, &tail);
@@ -7060,6 +7133,11 @@ static ERL_NIF_TERM nif_ref_call_method(ErlNifEnv *env, int argc, const ERL_NIF_
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(method);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[2];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -7218,16 +7296,19 @@ static ERL_NIF_TERM nif_owngil_create_session(ErlNifEnv *env, int argc,
         .payload_len = 0,
     };
 
-    /* Write header */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) != sizeof(header)) {
+    /* Write header (non-blocking write end + deadline so a stalled/dead worker
+     * can't block this dirty scheduler forever). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) != WRITE_OK) {
         pthread_mutex_unlock(&w->dispatch_mutex);
         return enif_make_tuple2(env, ATOM_ERROR,
                                 enif_make_atom(env, "write_failed"));
     }
 
-    /* Wait for response */
+    /* Wait for response, bounded by a deadline. */
     owngil_header_t resp;
-    if (read(w->result_pipe[0], &resp, sizeof(resp)) != sizeof(resp)) {
+    if (read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                          OWNGIL_IO_TIMEOUT_MS) != (ssize_t)sizeof(resp)) {
         pthread_mutex_unlock(&w->dispatch_mutex);
         return enif_make_tuple2(env, ATOM_ERROR,
                                 enif_make_atom(env, "read_failed"));
@@ -7311,9 +7392,11 @@ static ERL_NIF_TERM nif_owngil_submit_task(ErlNifEnv *env, int argc,
         .payload_len = payload_bin.size,
     };
 
-    /* Write header and payload */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) != sizeof(header) ||
-        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size) != (ssize_t)payload_bin.size) {
+    /* Write header and payload (non-blocking write end + deadline). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) != WRITE_OK ||
+        write_all_with_deadline(w->cmd_pipe[1], payload_bin.data, payload_bin.size,
+                                OWNGIL_IO_TIMEOUT_MS) != WRITE_OK) {
         pthread_mutex_unlock(&w->dispatch_mutex);
         enif_release_binary(&payload_bin);
         return enif_make_tuple2(env, ATOM_ERROR,
@@ -7369,11 +7452,13 @@ static ERL_NIF_TERM nif_owngil_destroy_session(ErlNifEnv *env, int argc,
         .payload_len = 0,
     };
 
-    /* Write header */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
-        /* Wait for response */
+    /* Write header (best-effort, bounded). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) == WRITE_OK) {
+        /* Wait for response (best-effort, bounded). */
         owngil_header_t resp;
-        read(w->result_pipe[0], &resp, sizeof(resp));
+        (void)read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                                OWNGIL_IO_TIMEOUT_MS);
     }
 
     pthread_mutex_unlock(&w->dispatch_mutex);
@@ -7430,12 +7515,15 @@ static ERL_NIF_TERM nif_owngil_apply_imports(ErlNifEnv *env, int argc,
         .payload_len = payload_bin.size,
     };
 
-    /* Write header and payload */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
-        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size);
-        /* Wait for response */
+    /* Write header and payload (best-effort, bounded). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) == WRITE_OK) {
+        (void)write_all_with_deadline(w->cmd_pipe[1], payload_bin.data, payload_bin.size,
+                                      OWNGIL_IO_TIMEOUT_MS);
+        /* Wait for response (best-effort, bounded). */
         owngil_header_t resp;
-        read(w->result_pipe[0], &resp, sizeof(resp));
+        (void)read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                                OWNGIL_IO_TIMEOUT_MS);
     }
 
     enif_release_binary(&payload_bin);
@@ -7493,12 +7581,15 @@ static ERL_NIF_TERM nif_owngil_apply_paths(ErlNifEnv *env, int argc,
         .payload_len = payload_bin.size,
     };
 
-    /* Write header and payload */
-    if (write(w->cmd_pipe[1], &header, sizeof(header)) == sizeof(header)) {
-        write(w->cmd_pipe[1], payload_bin.data, payload_bin.size);
-        /* Wait for response */
+    /* Write header and payload (best-effort, bounded). */
+    if (write_all_with_deadline(w->cmd_pipe[1], &header, sizeof(header),
+                                OWNGIL_IO_TIMEOUT_MS) == WRITE_OK) {
+        (void)write_all_with_deadline(w->cmd_pipe[1], payload_bin.data, payload_bin.size,
+                                      OWNGIL_IO_TIMEOUT_MS);
+        /* Wait for response (best-effort, bounded). */
         owngil_header_t resp;
-        read(w->result_pipe[0], &resp, sizeof(resp));
+        (void)read_with_timeout(w->result_pipe[0], &resp, sizeof(resp),
+                                OWNGIL_IO_TIMEOUT_MS);
     }
 
     enif_release_binary(&payload_bin);
@@ -7768,7 +7859,7 @@ static ErlNifFunc nif_funcs[] = {
 
     /* Callback support */
     {"set_callback_handler", 2, nif_set_callback_handler, 0},
-    {"send_callback_response", 2, nif_send_callback_response, 0},
+    {"send_callback_response", 2, nif_send_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"resume_callback", 2, nif_resume_callback, 0},
 
     /* Async worker management */
@@ -7792,11 +7883,11 @@ static ErlNifFunc nif_funcs[] = {
     {"subinterp_thread_pool_stats", 0, nif_subinterp_thread_pool_stats, 0},
 
     /* OWN_GIL session management for event loop pool */
-    {"owngil_create_session", 1, nif_owngil_create_session, 0},
-    {"owngil_submit_task", 7, nif_owngil_submit_task, 0},
-    {"owngil_destroy_session", 2, nif_owngil_destroy_session, 0},
-    {"owngil_apply_imports", 3, nif_owngil_apply_imports, 0},
-    {"owngil_apply_paths", 3, nif_owngil_apply_paths, 0},
+    {"owngil_create_session", 1, nif_owngil_create_session, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_submit_task", 7, nif_owngil_submit_task, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_destroy_session", 2, nif_owngil_destroy_session, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_apply_imports", 3, nif_owngil_apply_imports, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"owngil_apply_paths", 3, nif_owngil_apply_paths, ERL_NIF_DIRTY_JOB_IO_BOUND},
 
     /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},
@@ -7917,7 +8008,7 @@ static ErlNifFunc nif_funcs[] = {
     {"context_interp_id", 1, nif_context_interp_id, 0},
     {"context_set_callback_handler", 2, nif_context_set_callback_handler, 0},
     {"context_get_callback_pipe", 1, nif_context_get_callback_pipe, 0},
-    {"context_write_callback_response", 2, nif_context_write_callback_response, 0},
+    {"context_write_callback_response", 2, nif_context_write_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"context_resume", 3, nif_context_resume, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_cancel_resume", 2, nif_context_cancel_resume, 0},
     {"context_get_event_loop", 1, nif_context_get_event_loop, 0},
@@ -7941,8 +8032,8 @@ static ErlNifFunc nif_funcs[] = {
     {"reactor_close_fd", 2, nif_reactor_close_fd, 0},
 
     /* Direct FD operations */
-    {"fd_read", 2, nif_fd_read, 0},
-    {"fd_write", 2, nif_fd_write, 0},
+    {"fd_read", 2, nif_fd_read, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"fd_write", 2, nif_fd_write, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"fd_select_read", 1, nif_fd_select_read, 0},
     {"fd_select_write", 1, nif_fd_select_write, 0},
     {"fd_close", 1, nif_fd_close, 0},

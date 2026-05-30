@@ -555,7 +555,7 @@ static ERL_NIF_TERM nif_channel_receive(ErlNifEnv *env, int argc, const ERL_NIF_
     if (result == 0) {
         /* Data available - convert back to term */
         ERL_NIF_TERM term;
-        if (enif_binary_to_term(env, data, size, &term, 0) == 0) {
+        if (enif_binary_to_term(env, data, size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             enif_free(data);
             return make_error(env, "binary_to_term_failed");
         }
@@ -590,7 +590,7 @@ static ERL_NIF_TERM nif_channel_try_receive(ErlNifEnv *env, int argc, const ERL_
     if (result == 0) {
         /* Data available - convert back to term */
         ERL_NIF_TERM term;
-        if (enif_binary_to_term(env, data, size, &term, 0) == 0) {
+        if (enif_binary_to_term(env, data, size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             enif_free(data);
             return make_error(env, "binary_to_term_failed");
         }
@@ -760,7 +760,7 @@ ERL_NIF_TERM nif_channel_wait(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 
             /* Convert back to term */
             ERL_NIF_TERM term;
-            if (enif_binary_to_term(env, data, msg_size, &term, 0) == 0) {
+            if (enif_binary_to_term(env, data, msg_size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
                 enif_free(data);
                 return make_error(env, "binary_to_term_failed");
             }

@@ -152,6 +152,14 @@ int py_buffer_write(py_buffer_resource_t *buf, const unsigned char *data, size_t
     /* Check if we need to grow the buffer */
     size_t required = buf->write_pos + size;
     if (required > buf->capacity) {
+        /* A live Python memoryview (from PyBuffer_getbuffer) holds a raw pointer
+         * into buf->data. Relocating/freeing the buffer now would leave that
+         * pointer dangling -> use-after-free that crashes the whole node. Refuse
+         * to grow while any view is pinned; the caller gets a write error. */
+        if (buf->view_count > 0) {
+            pthread_mutex_unlock(&buf->mutex);
+            return -1;
+        }
         /* Calculate new capacity */
         size_t new_capacity = buf->capacity;
         while (new_capacity < required) {

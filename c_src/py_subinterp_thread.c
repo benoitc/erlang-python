@@ -107,6 +107,13 @@ int subinterp_thread_pool_init(int num_workers) {
             pthread_mutex_destroy(&w->ns_mutex);
             goto cleanup_workers;
         }
+        /* Non-blocking cmd_pipe write end so the dispatch NIFs can bound their
+         * writes with write_all_with_deadline (no dirty-scheduler stall on a full
+         * pipe). The worker thread reads cmd_pipe[0] blocking, which is fine. */
+        {
+            int wfl = fcntl(w->cmd_pipe[1], F_GETFL, 0);
+            if (wfl >= 0) (void)fcntl(w->cmd_pipe[1], F_SETFL, wfl | O_NONBLOCK);
+        }
         if (pipe(w->result_pipe) < 0) {
             fprintf(stderr, "subinterp_thread_pool_init: failed to create result_pipe for worker %d: %s\n",
                     i, strerror(errno));
@@ -430,7 +437,7 @@ static void *worker_thread_main(void *arg) {
                 if (tmp_env != NULL) {
                     ERL_NIF_TERM imports_list;
                     if (enif_binary_to_term(tmp_env, payload, header.payload_len,
-                                            &imports_list, 0) != 0) {
+                                            &imports_list, ERL_NIF_BIN2TERM_SAFE) != 0) {
                         ERL_NIF_TERM head, tail = imports_list;
                         int arity;
                         const ERL_NIF_TERM *tuple;
@@ -482,7 +489,7 @@ static void *worker_thread_main(void *arg) {
                 if (tmp_env != NULL) {
                     ERL_NIF_TERM paths_list;
                     if (enif_binary_to_term(tmp_env, payload, header.payload_len,
-                                            &paths_list, 0) != 0) {
+                                            &paths_list, ERL_NIF_BIN2TERM_SAFE) != 0) {
                         PyObject *sys_path = PySys_GetObject("path");
                         if (sys_path != NULL && PyList_Check(sys_path)) {
                             ERL_NIF_TERM head, tail = paths_list;
@@ -549,7 +556,7 @@ static void *worker_thread_main(void *arg) {
 
         if (tmp_env != NULL && header.payload_len > 0) {
             if (enif_binary_to_term(tmp_env, payload, header.payload_len,
-                                     &payload_term, 0) != 0) {
+                                     &payload_term, ERL_NIF_BIN2TERM_SAFE) != 0) {
                 if (enif_get_tuple(tmp_env, payload_term, &arity, &elements)) {
                     /* Execute based on request type */
                     PyObject *result = NULL;
@@ -562,7 +569,12 @@ static void *worker_thread_main(void *arg) {
                     if ((owns_globals && globals == NULL) || (owns_locals && locals == NULL)) {
                         if (owns_globals) Py_XDECREF(globals);
                         if (owns_locals) Py_XDECREF(locals);
-                        break;
+                        /* Per-request dict allocation failure: respond with an
+                         * error and keep serving. This previously `break`ed the
+                         * worker command loop, permanently killing the thread (and
+                         * leaving the GIL held), wedging every session routed to it. */
+                        resp_header.msg_type = MSG_ERROR;
+                        goto send_response;
                     }
 
                     switch (header.req_type) {
@@ -933,6 +945,7 @@ static void *worker_thread_main(void *arg) {
             }
         }
 
+    send_response:
         if (tmp_env) {
             enif_free_env(tmp_env);
         }

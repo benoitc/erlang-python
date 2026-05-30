@@ -24,7 +24,9 @@
     test_call_from_non_worker_thread/1,
     test_callback_with_try_except/1,
     test_async_call/1,
-    test_callback_name_registry/1
+    test_callback_name_registry/1,
+    test_etf_decode_safe/1,
+    test_reentrant_resume_stress/1
 ]).
 
 all() ->
@@ -38,7 +40,9 @@ all() ->
         test_call_from_non_worker_thread,
         test_callback_with_try_except,
         test_async_call,
-        test_callback_name_registry
+        test_callback_name_registry,
+        test_etf_decode_safe,
+        test_reentrant_resume_stress
     ].
 
 init_per_suite(Config) ->
@@ -65,6 +69,9 @@ end_per_testcase(_TestCase, _Config) ->
     try py:unregister_function(subtract_five) catch _:_ -> ok end,
     try py:unregister_function(async_multiply) catch _:_ -> ok end,
     try py:unregister_function(test_registry_func) catch _:_ -> ok end,
+    try py:unregister_function(etf_probe_ok) catch _:_ -> ok end,
+    try py:unregister_function(etf_probe_novel) catch _:_ -> ok end,
+    try py:unregister_function(rs_double) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================
@@ -88,6 +95,77 @@ test_basic_reentrant(_Config) ->
     21 = Result,  %% 10 * 2 + 1 = 21
 
     ok.
+
+%% @doc Many reentrant suspend/resume cycles must all succeed with no leak,
+%% stale-TLS invariant trip, or crash. Regression for the suspend/resume lifetime
+%% fixes (worker keep, TLS clear, result_data free, hardened callback-pipe writes);
+%% exercises the callback pipe and context resume under repetition.
+test_reentrant_resume_stress(_Config) ->
+    py:register_function(rs_double, fun([X]) ->
+        {ok, R} = py:eval(iolist_to_binary(io_lib:format("~p * 2", [X]))),
+        R
+    end),
+    Got = [begin
+        Code = iolist_to_binary(
+            io_lib:format("__import__('erlang').call('rs_double', ~p) + 1", [N])),
+        {ok, V} = py:eval(Code),
+        V
+    end || N <- lists:seq(1, 100)],
+    Got = [N * 2 + 1 || N <- lists:seq(1, 100)],
+    py:unregister_function(rs_double),
+    ok.
+
+%% @doc Regression for the binary_to_term SAFE-flag hardening (atom exhaustion).
+%% A `__etf__:` callback result that encodes a brand-new atom must be rejected (not
+%% decoded) so it cannot mint non-GC'd atoms, while a valid existing-atom payload
+%% still round-trips through the same enif_binary_to_term path.
+test_etf_decode_safe(_Config) ->
+    %% Positive: an EXISTING atom encoded via __etf__: still decodes under SAFE,
+    %% proving the decode path runs and the change is non-breaking.
+    OkMarker = etf_marker(term_to_binary(ok)),
+    py:register_function(etf_probe_ok, fun(_) -> OkMarker end),
+    {ok, GotOk} = py:eval(<<"__import__('erlang').call('etf_probe_ok', [])">>),
+    true = (GotOk =/= OkMarker),   %% decoded to the term, not passed through verbatim
+    py:unregister_function(etf_probe_ok),
+
+    %% Negative: many DISTINCT brand-new atoms encoded via __etf__: must all be
+    %% rejected. Pre-fix (flags=0) each would create a permanent atom and come back
+    %% as that atom; with ERL_NIF_BIN2TERM_SAFE the raw marker is returned unchanged.
+    Before = erlang:system_info(atom_count),
+    N = 50,
+    lists:foreach(
+        fun(I) ->
+            Name = "zzqx_etf_safe_" ++ integer_to_list(I),
+            Marker = etf_marker(novel_atom_etf(Name)),
+            py:register_function(etf_probe_novel, fun(_) -> Marker end),
+            {ok, Got} = py:eval(<<"__import__('erlang').call('etf_probe_novel', [])">>),
+            Marker = Got,   %% rejected: returned verbatim, never decoded to the atom
+            assert_atom_absent(Name)
+        end,
+        lists:seq(1, N)
+    ),
+    py:unregister_function(etf_probe_novel),
+    After = erlang:system_info(atom_count),
+    %% The N distinct novel atoms were not created (slack for unrelated atoms).
+    true = (After - Before) < (N div 2),
+    ok.
+
+%% @private Build a "__etf__:<base64>" marker the C side base64-decodes and feeds to
+%% enif_binary_to_term (see term_to_python_repr/1 in py_context for the real encoder).
+etf_marker(Etf) ->
+    <<"__etf__:", (base64:encode(Etf))/binary>>.
+
+%% @private Hand-craft the ETF for a brand-new atom WITHOUT creating it in this VM
+%% (an atom literal would create it). SMALL_ATOM_UTF8_EXT: <<131, 119, Len, Name>>.
+novel_atom_etf(Name) ->
+    Bin = list_to_binary(Name),
+    <<131, 119, (byte_size(Bin)), Bin/binary>>.
+
+%% @private Fail if Name was created as an atom.
+assert_atom_absent(Name) ->
+    try list_to_existing_atom(Name) of
+        _ -> error({atom_created, Name})
+    catch error:badarg -> ok end.
 
 %% @doc Test deeply nested callbacks (3+ levels).
 %% Tests Erlang→Python→Erlang→Python... nesting

@@ -21,6 +21,8 @@
     test_spawn_call/1,
     test_type_conversions/1,
     test_nested_types/1,
+    test_conversion_depth_guard/1,
+    test_embedded_nul_name_rejected/1,
     test_timeout/1,
     test_special_floats/1,
     test_streaming/1,
@@ -82,6 +84,8 @@ all() ->
         test_spawn_call,
         test_type_conversions,
         test_nested_types,
+        test_conversion_depth_guard,
+        test_embedded_nul_name_rejected,
         test_timeout,
         test_special_floats,
         test_streaming,
@@ -310,6 +314,28 @@ test_nested_types(_Config) ->
     {ok, #{<<"data">> := [{1, <<"a">>}, {2, <<"b">>}]}} =
         py:eval(<<"{'data': [(1, 'a'), (2, 'b')]}">>),
 
+    ok.
+
+%% @doc A term nested far deeper than the converter's depth cap must fail cleanly
+%% (RecursionError -> arg conversion error) rather than overflow the C stack and
+%% crash the node. Regression for the recursion guard in py_convert.
+test_conversion_depth_guard(_Config) ->
+    %% 1M deep: without the guard this overflows the C stack and crashes the
+    %% node; with it, conversion bails at PY_CONVERT_MAX_DEPTH and returns an error.
+    Deep = lists:foldl(fun(_, Acc) -> [Acc] end, [], lists:seq(1, 1000000)),
+    {error, _} = py:call(math, sqrt, [Deep]),
+    %% Node/context is still alive and usable afterwards.
+    {ok, 4.0} = py:call(math, sqrt, [16]),
+    ok.
+
+%% @doc A code string with an embedded NUL must be rejected, not silently
+%% truncated at the NUL (which would run something other than intended). Exercises
+%% the binary_to_string NUL guard shared by all name/code decoding.
+test_embedded_nul_name_rejected(_Config) ->
+    {error, _} = py:eval(<<"1", 0, "+1">>),
+    {error, _} = py:exec(<<"x = 1", 0, "; y = 2">>),
+    %% Node still alive and clean code still works.
+    {ok, 2} = py:eval(<<"1+1">>),
     ok.
 
 test_timeout(_Config) ->

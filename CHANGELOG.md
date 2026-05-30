@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+### Fixed
+
+- **NIF robustness hardening** - `make_py_error` no longer passes a NULL message/type
+  to `enif_make_string`/`enif_make_atom` when a Python exception's text isn't
+  UTF-8-encodable; `binary_to_string` rejects names/code containing an embedded NUL
+  (which would silently truncate a module/function/attr/code string) rather than
+  truncating; a leaked `split` method object in the reactor buffer is released; and a
+  stray debug `fprintf` on the normal worker send path is removed.
+
+### Security
+
+- **No shell for venv/installer commands** - `py:ensure_venv` and dependency
+  installation now run the executables via `open_port({spawn_executable, ...})` with an
+  argument list instead of building a shell string for `os:cmd`. Venv paths, requirement
+  files, and extras are passed literally, so shell metacharacters can't be injected. For
+  `uv`, `VIRTUAL_ENV` is passed via the port `{env, ...}` option rather than a shell prefix.
+- **Bounded shared state + safe stream/log builders** - `py_state` gained an optional
+  `max_state_entries` cap (default `infinity`, unchanged behavior) enforced with atomic
+  admission so Python-driven `state_set` can't exhaust node memory, and its size counter
+  is protected from corruption. The `py:stream` and logging helpers that build Python
+  source now strictly validate module/function/kwarg names as identifiers (rejecting
+  injection at positions where quoting is meaningless) and escape string-literal values
+  including control characters.
+- **Validated event-loop fd handles** - The asyncio reader/writer integration no longer
+  hands Python a raw `fd_resource` pointer as an integer key. Each handle is an opaque id
+  validated against a registry on every use, so a stale, duplicate, or fabricated id is a
+  safe no-op (or clean error) instead of a double-free or arbitrary-pointer dereference
+  that crashed the node. `fd_read`/`fd_write` also moved to dirty IO schedulers.
+- **OWN_GIL worker robustness** (Python 3.14+) - A per-request allocation failure in
+  a subinterpreter worker no longer `break`s (and permanently kills) the worker command
+  loop; it returns an error and keeps serving. The `owngil_*` dispatch NIFs now run on
+  dirty IO schedulers and use non-blocking, deadline-bounded pipe reads and writes, so a
+  stalled or dead worker can't wedge a scheduler forever. The internal `SuspensionRequired`
+  exception is now looked up per-interpreter (like `ProcessError`), avoiding cross-
+  interpreter object use under OWN_GIL.
+- **Callback suspend/resume lifetime hardening** - The worker resource is now kept
+  alive for the lifetime of a suspended callback (it could previously be GC'd mid-
+  suspension, causing a use-after-free on resume). A resume frees any prior result
+  before storing a new one (no leak/double-replay on a duplicate resume), the
+  pending-callback thread-local is cleared at the worker request boundary, and the
+  callback-response pipe writes run on dirty schedulers with non-blocking, deadline-
+  bounded writes so a stalled reader or large payload can't wedge a scheduler or
+  desync the framed protocol.
+- **Zero-copy buffer pinning** - `py_buffer` no longer relocates (and frees) its
+  storage while a Python `memoryview` points into it. A write that would grow the
+  buffer while a view is held now returns an error instead of dangling the view into
+  freed memory (a use-after-free that crashed the whole node).
+- **Bounded recursion in type conversion** - The Erlang<->Python converters now cap
+  nesting depth, so a deeply nested term (or Python structure) returns a clean error
+  instead of overflowing the C stack and crashing the whole node.
+- **NULL-checked tuple allocation** - Argument-tuple allocations in the call/eval paths
+  are checked before use, and the Python->Erlang map conversion is bounded against
+  mid-iteration dict mutation, closing two ways an allocation failure or re-entrant
+  `__str__` could corrupt memory.
+- **Safe term decoding at the NIF boundary** - All `enif_binary_to_term` calls now
+  pass `ERL_NIF_BIN2TERM_SAFE`, preventing attacker-influenced data (notably a Python
+  `"__etf__:<base64>"` callback result) from minting new, non-GC'd atoms and exhausting
+  the atom table. Local-node pids/refs and already-existing atoms still round-trip
+  unchanged; only brand-new atoms, remote-node pids/refs, and external funs in
+  Python-supplied payloads are now rejected.
+
 ### Changed
 
 - **Support Erlang/OTP 28 and 29** - Validated builds and the full Common Test

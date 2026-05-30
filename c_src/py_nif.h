@@ -1674,6 +1674,12 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env);
  * @warning Caller must call enif_free() on the returned string
  */
 static char *binary_to_string(const ErlNifBinary *bin) {
+    /* Reject embedded NULs: the result is used as a C string, so a NUL would
+     * silently truncate a module/func/attr/code name (a name-smuggling vector).
+     * Callers already treat a NULL return as an error. */
+    if (bin->size > 0 && memchr(bin->data, '\0', bin->size) != NULL) {
+        return NULL;
+    }
     char *str = enif_alloc(bin->size + 1);
     if (str != NULL) {
         memcpy(str, bin->data, bin->size);

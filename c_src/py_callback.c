@@ -147,6 +147,33 @@ static PyObject *get_current_process_error(void) {
     return exc_class;
 }
 
+/**
+ * Get the SuspensionRequired exception class from the current interpreter's
+ * erlang module. Under OWN_GIL subinterpreters each interpreter has its own
+ * erlang module/class, so raising the process-global object (which belongs to
+ * whichever interpreter initialized last) is cross-interpreter UB. Mirrors
+ * get_current_process_error().
+ */
+static PyObject *get_current_suspension_required(void) {
+    PyObject *erlang_module = PyImport_ImportModule("erlang");
+    if (erlang_module == NULL) {
+        PyErr_Clear();
+        return SuspensionRequiredException;  /* Fallback to global */
+    }
+
+    PyObject *exc_class = PyObject_GetAttrString(erlang_module, "SuspensionRequired");
+    Py_DECREF(erlang_module);
+
+    if (exc_class == NULL) {
+        PyErr_Clear();
+        return SuspensionRequiredException;  /* Fallback to global */
+    }
+
+    /* See get_current_process_error: decref and rely on the module keeping it alive. */
+    Py_DECREF(exc_class);
+    return exc_class;
+}
+
 /* ============================================================================
  * Callback Name Registry
  *
@@ -398,6 +425,14 @@ static suspended_state_t *create_suspended_state_ex(
         state->worker = tl_current_worker;
     } else {
         state->worker = source->data.existing->worker;
+    }
+    /* Keep the worker resource alive for as long as the suspended state exists.
+     * Without this the worker can be GC'd while a callback is suspended, and
+     * nif_resume_callback_dirty would dereference a freed worker (use-after-free
+     * with the GIL held). Mirrors the enif_keep_resource(ctx) on the context path;
+     * suspended_state_destructor releases it. */
+    if (state->worker != NULL) {
+        enif_keep_resource(state->worker);
     }
 
     state->callback_id = PyLong_AsUnsignedLongLong(callback_id_obj);
@@ -977,7 +1012,7 @@ static PyObject *decode_etf_string(const char *str, Py_ssize_t len) {
 
     /* Decode the ETF binary to an Erlang term */
     ERL_NIF_TERM term;
-    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, 0) == 0) {
+    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
         /* Decoding failed */
         enif_free_env(tmp_env);
         Py_DECREF(decoded);
@@ -2109,7 +2144,7 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     Py_XSETREF(tl_pending_args, call_args);
 
     /* Raise exception to abort Python execution */
-    PyErr_SetString(SuspensionRequiredException, "callback pending");
+    PyErr_SetString(get_current_suspension_required(), "callback pending");
     return NULL;
 }
 
@@ -2859,7 +2894,7 @@ static PyObject *erlang_channel_try_receive_impl(PyObject *self, PyObject *args)
         }
 
         ERL_NIF_TERM term;
-        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+        if (enif_binary_to_term(tmp_env, data, size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             enif_free(data);
             enif_free_env(tmp_env);
             PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
@@ -2939,7 +2974,7 @@ static PyObject *erlang_channel_receive_impl(PyObject *self, PyObject *args) {
         }
 
         ERL_NIF_TERM term;
-        if (enif_binary_to_term(tmp_env, data, size, &term, 0) == 0) {
+        if (enif_binary_to_term(tmp_env, data, size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             enif_free(data);
             enif_free_env(tmp_env);
             PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
@@ -3251,7 +3286,7 @@ static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
             }
 
             ERL_NIF_TERM term;
-            if (enif_binary_to_term(tmp_env, data, msg_size, &term, 0) == 0) {
+            if (enif_binary_to_term(tmp_env, data, msg_size, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
                 enif_free(data);
                 enif_free_env(tmp_env);
                 PyErr_SetString(PyExc_RuntimeError, "failed to decode term");
@@ -4316,7 +4351,14 @@ static ERL_NIF_TERM nif_resume_callback(ErlNifEnv *env, int argc, const ERL_NIF_
     /* Store the result in the suspended state */
     pthread_mutex_lock(&state->mutex);
 
-    /* Copy result data */
+    /* Copy result data. Free any prior result first: a duplicate/raced resume
+     * would otherwise leak the previous buffer. (has_result is not a one-shot
+     * flag -- it toggles during nested replay -- so result_data is the real
+     * pending-result indicator.) */
+    if (state->result_data != NULL) {
+        enif_free(state->result_data);
+        state->result_data = NULL;
+    }
     state->result_data = enif_alloc(result_bin.size);
     if (state->result_data == NULL) {
         pthread_mutex_unlock(&state->mutex);
@@ -4362,6 +4404,12 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
     /* Verify the state has a result */
     if (!state->has_result) {
         return make_error(env, "no_result");
+    }
+
+    /* The worker is kept alive for the lifetime of the suspended state, but
+     * guard rather than dereference NULL in the replay below. */
+    if (state->worker == NULL) {
+        return make_error(env, "no_worker");
     }
 
     /* Set up thread-local state for replay */
@@ -4430,6 +4478,11 @@ static ERL_NIF_TERM nif_resume_callback_dirty(ErlNifEnv *env, int argc, const ER
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            result = make_error(env, "alloc_failed");
+            goto call_cleanup;
+        }
         ERL_NIF_TERM head, tail = state->orig_args;
         for (unsigned int i = 0; i < args_len; i++) {
             enif_get_list_cell(state->orig_env, tail, &head, &tail);

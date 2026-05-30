@@ -22,6 +22,7 @@
     seek_tell_test/1,
     find_test/1,
     memoryview_test/1,
+    buffer_grow_pinned_test/1,
     iterator_test/1,
     closed_buffer_test/1,
     empty_buffer_test/1,
@@ -40,6 +41,7 @@ all() -> [
     seek_tell_test,
     find_test,
     memoryview_test,
+    buffer_grow_pinned_test,
     iterator_test,
     closed_buffer_test,
     empty_buffer_test,
@@ -304,6 +306,32 @@ def read_buffer(buf):
     %% Call with buffer ref - py_convert.c should wrap it as PyBuffer
     {ok, <<"chunk1chunk2">>} = py:eval(Ctx, <<"read_buffer(buf)">>, #{<<"buf">> => Buf}),
 
+    ok.
+
+%% @doc A buffer write that must grow the storage is refused while a Python
+%% memoryview pins it (relocating the storage would dangle the view -> UAF).
+%% Regression for the zero-copy view_count guard in py_buffer_write.
+buffer_grow_pinned_test(_Config) ->
+    {ok, Buf} = py_buffer:new(8),           %% capacity 8 bytes
+    ok = py_buffer:write(Buf, <<"ab">>),    %% write_pos 2, within capacity
+    Ctx = py:context(1),
+
+    %% Python holds a memoryview pinning the buffer (kept in a persistent global).
+    {ok, <<"pinned">>} = py:eval(Ctx,
+        <<"globals().setdefault('_keep', []).append(memoryview(buf)) or 'pinned'">>,
+        #{<<"buf">> => Buf}),
+
+    %% Growing the buffer now would relocate buf->data and dangle the memoryview,
+    %% so the write is refused (no crash) while the view is pinned.
+    {error, _} = py_buffer:write(Buf, binary:copy(<<"x">>, 1000)),
+
+    %% Release the view; the same write now succeeds.
+    {ok, <<"released">>} = py:eval(Ctx, <<"_keep[0].release() or 'released'">>),
+    ok = py_buffer:write(Buf, binary:copy(<<"x">>, 1000)),
+
+    %% Context still alive and usable.
+    {ok, 2} = py:eval(Ctx, <<"1+1">>),
+    ok = py_buffer:close(Buf),
     ok.
 
 %% @doc Test that buffer resources are properly garbage collected

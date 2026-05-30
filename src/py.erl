@@ -413,8 +413,8 @@ stream(Module, Func, Args, Kwargs) when map_size(Kwargs) == 0 ->
 stream(Module, Func, Args, Kwargs) ->
     %% With kwargs - use eval approach
     Ctx = py_context_router:get_context(),
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
+    ModuleBin = valid_py_module(ensure_binary(Module)),
+    FuncBin = valid_py_ident(ensure_binary(Func)),
     KwargsCode = format_kwargs(Kwargs),
     ArgsCode = format_args(Args),
     Code = iolist_to_binary([
@@ -445,8 +445,8 @@ format_args(Args) ->
 %% @private Format a single argument
 format_arg(A) when is_integer(A) -> integer_to_binary(A);
 format_arg(A) when is_float(A) -> float_to_binary(A);
-format_arg(A) when is_binary(A) -> <<"'", A/binary, "'">>;
-format_arg(A) when is_atom(A) -> <<"'", (atom_to_binary(A))/binary, "'">>;
+format_arg(A) when is_binary(A) -> <<"'", (escape_py_literal(A))/binary, "'">>;
+format_arg(A) when is_atom(A) -> <<"'", (escape_py_literal(atom_to_binary(A)))/binary, "'">>;
 format_arg(A) when is_list(A) -> iolist_to_binary([<<"[">>, format_args(A), <<"]">>]);
 format_arg(_) -> <<"None">>.
 
@@ -454,7 +454,7 @@ format_arg(_) -> <<"None">>.
 format_kwargs(Kwargs) when map_size(Kwargs) == 0 -> <<>>;
 format_kwargs(Kwargs) ->
     KwList = maps:fold(fun(K, V, Acc) ->
-        KB = if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end,
+        KB = valid_py_ident(if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end),
         [<<KB/binary, "=", (format_arg(V))/binary>> | Acc]
     end, [], Kwargs),
     iolist_to_binary([<<", ">>, lists:join(<<", ">>, KwList)]).
@@ -543,7 +543,9 @@ stream_start(Module, Func, Args, Opts) ->
     {ok, Ref}.
 
 %% @private Run the streaming via Python code
-stream_run_python(ModuleBin, FuncBin, RefHash) ->
+stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
+    ModuleBin = valid_py_module(ModuleBin0),
+    FuncBin = valid_py_ident(FuncBin0),
     RefHashBin = integer_to_binary(RefHash),
     %% Build Python code that streams values using callbacks
     Code = iolist_to_binary([
@@ -898,14 +900,13 @@ create_venv(Path, Opts) ->
         undefined -> get_python_executable();
         P -> P
     end,
-    Cmd = case Installer of
+    case Installer of
         uv ->
             %% uv venv is faster, use --python to match the running interpreter
-            io_lib:format("uv venv --python ~s ~s", [quote(Python), quote(Path)]);
+            run_cmd(uv_exe(), ["venv", "--python", Python, Path], []);
         pip ->
-            io_lib:format("~s -m venv ~s", [quote(Python), quote(Path)])
-    end,
-    run_cmd(lists:flatten(Cmd)).
+            run_cmd(Python, ["-m", "venv", Path], [])
+    end.
 
 %% @private Get the Python executable path
 %% When embedded, sys.executable returns the embedding app (beam.smp)
@@ -925,30 +926,28 @@ get_python_executable() ->
 -spec install_deps(string(), string(), list()) -> ok | {error, term()}.
 install_deps(Path, RequirementsFile, Opts) ->
     Installer = detect_installer(Opts),
-    PipPath = pip_path(Path, Installer),
+    {Exe, BaseArgs, PortOpts} = pip_command(Path, Installer),
     Extras = proplists:get_value(extras, Opts, []),
 
-    %% Determine file type and build install command
-    Cmd = case filename:extension(RequirementsFile) of
+    %% Determine file type and build the install argument list (no shell).
+    Args = case filename:extension(RequirementsFile) of
         ".txt" ->
-            %% requirements.txt
-            io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)]);
+            BaseArgs ++ ["install", "-r", RequirementsFile];
         ".toml" ->
-            %% pyproject.toml - install as editable
+            %% pyproject.toml - install as editable.
             %% filename:dirname returns "." for files without directory component
             InstallPath = filename:dirname(RequirementsFile),
             case Extras of
                 [] ->
-                    io_lib:format("~s install -e ~s", [PipPath, quote(InstallPath)]);
+                    BaseArgs ++ ["install", "-e", InstallPath];
                 _ ->
                     ExtrasStr = string:join(Extras, ","),
-                    io_lib:format("~s install -e \"~s[~s]\"", [PipPath, InstallPath, ExtrasStr])
+                    BaseArgs ++ ["install", "-e", InstallPath ++ "[" ++ ExtrasStr ++ "]"]
             end;
         _ ->
-            %% Assume requirements.txt format
-            io_lib:format("~s install -r ~s", [PipPath, quote(RequirementsFile)])
+            BaseArgs ++ ["install", "-r", RequirementsFile]
     end,
-    run_cmd(lists:flatten(Cmd)).
+    run_cmd(Exe, Args, PortOpts).
 
 %% @private Detect which installer to use (uv or pip)
 -spec detect_installer(list()) -> uv | pip.
@@ -963,40 +962,74 @@ detect_installer(Opts) ->
             Installer
     end.
 
-%% @private Get pip/uv pip command path
--spec pip_path(string(), uv | pip) -> string().
-pip_path(VenvPath, uv) ->
-    %% uv pip uses venv from env var or --python flag
-    "VIRTUAL_ENV=" ++ quote(VenvPath) ++ " uv pip";
-pip_path(VenvPath, pip) ->
-    %% Use pip from the venv
-    case os:type() of
+%% @private Resolve the installer into {Executable, BaseArgs, PortOpts}.
+%% For uv the venv is selected via the VIRTUAL_ENV port env option (not a shell
+%% prefix); for pip we use the venv's own pip binary.
+-spec pip_command(string(), uv | pip) -> {string(), [string()], list()}.
+pip_command(VenvPath, uv) ->
+    {uv_exe(), ["pip"], [{env, [{"VIRTUAL_ENV", VenvPath}]}]};
+pip_command(VenvPath, pip) ->
+    PipExe = case os:type() of
         {win32, _} ->
             filename:join([VenvPath, "Scripts", "pip"]);
         _ ->
             filename:join([VenvPath, "bin", "pip"])
+    end,
+    {PipExe, [], []}.
+
+%% @private Full path to the uv executable (falls back to the bare name).
+-spec uv_exe() -> string().
+uv_exe() ->
+    case os:find_executable("uv") of
+        false -> "uv";
+        P -> P
     end.
 
-%% @private Quote a path for shell
--spec quote(string()) -> string().
-quote(S) ->
-    "'" ++ S ++ "'".
+%% @private Run an executable with an argv list (no shell) and return ok or error.
+-spec run_cmd(string(), [string()], list()) -> ok | {error, term()}.
+run_cmd(Exe, Args, ExtraOpts) ->
+    case resolve_exe(Exe) of
+        {error, _} = Err ->
+            Err;
+        ExeFull ->
+            try open_port({spawn_executable, ExeFull},
+                          [exit_status, stderr_to_stdout, binary, {args, Args} | ExtraOpts]) of
+                Port -> collect_port(Port, [])
+            catch
+                error:Reason -> {error, {spawn_failed, Exe, Reason}}
+            end
+    end.
 
-%% @private Run a shell command and return ok or error
--spec run_cmd(string()) -> ok | {error, term()}.
-run_cmd(Cmd) ->
-    %% Use os:cmd but check for errors
-    Result = os:cmd(Cmd ++ " 2>&1; echo \"::exitcode::$?\""),
-    %% Parse exit code from end of output
-    case string:split(Result, "::exitcode::", trailing) of
-        [Output, ExitCodeStr] ->
-            case string:trim(ExitCodeStr) of
-                "0" -> ok;
-                Code -> {error, {exit_code, list_to_integer(Code), string:trim(Output)}}
+%% @private Resolve an executable name/path to a full path (spawn_executable does
+%% not search PATH).
+-spec resolve_exe(string()) -> string() | {error, term()}.
+resolve_exe(Exe) ->
+    case filename:pathtype(Exe) of
+        absolute ->
+            case filelib:is_file(Exe) of
+                true -> Exe;
+                false -> {error, {executable_not_found, Exe}}
             end;
         _ ->
-            %% Fallback - assume success if no error marker
-            ok
+            case os:find_executable(Exe) of
+                false -> {error, {executable_not_found, Exe}};
+                Found -> Found
+            end
+    end.
+
+%% @private Collect a spawned port's output and exit status.
+-spec collect_port(port(), [binary()]) -> ok | {error, term()}.
+collect_port(Port, Acc) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_port(Port, [Data | Acc]);
+        {Port, {exit_status, 0}} ->
+            ok;
+        {Port, {exit_status, Code}} ->
+            {error, {exit_code, Code, iolist_to_binary(lists:reverse(Acc))}}
+    after 300000 ->
+        try port_close(Port) catch _:_ -> ok end,
+        {error, timeout}
     end.
 
 %% @private Convert to string
@@ -1069,6 +1102,51 @@ escape_python_string(Str) ->
                      ($\\) -> "\\\\";
                      (C) -> [C]
                   end, Str).
+
+%% @private Escape a binary for safe embedding inside a single-quoted Python
+%% string literal: quote, backslash, and newline/CR/tab/other control bytes that
+%% would otherwise break out of or corrupt the literal.
+escape_py_literal(Bin) when is_binary(Bin) ->
+    << <<(escape_py_byte(B))/binary>> || <<B>> <= Bin >>.
+
+escape_py_byte($') -> <<"\\'">>;
+escape_py_byte($\\) -> <<"\\\\">>;
+escape_py_byte($\n) -> <<"\\n">>;
+escape_py_byte($\r) -> <<"\\r">>;
+escape_py_byte($\t) -> <<"\\t">>;
+escape_py_byte(B) when B < 16#20; B =:= 16#7f ->
+    list_to_binary(io_lib:format("\\x~2.16.0b", [B]));
+escape_py_byte(B) -> <<B>>.
+
+%% @private Validate a Python identifier ([A-Za-z_][A-Za-z0-9_]*). Crashes on a
+%% non-conforming value so an attacker-controlled module/func/kwarg name can't
+%% inject code at an identifier position (where quoting is meaningless).
+valid_py_ident(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
+    case ident_ok(Bin, first) of
+        true -> Bin;
+        false -> error({invalid_python_identifier, Bin})
+    end;
+valid_py_ident(Other) ->
+    error({invalid_python_identifier, Other}).
+
+%% @private Validate a dotted Python module path (each segment an identifier).
+valid_py_module(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
+    Segments = binary:split(Bin, <<".">>, [global]),
+    lists:foreach(fun valid_py_ident/1, Segments),
+    Bin;
+valid_py_module(Other) ->
+    error({invalid_python_identifier, Other}).
+
+ident_ok(<<>>, first) -> false;   %% empty segment (leading/trailing/double dot)
+ident_ok(<<>>, rest) -> true;
+ident_ok(<<C, Rest/binary>>, first)
+  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z); C =:= $_ ->
+    ident_ok(Rest, rest);
+ident_ok(<<C, Rest/binary>>, rest)
+  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z);
+       (C >= $0 andalso C =< $9); C =:= $_ ->
+    ident_ok(Rest, rest);
+ident_ok(_, _) -> false.
 
 %% @doc Deactivate the current virtual environment.
 %% Restores sys.path to its original state.
@@ -1262,13 +1340,13 @@ configure_logging(Opts) ->
             iolist_to_binary([
                 "__import__('erlang').setup_logging(",
                 integer_to_binary(LevelInt),
-                ", '", F, "')"
+                ", '", escape_py_literal(F), "')"
             ]);
         F when is_list(F) ->
             iolist_to_binary([
                 "__import__('erlang').setup_logging(",
                 integer_to_binary(LevelInt),
-                ", '", F, "')"
+                ", '", escape_py_literal(iolist_to_binary(F)), "')"
             ])
     end,
     case eval(Code) of

@@ -2101,6 +2101,11 @@ ERL_NIF_TERM nif_event_loop_run_async(ErlNifEnv *env, int argc,
     }
 
     PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        Py_DECREF(func);
+        result = make_error(env, "alloc_failed");
+        goto cleanup;
+    }
     ERL_NIF_TERM head, tail = argv[5];
     for (unsigned int i = 0; i < args_len; i++) {
         enif_get_list_cell(env, tail, &head, &tail);
@@ -2838,7 +2843,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
         ERL_NIF_TERM task_term;
         if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
-                                &task_term, 0) == 0) {
+                                &task_term, ERL_NIF_BIN2TERM_SAFE) == 0) {
             return_pooled_env(loop, term_env);
             /* Dequeue and skip this malformed task */
             enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
@@ -3109,6 +3114,11 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
 
         PyObject *args = PyTuple_New(args_len);
+        if (args == NULL) {
+            Py_DECREF(func);
+            return_pooled_env(loop, term_env);
+            continue;
+        }
         ERL_NIF_TERM head, tail = tuple_elems[4];
         bool args_ok = true;
         for (unsigned int i = 0; i < args_len && args_ok; i++) {
@@ -6506,6 +6516,83 @@ static PyObject *py_get_isolation_mode(PyObject *self, PyObject *args) {
     return PyUnicode_FromString("global");
 }
 
+/* ============================================================================
+ * Validating fd-handle registry
+ *
+ * Python receives an opaque integer id for each fd resource, never a raw
+ * pointer. Every consumer validates the id against this table, so a stale,
+ * duplicate, or fabricated id is a safe no-op instead of a use-after-free or
+ * arbitrary-pointer dereference. The producer's resource reference lives in the
+ * table entry: fd_reg_get hands out a temporary keep, fd_reg_take transfers the
+ * reference to the caller to release.
+ * ============================================================================ */
+typedef struct { uint64_t id; fd_resource_t *res; } fd_reg_entry_t;
+static fd_reg_entry_t *g_fd_reg = NULL;
+static size_t g_fd_reg_len = 0;
+static size_t g_fd_reg_cap = 0;
+static uint64_t g_fd_reg_next_id = 1;
+static pthread_mutex_t g_fd_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Store res and return its opaque id (0 on allocation failure). The caller's
+ * existing resource reference becomes owned by the table entry. */
+static uint64_t fd_reg_add(fd_resource_t *res) {
+    pthread_mutex_lock(&g_fd_reg_mutex);
+    if (g_fd_reg_len == g_fd_reg_cap) {
+        size_t ncap = g_fd_reg_cap ? g_fd_reg_cap * 2 : 16;
+        fd_reg_entry_t *n = enif_realloc(g_fd_reg, ncap * sizeof(*n));
+        if (n == NULL) {
+            pthread_mutex_unlock(&g_fd_reg_mutex);
+            return 0;
+        }
+        g_fd_reg = n;
+        g_fd_reg_cap = ncap;
+    }
+    uint64_t id = g_fd_reg_next_id++;
+    if (id == 0) id = g_fd_reg_next_id++;  /* never hand out 0 */
+    g_fd_reg[g_fd_reg_len].id = id;
+    g_fd_reg[g_fd_reg_len].res = res;
+    g_fd_reg_len++;
+    pthread_mutex_unlock(&g_fd_reg_mutex);
+    return id;
+}
+
+/* Look up id; on hit, keep the resource and return it (caller must release).
+ * Returns NULL for an unknown/stale/fabricated id. */
+static fd_resource_t *fd_reg_get(uint64_t id) {
+    fd_resource_t *res = NULL;
+    if (id != 0) {
+        pthread_mutex_lock(&g_fd_reg_mutex);
+        for (size_t i = 0; i < g_fd_reg_len; i++) {
+            if (g_fd_reg[i].id == id) {
+                res = g_fd_reg[i].res;
+                enif_keep_resource(res);
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_fd_reg_mutex);
+    }
+    return res;
+}
+
+/* Remove id; on hit, return the resource (caller owns the entry's reference and
+ * must release it). Returns NULL for an unknown/stale/duplicate id. */
+static fd_resource_t *fd_reg_take(uint64_t id) {
+    fd_resource_t *res = NULL;
+    if (id != 0) {
+        pthread_mutex_lock(&g_fd_reg_mutex);
+        for (size_t i = 0; i < g_fd_reg_len; i++) {
+            if (g_fd_reg[i].id == id) {
+                res = g_fd_reg[i].res;
+                g_fd_reg[i] = g_fd_reg[g_fd_reg_len - 1];  /* swap with last */
+                g_fd_reg_len--;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_fd_reg_mutex);
+    }
+    return res;
+}
+
 /* Python function: _add_reader(fd, callback_id) -> fd_key */
 static PyObject *py_add_reader(PyObject *self, PyObject *args) {
     (void)self;
@@ -6557,8 +6644,17 @@ static PyObject *py_add_reader(PyObject *self, PyObject *args) {
     }
 
     /* Return a key that can be used to remove the reader */
-    unsigned long long key = (unsigned long long)(uintptr_t)fd_res;
-    return PyLong_FromUnsignedLongLong(key);
+    /* Hand Python an opaque, validated id instead of a raw pointer. The
+     * producer's resource reference is taken over by the registry entry. */
+    uint64_t id = fd_reg_add(fd_res);
+    if (id == 0) {
+        enif_select(loop->msg_env, (ErlNifEvent)fd, ERL_NIF_SELECT_STOP,
+                    fd_res, NULL, ATOM_UNDEFINED);
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_MemoryError, "fd registry full");
+        return NULL;
+    }
+    return PyLong_FromUnsignedLongLong((unsigned long long)id);
 }
 
 /* Python function: _remove_reader(fd_key) -> None */
@@ -6571,11 +6667,13 @@ static PyObject *py_remove_reader(PyObject *self, PyObject *args) {
     }
 
     /* Use per-interpreter event loop lookup - but still allow cleanup even if loop is gone */
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
-    if (fd_res != NULL && fd_res->loop != NULL) {
-        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
-        fd_res->reader_active = false;
+    fd_resource_t *fd_res = fd_reg_take(fd_key);
+    if (fd_res != NULL) {
+        if (fd_res->loop != NULL) {
+            enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                        ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+            fd_res->reader_active = false;
+        }
         enif_release_resource(fd_res);
     }
 
@@ -6633,8 +6731,17 @@ static PyObject *py_add_writer(PyObject *self, PyObject *args) {
     }
 
     /* Return a key that can be used to remove the writer */
-    unsigned long long key = (unsigned long long)(uintptr_t)fd_res;
-    return PyLong_FromUnsignedLongLong(key);
+    /* Hand Python an opaque, validated id instead of a raw pointer. The
+     * producer's resource reference is taken over by the registry entry. */
+    uint64_t id = fd_reg_add(fd_res);
+    if (id == 0) {
+        enif_select(loop->msg_env, (ErlNifEvent)fd, ERL_NIF_SELECT_STOP,
+                    fd_res, NULL, ATOM_UNDEFINED);
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_MemoryError, "fd registry full");
+        return NULL;
+    }
+    return PyLong_FromUnsignedLongLong((unsigned long long)id);
 }
 
 /* Python function: _remove_writer(fd_key) -> None */
@@ -6647,11 +6754,13 @@ static PyObject *py_remove_writer(PyObject *self, PyObject *args) {
     }
 
     /* Use fd_res->loop directly - allows cleanup even if interpreter's loop is gone */
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
-    if (fd_res != NULL && fd_res->loop != NULL) {
-        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
-        fd_res->writer_active = false;
+    fd_resource_t *fd_res = fd_reg_take(fd_key);
+    if (fd_res != NULL) {
+        if (fd_res->loop != NULL) {
+            enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                        ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+            fd_res->writer_active = false;
+        }
         enif_release_resource(fd_res);
     }
 
@@ -7381,8 +7490,17 @@ static PyObject *py_add_reader_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    unsigned long long key = (unsigned long long)(uintptr_t)fd_res;
-    return PyLong_FromUnsignedLongLong(key);
+    /* Hand Python an opaque, validated id instead of a raw pointer. The
+     * producer's resource reference is taken over by the registry entry. */
+    uint64_t id = fd_reg_add(fd_res);
+    if (id == 0) {
+        enif_select(loop->msg_env, (ErlNifEvent)fd, ERL_NIF_SELECT_STOP,
+                    fd_res, NULL, ATOM_UNDEFINED);
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_MemoryError, "fd registry full");
+        return NULL;
+    }
+    return PyLong_FromUnsignedLongLong((unsigned long long)id);
 }
 
 /* Python function: _remove_reader_for(capsule, fd_key) -> None */
@@ -7401,11 +7519,13 @@ static PyObject *py_remove_reader_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
-    if (fd_res != NULL && fd_res->loop != NULL) {
-        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
-        fd_res->reader_active = false;
+    fd_resource_t *fd_res = fd_reg_take(fd_key);
+    if (fd_res != NULL) {
+        if (fd_res->loop != NULL) {
+            enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                        ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+            fd_res->reader_active = false;
+        }
         enif_release_resource(fd_res);
     }
 
@@ -7462,8 +7582,17 @@ static PyObject *py_add_writer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    unsigned long long key = (unsigned long long)(uintptr_t)fd_res;
-    return PyLong_FromUnsignedLongLong(key);
+    /* Hand Python an opaque, validated id instead of a raw pointer. The
+     * producer's resource reference is taken over by the registry entry. */
+    uint64_t id = fd_reg_add(fd_res);
+    if (id == 0) {
+        enif_select(loop->msg_env, (ErlNifEvent)fd, ERL_NIF_SELECT_STOP,
+                    fd_res, NULL, ATOM_UNDEFINED);
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_MemoryError, "fd registry full");
+        return NULL;
+    }
+    return PyLong_FromUnsignedLongLong((unsigned long long)id);
 }
 
 /* Python function: _remove_writer_for(capsule, fd_key) -> None */
@@ -7482,11 +7611,13 @@ static PyObject *py_remove_writer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
-    if (fd_res != NULL && fd_res->loop != NULL) {
-        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
-        fd_res->writer_active = false;
+    fd_resource_t *fd_res = fd_reg_take(fd_key);
+    if (fd_res != NULL) {
+        if (fd_res->loop != NULL) {
+            enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                        ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+            fd_res->writer_active = false;
+        }
         enif_release_resource(fd_res);
     }
 
@@ -7506,8 +7637,9 @@ static PyObject *py_update_fd_read(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    fd_resource_t *fd_res = fd_reg_get(fd_key);
     if (fd_res == NULL || fd_res->loop == NULL) {
+        if (fd_res) enif_release_resource(fd_res);
         PyErr_SetString(PyExc_ValueError, "Invalid fd resource");
         return NULL;
     }
@@ -7521,6 +7653,7 @@ static PyObject *py_update_fd_read(PyObject *self, PyObject *args) {
     enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
                 ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
 
+    enif_release_resource(fd_res);
     Py_RETURN_NONE;
 }
 
@@ -7537,8 +7670,9 @@ static PyObject *py_update_fd_write(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    fd_resource_t *fd_res = fd_reg_get(fd_key);
     if (fd_res == NULL || fd_res->loop == NULL) {
+        if (fd_res) enif_release_resource(fd_res);
         PyErr_SetString(PyExc_ValueError, "Invalid fd resource");
         return NULL;
     }
@@ -7552,6 +7686,7 @@ static PyObject *py_update_fd_write(PyObject *self, PyObject *args) {
     enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
                 ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
 
+    enif_release_resource(fd_res);
     Py_RETURN_NONE;
 }
 
@@ -7567,9 +7702,10 @@ static PyObject *py_clear_fd_read(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    fd_resource_t *fd_res = fd_reg_get(fd_key);
     if (fd_res == NULL || fd_res->loop == NULL) {
-        Py_RETURN_NONE;  /* Already cleaned up */
+        if (fd_res) enif_release_resource(fd_res);
+        Py_RETURN_NONE;  /* Already cleaned up / invalid id */
     }
 
     if (fd_res->reader_active) {
@@ -7580,6 +7716,7 @@ static PyObject *py_clear_fd_read(PyObject *self, PyObject *args) {
         fd_res->read_callback_id = 0;
     }
 
+    enif_release_resource(fd_res);
     Py_RETURN_NONE;
 }
 
@@ -7595,9 +7732,10 @@ static PyObject *py_clear_fd_write(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
+    fd_resource_t *fd_res = fd_reg_get(fd_key);
     if (fd_res == NULL || fd_res->loop == NULL) {
-        Py_RETURN_NONE;  /* Already cleaned up */
+        if (fd_res) enif_release_resource(fd_res);
+        Py_RETURN_NONE;  /* Already cleaned up / invalid id */
     }
 
     if (fd_res->writer_active) {
@@ -7608,6 +7746,7 @@ static PyObject *py_clear_fd_write(PyObject *self, PyObject *args) {
         fd_res->write_callback_id = 0;
     }
 
+    enif_release_resource(fd_res);
     Py_RETURN_NONE;
 }
 
@@ -7623,10 +7762,12 @@ static PyObject *py_release_fd_resource(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    fd_resource_t *fd_res = (fd_resource_t *)(uintptr_t)fd_key;
-    if (fd_res != NULL && fd_res->loop != NULL) {
-        enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                    ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+    fd_resource_t *fd_res = fd_reg_take(fd_key);
+    if (fd_res != NULL) {
+        if (fd_res->loop != NULL) {
+            enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                        ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+        }
         enif_release_resource(fd_res);
     }
 
