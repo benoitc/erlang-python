@@ -413,8 +413,8 @@ stream(Module, Func, Args, Kwargs) when map_size(Kwargs) == 0 ->
 stream(Module, Func, Args, Kwargs) ->
     %% With kwargs - use eval approach
     Ctx = py_context_router:get_context(),
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
+    ModuleBin = valid_py_module(ensure_binary(Module)),
+    FuncBin = valid_py_ident(ensure_binary(Func)),
     KwargsCode = format_kwargs(Kwargs),
     ArgsCode = format_args(Args),
     Code = iolist_to_binary([
@@ -445,8 +445,8 @@ format_args(Args) ->
 %% @private Format a single argument
 format_arg(A) when is_integer(A) -> integer_to_binary(A);
 format_arg(A) when is_float(A) -> float_to_binary(A);
-format_arg(A) when is_binary(A) -> <<"'", A/binary, "'">>;
-format_arg(A) when is_atom(A) -> <<"'", (atom_to_binary(A))/binary, "'">>;
+format_arg(A) when is_binary(A) -> <<"'", (escape_py_literal(A))/binary, "'">>;
+format_arg(A) when is_atom(A) -> <<"'", (escape_py_literal(atom_to_binary(A)))/binary, "'">>;
 format_arg(A) when is_list(A) -> iolist_to_binary([<<"[">>, format_args(A), <<"]">>]);
 format_arg(_) -> <<"None">>.
 
@@ -454,7 +454,7 @@ format_arg(_) -> <<"None">>.
 format_kwargs(Kwargs) when map_size(Kwargs) == 0 -> <<>>;
 format_kwargs(Kwargs) ->
     KwList = maps:fold(fun(K, V, Acc) ->
-        KB = if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end,
+        KB = valid_py_ident(if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end),
         [<<KB/binary, "=", (format_arg(V))/binary>> | Acc]
     end, [], Kwargs),
     iolist_to_binary([<<", ">>, lists:join(<<", ">>, KwList)]).
@@ -543,7 +543,9 @@ stream_start(Module, Func, Args, Opts) ->
     {ok, Ref}.
 
 %% @private Run the streaming via Python code
-stream_run_python(ModuleBin, FuncBin, RefHash) ->
+stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
+    ModuleBin = valid_py_module(ModuleBin0),
+    FuncBin = valid_py_ident(FuncBin0),
     RefHashBin = integer_to_binary(RefHash),
     %% Build Python code that streams values using callbacks
     Code = iolist_to_binary([
@@ -1070,6 +1072,51 @@ escape_python_string(Str) ->
                      (C) -> [C]
                   end, Str).
 
+%% @private Escape a binary for safe embedding inside a single-quoted Python
+%% string literal: quote, backslash, and newline/CR/tab/other control bytes that
+%% would otherwise break out of or corrupt the literal.
+escape_py_literal(Bin) when is_binary(Bin) ->
+    << <<(escape_py_byte(B))/binary>> || <<B>> <= Bin >>.
+
+escape_py_byte($') -> <<"\\'">>;
+escape_py_byte($\\) -> <<"\\\\">>;
+escape_py_byte($\n) -> <<"\\n">>;
+escape_py_byte($\r) -> <<"\\r">>;
+escape_py_byte($\t) -> <<"\\t">>;
+escape_py_byte(B) when B < 16#20; B =:= 16#7f ->
+    list_to_binary(io_lib:format("\\x~2.16.0b", [B]));
+escape_py_byte(B) -> <<B>>.
+
+%% @private Validate a Python identifier ([A-Za-z_][A-Za-z0-9_]*). Crashes on a
+%% non-conforming value so an attacker-controlled module/func/kwarg name can't
+%% inject code at an identifier position (where quoting is meaningless).
+valid_py_ident(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
+    case ident_ok(Bin, first) of
+        true -> Bin;
+        false -> error({invalid_python_identifier, Bin})
+    end;
+valid_py_ident(Other) ->
+    error({invalid_python_identifier, Other}).
+
+%% @private Validate a dotted Python module path (each segment an identifier).
+valid_py_module(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
+    Segments = binary:split(Bin, <<".">>, [global]),
+    lists:foreach(fun valid_py_ident/1, Segments),
+    Bin;
+valid_py_module(Other) ->
+    error({invalid_python_identifier, Other}).
+
+ident_ok(<<>>, first) -> false;   %% empty segment (leading/trailing/double dot)
+ident_ok(<<>>, rest) -> true;
+ident_ok(<<C, Rest/binary>>, first)
+  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z); C =:= $_ ->
+    ident_ok(Rest, rest);
+ident_ok(<<C, Rest/binary>>, rest)
+  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z);
+       (C >= $0 andalso C =< $9); C =:= $_ ->
+    ident_ok(Rest, rest);
+ident_ok(_, _) -> false.
+
 %% @doc Deactivate the current virtual environment.
 %% Restores sys.path to its original state.
 -spec deactivate_venv() -> ok | {error, term()}.
@@ -1262,13 +1309,13 @@ configure_logging(Opts) ->
             iolist_to_binary([
                 "__import__('erlang').setup_logging(",
                 integer_to_binary(LevelInt),
-                ", '", F, "')"
+                ", '", escape_py_literal(F), "')"
             ]);
         F when is_list(F) ->
             iolist_to_binary([
                 "__import__('erlang').setup_logging(",
                 integer_to_binary(LevelInt),
-                ", '", F, "')"
+                ", '", escape_py_literal(iolist_to_binary(F)), "')"
             ])
     end,
     case eval(Code) of

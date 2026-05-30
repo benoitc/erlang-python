@@ -72,6 +72,11 @@
 
 -define(TABLE, py_state).
 
+%% Reserved sentinel row holding the live entry count, used by the optional size
+%% cap. User keys are rejected from this slot so callers (Erlang or Python) can't
+%% corrupt the accounting.
+-define(SIZE_KEY, '$py_state_size$').
+
 %%% ============================================================================
 %%% API
 %%% ============================================================================
@@ -112,6 +117,7 @@ register_callbacks() ->
 
 %% @doc Fetch a value from the shared state.
 -spec fetch(Key :: term()) -> {ok, term()} | {error, not_found}.
+fetch(?SIZE_KEY) -> {error, not_found};
 fetch(Key) ->
     case ets:lookup(?TABLE, Key) of
         [{_, Value}] -> {ok, Value};
@@ -119,21 +125,62 @@ fetch(Key) ->
     end.
 
 %% @doc Store a value in the shared state.
--spec store(Key :: term(), Value :: term()) -> ok.
+-spec store(Key :: term(), Value :: term()) -> ok | {error, full | reserved_key}.
+store(?SIZE_KEY, _Value) ->
+    {error, reserved_key};
 store(Key, Value) ->
-    ets:insert(?TABLE, {Key, Value}),
-    ok.
+    case max_entries() of
+        infinity ->
+            ets:insert(?TABLE, {Key, Value}),
+            ok;
+        Max ->
+            %% Atomic admission: only genuinely new keys consume capacity, and the
+            %% reserve/rollback uses ets:update_counter so there is no TOCTOU race
+            %% on the public, write-concurrent table. Overwrites don't change count.
+            case ets:insert_new(?TABLE, {Key, Value}) of
+                true ->
+                    Count = ets:update_counter(?TABLE, ?SIZE_KEY, {2, 1}, {?SIZE_KEY, 0}),
+                    case Count > Max of
+                        true ->
+                            ets:delete(?TABLE, Key),
+                            ets:update_counter(?TABLE, ?SIZE_KEY, {2, -1}, {?SIZE_KEY, 0}),
+                            {error, full};
+                        false ->
+                            ok
+                    end;
+                false ->
+                    ets:insert(?TABLE, {Key, Value}),
+                    ok
+            end
+    end.
 
 %% @doc Remove a key from the shared state.
 -spec remove(Key :: term()) -> ok.
+remove(?SIZE_KEY) ->
+    ok;
 remove(Key) ->
-    ets:delete(?TABLE, Key),
-    ok.
+    case max_entries() of
+        infinity ->
+            ets:delete(?TABLE, Key),
+            ok;
+        _Max ->
+            %% Decrement only when a real user key was actually present (ets:take so
+            %% a missing-key remove can't drift the counter negative).
+            case ets:take(?TABLE, Key) of
+                [_] ->
+                    ets:update_counter(?TABLE, ?SIZE_KEY, {2, -1}, {?SIZE_KEY, 0}),
+                    ok;
+                [] ->
+                    ok
+            end
+    end.
 
 %% @doc Get all keys in the shared state.
 -spec keys() -> [term()].
 keys() ->
-    ets:foldl(fun({K, _}, Acc) -> [K | Acc] end, [], ?TABLE).
+    ets:foldl(fun({?SIZE_KEY, _}, Acc) -> Acc;
+                 ({K, _}, Acc) -> [K | Acc]
+              end, [], ?TABLE).
 
 %% @doc Clear all entries from the shared state.
 -spec clear() -> ok.
@@ -148,6 +195,8 @@ incr(Key) ->
 
 %% @doc Atomically increment a counter by Amount. Initializes to Amount if not exists.
 -spec incr(Key :: term(), Amount :: integer()) -> integer().
+incr(?SIZE_KEY, _Amount) ->
+    error(reserved_key);
 incr(Key, Amount) ->
     try
         ets:update_counter(?TABLE, Key, {2, Amount})
@@ -168,6 +217,12 @@ decr(Key) ->
 decr(Key, Amount) ->
     incr(Key, -Amount).
 
+%% @private Configured entry cap. `infinity' (the default) preserves the previous
+%% unbounded behavior; set application env `max_state_entries' to a positive
+%% integer to bound memory growth from Python-driven state_set calls.
+max_entries() ->
+    application:get_env(erlang_python, max_state_entries, infinity).
+
 %%% ============================================================================
 %%% Callback wrappers (for Python access)
 %%% ============================================================================
@@ -181,8 +236,10 @@ state_get_callback([Key]) ->
 
 %% @private
 state_set_callback([Key, Value]) ->
-    store(Key, Value),
-    none.
+    case store(Key, Value) of
+        ok -> none;
+        {error, Reason} -> {error, Reason}
+    end.
 
 %% @private
 state_delete_callback([Key]) ->

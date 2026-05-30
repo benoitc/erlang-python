@@ -4,6 +4,13 @@
 
 ### Security
 
+- **Bounded shared state + safe stream/log builders** - `py_state` gained an optional
+  `max_state_entries` cap (default `infinity`, unchanged behavior) enforced with atomic
+  admission so Python-driven `state_set` can't exhaust node memory, and its size counter
+  is protected from corruption. The `py:stream` and logging helpers that build Python
+  source now strictly validate module/function/kwarg names as identifiers (rejecting
+  injection at positions where quoting is meaningless) and escape string-literal values
+  including control characters.
 - **Validated event-loop fd handles** - The asyncio reader/writer integration no longer
   hands Python a raw `fd_resource` pointer as an integer key. Each handle is an opaque id
   validated against a registry on every use, so a stale, duplicate, or fabricated id is a
