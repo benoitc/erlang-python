@@ -4,6 +4,10 @@
 
 ### Security
 
+- **Zero-copy buffer pinning** - `py_buffer` no longer relocates (and frees) its
+  storage while a Python `memoryview` points into it. A write that would grow the
+  buffer while a view is held now returns an error instead of dangling the view into
+  freed memory (a use-after-free that crashed the whole node).
 - **Bounded recursion in type conversion** - The Erlang<->Python converters now cap
   nesting depth, so a deeply nested term (or Python structure) returns a clean error
   instead of overflowing the C stack and crashing the whole node.
