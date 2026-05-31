@@ -15,6 +15,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux - OTP 27 (minimum supported)
+          - os: ubuntu-24.04
+            otp: "27"
+            python: "3.12"
+          - os: ubuntu-24.04
+            otp: "27"
+            python: "3.13"
+          - os: ubuntu-24.04
+            otp: "27"
+            python: "3.14"
           # Linux - OTP 28
           - os: ubuntu-24.04
             otp: "28"
@@ -130,7 +140,7 @@ jobs:
           usesh: true
           prepare: |
             # Stock `erlang` pkg lags at OTP 26; use the versioned runtime
-            # package so we test on a supported OTP (28+).
+            # package so we test on a supported OTP (27+).
             pkg install -y erlang-runtime28 ${{ matrix.python_pkg }} cmake
             # numpy package follows the py<noDot>-numpy convention.
             # Non-fatal: not every FreeBSD pkg snapshot ships numpy for
