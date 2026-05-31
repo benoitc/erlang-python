@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Lower minimum OTP to 27** - `minimum_otp_vsn` is now `27`. The OTP 28/29
+  support work was source-compatible with 27 (the `try ... catch` cleanups build
+  fine there), so the floor was raised further than needed. CI now also builds and
+  runs the full Common Test suite on OTP 27 across Python 3.12/3.13/3.14.
+
 ## 3.1.0 (2026-05-30)
 
 ### Fixed
