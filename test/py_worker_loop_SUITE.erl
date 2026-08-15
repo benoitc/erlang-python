@@ -220,13 +220,18 @@ test_submit_ordering(Config) ->
         ok = py_nif:submit_task(LoopRef, self(), R, <<"py_test_workerloop">>, <<"add">>, [I, 0], #{}),
         {I, R}
     end || I <- lists:seq(1, 500)],
-    Results = [{I, py_event_loop:await(R, 30000)} || {I, R} <- Refs],
-    Bad = [X || {I, Res} = X <- Results, Res =/= {ok, I}],
+    %% Collect within one overall deadline so a strand shows up as a count,
+    %% not as a timetrap
+    Deadline = erlang:monotonic_time(millisecond) + 30000,
+    Results = collect_results(Refs, Deadline, #{}),
+    Bad = [{I, maps:get(R, Results, missing)} || {I, R} <- Refs,
+                                                  maps:get(R, Results, missing) =/= {ok, I}],
     case Bad of
         [] -> ok;
         _ -> ct:log("~p of 500 tasks did not complete: ~p", [length(Bad), lists:sublist(Bad, 10)]),
-             ct:log("loop alive: ~p", [py_context:submit_await(C, py_test_workerloop, sync_add, [1, 1])]),
-             ct:log("late results in mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
+             ct:log("loop alive (sync): ~p", [py_context:submit_await(C, py_test_workerloop, sync_add, [1, 1])]),
+             ct:log("loop alive (coro): ~p", [py_context:submit_await(C, py_test_workerloop, add, [1, 1])]),
+             ct:log("mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
              ct:fail({tasks_incomplete, length(Bad)})
     end,
     ok = py_context:stop_loop(C),
@@ -530,6 +535,20 @@ roundtrip(Port, Data) ->
     end,
     gen_tcp:close(S),
     R.
+
+collect_results([], _Deadline, Acc) ->
+    Acc;
+collect_results(Refs, Deadline, Acc) ->
+    Wait = max(0, Deadline - erlang:monotonic_time(millisecond)),
+    receive
+        {async_result, R, Res} ->
+            case lists:keytake(R, 2, Refs) of
+                {value, _, Rest} -> collect_results(Rest, Deadline, Acc#{R => Res});
+                false -> collect_results(Refs, Deadline, Acc)
+            end
+    after Wait ->
+        Acc
+    end.
 
 wait_until(Fun, TimeoutMs) ->
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
