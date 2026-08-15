@@ -50,6 +50,14 @@
   (`_release_fd_resource(fd_key, take_ownership)`), which closes it from the
   select stop callback; the reselect path and the close path serialise on the
   loop mutex. 10k connections across four workers now log nothing.
+- **Queued tasks dropped in pairs** - `py_nif:process_ready_tasks/1` dequeued
+  one whole iovec element per task; when erts stored several small task
+  binaries in one element (tasks queued behind a busy worker), every task
+  after the first in that element was lost, seen as every second
+  `submit_task` never answering on slow machines. It now dequeues exactly the
+  bytes each term consumed. Tasks beyond the batch limit queued behind a
+  running loop were also left waiting for the next wakeup; the running-loop
+  path now returns `more` like the idle path.
 - **Re-arming a read select from the Python thread** - re-selecting READ on
   an fd the BEAM had moved into a scheduler poll set crashed inside
   `enif_select` when done from the loop thread (transport `resume_reading`,

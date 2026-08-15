@@ -2990,8 +2990,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
 
         ERL_NIF_TERM task_term;
-        if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
-                                &task_term, ERL_NIF_BIN2TERM_SAFE) == 0) {
+        size_t consumed = enif_binary_to_term(term_env, task_bin.data, task_bin.size,
+                                              &task_term, ERL_NIF_BIN2TERM_SAFE);
+        if (consumed == 0) {
             return_pooled_env(loop, term_env);
             /* Dequeue and skip this malformed task */
             enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
@@ -3004,8 +3005,11 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         tasks[num_tasks].task_term = task_term;
         num_tasks++;
 
-        /* Dequeue (we've copied the data) */
-        enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+        /* Dequeue exactly the bytes of this term. The io queue merges small
+         * binaries enqueued back to back into one iovec element, so a slow
+         * consumer can find several tasks in iov[0]; dequeuing iov_len would
+         * silently drop the ones after the first. */
+        enif_ioq_deq(loop->task_queue, consumed, NULL);
         atomic_fetch_sub(&loop->task_count, 1);
     }
 
