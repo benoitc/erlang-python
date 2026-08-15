@@ -75,3 +75,9 @@ ok = py_context:destroy(Ctx).
   context that just finished one call and started another stops the new one.
 - `py:call/3,4` and `py:eval/1,2` use `infinity` by default. Pass an explicit
   timeout, or use `py:interrupt/1`, if you need a bound.
+- A context running a worker loop (`py_context:start_loop/1`) refuses
+  `call/eval/exec` with `{error, loop_running}` for this reason: a timed-out
+  call would interrupt the loop. `py_context:interrupt/1` on such a context
+  ends the loop with `{py_loop_exit, Ctx, {error, interrupted}}`; use
+  `py_context:stop_loop/1,2` for a cooperative stop. See [Worker
+  Loops](workers.md).

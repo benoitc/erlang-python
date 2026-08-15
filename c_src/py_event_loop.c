@@ -35,6 +35,7 @@
  */
 
 #include "py_nif.h"
+#include <unistd.h>
 #include "py_event_loop.h"
 #include "py_reactor_buffer.h"
 
@@ -336,6 +337,10 @@ static int set_interpreter_event_loop(erlang_event_loop_t *loop) {
     }
     state->event_loop = loop;
     return 0;
+}
+
+erlang_event_loop_t *get_current_interpreter_event_loop(void) {
+    return get_interpreter_event_loop();
 }
 
 /* ============================================================================
@@ -1950,11 +1955,6 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_fd_ref");
     }
 
-    /* Check if FD is still open */
-    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
-        return ATOM_OK;  /* Silently ignore events on closing FDs */
-    }
-
     erlang_event_loop_t *loop = fd_res->loop;
     if (loop == NULL) {
         return make_error(env, "no_loop");
@@ -1965,6 +1965,18 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
     uint64_t callback_id;
     bool is_active;
 
+    /* The state check and the reselect must be one step: the Python thread
+     * closes fds through py_release_fd_resource, which moves the state to
+     * CLOSING under this same mutex before it issues ERL_NIF_SELECT_STOP.
+     * Without the lock we could pass the check, lose the race, and reselect
+     * a closed (or already reused) fd number. */
+    pthread_mutex_lock(&loop->mutex);
+
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        pthread_mutex_unlock(&loop->mutex);
+        return ATOM_OK;  /* Silently ignore events on closing FDs */
+    }
+
     if (is_read) {
         callback_id = fd_res->read_callback_id;
         is_active = fd_res->reader_active;
@@ -1974,12 +1986,9 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
     }
 
     if (!is_active || callback_id == 0) {
+        pthread_mutex_unlock(&loop->mutex);
         return ATOM_OK;  /* Watcher was stopped, ignore */
     }
-
-    /* Add to pending queue (has duplicate detection) */
-    event_type_t event_type = is_read ? EVENT_TYPE_READ : EVENT_TYPE_WRITE;
-    event_loop_add_pending(loop, event_type, callback_id, fd_res->fd);
 
     /* Immediately reselect for next event.
      * Use ATOM_UNDEFINED instead of enif_make_ref to avoid per-event allocation.
@@ -1989,6 +1998,49 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
     enif_select(env, (ErlNifEvent)fd_res->fd, select_flags,
                 fd_res, target_pid, ATOM_UNDEFINED);
 
+    pthread_mutex_unlock(&loop->mutex);
+
+    /* Add to pending queue (has duplicate detection; takes loop->mutex itself) */
+    event_type_t event_type = is_read ? EVENT_TYPE_READ : EVENT_TYPE_WRITE;
+    event_loop_add_pending(loop, event_type, callback_id, fd_res->fd);
+
+    return ATOM_OK;
+}
+
+/**
+ * fd_arm(FdRef, read | write) -> ok
+ *
+ * Re-arm a read or write select for an fd whose resource already exists.
+ * Called by the loop's py_event_worker on behalf of ErlangEventLoop
+ * (_update_fd_read/_update_fd_write): re-selecting READ on an fd that a
+ * scheduler thread already polled must itself run on a scheduler thread,
+ * since erts keeps such fds in the scheduler's own poll set. Doing it from
+ * the Python thread crashes inside enif_select. Fresh selects, CANCEL and
+ * STOP are fine from any thread, and only re-arms go through here.
+ */
+ERL_NIF_TERM nif_fd_arm(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    fd_resource_t *fd_res;
+    if (!enif_get_resource(env, argv[0], FD_RESOURCE_TYPE, (void **)&fd_res)) {
+        return make_error(env, "invalid_fd_ref");
+    }
+    erlang_event_loop_t *loop = fd_res->loop;
+    if (loop == NULL) {
+        return make_error(env, "no_loop");
+    }
+    bool is_read = enif_compare(argv[1], ATOM_READ) == 0;
+
+    pthread_mutex_lock(&loop->mutex);
+    if (atomic_load(&fd_res->closing_state) != FD_STATE_OPEN ||
+        (is_read ? !fd_res->reader_active : !fd_res->writer_active)) {
+        pthread_mutex_unlock(&loop->mutex);
+        return ATOM_OK;  /* Closed or disarmed again in the meantime */
+    }
+    int select_flags = is_read ? ERL_NIF_SELECT_READ : ERL_NIF_SELECT_WRITE;
+    enif_select(env, (ErlNifEvent)fd_res->fd, select_flags,
+                fd_res, &loop->worker_pid, ATOM_UNDEFINED);
+    pthread_mutex_unlock(&loop->mutex);
     return ATOM_OK;
 }
 
@@ -2753,6 +2805,102 @@ static inline void return_pooled_env(erlang_event_loop_t *loop, ErlNifEnv *term_
     }
 }
 
+/* ============================================================================
+ * GIL handling for process_ready_tasks
+ *
+ * Main-interpreter loops use PyGILState_Ensure. Subinterpreter loops (OWN_GIL
+ * contexts) cannot: PyGILState_* only knows the main interpreter, so a fresh
+ * thread state is created for loop->interp and bound to this scheduler thread
+ * for the duration of the call. The attach count lets the interpreter thread
+ * wait for us before Py_EndInterpreter (event_loop_detach_interpreter).
+ * ============================================================================ */
+
+typedef struct {
+    PyGILState_STATE gstate;
+    PyThreadState *tstate;    /* non-NULL when attached to a subinterpreter */
+} loop_gil_t;
+
+static bool loop_gil_acquire(erlang_event_loop_t *loop, loop_gil_t *g) {
+    g->tstate = NULL;
+#ifdef HAVE_SUBINTERPRETERS
+    if (loop->interp_id != 0) {
+        pthread_mutex_lock(&loop->mutex);
+        if (loop->interp == NULL) {
+            pthread_mutex_unlock(&loop->mutex);
+            return false;
+        }
+        g->tstate = PyThreadState_New(loop->interp);
+        if (g->tstate == NULL) {
+            pthread_mutex_unlock(&loop->mutex);
+            return false;
+        }
+        loop->external_attached++;
+        pthread_mutex_unlock(&loop->mutex);
+        /* Take the subinterpreter GIL outside loop->mutex: the loop thread
+         * may hold the GIL while waiting for loop->mutex. */
+        PyEval_RestoreThread(g->tstate);
+        return true;
+    }
+#endif
+    g->gstate = PyGILState_Ensure();
+    return true;
+}
+
+static void loop_gil_release(erlang_event_loop_t *loop, loop_gil_t *g) {
+#ifdef HAVE_SUBINTERPRETERS
+    if (g->tstate != NULL) {
+        PyThreadState_Clear(g->tstate);
+        PyThreadState_DeleteCurrent();   /* releases the subinterpreter GIL */
+        g->tstate = NULL;
+        pthread_mutex_lock(&loop->mutex);
+        loop->external_attached--;
+        pthread_mutex_unlock(&loop->mutex);
+        return;
+    }
+#endif
+    (void)loop;
+    PyGILState_Release(g->gstate);
+}
+
+void event_loop_detach_interpreter(erlang_event_loop_t *loop) {
+    if (loop == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&loop->mutex);
+    loop->interp = NULL;
+    /* Teardown is rare: poll rather than add a condvar to the loop struct. */
+    while (loop->external_attached > 0) {
+        pthread_mutex_unlock(&loop->mutex);
+        usleep(1000);
+        pthread_mutex_lock(&loop->mutex);
+    }
+    pthread_mutex_unlock(&loop->mutex);
+}
+
+/**
+ * Report a task that could not be started to its caller as
+ * {async_result, Ref, {error, Reason}} instead of dropping it silently.
+ * Reason is the pending Python exception when one is set (cleared here),
+ * otherwise the given atom. Runs with the GIL held.
+ */
+static void send_task_failure(ErlNifEnv *term_env, ErlNifPid *caller_pid,
+                              ERL_NIF_TERM ref, const char *reason) {
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    ERL_NIF_TERM err = PyErr_Occurred() ? make_py_error(msg_env)
+                                        : make_error(msg_env, reason);
+    ERL_NIF_TERM msg = enif_make_tuple3(msg_env,
+        enif_make_atom(msg_env, "async_result"),
+        enif_make_copy(msg_env, ref),
+        err);
+    (void)term_env;
+    enif_send(NULL, caller_pid, msg_env, msg);
+    enif_free_env(msg_env);
+}
+
 /**
  * process_ready_tasks(LoopRef) -> ok | {error, Reason}
  *
@@ -2842,8 +2990,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
 
         ERL_NIF_TERM task_term;
-        if (enif_binary_to_term(term_env, task_bin.data, task_bin.size,
-                                &task_term, ERL_NIF_BIN2TERM_SAFE) == 0) {
+        size_t consumed = enif_binary_to_term(term_env, task_bin.data, task_bin.size,
+                                              &task_term, ERL_NIF_BIN2TERM_SAFE);
+        if (consumed == 0) {
             return_pooled_env(loop, term_env);
             /* Dequeue and skip this malformed task */
             enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
@@ -2856,8 +3005,11 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         tasks[num_tasks].task_term = task_term;
         num_tasks++;
 
-        /* Dequeue (we've copied the data) */
-        enif_ioq_deq(loop->task_queue, iov[0].iov_len, NULL);
+        /* Dequeue exactly the bytes of this term. The io queue merges small
+         * binaries enqueued back to back into one iovec element, so a slow
+         * consumer can find several tasks in iov[0]; dequeuing iov_len would
+         * silently drop the ones after the first. */
+        enif_ioq_deq(loop->task_queue, consumed, NULL);
         atomic_fetch_sub(&loop->task_count, 1);
     }
 
@@ -2866,13 +3018,28 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     /* NOTE: We do NOT return early here even if num_tasks == 0.
      * We may have pending timer/FD events that need _run_once to process.
      * The first check (task_count == 0 && pending_count == 0) at the start
-     * of this function already handles the case where there's truly no work. */
+     * of this function already handles the case where there's truly no work.
+     *
+     * Exception: a loop driven by run_forever on its own thread consumes
+     * pending events itself. With no tasks to schedule there is nothing for
+     * us to do under its GIL; wake it and leave. */
+    if (num_tasks == 0 && atomic_load(&loop->py_running)) {
+        if (!loop->shutdown) {
+            pthread_mutex_lock(&loop->mutex);
+            pthread_cond_broadcast(&loop->event_cond);
+            pthread_mutex_unlock(&loop->mutex);
+        }
+        return ATOM_OK;
+    }
 
     /* ========================================================================
      * PHASE 2: Process all tasks WITH GIL (Python operations)
      * ======================================================================== */
 
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    loop_gil_t gil;
+    if (!loop_gil_acquire(loop, &gil)) {
+        return make_error(env, "interpreter_gone");
+    }
 
     /* OPTIMIZATION: Use cached Python imports (uvloop-style)
      * Avoids PyImport_ImportModule on every call */
@@ -2897,7 +3064,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "asyncio_import_failed");
         }
 
@@ -2914,7 +3081,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "erlang_loop_import_failed");
         }
 
@@ -2925,7 +3092,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "run_and_send_not_found");
         }
 
@@ -2938,7 +3105,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "events_import_failed");
         }
 
@@ -2965,7 +3132,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "loop_module_import_failed");
         }
 
@@ -2976,7 +3143,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "loop_class_not_found");
         }
 
@@ -2987,7 +3154,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             for (int i = 0; i < num_tasks; i++) {
                 return_pooled_env(loop, tasks[i].term_env);
             }
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
             return make_error(env, "loop_creation_failed");
         }
 
@@ -3101,6 +3268,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         }
 
         if (func == NULL) {
+            send_task_failure(term_env, &caller_pid, tuple_elems[1], "function_not_found");
             return_pooled_env(loop, term_env);
             continue;
         }
@@ -3135,6 +3303,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         if (!args_ok) {
             Py_DECREF(args);
             Py_DECREF(func);
+            send_task_failure(term_env, &caller_pid, tuple_elems[1], "args_conversion_failed");
             return_pooled_env(loop, term_env);
             continue;
         }
@@ -3160,7 +3329,8 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         Py_XDECREF(kwargs);
 
         if (coro == NULL) {
-            PyErr_Clear();
+            /* The call itself raised: report the Python exception */
+            send_task_failure(term_env, &caller_pid, tuple_elems[1], "call_failed");
             return_pooled_env(loop, term_env);
             continue;
         }
@@ -3248,13 +3418,25 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         int running = PyObject_IsTrue(is_running);
         Py_DECREF(is_running);
         if (running) {
-            /* Loop is already running - just signal it and clean up.
-             * The pending events were already added by dispatch_timer/handle_fd_event,
-             * and the condition variable was signaled. The running loop will wake up
-             * and process them.
+            /* Loop is already running (run_forever on another thread): the
+             * coroutines were scheduled on its ready queue, wake it so they
+             * start now instead of at the next poll timeout. Same broadcast
+             * as _wakeup_for (call_soon_threadsafe).
              * Note: events_module is cached, so we don't DECREF it. */
             Py_XDECREF(old_running_loop);
-            PyGILState_Release(gstate);
+            loop_gil_release(loop, &gil);
+            if (!loop->shutdown) {
+                pthread_mutex_lock(&loop->mutex);
+                pthread_cond_broadcast(&loop->event_cond);
+                pthread_mutex_unlock(&loop->mutex);
+            }
+            /* Same contract as the tail of this function: tasks beyond the
+             * batch limit are still queued, tell the worker to come back
+             * (submit_task will not send another wakeup while one is
+             * pending, so returning ok here would strand them). */
+            if (atomic_load(&loop->task_count) > 0) {
+                return ATOM_MORE;
+            }
             return ATOM_OK;
         }
     } else {
@@ -3312,7 +3494,7 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     Py_XDECREF(restore);
     Py_XDECREF(old_running_loop);
 
-    PyGILState_Release(gstate);
+    loop_gil_release(loop, &gil);
 
     /*
      * Check if there are more tasks remaining (we hit MAX_TASK_BATCH limit).
@@ -4265,7 +4447,7 @@ bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
      *
      * Uses the same coalescing logic as submit_task to avoid message floods.
      */
-    if (loop->has_worker) {
+    if (loop->has_worker && !atomic_load(&loop->py_running)) {
         if (!atomic_exchange(&loop->task_wake_pending, true)) {
             ErlNifEnv *msg_env = enif_alloc_env();
             if (msg_env != NULL) {
@@ -5315,6 +5497,16 @@ ERL_NIF_TERM nif_context_get_event_loop(ErlNifEnv *env, int argc,
     /* Only OWN_GIL subinterpreters have their own event loop */
     if (!ctx->is_subinterp) {
         return make_error(env, "not_subinterp");
+    }
+
+    /* OWN_GIL contexts: the loop was created by the context thread inside its
+     * subinterpreter and recorded on the context. Read it without touching
+     * the main GIL, which would resolve the main interpreter's loop instead. */
+    if (ctx->uses_own_gil) {
+        if (ctx->event_loop == NULL) {
+            return make_error(env, "no_event_loop");
+        }
+        return enif_make_tuple2(env, ATOM_OK, enif_make_resource(env, ctx->event_loop));
     }
 
     /* With shared-GIL pool model, event loop operations work on dirty schedulers.
@@ -7131,6 +7323,7 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     } else {
         loop->interp_id = 0;  /* Main interpreter */
     }
+    loop->interp = current_interp;
 #else
     loop->interp_id = 0;  /* Main interpreter */
 #endif
@@ -7643,15 +7836,42 @@ static PyObject *py_update_fd_read(PyObject *self, PyObject *args) {
         PyErr_SetString(PyExc_ValueError, "Invalid fd resource");
         return NULL;
     }
+    if (fd_res->fd < 0 || atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_ValueError, "fd resource is closed");
+        return NULL;
+    }
+
+    if (!event_loop_ensure_worker(fd_res->loop)) {
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
+        return NULL;
+    }
 
     fd_res->read_callback_id = callback_id;
     fd_res->reader_active = true;
 
-    /* Re-register for read events (may already be registered, that's OK) */
-    ErlNifPid *target_pid = fd_res->loop->has_worker ?
-        &fd_res->loop->worker_pid : &fd_res->loop->router_pid;
-    enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                ERL_NIF_SELECT_READ, fd_res, target_pid, ATOM_UNDEFINED);
+    /* Re-arm from the worker process, not from this Python thread: see
+     * nif_fd_arm for why a READ re-select must run on a scheduler thread. */
+    ErlNifEnv *arm_env = enif_alloc_env();
+    if (arm_env == NULL) {
+        fd_res->reader_active = false;
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate env");
+        return NULL;
+    }
+    ERL_NIF_TERM arm_msg = enif_make_tuple3(arm_env,
+        enif_make_atom(arm_env, "fd_arm"),
+        enif_make_resource(arm_env, fd_res),
+        ATOM_READ);
+    if (!enif_send(NULL, &fd_res->loop->worker_pid, arm_env, arm_msg)) {
+        enif_free_env(arm_env);
+        fd_res->reader_active = false;
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_RuntimeError, "Event loop worker is gone");
+        return NULL;
+    }
+    enif_free_env(arm_env);
 
     enif_release_resource(fd_res);
     Py_RETURN_NONE;
@@ -7676,15 +7896,31 @@ static PyObject *py_update_fd_write(PyObject *self, PyObject *args) {
         PyErr_SetString(PyExc_ValueError, "Invalid fd resource");
         return NULL;
     }
+    if (fd_res->fd < 0 || atomic_load(&fd_res->closing_state) != FD_STATE_OPEN) {
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_ValueError, "fd resource is closed");
+        return NULL;
+    }
+
+    if (!event_loop_ensure_worker(fd_res->loop)) {
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
+        return NULL;
+    }
 
     fd_res->write_callback_id = callback_id;
     fd_res->writer_active = true;
 
-    /* Re-register for write events */
-    ErlNifPid *target_pid = fd_res->loop->has_worker ?
-        &fd_res->loop->worker_pid : &fd_res->loop->router_pid;
-    enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
+    /* Same target as _add_writer_for: the loop's worker process. */
+    ErlNifPid *target_pid = &fd_res->loop->worker_pid;
+    int ret = enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
+                          ERL_NIF_SELECT_WRITE, fd_res, target_pid, ATOM_UNDEFINED);
+    if (ret < 0) {
+        fd_res->writer_active = false;
+        enif_release_resource(fd_res);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to register fd for writing");
+        return NULL;
+    }
 
     enif_release_resource(fd_res);
     Py_RETURN_NONE;
@@ -7752,21 +7988,53 @@ static PyObject *py_clear_fd_write(PyObject *self, PyObject *args) {
 
 /**
  * Release fd_resource (stop all monitoring and release).
- * Python function: _release_fd_resource(fd_key) -> None
+ * Python function: _release_fd_resource(fd_key, take_ownership=False) -> None
+ *
+ * With take_ownership the fd is closed by us, from the enif_select stop
+ * callback once the poll set has dropped it (or right here when it is not
+ * selected). Closing an fd from Python while ERL_NIF_SELECT_STOP is still
+ * scheduled leaves a stale entry in the poll set and lets the number be
+ * reused by the next accept(): that is the "Bad input fd in erts_poll" /
+ * "stealing control of fd" report class. Transports hand their socket over
+ * this way (see ErlangEventLoop._close_socket).
  */
 static PyObject *py_release_fd_resource(PyObject *self, PyObject *args) {
     (void)self;
     unsigned long long fd_key;
+    int take_ownership = 0;
 
-    if (!PyArg_ParseTuple(args, "K", &fd_key)) {
+    if (!PyArg_ParseTuple(args, "K|p", &fd_key, &take_ownership)) {
         return NULL;
     }
 
     fd_resource_t *fd_res = fd_reg_take(fd_key);
     if (fd_res != NULL) {
-        if (fd_res->loop != NULL) {
-            enif_select(fd_res->loop->msg_env, (ErlNifEvent)fd_res->fd,
-                        ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+        erlang_event_loop_t *loop = fd_res->loop;
+        if (take_ownership) {
+            fd_res->owns_fd = true;
+            /* Move to CLOSING under loop->mutex so a concurrent
+             * handle_fd_event_and_reselect cannot reselect this fd. */
+            if (loop != NULL) pthread_mutex_lock(&loop->mutex);
+            int expected = FD_STATE_OPEN;
+            atomic_compare_exchange_strong(&fd_res->closing_state,
+                                           &expected, FD_STATE_CLOSING);
+            fd_res->reader_active = false;
+            fd_res->writer_active = false;
+            if (loop != NULL) pthread_mutex_unlock(&loop->mutex);
+        }
+        int rc = -1;
+        if (loop != NULL) {
+            rc = enif_select(loop->msg_env, (ErlNifEvent)fd_res->fd,
+                             ERL_NIF_SELECT_STOP, fd_res, NULL, ATOM_UNDEFINED);
+        }
+        if (rc < 0 && take_ownership && fd_res->fd >= 0) {
+            /* Never selected (or no loop): nothing pending in the poll set */
+            int expected = FD_STATE_CLOSING;
+            if (atomic_compare_exchange_strong(&fd_res->closing_state,
+                                               &expected, FD_STATE_CLOSED)) {
+                close(fd_res->fd);
+                fd_res->fd = -1;
+            }
         }
         enif_release_resource(fd_res);
     }
@@ -7878,6 +8146,40 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
     ErlNifPid *target_pid = &loop->worker_pid;
     enif_send(NULL, target_pid, msg_env, msg);
     enif_free_env(msg_env);
+    Py_RETURN_NONE;
+}
+
+/* Python function: _set_running_for(capsule, running) -> None
+ *
+ * Marks the loop as driven by run_forever on the calling thread (or not).
+ * See erlang_event_loop_t.py_running. */
+static PyObject *py_set_running_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    int running;
+
+    if (!PyArg_ParseTuple(args, "Op", &capsule, &running)) {
+        return NULL;
+    }
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    atomic_store(&loop->py_running, running ? true : false);
+    if (!running && loop->has_worker && !loop->shutdown) {
+        /* Events queued while we were running but not yet consumed must
+         * now be handled by the worker path again */
+        if (atomic_load(&loop->pending_count) > 0 &&
+            !atomic_exchange(&loop->task_wake_pending, true)) {
+            ErlNifEnv *msg_env = enif_alloc_env();
+            if (msg_env != NULL) {
+                enif_send(NULL, &loop->worker_pid, msg_env,
+                          enif_make_atom(msg_env, "task_ready"));
+                enif_free_env(msg_env);
+            }
+        }
+    }
     Py_RETURN_NONE;
 }
 
@@ -8019,6 +8321,7 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_set_global_loop_ref", py_set_global_loop_ref, METH_VARARGS, "Store Python loop reference in global loop"},
     {"_run_once_native_for", py_run_once_for, METH_VARARGS, "Combined poll + get_pending for specific loop"},
     {"_get_pending_for", py_get_pending_for, METH_VARARGS, "Get and clear pending events for specific loop"},
+    {"_set_running_for", py_set_running_for, METH_VARARGS, "Mark loop as running under run_forever"},
     {"_wakeup_for", py_wakeup_for, METH_VARARGS, "Wake up specific event loop"},
     {"_is_initialized_for", py_is_initialized_for, METH_VARARGS, "Check if specific loop is initialized"},
     {"_add_reader_for", py_add_reader_for, METH_VARARGS, "Register fd for read monitoring on specific loop"},
@@ -8149,6 +8452,45 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->has_router = false;
     loop->has_self = false;
 
+    /* Async task queue, env pool and namespace registry, as in
+     * nif_event_loop_new: a default loop must accept submit_task too, since
+     * OWN_GIL contexts only ever have this loop. */
+    loop->task_queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
+    if (loop->task_queue == NULL ||
+        pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
+        if (loop->task_queue != NULL) {
+            enif_ioq_destroy(loop->task_queue);
+            loop->task_queue = NULL;
+        }
+        enif_free_env(loop->msg_env);
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_release_resource(loop);
+        return -1;
+    }
+    loop->task_queue_initialized = true;
+    atomic_store(&loop->task_count, 0);
+    atomic_store(&loop->task_wake_pending, false);
+    loop->py_loop = NULL;
+    loop->py_loop_valid = false;
+    loop->py_cache_valid = false;
+    loop->callable_cache_count = 0;
+    loop->env_pool_count = 0;
+    if (pthread_mutex_init(&loop->env_pool_mutex, NULL) != 0 ||
+        pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
+        pthread_mutex_destroy(&loop->task_queue_mutex);
+        loop->task_queue_initialized = false;
+        enif_ioq_destroy(loop->task_queue);
+        loop->task_queue = NULL;
+        enif_free_env(loop->msg_env);
+        pthread_cond_destroy(&loop->event_cond);
+        pthread_mutex_destroy(&loop->mutex);
+        enif_release_resource(loop);
+        return -1;
+    }
+    loop->namespaces_head = NULL;
+    loop->pid_env_head = NULL;
+
 #ifdef HAVE_SUBINTERPRETERS
     /* Check if this is a subinterpreter by comparing to main interpreter */
     PyInterpreterState *current_interp = PyInterpreterState_Get();
@@ -8159,6 +8501,7 @@ int create_default_event_loop(ErlNifEnv *env) {
     } else {
         loop->interp_id = 0;  /* Main interpreter */
     }
+    loop->interp = current_interp;
 #else
     loop->interp_id = 0;  /* Main interpreter */
 #endif

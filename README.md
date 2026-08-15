@@ -650,6 +650,7 @@ py:execution_mode().  %% => worker | owngil
 - [Threading](docs/threading.md)
 - [Logging and Tracing](docs/logging.md)
 - [Asyncio Event Loop](docs/asyncio.md) - Erlang-native asyncio with TCP/UDP support
+- [Worker Loops](docs/workers.md) - Long-lived loops in owngil contexts, serving on sockets Erlang owns
 - [Reactor](docs/reactor.md) - FD-based protocol handling
 - [Security](docs/security.md) - Sandbox and blocked operations
 - [Changelog](https://github.com/benoitc/erlang-python/releases)

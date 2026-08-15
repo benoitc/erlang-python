@@ -49,6 +49,15 @@ EVENT_TYPE_WRITE = 2
 EVENT_TYPE_TIMER = 3
 
 
+class _PooledHandle(events.Handle):
+    """Handle recycled through ErlangEventLoop._handle_pool.
+
+    Only fd event dispatch creates these; they never leave the loop, so no
+    one can cancel one after it ran and hit its next occupant.
+    """
+    __slots__ = ()
+
+
 class ErlangEventLoop(asyncio.AbstractEventLoop):
     """asyncio event loop backed by Erlang's scheduler.
 
@@ -227,6 +236,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._running = True
         # Don't reset _stopping here - honor stop() called before run_forever()
 
+        # Tell the NIF this loop consumes its own events from now on
+        set_running = getattr(self._pel, '_set_running_for', None)
+        if set_running is not None:
+            try:
+                set_running(self._loop_capsule, True)
+            except Exception:
+                set_running = None
+
         # Register as the running loop
         old_running_loop = events._get_running_loop()
         events._set_running_loop(self)
@@ -237,6 +254,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             events._set_running_loop(old_running_loop)
             self._stopping = False
             self._running = False
+            if set_running is not None:
+                try:
+                    set_running(self._loop_capsule, False)
+                except Exception:
+                    pass
             self._thread_id = None
             self._set_coroutine_origin_tracking(False)
 
@@ -314,11 +336,18 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._timer_refs.clear()
         self._handle_to_callback_id.clear()
 
-        # Remove all readers/writers
+        # Remove all readers/writers, then release fd resources kept alive by
+        # _stop_reading/_stop_writing for transports that were never closed
         for fd in list(self._readers.keys()):
             self.remove_reader(fd)
         for fd in list(self._writers.keys()):
             self.remove_writer(fd)
+        for fd, fd_key in list(self._fd_resources.items()):
+            try:
+                self._pel._release_fd_resource(fd_key)
+            except Exception:
+                pass
+        self._fd_resources.clear()
 
         # Clear signal handlers
         self._signal_handlers.clear()
@@ -372,7 +401,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         Uses handle pooling (uvloop-style) to reduce allocations.
         """
         self._check_closed()
-        handle = self._get_handle(callback, args, context)
+        # A handle handed to the caller must not come from the pool: asyncio
+        # code keeps call_soon/call_later handles and cancels them after they
+        # ran (asyncio.sleep does), which would cancel whatever callback the
+        # recycled handle carries by then. Pooling stays for the fd event
+        # handles created in _dispatch, which never leave the loop.
+        if context is None:
+            context = contextvars.copy_context()
+        handle = events.Handle(callback, args, self, context)
         self._ready_append(handle)
         return handle
 
@@ -400,10 +436,15 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         """Schedule a callback to be called at a specific time."""
         self._check_closed()
 
-        # For zero or past times, schedule immediately via call_soon
+        # For zero or past times, run at the next iteration. Return a real
+        # TimerHandle (never pooled): callers cancel it after it ran.
         delay_ms = int((when - self.time()) * 1000)
         if delay_ms <= 0:
-            return self.call_soon(callback, *args, context=context)
+            if context is None:
+                context = contextvars.copy_context()
+            handle = events.TimerHandle(when, callback, args, self, context)
+            self._ready_append(handle)
+            return handle
 
         callback_id = self._next_id()
 
@@ -589,6 +630,76 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 del self._fd_resources[fd]
 
         return True
+
+    # ------------------------------------------------------------------------
+    # Transport helpers: stop reading/writing without giving up the fd
+    # resource, and hand the socket to the NIF for closing.
+    #
+    # remove_reader/remove_writer release the fd resource as soon as neither
+    # side is active, which issues ERL_NIF_SELECT_STOP. If the socket is then
+    # closed from Python before the stop completes, the fd sits in the poll
+    # set while its number gets reused. Transports therefore only clear the
+    # callbacks here and let _close_socket transfer the fd to the NIF, which
+    # closes it from the stop callback.
+    # ------------------------------------------------------------------------
+
+    def _stop_reading(self, fd):
+        entry = self._readers.pop(fd, None)
+        if entry is None:
+            return False
+        self._callbacks_by_cid.pop(entry[2], None)
+        fd_key = self._fd_resources.get(fd)
+        if fd_key is not None:
+            try:
+                self._pel._clear_fd_read(fd_key)
+            except Exception:
+                pass
+        return True
+
+    def _stop_writing(self, fd):
+        entry = self._writers.pop(fd, None)
+        if entry is None:
+            return False
+        self._callbacks_by_cid.pop(entry[2], None)
+        fd_key = self._fd_resources.get(fd)
+        if fd_key is not None:
+            try:
+                self._pel._clear_fd_write(fd_key)
+            except Exception:
+                pass
+        return True
+
+    def _close_socket(self, sock):
+        """Close a socket that may still be registered with enif_select.
+
+        Clears any reader/writer, detaches the fd from the socket object and
+        lets the NIF close it once the select stop has completed. Sockets the
+        loop never registered are closed directly.
+        """
+        try:
+            fd = sock.fileno()
+        except (OSError, ValueError):
+            return
+        if fd is None or fd < 0:
+            return
+        self._stop_reading(fd)
+        self._stop_writing(fd)
+        fd_key = self._fd_resources.pop(fd, None)
+        if fd_key is None:
+            sock.close()
+            return
+        try:
+            sock.detach()
+        except OSError:
+            pass
+        try:
+            self._pel._release_fd_resource(fd_key, True)
+        except Exception:
+            # NIF unavailable (mock module or shutdown): close it ourselves
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     # ========================================================================
     # Socket operations
@@ -1154,7 +1265,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             handle._context = context
             return handle
         except IndexError:
-            return events.Handle(callback, args, self, context)
+            return _PooledHandle(callback, args, self, context)
 
     def _return_handle(self, handle):
         """Return a Handle to the pool for reuse.
@@ -1166,8 +1277,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         If the TimerHandle is recycled and reused for another callback, the
         cancel() call will incorrectly cancel the new callback.
         """
-        # Don't pool TimerHandle - asyncio.sleep holds a reference and cancels it
-        if isinstance(handle, events.TimerHandle):
+        # Only handles created by _dispatch are recycled (see _PooledHandle);
+        # call_soon/call_at handles are held by callers who may cancel them
+        if type(handle) is not _PooledHandle:
             return
 
         if len(self._handle_pool) < self._handle_pool_max:
@@ -1230,6 +1342,9 @@ class _MockLoopCapsule:
 class _MockNifModule:
     """Mock NIF module for testing without actual Erlang integration."""
 
+    def __init__(self):
+        self._fd_by_key = {}
+
     def _is_initialized(self):
         return True
 
@@ -1260,6 +1375,7 @@ class _MockNifModule:
     def _add_reader_for(self, capsule, fd, callback_id):
         capsule._counter += 1
         capsule.readers[fd] = (callback_id, capsule._counter)
+        self._fd_by_key[capsule._counter] = fd
         return capsule._counter
 
     def _remove_reader_for(self, capsule, fd_key):
@@ -1271,6 +1387,7 @@ class _MockNifModule:
     def _add_writer_for(self, capsule, fd, callback_id):
         capsule._counter += 1
         capsule.writers[fd] = (callback_id, capsule._counter)
+        self._fd_by_key[capsule._counter] = fd
         return capsule._counter
 
     def _remove_writer_for(self, capsule, fd_key):
@@ -1295,9 +1412,16 @@ class _MockNifModule:
         """Clear write monitoring on fd_resource."""
         pass
 
-    def _release_fd_resource(self, fd_key):
-        """Release fd_resource."""
-        pass
+    def _release_fd_resource(self, fd_key, take_ownership=False):
+        """Release fd_resource. With take_ownership the fd is closed here,
+        since there is no NIF to close it from a select stop callback."""
+        if take_ownership:
+            fd = self._fd_by_key.pop(fd_key, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _schedule_timer_for(self, capsule, delay_ms, callback_id):
         return callback_id

@@ -3542,6 +3542,20 @@ static ERL_NIF_TERM dispatch_to_worker_thread(
  * @param local_env Optional local environment (NULL for default)
  * @return {enqueued, RequestId} on success, {error, Reason} on failure
  */
+/**
+ * @brief Whether requests to this context go through the shared request queue
+ * of a dedicated thread (worker or OWN_GIL), which is what the async
+ * dispatch NIFs need.
+ */
+static inline bool ctx_uses_async_thread(const py_context_t *ctx) {
+#ifdef HAVE_SUBINTERPRETERS
+    if (ctx->uses_own_gil) {
+        return true;
+    }
+#endif
+    return ctx->uses_worker_thread;
+}
+
 static ERL_NIF_TERM dispatch_to_worker_thread_async(
     ErlNifEnv *env,
     py_context_t *ctx,
@@ -3638,14 +3652,21 @@ static void *owngil_context_thread_main(void *arg) {
         return NULL;
     }
 
-    /* Register py_event_loop module for reactor support */
-    if (create_py_event_loop_module() < 0) {
-        fprintf(stderr, "OWN_GIL: create_py_event_loop_module failed\n");
+    /* Register py_event_loop module and create this interpreter's default
+     * ErlangEventLoop, so asyncio I/O (create_server, channels, timers) works
+     * inside the context. Keep a reference on the context so Erlang can wire a
+     * dedicated py_event_worker without acquiring the main GIL. */
+    if (init_subinterpreter_event_loop(NULL) < 0) {
+        fprintf(stderr, "OWN_GIL: init_subinterpreter_event_loop failed\n");
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
         atomic_store(&ctx->init_error, true);
         atomic_store(&ctx->worker_running, false);
         return NULL;
+    }
+    ctx->event_loop = get_current_interpreter_event_loop();
+    if (ctx->event_loop != NULL) {
+        enif_keep_resource(ctx->event_loop);
     }
 
     /* Create namespace dictionaries */
@@ -3706,19 +3727,30 @@ static void *owngil_context_thread_main(void *arg) {
 
         /* Check if request was cancelled while queued */
         if (atomic_load(&req->cancelled)) {
-            /* Request cancelled - signal completion without processing */
-            req->result_env = enif_alloc_env();
-            if (req->result_env) {
-                req->result = enif_make_tuple2(req->result_env,
-                    enif_make_atom(req->result_env, "error"),
-                    enif_make_atom(req->result_env, "cancelled"));
-            }
-            req->success = false;
+            /* Request cancelled - deliver error without processing */
+            if (req->async_mode) {
+                enif_clear_env(ctx->msg_env);
+                ERL_NIF_TERM cancel_msg = enif_make_tuple3(ctx->msg_env,
+                    enif_make_atom(ctx->msg_env, "py_result"),
+                    enif_make_copy(ctx->msg_env, req->request_id),
+                    enif_make_tuple2(ctx->msg_env,
+                        enif_make_atom(ctx->msg_env, "error"),
+                        enif_make_atom(ctx->msg_env, "cancelled")));
+                enif_send(NULL, &req->caller_pid, ctx->msg_env, cancel_msg);
+            } else {
+                req->result_env = enif_alloc_env();
+                if (req->result_env) {
+                    req->result = enif_make_tuple2(req->result_env,
+                        enif_make_atom(req->result_env, "error"),
+                        enif_make_atom(req->result_env, "cancelled"));
+                }
+                req->success = false;
 
-            pthread_mutex_lock(&req->mutex);
-            atomic_store(&req->completed, true);
-            pthread_cond_signal(&req->cond);
-            pthread_mutex_unlock(&req->mutex);
+                pthread_mutex_lock(&req->mutex);
+                atomic_store(&req->completed, true);
+                pthread_cond_signal(&req->cond);
+                pthread_mutex_unlock(&req->mutex);
+            }
 
             ctx_request_release(req);
             continue;
@@ -3760,14 +3792,33 @@ static void *owngil_context_thread_main(void *arg) {
         ctx->reactor_buffer_ptr = NULL;
         ctx->local_env_ptr = NULL;
 
-        /* Signal completion */
-        pthread_mutex_lock(&req->mutex);
-        atomic_store(&req->completed, true);
-        pthread_cond_signal(&req->cond);
-        pthread_mutex_unlock(&req->mutex);
+        /* Deliver result - async (message to caller) or blocking (condvar) */
+        if (req->async_mode) {
+            enif_clear_env(ctx->msg_env);
+            ERL_NIF_TERM result_msg = enif_make_tuple3(ctx->msg_env,
+                enif_make_atom(ctx->msg_env, "py_result"),
+                enif_make_copy(ctx->msg_env, req->request_id),
+                req->result_env ? enif_make_copy(ctx->msg_env, req->result)
+                    : enif_make_tuple2(ctx->msg_env,
+                        enif_make_atom(ctx->msg_env, "error"),
+                        enif_make_atom(ctx->msg_env, "no_result")));
+            enif_send(NULL, &req->caller_pid, ctx->msg_env, result_msg);
+        } else {
+            pthread_mutex_lock(&req->mutex);
+            atomic_store(&req->completed, true);
+            pthread_cond_signal(&req->cond);
+            pthread_mutex_unlock(&req->mutex);
+        }
 
         /* Release queue's reference to request */
         ctx_request_release(req);
+    }
+
+    /* Refuse new scheduler attachments to our event loop and wait for the
+     * ones in flight (process_ready_tasks). Must run with our GIL released,
+     * since an attached thread needs it to finish. */
+    if (ctx->event_loop != NULL) {
+        event_loop_detach_interpreter((erlang_event_loop_t *)ctx->event_loop);
     }
 
     /* Cleanup: acquire our OWN_GIL and destroy interpreter */
@@ -3778,6 +3829,15 @@ static void *owngil_context_thread_main(void *arg) {
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
+
+    /* Drop our reference on the interpreter's event loop before the
+     * interpreter goes away (the loop destructor skips Python cleanup for
+     * subinterpreter loops). Detaching was done above with the GIL released. */
+    if (ctx->event_loop != NULL) {
+        void *loop = ctx->event_loop;
+        ctx->event_loop = NULL;
+        enif_release_resource(loop);
+    }
 
     /* End interpreter - this releases our GIL and cleans up */
     PyInterpreterState *ended_interp = ctx->own_gil_interp;
@@ -4539,6 +4599,7 @@ static int owngil_context_init(py_context_t *ctx) {
     ctx->uses_own_gil = true;
     ctx->own_gil_tstate = NULL;
     ctx->own_gil_interp = NULL;
+    ctx->event_loop = NULL;
 
     /* Initialize worker thread state */
     atomic_store(&ctx->worker_running, false);
@@ -4777,6 +4838,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->uses_own_gil = false;
     ctx->own_gil_tstate = NULL;
     ctx->own_gil_interp = NULL;
+    ctx->event_loop = NULL;
 
     if (use_owngil) {
         /* OWN_GIL mode: create dedicated pthread with OWN_GIL subinterpreter */
@@ -5347,8 +5409,8 @@ static ERL_NIF_TERM nif_context_call_async(ErlNifEnv *env, int argc, const ERL_N
     /* RequestId is argv[2] - can be any term */
     ERL_NIF_TERM request_id = argv[2];
 
-    /* Worker thread mode: dispatch async */
-    if (ctx->uses_worker_thread) {
+    /* Dedicated thread (worker or OWN_GIL): dispatch async */
+    if (ctx_uses_async_thread(ctx)) {
         /* Build request tuple: {Module, Func, Args, Kwargs} */
         ERL_NIF_TERM kwargs = (argc > 6 && enif_is_map(env, argv[6]))
             ? argv[6] : enif_make_new_map(env);
@@ -5397,8 +5459,8 @@ static ERL_NIF_TERM nif_context_eval_async(ErlNifEnv *env, int argc, const ERL_N
     /* RequestId is argv[2] - can be any term */
     ERL_NIF_TERM request_id = argv[2];
 
-    /* Worker thread mode: dispatch async */
-    if (ctx->uses_worker_thread) {
+    /* Dedicated thread (worker or OWN_GIL): dispatch async */
+    if (ctx_uses_async_thread(ctx)) {
         /* Build request tuple: {Code, Locals} */
         ERL_NIF_TERM locals = (argc > 4 && enif_is_map(env, argv[4]))
             ? argv[4] : enif_make_new_map(env);
@@ -5443,8 +5505,8 @@ static ERL_NIF_TERM nif_context_exec_async(ErlNifEnv *env, int argc, const ERL_N
     /* RequestId is argv[2] - can be any term */
     ERL_NIF_TERM request_id = argv[2];
 
-    /* Worker thread mode: dispatch async */
-    if (ctx->uses_worker_thread) {
+    /* Dedicated thread (worker or OWN_GIL): dispatch async */
+    if (ctx_uses_async_thread(ctx)) {
         return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EXEC,
             argv[3], caller_pid, request_id, NULL);
     }
@@ -5487,7 +5549,7 @@ static ERL_NIF_TERM nif_context_call_with_env_async(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_env");
     }
 
-    if (!ctx->uses_worker_thread) {
+    if (!ctx_uses_async_thread(ctx)) {
         return make_error(env, "async_requires_worker_thread");
     }
 
@@ -5532,7 +5594,7 @@ static ERL_NIF_TERM nif_context_eval_with_env_async(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_env");
     }
 
-    if (!ctx->uses_worker_thread) {
+    if (!ctx_uses_async_thread(ctx)) {
         return make_error(env, "async_requires_worker_thread");
     }
 
@@ -5573,7 +5635,7 @@ static ERL_NIF_TERM nif_context_exec_with_env_async(ErlNifEnv *env, int argc,
         return make_error(env, "invalid_env");
     }
 
-    if (!ctx->uses_worker_thread) {
+    if (!ctx_uses_async_thread(ctx)) {
         return make_error(env, "async_requires_worker_thread");
     }
 
@@ -8146,6 +8208,7 @@ static ErlNifFunc nif_funcs[] = {
     /* FD lifecycle management (uvloop-like API) */
     {"handle_fd_event", 2, nif_handle_fd_event, 0},
     {"handle_fd_event_and_reselect", 2, nif_handle_fd_event_and_reselect, 0},
+    {"fd_arm", 2, nif_fd_arm, 0},
     {"stop_reader", 1, nif_stop_reader, 0},
     {"start_reader", 1, nif_start_reader, 0},
     {"stop_writer", 1, nif_stop_writer, 0},

@@ -121,6 +121,7 @@
     %% FD lifecycle management (uvloop-like API)
     handle_fd_event/2,
     handle_fd_event_and_reselect/2,
+    fd_arm/2,
     stop_reader/1,
     start_reader/1,
     stop_writer/1,
@@ -923,6 +924,13 @@ handle_fd_event(_FdRef, _Type) ->
 %% Type: read | write
 -spec handle_fd_event_and_reselect(reference(), read | write) -> ok | {error, term()}.
 handle_fd_event_and_reselect(_FdRef, _Type) ->
+    ?NIF_STUB.
+
+%% @doc Re-arm a read or write select for an existing fd resource.
+%% Sent to the event worker by the Python loop, which cannot re-select a
+%% scheduler-polled fd from its own thread.
+-spec fd_arm(reference(), read | write) -> ok | {error, term()}.
+fd_arm(_FdRef, _Type) ->
     ?NIF_STUB.
 
 %% @doc Stop/pause read monitoring without closing the FD.
