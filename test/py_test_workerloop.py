@@ -118,9 +118,29 @@ async def adopt(fd):
     return 'adopted'
 
 
+_started = []
+
+
 async def add(a, b):
+    _started.append(a)
     await asyncio.sleep(0.001)
     return a + b
+
+
+def started():
+    """Which add() calls actually started (diagnostics)."""
+    return list(_started)
+
+
+def scheduled_stats():
+    """Loop side view: how many tasks were created and how many are pending."""
+    loop = asyncio.get_event_loop_policy().get_event_loop() if False else None
+    try:
+        import asyncio as _a
+        tasks = _a.all_tasks(loop=None) if False else []
+    except Exception:
+        tasks = []
+    return len(_started), len(tasks)
 
 
 def sync_add(a, b):
