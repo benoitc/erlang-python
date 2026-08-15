@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 4.0.0 (2026-08-15)
+
+### Breaking Changes
+
+- **Callback results returning an Erlang string** - a string returned from an
+  Erlang callback (`"abc"`, a list of integers) now reaches Python as
+  `[97, 98, 99]` rather than `'abc'`, the same conversion call arguments have
+  always used. Return a binary (`<<"abc">>`) for a Python `str`. Nothing raises
+  on upgrade, so check what your registered callbacks return before deploying.
+  See the encoding change under Changed below.
 
 ### Added
 
