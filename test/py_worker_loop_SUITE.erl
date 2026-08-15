@@ -232,7 +232,9 @@ test_submit_ordering(Config) ->
              ct:log("loop alive (sync): ~p", [py_context:submit_await(C, py_test_workerloop, sync_add, [1, 1])]),
              ct:log("loop alive (coro): ~p", [py_context:submit_await(C, py_test_workerloop, add, [1, 1])]),
              ct:log("mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
-             ct:fail({tasks_incomplete, length(Bad)})
+             Alive = py_context:submit_await(C, py_test_workerloop, add, [1, 1]),
+             ct:fail({tasks_incomplete, length(Bad), lists:sublist(Bad, 6),
+                      {first_bad_index, element(1, hd(Bad))}, {loop_alive, Alive}})
     end,
     ok = py_context:stop_loop(C),
     stop_ctx(C),
