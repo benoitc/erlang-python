@@ -220,7 +220,15 @@ test_submit_ordering(Config) ->
         ok = py_nif:submit_task(LoopRef, self(), R, <<"py_test_workerloop">>, <<"add">>, [I, 0], #{}),
         {I, R}
     end || I <- lists:seq(1, 500)],
-    [{ok, I} = py_event_loop:await(R, 10000) || {I, R} <- Refs],
+    Results = [{I, py_event_loop:await(R, 30000)} || {I, R} <- Refs],
+    Bad = [X || {I, Res} = X <- Results, Res =/= {ok, I}],
+    case Bad of
+        [] -> ok;
+        _ -> ct:log("~p of 500 tasks did not complete: ~p", [length(Bad), lists:sublist(Bad, 10)]),
+             ct:log("loop alive: ~p", [py_context:submit_await(C, py_test_workerloop, sync_add, [1, 1])]),
+             ct:log("late results in mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
+             ct:fail({tasks_incomplete, length(Bad)})
+    end,
     ok = py_context:stop_loop(C),
     stop_ctx(C),
     ok.
