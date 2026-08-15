@@ -116,21 +116,23 @@ test_reentrant_resume_stress(_Config) ->
     ok.
 
 %% @doc Regression for the binary_to_term SAFE-flag hardening (atom exhaustion).
-%% A `__etf__:` callback result that encodes a brand-new atom must be rejected (not
-%% decoded) so it cannot mint non-GC'd atoms, while a valid existing-atom payload
-%% still round-trips through the same enif_binary_to_term path.
+%%
+%% Callback results cross as external term format built by the Erlang side, so
+%% pids and references round-trip natively. A binary that merely looks like the
+%% old `__etf__:` marker is data: it must be passed through untouched and must
+%% never be re-interpreted as a term, which is what could mint non-GC'd atoms.
 test_etf_decode_safe(_Config) ->
-    %% Positive: an EXISTING atom encoded via __etf__: still decodes under SAFE,
-    %% proving the decode path runs and the change is non-breaking.
-    OkMarker = etf_marker(term_to_binary(ok)),
-    py:register_function(etf_probe_ok, fun(_) -> OkMarker end),
-    {ok, GotOk} = py:eval(<<"__import__('erlang').call('etf_probe_ok', [])">>),
-    true = (GotOk =/= OkMarker),   %% decoded to the term, not passed through verbatim
+    %% Positive: pids and refs cross natively, no marker encoding involved.
+    %% (The atom comes back as a binary: atoms have no Python counterpart.)
+    Pid = self(),
+    Ref = make_ref(),
+    py:register_function(etf_probe_ok, fun(_) -> {Pid, Ref, ok} end),
+    {ok, {Pid, Ref, <<"ok">>}} =
+        py:eval(<<"__import__('erlang').call('etf_probe_ok', [])">>),
     py:unregister_function(etf_probe_ok),
 
-    %% Negative: many DISTINCT brand-new atoms encoded via __etf__: must all be
-    %% rejected. Pre-fix (flags=0) each would create a permanent atom and come back
-    %% as that atom; with ERL_NIF_BIN2TERM_SAFE the raw marker is returned unchanged.
+    %% Negative: many DISTINCT brand-new atoms wrapped in marker-shaped binaries
+    %% must all come back verbatim, never decoded into atoms.
     Before = erlang:system_info(atom_count),
     N = 50,
     lists:foreach(
@@ -139,7 +141,7 @@ test_etf_decode_safe(_Config) ->
             Marker = etf_marker(novel_atom_etf(Name)),
             py:register_function(etf_probe_novel, fun(_) -> Marker end),
             {ok, Got} = py:eval(<<"__import__('erlang').call('etf_probe_novel', [])">>),
-            Marker = Got,   %% rejected: returned verbatim, never decoded to the atom
+            Marker = Got,   %% passed through as data, never decoded to the atom
             assert_atom_absent(Name)
         end,
         lists:seq(1, N)
@@ -150,8 +152,8 @@ test_etf_decode_safe(_Config) ->
     true = (After - Before) < (N div 2),
     ok.
 
-%% @private Build a "__etf__:<base64>" marker the C side base64-decodes and feeds to
-%% enif_binary_to_term (see term_to_python_repr/1 in py_context for the real encoder).
+%% @private Build a "__etf__:<base64>" marker, the shape the legacy repr encoder
+%% used for pids and refs, now just an ordinary binary as far as callbacks go.
 etf_marker(Etf) ->
     <<"__etf__:", (base64:encode(Etf))/binary>>.
 

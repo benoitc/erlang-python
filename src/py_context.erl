@@ -35,6 +35,7 @@
 
 -export([
     start_link/2,
+    start_link/3,
     new/1,
     stop/1,
     destroy/1,
@@ -53,14 +54,24 @@
     get_interp_id/1,
     is_subinterp/1,
     create_local_env/1,
-    get_nif_ref/1
+    get_nif_ref/1,
+    interrupt/1
 ]).
 
 %% Internal exports
--export([init/3]).
+-export([init/3, init/4, init_ref_tab/0]).
 
 %% Exported for py_reactor_context
 -export([extend_erlang_module_in_context/1]).
+
+%% Maps context pid -> NIF context reference. Read by interrupt/1, which must
+%% reach the NIF reference while the context process is blocked in a NIF and
+%% therefore cannot answer get_nif_ref/1.
+-define(REF_TAB, py_context_refs).
+
+%% How long to wait for an interrupted call to unwind and reply, so the late
+%% reply is drained instead of being left in the caller's mailbox.
+-define(INTERRUPT_GRACE_MS, 1000).
 
 -type context_mode() :: worker | owngil.
 -type context() :: pid().
@@ -93,8 +104,21 @@
 %% @returns {ok, Pid} | {error, Reason}
 -spec start_link(pos_integer(), context_mode()) -> {ok, pid()} | {error, term()}.
 start_link(Id, Mode) ->
+    start_link(Id, Mode, #{}).
+
+%% @doc Start a new py_context process with options.
+%%
+%% See new/1 for the recognised options.
+%%
+%% @param Id Unique identifier for this context
+%% @param Mode Context mode
+%% @param Opts Options map
+%% @returns {ok, Pid} | {error, Reason}
+-spec start_link(pos_integer(), context_mode(), map()) ->
+    {ok, pid()} | {error, term()}.
+start_link(Id, Mode, Opts) when is_map(Opts) ->
     Parent = self(),
-    Pid = spawn_link(fun() -> init(Parent, Id, Mode) end),
+    Pid = spawn_link(fun() -> init(Parent, Id, Mode, Opts) end),
     receive
         {Pid, started} ->
             {ok, Pid};
@@ -126,6 +150,10 @@ stop(Ctx) when is_pid(Ctx) ->
 %%
 %% Options:
 %% - `mode' - Context mode (worker | owngil), default: worker
+%% - `memory_limit' - Cap in bytes on memory allocated by this context.
+%%   Requires `mode => owngil' and the runtime started with
+%%   `enable_memory_limits'; see py_nif:context_set_memory_limit/2 for what
+%%   is counted.
 %%
 %% @param Opts Options map
 %% @returns {ok, Pid} | {error, Reason}
@@ -133,7 +161,7 @@ stop(Ctx) when is_pid(Ctx) ->
 new(Opts) when is_map(Opts) ->
     Mode = maps:get(mode, Opts, worker),
     Id = erlang:unique_integer([positive]),
-    start_link(Id, Mode).
+    start_link(Id, Mode, Opts).
 
 %% @doc Alias for stop/1 for API consistency.
 -spec destroy(context()) -> ok.
@@ -175,16 +203,7 @@ call(Ctx, Module, Func, Args, Kwargs, Timeout) when is_pid(Ctx) ->
     ModuleBin = to_binary(Module),
     FuncBin = to_binary(Func),
     Ctx ! {call, self(), MRef, ModuleBin, FuncBin, Args, Kwargs},
-    receive
-        {MRef, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Ctx, Reason} ->
-            {error, {context_died, Reason}}
-    after Timeout ->
-        erlang:demonitor(MRef, [flush]),
-        {error, timeout}
-    end.
+    await_reply(Ctx, MRef, Timeout).
 
 %% @doc Call a Python function with a process-local environment.
 %%
@@ -203,16 +222,7 @@ call(Ctx, Module, Func, Args, Kwargs, Timeout, EnvRef) when is_pid(Ctx), is_refe
     ModuleBin = to_binary(Module),
     FuncBin = to_binary(Func),
     Ctx ! {call, self(), MRef, ModuleBin, FuncBin, Args, Kwargs, EnvRef},
-    receive
-        {MRef, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Ctx, Reason} ->
-            {error, {context_died, Reason}}
-    after Timeout ->
-        erlang:demonitor(MRef, [flush]),
-        {error, timeout}
-    end.
+    await_reply(Ctx, MRef, Timeout).
 
 %% @doc Evaluate a Python expression with empty locals.
 %%
@@ -244,16 +254,7 @@ eval(Ctx, Code, Locals, Timeout) when is_pid(Ctx) ->
     MRef = erlang:monitor(process, Ctx),
     CodeBin = to_binary(Code),
     Ctx ! {eval, self(), MRef, CodeBin, Locals},
-    receive
-        {MRef, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Ctx, Reason} ->
-            {error, {context_died, Reason}}
-    after Timeout ->
-        erlang:demonitor(MRef, [flush]),
-        {error, timeout}
-    end.
+    await_reply(Ctx, MRef, Timeout).
 
 %% @doc Evaluate a Python expression with a process-local environment.
 %%
@@ -269,16 +270,7 @@ eval(Ctx, Code, Locals, Timeout, EnvRef) when is_pid(Ctx), is_reference(EnvRef) 
     MRef = erlang:monitor(process, Ctx),
     CodeBin = to_binary(Code),
     Ctx ! {eval, self(), MRef, CodeBin, Locals, EnvRef},
-    receive
-        {MRef, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Ctx, Reason} ->
-            {error, {context_died, Reason}}
-    after Timeout ->
-        erlang:demonitor(MRef, [flush]),
-        {error, timeout}
-    end.
+    await_reply(Ctx, MRef, Timeout).
 
 %% @doc Execute Python statements.
 %%
@@ -290,16 +282,7 @@ exec(Ctx, Code) when is_pid(Ctx) ->
     MRef = erlang:monitor(process, Ctx),
     CodeBin = to_binary(Code),
     Ctx ! {exec, self(), MRef, CodeBin},
-    receive
-        {MRef, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Ctx, Reason} ->
-            {error, {context_died, Reason}}
-    after infinity ->
-        erlang:demonitor(MRef, [flush]),
-        {error, timeout}
-    end.
+    await_reply(Ctx, MRef, infinity).
 
 %% @doc Execute Python statements with a process-local environment.
 %%
@@ -312,16 +295,7 @@ exec(Ctx, Code, EnvRef) when is_pid(Ctx), is_reference(EnvRef) ->
     MRef = erlang:monitor(process, Ctx),
     CodeBin = to_binary(Code),
     Ctx ! {exec, self(), MRef, CodeBin, EnvRef},
-    receive
-        {MRef, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Ctx, Reason} ->
-            {error, {context_died, Reason}}
-    after infinity ->
-        erlang:demonitor(MRef, [flush]),
-        {error, timeout}
-    end.
+    await_reply(Ctx, MRef, infinity).
 
 %% @doc Call a method on a Python object reference.
 -spec call_method(context(), reference(), atom() | binary(), list()) ->
@@ -408,44 +382,167 @@ get_nif_ref(Ctx) when is_pid(Ctx) ->
             error({context_died, Reason})
     end.
 
+%% @doc Interrupt Python code currently running in this context.
+%%
+%% Raises KeyboardInterrupt in the thread executing the context; the in-flight
+%% call returns `{error, interrupted}'. Callable from any process, including
+%% while the context process is blocked in a NIF.
+%%
+%% Returns `not_running' if the context is idle, unknown, or the exception
+%% could not be delivered. Code blocked in a C call (`time.sleep', a numpy
+%% kernel, a socket read) is only interrupted once that call returns.
+%%
+%% @param Ctx Context process
+%% @returns ok | not_running
+-spec interrupt(context()) -> ok | not_running.
+interrupt(Ctx) when is_pid(Ctx) ->
+    case lookup_nif_ref(Ctx) of
+        {ok, Ref} ->
+            try py_nif:context_interrupt(Ref) of
+                ok -> ok;
+                _ -> not_running
+            catch
+                _:_ -> not_running
+            end;
+        error ->
+            not_running
+    end.
+
+%% @private Create the pid -> NIF reference table. Called by the supervisor
+%% before any context starts.
+-spec init_ref_tab() -> ok.
+init_ref_tab() ->
+    case ets:whereis(?REF_TAB) of
+        undefined ->
+            ?REF_TAB = ets:new(?REF_TAB, [
+                named_table, public, set, {read_concurrency, true}
+            ]),
+            ok;
+        _ ->
+            ok
+    end.
+
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
 
+%% @private Wait for a context reply, interrupting the running Python code if
+%% the timeout expires.
+%%
+%% On timeout the Python side is interrupted and we wait a bounded grace period
+%% for the unwinding call to reply, so the late reply is consumed here rather
+%% than left behind in the caller's mailbox. The result is still
+%% `{error, timeout}': the caller asked to stop waiting.
+await_reply(Ctx, MRef, Timeout) ->
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    after Timeout ->
+        _ = interrupt(Ctx),
+        receive
+            {MRef, _Late} ->
+                erlang:demonitor(MRef, [flush]);
+            {'DOWN', MRef, process, Ctx, _} ->
+                ok
+        after ?INTERRUPT_GRACE_MS ->
+            erlang:demonitor(MRef, [flush])
+        end,
+        {error, timeout}
+    end.
+
+%% @private
+register_nif_ref(Ref) ->
+    try
+        true = ets:insert(?REF_TAB, {self(), Ref}),
+        ok
+    catch
+        error:badarg -> ok  %% table not created (library used without the app)
+    end.
+
+%% @private
+unregister_nif_ref() ->
+    try
+        true = ets:delete(?REF_TAB, self()),
+        ok
+    catch
+        error:badarg -> ok
+    end.
+
+%% @private
+lookup_nif_ref(Ctx) ->
+    try ets:lookup(?REF_TAB, Ctx) of
+        [{Ctx, Ref}] -> {ok, Ref};
+        [] -> error
+    catch
+        error:badarg -> error
+    end.
+
 %% @private
 init(Parent, Id, Mode) ->
+    init(Parent, Id, Mode, #{}).
+
+%% @private
+init(Parent, Id, Mode, Opts) ->
     process_flag(trap_exit, true),
     case create_context(Mode) of
         {ok, Ref, InterpId} ->
-            %% Apply all registered imports and paths to this interpreter
-            apply_registered_imports(Ref),
-            apply_registered_paths(Ref),
-            %% Apply preload code (populates globals for process-local envs)
-            apply_preload(Ref),
-            %% For subinterpreters, create a dedicated event worker
-            EventState = setup_event_worker(Ref, InterpId),
-            %% For thread-model subinterpreters, spawn a dedicated callback handler
-            %% because the main context process will be blocked in the NIF
-            CallbackHandler = case maps:get(mode, EventState, normal) of
-                thread_model ->
-                    Handler = spawn_callback_handler(Ref),
-                    ok = py_nif:context_set_callback_handler(Ref, Handler),
-                    Handler;
-                _ ->
-                    undefined
-            end,
-            Parent ! {self(), started},
-            State = #state{
-                ref = Ref,
-                id = Id,
-                interp_id = InterpId,
-                event_state = EventState,
-                callback_handler = CallbackHandler
-            },
-            loop(State);
+            %% Publish the NIF reference so interrupt/1 can reach it while
+            %% this process is blocked in a NIF
+            register_nif_ref(Ref),
+            case apply_memory_limit(Ref, Opts) of
+                ok ->
+                    init_started(Parent, Id, Ref, InterpId);
+                {error, LimitError} ->
+                    unregister_nif_ref(),
+                    try py_nif:context_destroy(Ref) catch _:_ -> ok end,
+                    Parent ! {self(), {error, LimitError}}
+            end;
         {error, Reason} ->
             Parent ! {self(), {error, Reason}}
     end.
+
+%% @private
+apply_memory_limit(Ref, Opts) ->
+    case maps:get(memory_limit, Opts, undefined) of
+        undefined ->
+            ok;
+        Bytes when is_integer(Bytes), Bytes >= 0 ->
+            py_nif:context_set_memory_limit(Ref, Bytes);
+        Other ->
+            {error, {invalid_memory_limit, Other}}
+    end.
+
+%% @private
+init_started(Parent, Id, Ref, InterpId) ->
+    %% Apply all registered imports and paths to this interpreter
+    apply_registered_imports(Ref),
+    apply_registered_paths(Ref),
+    %% Apply preload code (populates globals for process-local envs)
+    apply_preload(Ref),
+    %% For subinterpreters, create a dedicated event worker
+    EventState = setup_event_worker(Ref, InterpId),
+    %% For thread-model subinterpreters, spawn a dedicated callback handler
+    %% because the main context process will be blocked in the NIF
+    CallbackHandler = case maps:get(mode, EventState, normal) of
+        thread_model ->
+            Handler = spawn_callback_handler(Ref),
+            ok = py_nif:context_set_callback_handler(Ref, Handler),
+            Handler;
+        _ ->
+            undefined
+    end,
+    Parent ! {self(), started},
+    State = #state{
+        ref = Ref,
+        id = Id,
+        interp_id = InterpId,
+        event_state = EventState,
+        callback_handler = CallbackHandler
+    },
+    loop(State).
 
 %% @private Create event worker for subinterpreter contexts
 setup_event_worker(Ref, InterpId) ->
@@ -641,6 +738,7 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
 
 %% @private Clean up resources on termination
 terminate(_Reason, #state{ref = Ref, event_state = EventState, callback_handler = CallbackHandler}) ->
+    unregister_nif_ref(),
     %% Stop the callback handler if it exists
     case CallbackHandler of
         Pid when is_pid(Pid) ->
@@ -699,9 +797,8 @@ handle_blocking_callback(Ref, FuncName, Args) ->
     %% Execute the registered function
     Response = case py_callback:execute(FuncName, ArgsList) of
         {ok, Result} ->
-            %% Format: status_byte (0=ok) + python_repr
-            ResultStr = term_to_python_repr(Result),
-            <<0, ResultStr/binary>>;
+            %% Format: status_byte (2=ok, ETF) + external term format
+            <<2, (term_to_binary(Result))/binary>>;
         {error, {not_found, Name}} ->
             ErrMsg = iolist_to_binary(
                 io_lib:format("Function '~s' not registered", [Name])),
@@ -966,8 +1063,7 @@ handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs) ->
             ArgsList = tuple_to_list(CallbackArgs),
             case py_callback:execute(FuncName, ArgsList) of
                 {ok, Value} ->
-                    ReprStr = term_to_python_repr(Value),
-                    {ok, <<0, ReprStr/binary>>};
+                    {ok, <<2, (term_to_binary(Value))/binary>>};
                 {error, Reason} ->
                     ErrMsg = iolist_to_binary(io_lib:format("~p", [Reason])),
                     {ok, <<1, ErrMsg/binary>>}
@@ -1069,79 +1165,10 @@ resume_and_continue(Ref, StateRef, {error, _} = Err) ->
 %% Utility functions
 %% ============================================================================
 
-%% @private
-%% Convert Erlang term to Python repr string
-term_to_python_repr(Term) when is_integer(Term) ->
-    integer_to_binary(Term);
-term_to_python_repr(Term) when is_float(Term) ->
-    float_to_binary(Term, [{decimals, 15}, compact]);
-term_to_python_repr(true) ->
-    <<"True">>;
-term_to_python_repr(false) ->
-    <<"False">>;
-term_to_python_repr(none) ->
-    <<"None">>;
-term_to_python_repr(nil) ->
-    <<"None">>;
-term_to_python_repr(undefined) ->
-    <<"None">>;
-term_to_python_repr(Term) when is_atom(Term) ->
-    %% Convert atom to Python string
-    BinStr = atom_to_binary(Term, utf8),
-    <<"'", BinStr/binary, "'">>;
-term_to_python_repr(Term) when is_binary(Term) ->
-    %% Escape the binary for Python
-    Escaped = binary:replace(Term, <<"'">>, <<"\\'">>, [global]),
-    <<"'", Escaped/binary, "'">>;
-term_to_python_repr(Term) when is_list(Term) ->
-    case io_lib:printable_unicode_list(Term) of
-        true ->
-            %% It's a string
-            Bin = unicode:characters_to_binary(Term),
-            Escaped = binary:replace(Bin, <<"'">>, <<"\\'">>, [global]),
-            <<"'", Escaped/binary, "'">>;
-        false ->
-            %% It's a list
-            Items = [term_to_python_repr(E) || E <- Term],
-            ItemsBin = join_binaries(Items, <<", ">>),
-            <<"[", ItemsBin/binary, "]">>
-    end;
-term_to_python_repr(Term) when is_tuple(Term) ->
-    Items = [term_to_python_repr(E) || E <- tuple_to_list(Term)],
-    ItemsBin = join_binaries(Items, <<", ">>),
-    case tuple_size(Term) of
-        1 -> <<"(", ItemsBin/binary, ",)">>;
-        _ -> <<"(", ItemsBin/binary, ")">>
-    end;
-term_to_python_repr(Term) when is_map(Term) ->
-    Items = maps:fold(fun(K, V, Acc) ->
-        KeyRepr = term_to_python_repr(K),
-        ValRepr = term_to_python_repr(V),
-        [<<KeyRepr/binary, ": ", ValRepr/binary>> | Acc]
-    end, [], Term),
-    ItemsBin = join_binaries(lists:reverse(Items), <<", ">>),
-    <<"{", ItemsBin/binary, "}">>;
-term_to_python_repr(Term) when is_pid(Term) ->
-    %% Encode PID using ETF (Erlang Term Format) for exact reconstruction.
-    %% Format: "__etf__:<base64_encoded_binary>"
-    %% The C side will detect this, base64 decode, and use enif_binary_to_term
-    %% to reconstruct the pid, then convert to ErlangPidObject.
-    Etf = term_to_binary(Term),
-    B64 = base64:encode(Etf),
-    <<"\"__etf__:", B64/binary, "\"">>;
-term_to_python_repr(Term) when is_reference(Term) ->
-    %% References also need ETF encoding for round-trip
-    Etf = term_to_binary(Term),
-    B64 = base64:encode(Etf),
-    <<"\"__etf__:", B64/binary, "\"">>;
-term_to_python_repr(_Term) ->
-    <<"None">>.
-
-%% @private
-join_binaries([], _Sep) -> <<>>;
-join_binaries([H], _Sep) -> H;
-join_binaries([H|T], Sep) ->
-    lists:foldl(fun(B, Acc) -> <<Acc/binary, Sep/binary, B/binary>> end, H, T).
+%% Callback results cross to Python as external term format (status byte 2)
+%% and are decoded by term_to_py() in c_src/py_convert.c, the same
+%% converter used for call arguments. The former Python-repr encoder was
+%% removed in favour of it.
 
 %% @private
 to_binary(Atom) when is_atom(Atom) ->

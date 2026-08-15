@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Interrupt running Python** - `py:interrupt/1` and `py_context:interrupt/1`
+  raise `KeyboardInterrupt` in the thread executing a context; the in-flight call
+  returns `{error, interrupted}`. `py_context:call/eval/exec` now interrupt
+  automatically when their timeout expires, so `{error, timeout}` stops the Python
+  code instead of only abandoning the reply while the thread kept burning CPU.
+  Works in both `worker` and `owngil` modes, and is callable while the context
+  process is blocked in a NIF. CPython delivers async exceptions at bytecode
+  boundaries, so code blocked in a C call (`time.sleep`, a numpy kernel, a socket
+  read) is interrupted once that call returns. See `docs/interrupts.md`.
+- **Per-context memory caps** - `py_context:new(#{mode => owngil, memory_limit => Bytes})`
+  caps memory allocated by one context; exceeding it raises `MemoryError` there and
+  leaves other contexts untouched. Requires `{enable_memory_limits, true}` in the
+  application environment, since the allocator is hooked before Python starts.
+  Accounting covers obmalloc traffic only: allocations over 512 bytes (large
+  binaries, numpy buffers) are not counted, granularity is one 1 MB arena, and
+  `worker` mode returns `{error, memory_limit_requires_owngil}` because those
+  contexts share the main interpreter. `py_nif:context_memory_usage/1` reports
+  usage. See `docs/memory.md`.
+- **Async generator streaming** - `py:stream_start/3,4` accepts async generators
+  again, driving them on a private event loop and emitting the same
+  `{py_stream, Ref, ...}` events. The docs claimed this since 3.0.0 without the
+  code behind it. `py:stream/4` with kwargs and `py:stream_eval/1,2` remain
+  sync-only, which is now stated explicitly.
+
+### Changed
+
+- **Callback results cross as external term format** - results returned from an
+  Erlang callback into Python are encoded with `term_to_binary` and decoded by the
+  same `term_to_py` converter used for call arguments, replacing the Python-repr
+  string that was parsed with `ast.literal_eval`. This fixes binaries containing
+  backslashes, quotes, newlines or tabs (which produced an unparseable literal and
+  were silently handed to Python as the raw repr text), `[]` arriving as `''`,
+  float precision loss, and the base64 round-trip for pids and references, which
+  now cross as native `Pid` and `Ref` objects.
+
+  Breaking: an Erlang string returned from a callback (`"abc"`, a list of
+  integers) now reaches Python as `[97, 98, 99]` rather than `'abc'`, the same
+  conversion call arguments have always used. Return a binary (`<<"abc">>`) for a
+  Python `str`.
+
 ## 3.1.1 (2026-05-31)
 
 ### Changed

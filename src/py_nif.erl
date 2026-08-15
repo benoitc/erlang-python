@@ -156,6 +156,9 @@
     %% Process-per-context API (no mutex)
     context_create/1,
     context_destroy/1,
+    context_interrupt/1,
+    context_set_memory_limit/2,
+    context_memory_usage/1,
     context_call/5,
     context_call/6,
     context_eval/3,
@@ -1172,6 +1175,52 @@ context_create(_Mode) ->
 %% @returns ok
 -spec context_destroy(reference()) -> ok.
 context_destroy(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Interrupt Python code currently running in a context.
+%%
+%% Raises KeyboardInterrupt asynchronously in the thread executing the
+%% context. The interrupted call returns `{error, interrupted}'.
+%%
+%% Safe to call from any process, including while the owning context process
+%% is blocked in a NIF. Returns `not_running' if the context is idle or the
+%% exception could not be delivered.
+%%
+%% CPython delivers async exceptions at bytecode boundaries, so code blocked
+%% in a C call (`time.sleep', a numpy kernel, a socket read) is not
+%% interrupted until that call returns.
+%%
+%% @param ContextRef Reference returned by context_create/1
+%% @returns ok | not_running | {error, Reason}
+-spec context_interrupt(reference()) -> ok | not_running | {error, term()}.
+context_interrupt(_ContextRef) ->
+    ?NIF_STUB.
+
+%% @doc Set a memory cap for a context, in bytes (0 removes the cap).
+%%
+%% Requires `owngil' mode and the runtime started with
+%% `enable_memory_limits'. Exceeding the cap raises MemoryError in the
+%% Python code, which surfaces as `{error, {'MemoryError', _}}'.
+%%
+%% Only memory routed through obmalloc is counted: allocations over 512 bytes
+%% (large binaries, numpy buffers, extensions with their own allocator) bypass
+%% it, and the granularity is one 1 MB arena.
+%%
+%% @param ContextRef Reference returned by context_create/1
+%% @param Bytes Cap in bytes, or 0 for no cap
+%% @returns ok | {error, Reason}
+-spec context_set_memory_limit(reference(), non_neg_integer()) ->
+    ok | {error, term()}.
+context_set_memory_limit(_ContextRef, _Bytes) ->
+    ?NIF_STUB.
+
+%% @doc Report accounted memory usage for a context.
+%%
+%% @param ContextRef Reference returned by context_create/1
+%% @returns {ok, UsedBytes, LimitBytes} | {error, Reason}
+-spec context_memory_usage(reference()) ->
+    {ok, non_neg_integer(), non_neg_integer()} | {error, term()}.
+context_memory_usage(_ContextRef) ->
     ?NIF_STUB.
 
 %% @doc Call a Python function in a context.

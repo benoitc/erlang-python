@@ -225,10 +225,8 @@ handle_thread_callback(WriteFd, CallbackId, FuncName, Args) ->
     %% Execute the registered function
     Response = case py_callback:execute(FuncName, ArgsList) of
         {ok, Result} ->
-            %% Encode result as Python-parseable string
-            %% Format: status_byte (0=ok) + python_repr
-            ResultStr = term_to_python_repr(Result),
-            <<0, ResultStr/binary>>;
+            %% Format: status_byte (2=ok, ETF) + external term format
+            <<2, (term_to_binary(Result))/binary>>;
         {error, {not_found, Name}} ->
             ErrMsg = iolist_to_binary(
                 io_lib:format("Function '~s' not registered", [Name])),
@@ -247,7 +245,7 @@ handle_thread_callback(WriteFd, CallbackId, FuncName, Args) ->
     end.
 
 %% Execute the user's registered function and encode the result as a
-%% wire-format response body (`<<Status, PythonRepr/binary>>`).
+%% wire-format response body (`<<Status, Payload/binary>>`).
 %% Used by async_writer_loop (and indirectly by handle_thread_callback
 %% via the same encoding shape — the sync path keeps its own copy
 %% close to the write call site).
@@ -259,8 +257,7 @@ run_async_callback(FuncName, Args) ->
     end,
     case py_callback:execute(FuncName, ArgsList) of
         {ok, Result} ->
-            ResultStr = term_to_python_repr(Result),
-            <<0, ResultStr/binary>>;
+            <<2, (term_to_binary(Result))/binary>>;
         {error, {not_found, Name}} ->
             ErrMsg = iolist_to_binary(
                 io_lib:format("Function '~s' not registered", [Name])),
@@ -341,88 +338,10 @@ async_writer_loop(WriteFd) ->
     end.
 
 %%% ============================================================================
-%%% Term to Python repr conversion
-%%% (Same as py_worker.erl - could be factored out to py_util.erl)
+%%% Callback result encoding
 %%% ============================================================================
-
-%% Convert Erlang term to Python-parseable string representation
-term_to_python_repr(Term) when is_integer(Term) ->
-    integer_to_binary(Term);
-term_to_python_repr(Term) when is_float(Term) ->
-    float_to_binary(Term, [{decimals, 17}, compact]);
-term_to_python_repr(true) ->
-    <<"True">>;
-term_to_python_repr(false) ->
-    <<"False">>;
-term_to_python_repr(none) ->
-    <<"None">>;
-term_to_python_repr(nil) ->
-    <<"None">>;
-term_to_python_repr(undefined) ->
-    <<"None">>;
-term_to_python_repr(Term) when is_atom(Term) ->
-    %% Convert atom to Python string
-    AtomStr = atom_to_binary(Term, utf8),
-    <<"\"", AtomStr/binary, "\"">>;
-term_to_python_repr(Term) when is_binary(Term) ->
-    %% Escape binary as Python string
-    Escaped = escape_string(Term),
-    <<"\"", Escaped/binary, "\"">>;
-term_to_python_repr(Term) when is_list(Term) ->
-    %% Check if it's a string (list of integers)
-    case io_lib:printable_list(Term) of
-        true ->
-            Bin = list_to_binary(Term),
-            Escaped = escape_string(Bin),
-            <<"\"", Escaped/binary, "\"">>;
-        false ->
-            Items = [term_to_python_repr(E) || E <- Term],
-            Joined = join_binaries(Items, <<", ">>),
-            <<"[", Joined/binary, "]">>
-    end;
-term_to_python_repr(Term) when is_tuple(Term) ->
-    Items = [term_to_python_repr(E) || E <- tuple_to_list(Term)],
-    Joined = join_binaries(Items, <<", ">>),
-    case length(Items) of
-        1 -> <<"(", Joined/binary, ",)">>;
-        _ -> <<"(", Joined/binary, ")">>
-    end;
-term_to_python_repr(Term) when is_map(Term) ->
-    Items = maps:fold(fun(K, V, Acc) ->
-        KeyRepr = term_to_python_repr(K),
-        ValRepr = term_to_python_repr(V),
-        [<<KeyRepr/binary, ": ", ValRepr/binary>> | Acc]
-    end, [], Term),
-    Joined = join_binaries(Items, <<", ">>),
-    <<"{", Joined/binary, "}">>;
-term_to_python_repr(Term) when is_pid(Term) ->
-    %% Encode PID using ETF (Erlang Term Format) for exact reconstruction.
-    %% Format: "__etf__:<base64_encoded_binary>"
-    %% The C side will detect this, base64 decode, and use enif_binary_to_term
-    %% to reconstruct the pid, then convert to ErlangPidObject.
-    Etf = term_to_binary(Term),
-    B64 = base64:encode(Etf),
-    <<"\"__etf__:", B64/binary, "\"">>;
-term_to_python_repr(Term) when is_reference(Term) ->
-    %% References also need ETF encoding for round-trip
-    Etf = term_to_binary(Term),
-    B64 = base64:encode(Etf),
-    <<"\"__etf__:", B64/binary, "\"">>;
-term_to_python_repr(_Term) ->
-    %% Fallback - return None for unsupported types
-    <<"None">>.
-
-escape_string(Bin) ->
-    %% Escape special characters for Python string
-    binary:replace(
-        binary:replace(
-            binary:replace(
-                binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
-                <<"\"">>, <<"\\\"">>, [global]),
-            <<"\n">>, <<"\\n">>, [global]),
-        <<"\r">>, <<"\\r">>, [global]).
-
-join_binaries([], _Sep) -> <<>>;
-join_binaries([H], _Sep) -> H;
-join_binaries([H|T], Sep) ->
-    lists:foldl(fun(E, Acc) -> <<Acc/binary, Sep/binary, E/binary>> end, H, T).
+%%%
+%%% Results cross to Python as external term format (status byte 2) and are
+%%% decoded by term_to_py() in c_src/py_convert.c, the same converter used
+%%% for call arguments. The former Python-repr encoder was removed in
+%%% favour of it.

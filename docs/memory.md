@@ -146,6 +146,64 @@ Default thresholds are `{700, 10, 10}`:
 Objects with circular references and `__del__` methods may be uncollectable.
 Monitor the `uncollectable` count in gc_stats.
 
+## Per-Context Memory Caps
+
+Cap how much memory one context may allocate, so a runaway script cannot take
+the whole node down. Exceeding the cap raises `MemoryError` inside that
+context; every other context is unaffected.
+
+Caps require `owngil` mode and must be enabled before Python starts, because
+they hook the allocator:
+
+```erlang
+%% sys.config
+[{erlang_python, [{enable_memory_limits, true}]}].
+```
+
+Then set a cap per context:
+
+```erlang
+{ok, Ctx} = py_context:new(#{mode => owngil, memory_limit => 256 * 1024 * 1024}),
+{error, {'MemoryError', _}} =
+    py_context:exec(Ctx, <<"_hog = [[] for _ in range(10000000)]">>),
+%% The context stays usable
+{ok, 4} = py_context:eval(Ctx, <<"2+2">>, #{}, 5000).
+```
+
+Read current usage:
+
+```erlang
+Ref = py_context:get_nif_ref(Ctx),
+{ok, UsedBytes, LimitBytes} = py_nif:context_memory_usage(Ref).
+```
+
+Remove a cap with `py_nif:context_set_memory_limit(Ref, 0)`. Accounting keeps
+running, so `context_memory_usage/1` still reports usage.
+
+### What is counted
+
+Accounting comes from obmalloc arena traffic, which covers ordinary Python
+objects: lists, dicts, tuples, instances, small strings.
+
+Not counted:
+
+- Allocations over 512 bytes, which bypass obmalloc: large `bytes`, numpy
+  buffers, and extensions with their own allocator.
+- Memory held by the interpreter before the cap was set.
+
+Other behaviour to expect:
+
+- Granularity is one 1 MB arena.
+- Enforcement raises `MemoryError` at the next bytecode boundary, so usage can
+  overshoot the cap slightly before the code stops.
+- The cap re-arms once usage drops back below it.
+- `worker` mode contexts share the main interpreter, so a per-context cap has
+  no meaning there. `py_context:new(#{mode => worker, memory_limit => N})`
+  returns `{error, memory_limit_requires_owngil}` instead of silently applying
+  a process-wide cap.
+
+Treat a cap as a guard against runaway object graphs, not as a hard RSS bound.
+
 ## Troubleshooting
 
 ### High Memory Usage

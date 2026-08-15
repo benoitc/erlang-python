@@ -111,6 +111,7 @@
     %% Process-per-context API (new architecture)
     context/0,
     context/1,
+    interrupt/1,
     start_contexts/0,
     start_contexts/1,
     stop_contexts/0,
@@ -490,7 +491,9 @@ stream_eval(Code, Locals) ->
 %% - `{py_stream, Ref, done}' - Stream completed
 %% - `{py_stream, Ref, {error, Reason}}' - Stream error
 %%
-%% Supports both sync generators and async generators (coroutines).
+%% Accepts sync generators and async generators. An async generator is driven
+%% on a private event loop, one value at a time; delivering a value blocks that
+%% loop, so other coroutines on it do not progress between yields.
 %%
 %% Example:
 %% ```
@@ -558,13 +561,27 @@ stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
         <<"    _mod = __import__('">>, ModuleBin, <<"')\n">>,
         <<"    _fn = getattr(_mod, '">>, FuncBin, <<"')\n">>,
         <<"    _gen = _fn(*_args) if _args else _fn()\n">>,
-        <<"    for _val in _gen:\n">>,
-        <<"        if erlang.call('_py_stream_cancelled', _rh):\n">>,
-        <<"            erlang.call('_py_stream_send', _rh, 'error', 'cancelled')\n">>,
-        <<"            break\n">>,
-        <<"        erlang.call('_py_stream_send', _rh, 'data', _val)\n">>,
+        %% Async generators are driven on a private event loop. erlang.call is
+        %% a blocking pipe read, so it stalls that loop between yields, which
+        %% is fine for a sequential stream.
+        <<"    if hasattr(_gen, '__anext__'):\n">>,
+        <<"        import asyncio\n">>,
+        <<"        async def _drive():\n">>,
+        <<"            async for _val in _gen:\n">>,
+        <<"                if erlang.call('_py_stream_cancelled', _rh):\n">>,
+        <<"                    erlang.call('_py_stream_send', _rh, 'error', 'cancelled')\n">>,
+        <<"                    return\n">>,
+        <<"                erlang.call('_py_stream_send', _rh, 'data', _val)\n">>,
+        <<"            erlang.call('_py_stream_send', _rh, 'done', None)\n">>,
+        <<"        asyncio.run(_drive())\n">>,
         <<"    else:\n">>,
-        <<"        erlang.call('_py_stream_send', _rh, 'done', None)\n">>,
+        <<"        for _val in _gen:\n">>,
+        <<"            if erlang.call('_py_stream_cancelled', _rh):\n">>,
+        <<"                erlang.call('_py_stream_send', _rh, 'error', 'cancelled')\n">>,
+        <<"                break\n">>,
+        <<"            erlang.call('_py_stream_send', _rh, 'data', _val)\n">>,
+        <<"        else:\n">>,
+        <<"            erlang.call('_py_stream_send', _rh, 'done', None)\n">>,
         <<"except Exception as _e:\n">>,
         <<"    erlang.call('_py_stream_send', _rh, 'error', str(_e))\n">>,
         <<"finally:\n">>,
@@ -1452,6 +1469,25 @@ context() ->
 -spec context(pos_integer()) -> pid().
 context(N) ->
     py_context_router:get_context(N).
+
+%% @doc Interrupt Python code currently running in a context.
+%%
+%% Raises KeyboardInterrupt in the thread executing the context; the in-flight
+%% call returns `{error, interrupted}'. Callable from any process, including
+%% while the context process is blocked in a NIF.
+%%
+%% Calls made with a timeout interrupt themselves when that timeout expires,
+%% so this is only needed to cancel work early or to stop a call made with
+%% `infinity'.
+%%
+%% Code blocked inside a C call (`time.sleep', a numpy kernel, a socket read)
+%% is only interrupted once that call returns.
+%%
+%% @param Ctx Context pid
+%% @returns ok | not_running
+-spec interrupt(pid()) -> ok | not_running.
+interrupt(Ctx) when is_pid(Ctx) ->
+    py_context:interrupt(Ctx).
 
 %%% ============================================================================
 %%% py_ref API (Python object references with auto-routing)

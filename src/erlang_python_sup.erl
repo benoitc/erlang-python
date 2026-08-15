@@ -36,8 +36,13 @@ init([]) ->
                                        erlang:system_info(schedulers)),
     ContextMode = application:get_env(erlang_python, context_mode, worker),
 
+    %% Per-context memory caps hook the obmalloc arena allocator, which has to
+    %% be installed before Python starts, hence an app env rather than a
+    %% per-context option.
+    MemoryLimits = application:get_env(erlang_python, enable_memory_limits, false),
+
     %% Initialize Python runtime first
-    ok = py_nif:init(#{}),
+    ok = py_nif:init(#{enable_memory_limits => MemoryLimits}),
 
     %% Initialize the semaphore ETS table for rate limiting
     ok = py_semaphore:init(),
@@ -47,6 +52,10 @@ init([]) ->
 
     %% Initialize shared state ETS table (owned by supervisor for resilience)
     ok = py_state:init_tab(),
+
+    %% Initialize the context pid -> NIF reference table used by
+    %% py_context:interrupt/1 (owned by supervisor, must outlive contexts)
+    ok = py_context:init_ref_tab(),
 
     %% Initialize import/path registry and load config (before contexts start)
     ok = py_import:init(),

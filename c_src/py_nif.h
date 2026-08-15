@@ -1025,6 +1025,31 @@ struct py_context {
 
     /** @brief Module cache (Dict: module_name -> PyModule) */
     PyObject *module_cache;
+
+    /* ========== Interrupt support ========== */
+
+    /**
+     * @brief Protects the exec_* fields below and serialises interrupt delivery
+     *
+     * LOCKING INVARIANT: this mutex is only ever taken by a thread that does
+     * NOT hold the GIL. nif_context_interrupt holds it while blocking on the
+     * GIL, so py_context_exec_enter() must run BEFORE acquiring the GIL and
+     * py_context_exec_leave() AFTER releasing it. Taking it with the GIL held
+     * deadlocks against an in-flight interrupt.
+     */
+    pthread_mutex_t interrupt_mutex;
+
+    /** @brief True once interrupt_mutex has been initialized (destructor guard) */
+    bool interrupt_mutex_init;
+
+    /** @brief True while a request is executing Python code in this context */
+    _Atomic bool exec_in_flight;
+
+    /** @brief PyThread_get_thread_ident() of the thread executing the request */
+    unsigned long exec_thread_id;
+
+    /** @brief True when an async exception was injected and not yet consumed */
+    _Atomic bool interrupt_pending;
 };
 
 /* ============================================================================
@@ -1127,6 +1152,67 @@ typedef struct {
  * py_context_release(&guard);
  * @endcode
  */
+/**
+ * @brief Mark this thread as the one executing Python for @p ctx
+ *
+ * Records the calling thread's Python thread identifier so
+ * nif_context_interrupt() knows where to deliver an async exception.
+ *
+ * @note MUST be called BEFORE acquiring the GIL. See the locking invariant
+ *       on py_context::interrupt_mutex.
+ */
+static inline void py_context_exec_enter(py_context_t *ctx) {
+    if (ctx == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&ctx->interrupt_mutex);
+    ctx->exec_thread_id = PyThread_get_thread_ident();
+    atomic_store(&ctx->exec_in_flight, true);
+    pthread_mutex_unlock(&ctx->interrupt_mutex);
+}
+
+/**
+ * @brief Clear the executing-thread marker for @p ctx
+ *
+ * If an interrupt was injected but never consumed (it landed after the code
+ * finished, or Python swallowed it), the pending async exception is cleared
+ * here so it cannot leak into the next request on this context.
+ *
+ * @note MUST be called AFTER releasing the GIL. See the locking invariant
+ *       on py_context::interrupt_mutex.
+ */
+static inline void py_context_exec_leave(py_context_t *ctx) {
+    if (ctx == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&ctx->interrupt_mutex);
+    atomic_store(&ctx->exec_in_flight, false);
+
+    if (atomic_load(&ctx->interrupt_pending)) {
+        /* Drop an async exception that was never raised. Re-acquiring the GIL
+         * here is safe: we do not hold it, per the invariant above. */
+        unsigned long tid = ctx->exec_thread_id;
+#ifdef HAVE_SUBINTERPRETERS
+        if (ctx->uses_own_gil && ctx->own_gil_interp != NULL) {
+            PyThreadState *tstate = PyThreadState_New(ctx->own_gil_interp);
+            if (tstate != NULL) {
+                PyEval_RestoreThread(tstate);
+                PyThreadState_SetAsyncExc(tid, NULL);
+                PyThreadState_Clear(tstate);
+                PyThreadState_DeleteCurrent();
+            }
+        } else
+#endif
+        {
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            PyThreadState_SetAsyncExc(tid, NULL);
+            PyGILState_Release(gstate);
+        }
+        atomic_store(&ctx->interrupt_pending, false);
+    }
+    pthread_mutex_unlock(&ctx->interrupt_mutex);
+}
+
 static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
     py_context_guard_t guard = {
         .ctx = ctx,
@@ -1139,6 +1225,10 @@ static inline py_context_guard_t py_context_acquire(py_context_t *ctx) {
     if (ctx == NULL || atomic_load(&ctx->destroyed)) {
         return guard;
     }
+
+    /* Register as the executing thread BEFORE taking the GIL, so an interrupt
+     * blocked on the GIL cannot deadlock against us. */
+    py_context_exec_enter(ctx);
 
     /* Acquire the GIL first */
     guard.gstate = PyGILState_Ensure();
@@ -1167,6 +1257,9 @@ static inline void py_context_release(py_context_guard_t *guard) {
     /* Release the GIL */
     PyGILState_Release(guard->gstate);
     guard->acquired = false;
+
+    /* Clear the executing-thread marker AFTER dropping the GIL. */
+    py_context_exec_leave(guard->ctx);
 }
 
 /**

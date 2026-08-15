@@ -18,7 +18,12 @@
     test_stream_error/1,
     test_stream_empty/1,
     test_stream_large/1,
-    test_stream_rejects_injection/1
+    test_stream_rejects_injection/1,
+    test_stream_async_generator/1,
+    test_stream_async_generator_args/1,
+    test_stream_async_generator_empty/1,
+    test_stream_async_generator_error/1,
+    test_stream_async_cancel/1
 ]).
 
 all() ->
@@ -31,11 +36,20 @@ all() ->
         test_stream_error,
         test_stream_empty,
         test_stream_large,
-        test_stream_rejects_injection
+        test_stream_rejects_injection,
+        test_stream_async_generator,
+        test_stream_async_generator_args,
+        test_stream_async_generator_empty,
+        test_stream_async_generator_error,
+        test_stream_async_cancel
     ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
+    %% Make test/py_test_agen.py importable for the async generator cases
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
     Config.
 
 end_per_suite(_Config) ->
@@ -174,4 +188,55 @@ test_stream_large(_Config) ->
     %% Verify first and last values
     0 = hd(Values),
     999 = lists:last(Values),
+    ok.
+
+%%% ============================================================================
+%%% Async generators
+%%%
+%%% stream_start/3,4 drives an async generator on a private event loop. The
+%%% collect-style py:stream/4-with-kwargs and py:stream_eval/1,2 wrap the call
+%%% in list() and remain sync-only.
+%%% ============================================================================
+
+%% Test streaming from an async generator
+test_stream_async_generator(_Config) ->
+    {ok, Ref} = py:stream_start(<<"py_test_agen">>, <<"counter">>, [4]),
+    {ok, Values} = collect_stream(Ref),
+    [0, 1, 2, 3] = Values,
+    ok.
+
+%% Test an async generator taking several arguments
+test_stream_async_generator_args(_Config) ->
+    {ok, Ref} = py:stream_start(<<"py_test_agen">>, <<"scaled">>, [3, 10]),
+    {ok, Values} = collect_stream(Ref),
+    [0, 10, 20] = Values,
+    ok.
+
+%% An async generator that yields nothing still completes
+test_stream_async_generator_empty(_Config) ->
+    {ok, Ref} = py:stream_start(<<"py_test_agen">>, <<"empty">>, []),
+    {ok, Values} = collect_stream(Ref),
+    [] = Values,
+    ok.
+
+%% An exception raised mid-iteration is reported as a stream error, after the
+%% values yielded before it
+test_stream_async_generator_error(_Config) ->
+    {ok, Ref} = py:stream_start(<<"py_test_agen">>, <<"failing">>, [5]),
+    {error, Reason} = collect_stream(Ref),
+    true = is_binary(Reason),
+    {_, _} = binary:match(Reason, <<"agen boom">>),
+    ok.
+
+%% Cancelling an async stream stops it with {error, cancelled}
+test_stream_async_cancel(_Config) ->
+    {ok, Ref} = py:stream_start(<<"py_test_agen">>, <<"slow">>, [50]),
+    receive
+        {py_stream, Ref, {data, _}} -> ok
+    after 5000 ->
+        ct:fail(no_first_value)
+    end,
+    ok = py:stream_cancel(Ref),
+    {error, <<"cancelled">>} = collect_stream(Ref),
+    drain_stream(Ref),
     ok.
