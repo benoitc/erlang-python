@@ -217,7 +217,7 @@ test_submit_ordering(Config) ->
     {ok, LoopRef} = py_context:loop_ref(C),
     Refs = [begin
         R = make_ref(),
-        ok = py_nif:submit_task(LoopRef, self(), R, <<"py_test_workerloop">>, <<"add">>, [I, 0], #{}),
+        ok = py_nif:submit_task(LoopRef, self(), R, <<"py_test_workerloop">>, <<"add_traced">>, [I, 0], #{}),
         {I, R}
     end || I <- lists:seq(1, 500)],
     %% Collect within one overall deadline so a strand shows up as a count,
@@ -233,11 +233,10 @@ test_submit_ordering(Config) ->
              ct:log("loop alive (coro): ~p", [py_context:submit_await(C, py_test_workerloop, add, [1, 1])]),
              ct:log("mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
              Alive = py_context:submit_await(C, py_test_workerloop, add, [1, 1]),
-             Started = py_context:submit_await(C, py_test_workerloop, started, []),
-             StartedN = case Started of {ok, L} -> length(L); _ -> Started end,
+             LoopState = py_context:submit_await(C, py_test_workerloop, loop_state, []),
              ct:fail({tasks_incomplete, length(Bad), lists:sublist(Bad, 6),
                       {first_bad_index, element(1, hd(Bad))}, {loop_alive, Alive},
-                      {started, StartedN}, {started_head, case Started of {ok, L2} -> lists:sublist(L2, 12); _ -> Started end}})
+                      {loop_state, LoopState}})
     end,
     ok = py_context:stop_loop(C),
     stop_ctx(C),

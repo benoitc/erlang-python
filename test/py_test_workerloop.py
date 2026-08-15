@@ -132,15 +132,30 @@ def started():
     return list(_started)
 
 
-def scheduled_stats():
-    """Loop side view: how many tasks were created and how many are pending."""
-    loop = asyncio.get_event_loop_policy().get_event_loop() if False else None
-    try:
-        import asyncio as _a
-        tasks = _a.all_tasks(loop=None) if False else []
-    except Exception:
-        tasks = []
-    return len(_started), len(tasks)
+_woke = []
+
+
+async def add_traced(a, b):
+    """add() that records wake up: which sleeps came back."""
+    _started.append(a)
+    await asyncio.sleep(0.001)
+    _woke.append(a)
+    return a + b
+
+
+async def loop_state():
+    """Loop side view for diagnostics."""
+    loop = asyncio.get_running_loop()
+    timers = getattr(loop, '_timers', {})
+    return {
+        'started': len(_started),
+        'woke': len(_woke),
+        'woke_head': _woke[:12],
+        'timers_left': len(timers),
+        'timer_ids': sorted(timers)[:12],
+        'ready': len(getattr(loop, '_ready', [])),
+        'tasks': len(asyncio.all_tasks()),
+    }
 
 
 def sync_add(a, b):
