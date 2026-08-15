@@ -1479,6 +1479,7 @@ process_batch(Items) ->
 
 ## See Also
 
+- [Worker Loops](workers.md) - Run the loop forever in a context, inject coroutines from Erlang, serve on sockets Erlang owns
 - [Reactor](reactor.md) - Low-level FD-based protocol handling
 - [Security](security.md) - Sandbox and blocked operations
 - [Threading](threading.md) - For `erlang.async_call()` in asyncio contexts

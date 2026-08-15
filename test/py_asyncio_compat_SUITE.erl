@@ -50,7 +50,11 @@
     test_executors_erlang/1,
     test_context_erlang/1,
     test_process_erlang/1,
-    test_erlang_api/1
+    test_erlang_api/1,
+    test_server_erlang/1,
+    test_server_asyncio/1,
+    test_transport_close/1,
+    test_loop_helpers/1
 ]).
 
 %% Asyncio comparison tests (standard asyncio)
@@ -84,7 +88,10 @@ groups() ->
             test_executors_erlang,
             test_context_erlang,
             test_process_erlang,
-            test_erlang_api
+            test_erlang_api,
+            test_server_erlang,
+            test_transport_close,
+            test_loop_helpers
         ]},
         {comparison_tests, [sequence], [
             test_base_asyncio,
@@ -94,7 +101,8 @@ groups() ->
             test_unix_asyncio,
             test_dns_asyncio,
             test_executors_asyncio,
-            test_context_asyncio
+            test_context_asyncio,
+            test_server_asyncio
         ]}
     ].
 
@@ -176,6 +184,35 @@ test_erlang_api(Config) ->
     %% test_erlang_api has only Erlang-specific tests, run all
     run_python_tests("tests.test_erlang_api", <<"*">>, Config).
 
+%% erlang.server (serve/adopt on handed-over fds) on the Erlang loop
+test_server_erlang(Config) ->
+    run_erlang_tests("tests.test_server", Config).
+
+%% Transport close path against a recording NIF stub (no loop needed)
+test_transport_close(Config) ->
+    run_python_tests("tests.test_transport_close", <<"*">>, Config).
+
+%% _run_loop_forever/_stop_loop, the entry points of py_context:start_loop.
+%% Needs an interpreter with no other ErlangEventLoop, so an owngil context.
+test_loop_helpers(Config) ->
+    case py_nif:owngil_supported() of
+        false ->
+            {skip, "needs an owngil context (Python 3.14+)"};
+        true ->
+            PrivDir = ?config(priv_dir, Config),
+            {ok, Ctx} = py_context:new(#{mode => owngil}),
+            ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
+                "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n",
+                [PrivDir, PrivDir]))),
+            Result = py_context:call(Ctx, 'tests.ct_runner', run_tests,
+                                     [<<"tests.test_loop_helpers">>, <<"*">>], #{}, 120000),
+            py_context:stop(Ctx),
+            case Result of
+                {ok, Results} -> handle_test_results("tests.test_loop_helpers", <<"*">>, Results);
+                {error, Reason} -> ct:fail({python_error, Reason})
+            end
+    end.
+
 %% ============================================================================
 %% Asyncio Comparison Tests (standard asyncio)
 %% ============================================================================
@@ -208,6 +245,9 @@ test_executors_asyncio(Config) ->
 
 test_context_asyncio(Config) ->
     run_asyncio_tests("tests.test_context", Config).
+
+test_server_asyncio(Config) ->
+    run_asyncio_tests("tests.test_server", Config).
 
 %% ============================================================================
 %% Internal Functions

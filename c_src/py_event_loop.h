@@ -39,8 +39,9 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
-/* Forward declaration for Python object (avoids including Python.h in header) */
+/* Forward declarations for Python objects (avoids including Python.h in header) */
 typedef struct _object PyObject;
+typedef struct _is PyInterpreterState;
 
 /* ============================================================================
  * Constants
@@ -346,6 +347,15 @@ typedef struct erlang_event_loop {
 
     /** @brief Interpreter ID: 0 = main interpreter, >0 = subinterpreter */
     uint32_t interp_id;
+
+    /** @brief Owning interpreter, needed to attach a thread state to a
+     *  subinterpreter loop from an Erlang scheduler (see process_ready_tasks).
+     *  NULL once the interpreter is being torn down. Guarded by mutex. */
+    PyInterpreterState *interp;
+
+    /** @brief Number of scheduler threads currently attached to interp
+     *  through loop_gil_acquire(). Guarded by mutex. */
+    int external_attached;
 
     /* ========== Async Task Queue (uvloop-inspired) ========== */
     /*
@@ -865,6 +875,13 @@ ERL_NIF_TERM nif_handle_fd_event_and_reselect(ErlNifEnv *env, int argc,
                                                const ERL_NIF_TERM argv[]);
 
 /**
+ * @brief Re-arm a read/write select from a scheduler thread
+ *
+ * NIF: fd_arm(FdRef, read | write) -> ok | {error, Reason}
+ */
+ERL_NIF_TERM nif_fd_arm(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
+
+/**
  * @brief Stop read monitoring without closing the FD
  *
  * Pauses monitoring. Can be resumed with start_reader.
@@ -1091,6 +1108,23 @@ int create_default_event_loop(ErlNifEnv *env);
  * @return 0 on success, -1 on failure
  */
 int init_subinterpreter_event_loop(ErlNifEnv *env);
+
+/**
+ * @brief Event loop of the interpreter bound to the calling thread
+ *
+ * Must be called with that interpreter's GIL held. Returns NULL when no
+ * default loop exists yet.
+ */
+erlang_event_loop_t *get_current_interpreter_event_loop(void);
+
+/**
+ * @brief Detach a subinterpreter loop from its interpreter before teardown
+ *
+ * Call from the interpreter's own thread with its GIL released, right before
+ * Py_EndInterpreter. Blocks until every scheduler thread attached through
+ * process_ready_tasks has detached, and refuses new attachments.
+ */
+void event_loop_detach_interpreter(erlang_event_loop_t *loop);
 
 /* ============================================================================
  * Reactor NIF Functions (Erlang-as-Reactor architecture)

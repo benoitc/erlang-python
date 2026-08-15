@@ -1,5 +1,61 @@
 # Changelog
 
+## 4.1.0 (2026-08-15)
+
+### Added
+
+- **Worker loops** - `py_context:start_loop/1,2` runs an `ErlangEventLoop`
+  forever on the context thread and returns at once; `py_context:submit/4,5`
+  and `submit_await/4,5,6` schedule a coroutine or function on it from Erlang
+  (results as `{async_result, TaskRef, _}`, `py_event_loop:await/1,2`);
+  `stop_loop/1,2` stops it cooperatively, then interrupts after a grace
+  period; `loop_ref/1` exposes the loop for `py_nif:submit_task/7`. The owner
+  receives `{py_loop_exit, Ctx, Result}` when the loop ends. While a loop
+  runs, `call/eval/exec/call_method` on that context return
+  `{error, loop_running}`. `py_context:new/1` takes `preload => Code`, run once
+  in the context before anything else. See `docs/workers.md`.
+- **`erlang.server`** - `serve(listen_fd, protocol_factory, udp=False)`,
+  `adopt(fd, protocol_factory)` and `stop_serving(server)`: serve TCP or UDP
+  on a socket Erlang bound (`py:dup_fd/1` per worker) or take over one
+  accepted connection, from a coroutine scheduled with `submit`. This is the
+  gunicorn shape inside the VM: Erlang binds once, N owngil contexts accept
+  on their copy of the fd, Erlang supervises, scales and reloads.
+- **Injection into subinterpreter loops** - `py_nif:process_ready_tasks/1`
+  attaches a thread state to the loop's subinterpreter, so `submit_task` works
+  for owngil loops, idle or running; scheduling into a running loop now wakes
+  it instead of waiting for the next poll timeout (about 25 us round trip
+  instead of up to 1 s). Tasks that fail to start (missing module or function,
+  argument conversion, the call itself raising) are reported to the caller as
+  `{async_result, Ref, {error, Reason}}` instead of being dropped.
+
+### Fixed
+
+- **owngil contexts had no event loop** - `owngil_context_thread_main` created
+  the `py_event_loop` module without a default loop, so `erlang.run()`,
+  `create_server` and channels raised "Erlang event loop not initialized" in
+  owngil contexts. Each owngil context now owns an `ErlangEventLoop` served by
+  its own `py_event_worker`. `py_nif:context_get_event_loop/1` returned the
+  main interpreter's loop for owngil contexts, which made every owngil start
+  re-point the main loop's worker to a process that died with the context.
+- **owngil dispatch** - calls into owngil contexts went through a blocking
+  dispatch on a dirty CPU scheduler with a 30 s cap
+  (`OWNGIL_DISPATCH_TIMEOUT_SECS`); they now use the same async queue as
+  worker mode: no dirty scheduler held during the call, no cap, and a lower
+  round trip (about 11.6 us against 15.6 us before on the bench machine).
+- **fd closed while still in the poll set** - transports closed their socket
+  right after `ERL_NIF_SELECT_STOP` was issued, which under connection churn
+  produced `Bad input fd in erts_poll()` and `enif_select ... stealing
+  control of fd` reports and could deliver events to the wrong resource once
+  the number was reused. Transports now detach the fd and hand it to the NIF
+  (`_release_fd_resource(fd_key, take_ownership)`), which closes it from the
+  select stop callback; the reselect path and the close path serialise on the
+  loop mutex. 10k connections across four workers now log nothing.
+- **Re-arming a read select from the Python thread** - re-selecting READ on
+  an fd the BEAM had moved into a scheduler poll set crashed inside
+  `enif_select` when done from the loop thread (transport `resume_reading`,
+  `add_reader` on an fd with an active writer). Read re-arms now go through
+  the loop's `py_event_worker` (`py_nif:fd_arm/2`).
+
 ## 4.0.0 (2026-08-15)
 
 ### Breaking Changes

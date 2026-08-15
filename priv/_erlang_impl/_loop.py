@@ -314,11 +314,18 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._timer_refs.clear()
         self._handle_to_callback_id.clear()
 
-        # Remove all readers/writers
+        # Remove all readers/writers, then release fd resources kept alive by
+        # _stop_reading/_stop_writing for transports that were never closed
         for fd in list(self._readers.keys()):
             self.remove_reader(fd)
         for fd in list(self._writers.keys()):
             self.remove_writer(fd)
+        for fd, fd_key in list(self._fd_resources.items()):
+            try:
+                self._pel._release_fd_resource(fd_key)
+            except Exception:
+                pass
+        self._fd_resources.clear()
 
         # Clear signal handlers
         self._signal_handlers.clear()
@@ -589,6 +596,76 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 del self._fd_resources[fd]
 
         return True
+
+    # ------------------------------------------------------------------------
+    # Transport helpers: stop reading/writing without giving up the fd
+    # resource, and hand the socket to the NIF for closing.
+    #
+    # remove_reader/remove_writer release the fd resource as soon as neither
+    # side is active, which issues ERL_NIF_SELECT_STOP. If the socket is then
+    # closed from Python before the stop completes, the fd sits in the poll
+    # set while its number gets reused. Transports therefore only clear the
+    # callbacks here and let _close_socket transfer the fd to the NIF, which
+    # closes it from the stop callback.
+    # ------------------------------------------------------------------------
+
+    def _stop_reading(self, fd):
+        entry = self._readers.pop(fd, None)
+        if entry is None:
+            return False
+        self._callbacks_by_cid.pop(entry[2], None)
+        fd_key = self._fd_resources.get(fd)
+        if fd_key is not None:
+            try:
+                self._pel._clear_fd_read(fd_key)
+            except Exception:
+                pass
+        return True
+
+    def _stop_writing(self, fd):
+        entry = self._writers.pop(fd, None)
+        if entry is None:
+            return False
+        self._callbacks_by_cid.pop(entry[2], None)
+        fd_key = self._fd_resources.get(fd)
+        if fd_key is not None:
+            try:
+                self._pel._clear_fd_write(fd_key)
+            except Exception:
+                pass
+        return True
+
+    def _close_socket(self, sock):
+        """Close a socket that may still be registered with enif_select.
+
+        Clears any reader/writer, detaches the fd from the socket object and
+        lets the NIF close it once the select stop has completed. Sockets the
+        loop never registered are closed directly.
+        """
+        try:
+            fd = sock.fileno()
+        except (OSError, ValueError):
+            return
+        if fd is None or fd < 0:
+            return
+        self._stop_reading(fd)
+        self._stop_writing(fd)
+        fd_key = self._fd_resources.pop(fd, None)
+        if fd_key is None:
+            sock.close()
+            return
+        try:
+            sock.detach()
+        except OSError:
+            pass
+        try:
+            self._pel._release_fd_resource(fd_key, True)
+        except Exception:
+            # NIF unavailable (mock module or shutdown): close it ourselves
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     # ========================================================================
     # Socket operations
@@ -1230,6 +1307,9 @@ class _MockLoopCapsule:
 class _MockNifModule:
     """Mock NIF module for testing without actual Erlang integration."""
 
+    def __init__(self):
+        self._fd_by_key = {}
+
     def _is_initialized(self):
         return True
 
@@ -1260,6 +1340,7 @@ class _MockNifModule:
     def _add_reader_for(self, capsule, fd, callback_id):
         capsule._counter += 1
         capsule.readers[fd] = (callback_id, capsule._counter)
+        self._fd_by_key[capsule._counter] = fd
         return capsule._counter
 
     def _remove_reader_for(self, capsule, fd_key):
@@ -1271,6 +1352,7 @@ class _MockNifModule:
     def _add_writer_for(self, capsule, fd, callback_id):
         capsule._counter += 1
         capsule.writers[fd] = (callback_id, capsule._counter)
+        self._fd_by_key[capsule._counter] = fd
         return capsule._counter
 
     def _remove_writer_for(self, capsule, fd_key):
@@ -1295,9 +1377,16 @@ class _MockNifModule:
         """Clear write monitoring on fd_resource."""
         pass
 
-    def _release_fd_resource(self, fd_key):
-        """Release fd_resource."""
-        pass
+    def _release_fd_resource(self, fd_key, take_ownership=False):
+        """Release fd_resource. With take_ownership the fd is closed here,
+        since there is no NIF to close it from a select stop callback."""
+        if take_ownership:
+            fd = self._fd_by_key.pop(fd_key, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _schedule_timer_for(self, capsule, delay_ms, callback_id):
         return callback_id

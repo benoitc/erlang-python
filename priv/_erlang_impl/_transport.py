@@ -69,6 +69,16 @@ class ErlangSocketTransport(transports.Transport):
         self._loop.call_soon(self._protocol.connection_made, self)
         self._loop.add_reader(self._fileno, self._read_ready)
 
+    def __del__(self):
+        # An abandoned transport must still hand its fd back to the loop, so
+        # the enif_select registration is stopped before the number is reused.
+        sock = getattr(self, '_sock', None)
+        if sock is not None and sock.fileno() >= 0:
+            try:
+                self._loop._close_socket(sock)
+            except Exception:
+                pass
+
     # Maximum reads per callback to avoid starving other events
     _max_reads_per_call = 16
 
@@ -105,7 +115,7 @@ class ErlangSocketTransport(transports.Transport):
                 self._protocol.data_received(data)
             else:
                 # Connection closed (EOF received)
-                self._loop.remove_reader(self._fileno)
+                self._loop._stop_reading(self._fileno)
                 keep_open = self._protocol.eof_received()
                 # If eof_received returns False/None, close the transport
                 if not keep_open:
@@ -159,7 +169,7 @@ class ErlangSocketTransport(transports.Transport):
         for _ in range(self._max_writes_per_call):
             remaining = len(self._buffer) - self._buffer_offset
             if remaining <= 0:
-                self._loop.remove_writer(self._fileno)
+                self._loop._stop_writing(self._fileno)
                 if self._closing:
                     self._call_connection_lost(None)
                 return
@@ -176,11 +186,11 @@ class ErlangSocketTransport(transports.Transport):
                 if exc.errno == errno.EBADF:
                     self._conn_lost += 1
                     return
-                self._loop.remove_writer(self._fileno)
+                self._loop._stop_writing(self._fileno)
                 self._fatal_error(exc, 'Fatal write error')
                 return
             except Exception as exc:
-                self._loop.remove_writer(self._fileno)
+                self._loop._stop_writing(self._fileno)
                 self._fatal_error(exc, 'Fatal write error')
                 return
 
@@ -192,7 +202,7 @@ class ErlangSocketTransport(transports.Transport):
             # Reset buffer when fully consumed
             self._buffer = self._buffer_factory()
             self._buffer_offset = 0
-            self._loop.remove_writer(self._fileno)
+            self._loop._stop_writing(self._fileno)
             if self._closing:
                 self._call_connection_lost(None)
 
@@ -203,7 +213,7 @@ class ErlangSocketTransport(transports.Transport):
         self._closing = True
         # Check if no pending data (buffer fully consumed)
         if self._buffer_offset >= len(self._buffer):
-            self._loop.remove_reader(self._fileno)
+            self._loop._stop_reading(self._fileno)
             self._call_connection_lost(None)
 
     def can_write_eof(self):
@@ -214,7 +224,7 @@ class ErlangSocketTransport(transports.Transport):
         if self._closing:
             return
         self._closing = True
-        self._loop.remove_reader(self._fileno)
+        self._loop._stop_reading(self._fileno)
         # Check if no pending data (buffer fully consumed)
         if self._buffer_offset >= len(self._buffer):
             self._conn_lost += 1
@@ -229,8 +239,10 @@ class ErlangSocketTransport(transports.Transport):
         try:
             self._protocol.connection_lost(exc)
         finally:
+            # The fd may still be in the BEAM poll set: let the loop hand it
+            # to the NIF, which closes it once the select stop completes.
             try:
-                self._sock.close()
+                self._loop._close_socket(self._sock)
             except OSError:
                 pass
 
@@ -274,8 +286,8 @@ class ErlangSocketTransport(transports.Transport):
         """Close immediately."""
         self._closing = True
         self._conn_lost += 1
-        self._loop.remove_reader(self._fileno)
-        self._loop.remove_writer(self._fileno)
+        self._loop._stop_reading(self._fileno)
+        self._loop._stop_writing(self._fileno)
         self._call_connection_lost(None)
 
     def pause_reading(self):
@@ -283,7 +295,7 @@ class ErlangSocketTransport(transports.Transport):
         if self._closing or self._paused:
             return
         self._paused = True
-        self._loop.remove_reader(self._fileno)
+        self._loop._stop_reading(self._fileno)
 
     def resume_reading(self):
         """Resume reading from the transport."""
@@ -332,6 +344,14 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         # Call connection_made directly to ensure it runs before returning
         self._protocol.connection_made(self)
         self._loop.add_reader(self._fileno, self._read_ready)
+
+    def __del__(self):
+        sock = getattr(self, '_sock', None)
+        if sock is not None and sock.fileno() >= 0:
+            try:
+                self._loop._close_socket(sock)
+            except Exception:
+                pass
 
     def _read_ready(self):
         """Called when data is available to read.
@@ -432,7 +452,7 @@ class ErlangDatagramTransport(transports.DatagramTransport):
 
             self._buffer.popleft()
 
-        self._loop.remove_writer(self._fileno)
+        self._loop._stop_writing(self._fileno)
         if self._closing:
             self._call_connection_lost(None)
 
@@ -441,7 +461,7 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         if self._closing:
             return
         self._closing = True
-        self._loop.remove_reader(self._fileno)
+        self._loop._stop_reading(self._fileno)
         if not self._buffer:
             self._conn_lost += 1
             self._call_connection_lost(None)
@@ -455,8 +475,10 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         try:
             self._protocol.connection_lost(exc)
         finally:
+            # The fd may still be in the BEAM poll set: let the loop hand it
+            # to the NIF, which closes it once the select stop completes.
             try:
-                self._sock.close()
+                self._loop._close_socket(self._sock)
             except OSError:
                 pass
 
@@ -487,8 +509,8 @@ class ErlangDatagramTransport(transports.DatagramTransport):
         """Close immediately."""
         self._closing = True
         self._conn_lost += 1
-        self._loop.remove_reader(self._fileno)
-        self._loop.remove_writer(self._fileno)
+        self._loop._stop_reading(self._fileno)
+        self._loop._stop_writing(self._fileno)
         self._buffer.clear()
         self._call_connection_lost(None)
 
@@ -540,8 +562,7 @@ class ErlangServer:
             return
         self._serving = False
         for sock in self._sockets:
-            self._loop.remove_reader(sock.fileno())
-            sock.close()
+            self._loop._close_socket(sock)
         self._sockets.clear()
 
         # Wake up waiters

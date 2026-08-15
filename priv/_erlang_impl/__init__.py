@@ -65,6 +65,7 @@ from ._mode import detect_mode, ExecutionMode
 from . import _reactor as reactor
 from . import _channel as channel
 from . import _byte_channel as byte_channel
+from . import _server as server
 from ._channel import Channel, reply, ChannelClosed
 from ._byte_channel import ByteChannel, ByteChannelClosed
 
@@ -88,6 +89,7 @@ __all__ = [
     'byte_channel',
     'ByteChannel',
     'ByteChannelClosed',
+    'server',
     'atom',
 ]
 
@@ -163,6 +165,42 @@ def new_event_loop() -> ErlangEventLoop:
             capsule for proper timer and FD event routing.
     """
     return ErlangEventLoop()
+
+
+def _run_loop_forever(notify_pid=None):
+    """Run an ErlangEventLoop on this thread until it is stopped.
+
+    Entry point of py_context:start_loop/1: the context thread stays here
+    while Erlang injects coroutines with py_context:submit/4 (or the fd
+    events fire). notify_pid receives {py_loop_started} once the loop is
+    running. Returns 'stopped' when _stop_loop() ran, propagates
+    KeyboardInterrupt when py_context:interrupt/1 was used.
+    """
+    loop = new_event_loop()
+    asyncio.set_event_loop(loop)
+    if notify_pid is not None:
+        import erlang as _erlang
+
+        def _started():
+            try:
+                _erlang.send(notify_pid, (atom('py_loop_started'),))
+            except Exception:
+                pass
+        loop.call_soon(_started)
+    try:
+        loop.run_forever()
+    finally:
+        try:
+            asyncio.set_event_loop(None)
+        finally:
+            loop.close()
+    return 'stopped'
+
+
+async def _stop_loop():
+    """Stop the loop running _run_loop_forever() from inside it."""
+    asyncio.get_running_loop().stop()
+    return 'stopping'
 
 
 def run(main, *, debug=None, **run_kwargs):

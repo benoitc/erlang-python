@@ -55,7 +55,17 @@
     is_subinterp/1,
     create_local_env/1,
     get_nif_ref/1,
-    interrupt/1
+    interrupt/1,
+    start_loop/1,
+    start_loop/2,
+    stop_loop/1,
+    stop_loop/2,
+    loop_ref/1,
+    submit/4,
+    submit/5,
+    submit_await/4,
+    submit_await/5,
+    submit_await/6
 ]).
 
 %% Internal exports
@@ -83,8 +93,18 @@
     id :: pos_integer(),
     interp_id :: non_neg_integer(),
     event_state = #{} :: map(),  %% #{loop_ref => ref(), worker_pid => pid()}
-    callback_handler :: pid() | undefined  %% For thread-model callback handling
+    callback_handler :: pid() | undefined,  %% For thread-model callback handling
+    %% Worker loop (start_loop/1): request id of the run_forever exec, the
+    %% owner that gets {py_loop_exit, Ctx, Result}, its monitor, and the
+    %% callers waiting in stop_loop/2
+    loop_req :: reference() | undefined,
+    loop_owner :: pid() | undefined,
+    loop_owner_mon :: reference() | undefined,
+    loop_stop_waiters = [] :: [{pid(), reference()}]
 }).
+
+%% Time given to a running loop to exit after py_context:interrupt/1
+-define(LOOP_INTERRUPT_GRACE_MS, 3000).
 
 %% ============================================================================
 %% API
@@ -422,6 +442,108 @@ init_ref_tab() ->
             ok
     end.
 
+%% @doc Run an ErlangEventLoop forever on the context's thread.
+%%
+%% Returns as soon as the loop is started. The loop keeps running until
+%% stop_loop/1,2 or interrupt/1; the owner (the caller by default) receives
+%% `{py_loop_exit, Ctx, Result}' when it ends, where Result is the return of
+%% the exec that ran it (`ok', `{error, interrupted}', or a Python error).
+%%
+%% While the loop runs, call/eval/exec/call_method on this context return
+%% `{error, loop_running}': the thread is busy in the loop, and a timed-out
+%% call would interrupt it. Use submit/4,5 and submit_await/4,5,6 instead;
+%% they inject coroutines into the running loop.
+%%
+%% Options:
+%% - `owner' - pid that receives `{py_loop_exit, Ctx, Result}' (default: caller).
+%%   If the owner dies the loop is stopped.
+-spec start_loop(context()) -> ok | {error, term()}.
+start_loop(Ctx) ->
+    start_loop(Ctx, #{}).
+
+-spec start_loop(context(), map()) -> ok | {error, term()}.
+start_loop(Ctx, Opts) when is_pid(Ctx), is_map(Opts) ->
+    Owner = maps:get(owner, Opts, self()),
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {start_loop, self(), MRef, Owner},
+    await_ctrl_reply(Ctx, MRef, 15000).
+
+%% @doc Stop a loop started with start_loop/1,2.
+%%
+%% Asks the loop to stop from inside (a coroutine calling `loop.stop()'),
+%% then interrupts the thread if it has not exited after Grace ms (default
+%% 5000). Returns `ok' once the loop has exited, `{error, no_loop}' when none
+%% is running, `{error, timeout}' if it survived the interrupt too.
+-spec stop_loop(context()) -> ok | {error, term()}.
+stop_loop(Ctx) ->
+    stop_loop(Ctx, 5000).
+
+-spec stop_loop(context(), non_neg_integer()) -> ok | {error, term()}.
+stop_loop(Ctx, GraceMs) when is_pid(Ctx), is_integer(GraceMs), GraceMs >= 0 ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {stop_loop, self(), MRef, GraceMs},
+    await_ctrl_reply(Ctx, MRef, GraceMs + ?LOOP_INTERRUPT_GRACE_MS + 2000).
+
+%% @doc Event loop reference of this context, usable with py_nif:submit_task/7
+%% and py_event_loop:create_task/4.
+%%
+%% owngil contexts have their own loop; worker contexts share the main
+%% interpreter's loop (py_event_loop:get_loop/0).
+-spec loop_ref(context()) -> {ok, reference()} | {error, term()}.
+loop_ref(Ctx) when is_pid(Ctx) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {loop_ref, self(), MRef},
+    await_ctrl_reply(Ctx, MRef, 5000).
+
+%% @doc Schedule `Module:Func(Args...)' on the context's event loop and
+%% return at once with `{ok, TaskRef}'.
+%%
+%% Works whether or not start_loop/1 is active: with a running loop the
+%% coroutine is injected into it, otherwise the event worker steps the loop.
+%% The result arrives as `{async_result, TaskRef, {ok, Value} | {error, R}}';
+%% use py_event_loop:await/1,2 or submit_await/4,5,6. Coroutine functions
+%% are awaited, plain functions are called and their value returned.
+%% Module must be importable in the context (sys.modules), so put entry
+%% points in a module rather than in the exec namespace.
+-spec submit(context(), atom() | binary(), atom() | binary(), list()) ->
+    {ok, reference()} | {error, term()}.
+submit(Ctx, Module, Func, Args) ->
+    submit(Ctx, Module, Func, Args, #{}).
+
+-spec submit(context(), atom() | binary(), atom() | binary(), list(), map()) ->
+    {ok, reference()} | {error, term()}.
+submit(Ctx, Module, Func, Args, Kwargs) when is_pid(Ctx), is_list(Args), is_map(Kwargs) ->
+    case loop_ref(Ctx) of
+        {ok, LoopRef} ->
+            TaskRef = make_ref(),
+            case py_nif:submit_task(LoopRef, self(), TaskRef,
+                                    to_binary(Module), to_binary(Func), Args, Kwargs) of
+                ok -> {ok, TaskRef};
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc submit/4 followed by py_event_loop:await/2 (default timeout 5000 ms).
+-spec submit_await(context(), atom() | binary(), atom() | binary(), list()) ->
+    {ok, term()} | {error, term()}.
+submit_await(Ctx, Module, Func, Args) ->
+    submit_await(Ctx, Module, Func, Args, #{}, 5000).
+
+-spec submit_await(context(), atom() | binary(), atom() | binary(), list(), map()) ->
+    {ok, term()} | {error, term()}.
+submit_await(Ctx, Module, Func, Args, Kwargs) ->
+    submit_await(Ctx, Module, Func, Args, Kwargs, 5000).
+
+-spec submit_await(context(), atom() | binary(), atom() | binary(), list(), map(),
+                   timeout()) -> {ok, term()} | {error, term()}.
+submit_await(Ctx, Module, Func, Args, Kwargs, Timeout) ->
+    case submit(Ctx, Module, Func, Args, Kwargs) of
+        {ok, TaskRef} -> py_event_loop:await(TaskRef, Timeout);
+        {error, _} = Error -> Error
+    end.
+
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
@@ -450,6 +572,21 @@ await_reply(Ctx, MRef, Timeout) ->
         after ?INTERRUPT_GRACE_MS ->
             erlang:demonitor(MRef, [flush])
         end,
+        {error, timeout}
+    end.
+
+%% @private
+%% Reply wait for loop control messages: unlike await_reply/3 a timeout here
+%% must not interrupt the context (it would kill the loop we are managing).
+await_ctrl_reply(Ctx, MRef, Timeout) ->
+    receive
+        {MRef, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Ctx, Reason} ->
+            {error, {context_died, Reason}}
+    after Timeout ->
+        erlang:demonitor(MRef, [flush]),
         {error, timeout}
     end.
 
@@ -494,7 +631,7 @@ init(Parent, Id, Mode, Opts) ->
             register_nif_ref(Ref),
             case apply_memory_limit(Ref, Opts) of
                 ok ->
-                    init_started(Parent, Id, Ref, InterpId);
+                    init_started(Parent, Id, Ref, InterpId, Opts);
                 {error, LimitError} ->
                     unregister_nif_ref(),
                     try py_nif:context_destroy(Ref) catch _:_ -> ok end,
@@ -516,12 +653,23 @@ apply_memory_limit(Ref, Opts) ->
     end.
 
 %% @private
-init_started(Parent, Id, Ref, InterpId) ->
+init_started(Parent, Id, Ref, InterpId, Opts) ->
     %% Apply all registered imports and paths to this interpreter
     apply_registered_imports(Ref),
     apply_registered_paths(Ref),
     %% Apply preload code (populates globals for process-local envs)
     apply_preload(Ref),
+    %% Per-context preload from new/1 (imports the app once per worker)
+    case maps:get(preload, Opts, undefined) of
+        undefined -> ok;
+        PreCode when is_binary(PreCode); is_list(PreCode) ->
+            case handle_exec_with_async(Ref, iolist_to_binary(PreCode)) of
+                ok -> ok;
+                {error, PreErr} ->
+                    error_logger:warning_msg(
+                        "py_context ~p: preload failed: ~p~n", [InterpId, PreErr])
+            end
+    end,
     %% For subinterpreters, create a dedicated event worker
     EventState = setup_event_worker(Ref, InterpId),
     %% For thread-model subinterpreters, spawn a dedicated callback handler
@@ -635,8 +783,86 @@ create_context(owngil) ->
 
 %% @private
 %% Main context loop. Handles requests and uses suspension-based callback support.
-loop(#state{ref = Ref, interp_id = InterpId} = State) ->
+loop(#state{ref = Ref, interp_id = InterpId, loop_req = LoopReq} = State) ->
     receive
+        %% ---- worker loop management (start_loop/stop_loop/loop_ref) ----
+        {start_loop, From, MRef, _Owner} when LoopReq =/= undefined ->
+            From ! {MRef, {error, already_running}},
+            loop(State);
+
+        {start_loop, From, MRef, Owner} ->
+            {Reply, NewState} = do_start_loop(Owner, State),
+            From ! {MRef, Reply},
+            loop(NewState);
+
+        {stop_loop, From, MRef, _GraceMs} when LoopReq =:= undefined ->
+            From ! {MRef, {error, no_loop}},
+            loop(State);
+
+        {stop_loop, From, MRef, GraceMs} ->
+            loop(begin_stop_loop(From, MRef, GraceMs, State));
+
+        {loop_ref, From, MRef} ->
+            From ! {MRef, context_loop_ref(State)},
+            loop(State);
+
+        {py_result, LoopReq, Result} when LoopReq =/= undefined ->
+            loop(loop_exited(Result, State));
+
+        {loop_stop_deadline, LoopReq} when LoopReq =/= undefined ->
+            %% Cooperative stop did not land: interrupt the thread
+            _ = py_nif:context_interrupt(Ref),
+            erlang:send_after(?LOOP_INTERRUPT_GRACE_MS, self(),
+                              {loop_interrupt_deadline, LoopReq}),
+            loop(State);
+
+        {loop_interrupt_deadline, LoopReq} when LoopReq =/= undefined ->
+            [W ! {M, {error, timeout}} || {W, M} <- State#state.loop_stop_waiters],
+            loop(State#state{loop_stop_waiters = []});
+
+        {loop_stop_deadline, _} ->
+            loop(State);
+        {loop_interrupt_deadline, _} ->
+            loop(State);
+
+        {'DOWN', Mon, process, _Owner, _Reason}
+                when Mon =:= State#state.loop_owner_mon, LoopReq =/= undefined ->
+            %% Owner is gone: nobody will hear the exit, stop the loop
+            loop(begin_stop_loop(undefined, undefined, 5000,
+                                 State#state{loop_owner_mon = undefined}));
+
+        {async_result, _TaskRef, _} ->
+            %% Result of a coroutine this process submitted (loop stop) - drop
+            loop(State);
+
+        %% ---- while a worker loop runs, the thread is not available ----
+        {call, From, MRef, _, _, _, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+        {call, From, MRef, _, _, _, _, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+        {eval, From, MRef, _, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+        {eval, From, MRef, _, _, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+        {exec, From, MRef, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+        {exec, From, MRef, _, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+        {call_method, From, MRef, _, _, _} when LoopReq =/= undefined ->
+            From ! {MRef, {error, loop_running}}, loop(State);
+
+        {stop, From, MRef} when LoopReq =/= undefined ->
+            %% Get the thread out of the loop before destroying the context,
+            %% otherwise context_destroy waits for a thread that never returns
+            terminate(normal, stop_running_loop(State)),
+            From ! {MRef, ok};
+
+        {'EXIT', _Pid, Reason} = Exit when LoopReq =/= undefined,
+                                            (Reason =:= shutdown orelse Reason =:= kill orelse
+                                             (is_tuple(Reason) andalso element(1, Reason) =:= shutdown)) ->
+            self() ! Exit,
+            loop(stop_running_loop(State));
+
         {call, From, MRef, Module, Func, Args, Kwargs} ->
             Result = handle_call_with_suspension(Ref, Module, Func, Args, Kwargs),
             From ! {MRef, Result},
@@ -734,6 +960,95 @@ loop(#state{ref = Ref, interp_id = InterpId} = State) ->
                             loop(State)
                     end
             end
+    end.
+
+%% ============================================================================
+%% Worker loop helpers
+%% ============================================================================
+
+%% @private Loop reference: the context's own loop (owngil) or the shared
+%% main-interpreter loop (worker mode)
+context_loop_ref(#state{event_state = #{loop_ref := LoopRef}}) ->
+    {ok, LoopRef};
+context_loop_ref(_State) ->
+    py_event_loop:get_loop().
+
+%% @private Start run_forever on the context thread through the async exec
+%% path, so this process stays free to serve loop_ref/stop_loop and the
+%% dirty schedulers are not held.
+do_start_loop(Owner, #state{ref = Ref} = State) ->
+    case context_loop_ref(State) of
+        {ok, _} ->
+            LoopReq = make_ref(),
+            case py_nif:context_call_async(Ref, self(), LoopReq, <<"erlang">>,
+                                           <<"_run_loop_forever">>, [self()], #{}) of
+                {enqueued, LoopReq} ->
+                    %% Wait for the loop to actually run before answering, so
+                    %% a submit right after start_loop finds it
+                    receive
+                        {py_loop_started} ->
+                            Mon = case is_pid(Owner) of
+                                true -> erlang:monitor(process, Owner);
+                                false -> undefined
+                            end,
+                            {ok, State#state{loop_req = LoopReq, loop_owner = Owner,
+                                             loop_owner_mon = Mon, loop_stop_waiters = []}};
+                        {py_result, LoopReq, {error, Reason}} ->
+                            {{error, Reason}, State};
+                        {py_result, LoopReq, Other} ->
+                            {{error, {loop_exited, Other}}, State}
+                    after 10000 ->
+                        {{error, loop_start_timeout}, State}
+                    end;
+                {error, Reason} ->
+                    {{error, Reason}, State}
+            end;
+        {error, Reason} ->
+            {{error, Reason}, State}
+    end.
+
+%% @private Ask the running loop to stop from inside, arm the interrupt
+%% deadline, and remember who to answer once it has exited.
+begin_stop_loop(From, MRef, GraceMs, #state{loop_req = LoopReq} = State) ->
+    Waiters = case From of
+        undefined -> State#state.loop_stop_waiters;
+        _ -> [{From, MRef} | State#state.loop_stop_waiters]
+    end,
+    case context_loop_ref(State) of
+        {ok, LoopRef} ->
+            _ = py_nif:submit_task(LoopRef, self(), make_ref(),
+                                   <<"erlang">>, <<"_stop_loop">>, [], #{});
+        _ ->
+            ok
+    end,
+    erlang:send_after(GraceMs, self(), {loop_stop_deadline, LoopReq}),
+    State#state{loop_stop_waiters = Waiters}.
+
+%% @private The exec running the loop returned: tell the owner and the
+%% stop_loop callers, clear the loop state.
+loop_exited(Result, #state{loop_owner = Owner, loop_owner_mon = Mon,
+                           loop_stop_waiters = Waiters} = State) ->
+    case Mon of
+        undefined -> ok;
+        _ -> erlang:demonitor(Mon, [flush])
+    end,
+    case is_pid(Owner) of
+        true -> Owner ! {py_loop_exit, self(), Result};
+        false -> ok
+    end,
+    [W ! {M, ok} || {W, M} <- Waiters],
+    State#state{loop_req = undefined, loop_owner = undefined,
+                loop_owner_mon = undefined, loop_stop_waiters = []}.
+
+%% @private Synchronous stop used before terminate: interrupt and wait a
+%% bounded time for the exec to return.
+stop_running_loop(#state{ref = Ref, loop_req = LoopReq} = State) ->
+    _ = py_nif:context_interrupt(Ref),
+    receive
+        {py_result, LoopReq, Result} ->
+            loop_exited(Result, State)
+    after ?LOOP_INTERRUPT_GRACE_MS ->
+        loop_exited({error, timeout}, State)
     end.
 
 %% @private Clean up resources on termination

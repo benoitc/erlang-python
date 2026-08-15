@@ -46,8 +46,9 @@ All major erlang_python features work with OWN_GIL mode:
 | PIDs (`erlang.Pid`) | Full | Round-trip serialization |
 | Send (`erlang.send`) | Full | Fire-and-forget messaging |
 | Reactor (`erlang.reactor`) | Full | FD-based protocols |
-| Async Tasks | Full | `py_event_loop:create_task` |
-| Asyncio | Full | `asyncio.sleep`, `gather`, etc. |
+| Async Tasks | Full | `py_event_loop:create_task`, `py_context:submit` |
+| Asyncio | Full | Own `ErlangEventLoop` per context: `erlang.run`, `create_server`, channels |
+| Worker loops | Full | `py_context:start_loop`, see [Worker Loops](workers.md) |
 | Process-local envs | Full | Namespace isolation |
 
 ## Architecture
@@ -302,7 +303,9 @@ py_env_resource_dtor(env, res) {
 
 ## Reactor / Event Loop Integration
 
-OWN_GIL contexts support the reactor pattern for I/O-driven protocols. The `py_event_loop` module is registered in each OWN_GIL subinterpreter during startup.
+OWN_GIL contexts support the reactor pattern for I/O-driven protocols. The `py_event_loop` module is registered in each OWN_GIL subinterpreter during startup, together with a default `ErlangEventLoop` for that interpreter. `py_context` starts a dedicated `py_event_worker` per OWN_GIL context and points that loop at it, so fd readiness and timers of one context never go through another context's process or through the main loop's worker.
+
+Requests to the OWN_GIL thread go through the same async queue as worker mode (`context_*_async` NIFs): the calling Erlang process waits in a `receive`, no dirty scheduler is held and there is no 30 s cap on a call. From an Erlang scheduler, `process_ready_tasks` attaches a temporary thread state to the subinterpreter to inject coroutines into its loop (`py_context:submit`); the context thread waits for those to detach before `Py_EndInterpreter`.
 
 ### Why Event Loop Registration Matters
 

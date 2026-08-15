@@ -92,6 +92,11 @@ handle_info({timeout, TimerRef}, State) ->
 
 handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
 
+%% Re-arm request from the Python loop (see py_nif:fd_arm/2)
+handle_info({fd_arm, FdRes, Mode}, State) ->
+    _ = py_nif:fd_arm(FdRes, Mode),
+    {noreply, State};
+
 %% Handle task_ready wakeup from submit_task NIF.
 %% This is sent via enif_send when a new async task is submitted.
 %% Uses a drain-until-empty loop to handle tasks submitted during processing.

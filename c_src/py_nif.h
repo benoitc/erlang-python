@@ -1012,6 +1012,10 @@ struct py_context {
 
     /** @brief Interpreter state for OWN_GIL subinterpreter */
     PyInterpreterState *own_gil_interp;
+
+    /** @brief Default ErlangEventLoop of the subinterpreter (kept resource,
+     *  set by the context thread, read by nif_context_get_event_loop) */
+    void *event_loop;
 #else
     /** @brief Worker thread state (non-subinterp mode, kept for compatibility) */
     PyThreadState *thread_state;
