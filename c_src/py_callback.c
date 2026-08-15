@@ -947,6 +947,30 @@ static int copy_callback_results_to_nested(suspended_context_state_t *nested,
 }
 
 /**
+ * Decode an external-term-format binary into a Python object.
+ *
+ * Returns a NEW reference on success, NULL on failure (decode error or a
+ * conversion error, in which case a Python exception may be set).
+ */
+static PyObject *etf_binary_to_py(const char *data, size_t len) {
+    ErlNifEnv *tmp_env = enif_alloc_env();
+    if (tmp_env == NULL) {
+        return NULL;
+    }
+
+    ERL_NIF_TERM term;
+    if (enif_binary_to_term(tmp_env, (unsigned char *)data, len, &term,
+                            ERL_NIF_BIN2TERM_SAFE) == 0) {
+        enif_free_env(tmp_env);
+        return NULL;
+    }
+
+    PyObject *result = term_to_py(tmp_env, term);
+    enif_free_env(tmp_env);
+    return result;
+}
+
+/**
  * Helper to convert __etf__:base64 strings to Python objects.
  * Used for encoding pids and references in callback responses.
  * Returns a NEW reference on success, NULL with exception on error.
@@ -1003,28 +1027,8 @@ static PyObject *decode_etf_string(const char *str, Py_ssize_t len) {
         return NULL;
     }
 
-    /* Create a temporary NIF environment to decode the term */
-    ErlNifEnv *tmp_env = enif_alloc_env();
-    if (tmp_env == NULL) {
-        Py_DECREF(decoded);
-        return NULL;
-    }
-
-    /* Decode the ETF binary to an Erlang term */
-    ERL_NIF_TERM term;
-    if (enif_binary_to_term(tmp_env, (unsigned char *)bin_data, bin_len, &term, ERL_NIF_BIN2TERM_SAFE) == 0) {
-        /* Decoding failed */
-        enif_free_env(tmp_env);
-        Py_DECREF(decoded);
-        return NULL;
-    }
-
+    PyObject *result = etf_binary_to_py(bin_data, (size_t)bin_len);
     Py_DECREF(decoded);
-
-    /* Convert the term to a Python object */
-    PyObject *result = term_to_py(tmp_env, term);
-    enif_free_env(tmp_env);
-
     return result;
 }
 
@@ -1150,7 +1154,12 @@ static PyObject *convert_etf_strings(PyObject *obj) {
 
 /**
  * Helper to parse callback response data into a Python object.
- * Response format: status_byte (0=ok, 1=error) + python_repr_string
+ *
+ * Response format: status_byte + payload
+ *   0 = ok, payload is a Python source literal (legacy; kept so responses
+ *       produced by an older Erlang side still decode)
+ *   1 = error, payload is an error message
+ *   2 = ok, payload is an external-term-format binary (current encoding)
  */
 static PyObject *parse_callback_response(unsigned char *response_data, size_t response_len) {
     if (response_len < 1) {
@@ -1161,7 +1170,7 @@ static PyObject *parse_callback_response(unsigned char *response_data, size_t re
     uint8_t status = response_data[0];
 
     if (response_len < 2) {
-        if (status == 0) {
+        if (status == 0 || status == 2) {
             Py_RETURN_NONE;
         } else {
             PyErr_SetString(PyExc_RuntimeError, "Erlang callback failed");
@@ -1173,7 +1182,18 @@ static PyObject *parse_callback_response(unsigned char *response_data, size_t re
     size_t result_len = response_len - 1;
 
     PyObject *result = NULL;
-    if (status == 0) {
+    if (status == 2) {
+        /* Current encoding: external term format, decoded by the same
+         * converter that handles call arguments. */
+        result = etf_binary_to_py(result_str, result_len);
+        if (result == NULL) {
+            if (!PyErr_Occurred()) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                "Failed to decode callback result");
+            }
+            return NULL;
+        }
+    } else if (status == 0) {
         /* Try to evaluate the result string as Python literal.
          * Import ast.literal_eval fresh to support subinterpreters
          * (the cached g_ast_literal_eval may be from a different interpreter). */

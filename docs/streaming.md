@@ -65,18 +65,34 @@ ok = py:stream_cancel(Ref).
 
 ### Async Generators
 
-`stream_start` supports both sync and async generators:
+`stream_start` accepts sync and async generators. An async generator is driven
+on a private event loop, one value at a time, and delivers the same
+`{py_stream, Ref, ...}` events.
 
-```erlang
-%% Async generator (e.g., streaming from an async API)
-ok = py:exec(<<"
-async def async_gen():
-    for i in range(5):
+Put the generator in an importable module:
+
+```python
+# my_module.py
+import asyncio
+
+async def async_gen(n):
+    for i in range(n):
         await asyncio.sleep(0.1)
         yield i
-">>),
-{ok, Ref} = py:stream_start('__main__', async_gen, []).
 ```
+
+```erlang
+{ok, Ref} = py:stream_start(my_module, async_gen, [5]),
+receive_loop(Ref).
+```
+
+Notes:
+
+- Delivery of each value blocks that private loop, so other coroutines on it do
+  not progress between yields. Use it for sequential streams.
+- `py:stream_cancel/1` works the same for async generators.
+- The batch helpers below (`py:stream/4` with kwargs, `py:stream_eval/1,2`)
+  wrap the call in `list()` and accept sync generators only.
 
 ## Batch Streaming (Collecting All Values)
 

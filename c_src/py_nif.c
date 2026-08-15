@@ -261,6 +261,7 @@ static int is_inline_schedule_marker(PyObject *obj);
  * ============================================================================ */
 
 #include "py_util.c"
+#include "py_mem_limit.c"
 #include "py_convert.c"
 #include "py_exec.c"
 #include "py_logging.c"
@@ -350,6 +351,13 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
 
     /* Close callback pipes if open */
     close_pipe_pair(ctx->callback_pipe);
+
+    /* Refcount is zero here, so no interrupt can be in flight. Contexts that
+     * leaked an unresponsive thread keep a reference and never reach this. */
+    if (ctx->interrupt_mutex_init) {
+        pthread_mutex_destroy(&ctx->interrupt_mutex);
+        ctx->interrupt_mutex_init = false;
+    }
 
     /* Skip if already destroyed by nif_context_destroy */
     if (ctx->destroyed) {
@@ -1010,6 +1018,19 @@ static ERL_NIF_TERM nif_py_init(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
         /* It's OK if this fails - the symbols might already be global */
     }
 #endif
+
+    /* Per-context memory caps hook the obmalloc arena allocator, which has to
+     * be installed before Python allocates anything. Opt-in: the default path
+     * leaves the allocator untouched. */
+    if (argc > 0 && enif_is_map(env, argv[0])) {
+        ERL_NIF_TERM mem_value;
+        if (enif_get_map_value(env, argv[0],
+                               enif_make_atom(env, "enable_memory_limits"),
+                               &mem_value) &&
+            enif_is_identical(mem_value, ATOM_TRUE)) {
+            py_mem_limit_install();
+        }
+    }
 
     /* Initialize Python with thread support.
      * If Python is already initialized (e.g., after app restart without
@@ -3170,10 +3191,14 @@ static void *worker_context_thread_main(void *arg) {
         ctx->response_ok = false;
         ctx->response_term = 0;
 
-        /* Acquire GIL and process the request */
+        /* Acquire GIL and process the request.
+         * exec_enter before / exec_leave after the GIL (see the locking
+         * invariant on py_context::interrupt_mutex). */
+        py_context_exec_enter(ctx);
         gstate = PyGILState_Ensure();
         owngil_execute_request(ctx);  /* Reuse execute functions */
         PyGILState_Release(gstate);
+        py_context_exec_leave(ctx);
 
         /* Copy response to request struct */
         req->result_env = enif_alloc_env();
@@ -3708,10 +3733,14 @@ static void *owngil_context_thread_main(void *arg) {
         ctx->response_ok = false;
         ctx->response_term = 0;
 
-        /* Acquire our GIL and process the request */
+        /* Acquire our GIL and process the request.
+         * exec_enter before / exec_leave after the GIL (see the locking
+         * invariant on py_context::interrupt_mutex). */
+        py_context_exec_enter(ctx);
         PyEval_RestoreThread(ctx->own_gil_tstate);
         owngil_execute_request(ctx);
         PyEval_SaveThread();
+        py_context_exec_leave(ctx);
 
         /* Copy response to request struct */
         req->result_env = enif_alloc_env();
@@ -3751,9 +3780,14 @@ static void *owngil_context_thread_main(void *arg) {
     ctx->module_cache = NULL;
 
     /* End interpreter - this releases our GIL and cleans up */
+    PyInterpreterState *ended_interp = ctx->own_gil_interp;
     Py_EndInterpreter(ctx->own_gil_tstate);
     ctx->own_gil_tstate = NULL;
     ctx->own_gil_interp = NULL;
+
+    /* Release the memory accounting slot only after teardown, so the arenas
+     * freed by Py_EndInterpreter are still attributed to this interpreter. */
+    py_mem_limit_forget(ended_interp);
 
     /* Don't call PyGILState_Release(gstate) here!
      * After Py_NewInterpreterFromConfig switched us to the OWN_GIL interpreter,
@@ -4718,6 +4752,16 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->module_cache = NULL;
     ctx->uses_worker_thread = false;
 
+    /* Interrupt support */
+    ctx->interrupt_mutex_init = (pthread_mutex_init(&ctx->interrupt_mutex, NULL) == 0);
+    if (!ctx->interrupt_mutex_init) {
+        enif_release_resource(ctx);
+        return make_error(env, "mutex_init_failed");
+    }
+    atomic_store(&ctx->exec_in_flight, false);
+    atomic_store(&ctx->interrupt_pending, false);
+    ctx->exec_thread_id = 0;
+
     /* Create callback pipe for blocking callback responses */
     if (pipe(ctx->callback_pipe) < 0) {
         enif_release_resource(ctx);
@@ -4731,6 +4775,8 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
 #ifdef HAVE_SUBINTERPRETERS
     ctx->uses_own_gil = false;
+    ctx->own_gil_tstate = NULL;
+    ctx->own_gil_interp = NULL;
 
     if (use_owngil) {
         /* OWN_GIL mode: create dedicated pthread with OWN_GIL subinterpreter */
@@ -4762,6 +4808,155 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
     atomic_fetch_add(&g_counters.ctx_created, 1);
     return enif_make_tuple3(env, ATOM_OK, ref, enif_make_uint(env, ctx->interp_id));
+}
+
+/**
+ * @brief Set a memory cap for a context
+ *
+ * nif_context_set_memory_limit(ContextRef, Bytes) -> ok | {error, Reason}
+ *
+ * Bytes = 0 removes the cap. Requires owngil mode: accounting is per
+ * interpreter, and every worker-mode context shares the main interpreter.
+ * Requires the runtime to have been started with enable_memory_limits.
+ */
+static ERL_NIF_TERM nif_context_set_memory_limit(ErlNifEnv *env, int argc,
+                                                 const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+    ErlNifUInt64 limit;
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+    if (!enif_get_uint64(env, argv[1], &limit)) {
+        return make_error(env, "invalid_limit");
+    }
+    if (atomic_load(&ctx->destroyed)) {
+        return make_error(env, "context_destroyed");
+    }
+    if (!py_mem_limit_enabled()) {
+        return make_error(env, "memory_limits_disabled");
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (!ctx->uses_own_gil || ctx->own_gil_interp == NULL) {
+        return make_error(env, "memory_limit_requires_owngil");
+    }
+    if (py_mem_limit_set(ctx->own_gil_interp, (size_t)limit) != 0) {
+        return make_error(env, "memory_limit_unavailable");
+    }
+    return ATOM_OK;
+#else
+    return make_error(env, "memory_limit_requires_owngil");
+#endif
+}
+
+/**
+ * @brief Report accounted memory usage for a context
+ *
+ * nif_context_memory_usage(ContextRef) -> {ok, Used, Limit} | {error, Reason}
+ *
+ * Used counts obmalloc arena bytes for this context's interpreter. It does
+ * not include allocations that bypass obmalloc (over 512 bytes).
+ */
+static ERL_NIF_TERM nif_context_memory_usage(ErlNifEnv *env, int argc,
+                                             const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+    if (atomic_load(&ctx->destroyed)) {
+        return make_error(env, "context_destroyed");
+    }
+    if (!py_mem_limit_enabled()) {
+        return make_error(env, "memory_limits_disabled");
+    }
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (!ctx->uses_own_gil || ctx->own_gil_interp == NULL) {
+        return make_error(env, "memory_limit_requires_owngil");
+    }
+
+    size_t used = 0, limit = 0;
+    if (py_mem_limit_get(ctx->own_gil_interp, &used, &limit) != 0) {
+        return make_error(env, "not_tracked");
+    }
+    return enif_make_tuple3(env, ATOM_OK,
+                            enif_make_uint64(env, (ErlNifUInt64)used),
+                            enif_make_uint64(env, (ErlNifUInt64)limit));
+#else
+    return make_error(env, "memory_limit_requires_owngil");
+#endif
+}
+
+/**
+ * @brief Interrupt Python code currently running in a context
+ *
+ * nif_context_interrupt(ContextRef) -> ok | not_running
+ *
+ * Raises KeyboardInterrupt asynchronously in whichever thread is executing
+ * this context. KeyboardInterrupt is a BaseException, so ordinary
+ * `except Exception:` handlers in user code do not swallow it, and it is a
+ * static builtin valid in every subinterpreter.
+ *
+ * CPython delivers an async exception at the next bytecode boundary, so a
+ * thread blocked inside a C call (time.sleep, a numpy kernel, a socket read)
+ * is not interrupted until that call returns.
+ *
+ * Dirty IO-bound: this blocks on the GIL, which the running thread only
+ * yields at switch-interval boundaries.
+ */
+static ERL_NIF_TERM nif_context_interrupt(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+
+    if (!runtime_is_running() || atomic_load(&ctx->destroyed)) {
+        return enif_make_atom(env, "not_running");
+    }
+
+    /* Held across the GIL acquisition below (see the locking invariant on
+     * py_context::interrupt_mutex). This thread must not already hold the GIL. */
+    pthread_mutex_lock(&ctx->interrupt_mutex);
+
+    if (!atomic_load(&ctx->exec_in_flight) || atomic_load(&ctx->destroyed)) {
+        pthread_mutex_unlock(&ctx->interrupt_mutex);
+        return enif_make_atom(env, "not_running");
+    }
+
+    unsigned long tid = ctx->exec_thread_id;
+    bool injected = false;
+
+#ifdef HAVE_SUBINTERPRETERS
+    if (ctx->uses_own_gil && ctx->own_gil_interp != NULL) {
+        /* Attach to this context's subinterpreter. The thread state is created
+         * on THIS thread so the 3.12+ tstate/thread binding assertions hold. */
+        PyThreadState *tstate = PyThreadState_New(ctx->own_gil_interp);
+        if (tstate != NULL) {
+            PyEval_RestoreThread(tstate);
+            injected = (PyThreadState_SetAsyncExc(tid, PyExc_KeyboardInterrupt) > 0);
+            PyThreadState_Clear(tstate);
+            PyThreadState_DeleteCurrent();  /* detaches and drops the OWN_GIL */
+        }
+    } else
+#endif
+    {
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        injected = (PyThreadState_SetAsyncExc(tid, PyExc_KeyboardInterrupt) > 0);
+        PyGILState_Release(gstate);
+    }
+
+    if (injected) {
+        atomic_store(&ctx->interrupt_pending, true);
+    }
+    pthread_mutex_unlock(&ctx->interrupt_mutex);
+
+    return injected ? ATOM_OK : enif_make_atom(env, "not_running");
 }
 
 /**
@@ -7987,6 +8182,9 @@ static ErlNifFunc nif_funcs[] = {
     /* Process-per-context API (no mutex) */
     {"context_create", 1, nif_context_create, 0},
     {"context_destroy", 1, nif_context_destroy, 0},
+    {"context_interrupt", 1, nif_context_interrupt, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"context_set_memory_limit", 2, nif_context_set_memory_limit, 0},
+    {"context_memory_usage", 1, nif_context_memory_usage, 0},
     {"context_call", 5, nif_context_call, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_eval", 3, nif_context_eval, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_exec", 2, nif_context_exec, ERL_NIF_DIRTY_JOB_CPU_BOUND},

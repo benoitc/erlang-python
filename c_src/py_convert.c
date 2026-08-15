@@ -825,6 +825,16 @@ static ERL_NIF_TERM make_py_error(ErlNifEnv *env) {
             enif_make_tuple2(env, ATOM_STOP_ITERATION, ATOM_NONE));
     }
 
+    /* KeyboardInterrupt means py_nif:context_interrupt/1 injected an async
+     * exception, so report it as a distinct reason rather than a Python error. */
+    if (PyErr_GivenExceptionMatches(type, PyExc_KeyboardInterrupt)) {
+        PyErr_Clear();
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+        return enif_make_tuple2(env, ATOM_ERROR, enif_make_atom(env, "interrupted"));
+    }
+
     /* Get exception message. PyUnicode_AsUTF8 can return NULL (e.g. a str with
      * lone surrogates); never pass NULL to enif_make_string. */
     PyObject *str = PyObject_Str(value);
