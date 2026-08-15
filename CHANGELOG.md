@@ -58,6 +58,14 @@
   bytes each term consumed. Tasks beyond the batch limit queued behind a
   running loop were also left waiting for the next wakeup; the running-loop
   path now returns `more` like the idle path.
+- **Recycled handles cancelled by their previous owner** - `ErlangEventLoop`
+  handed pooled `Handle` objects out of `call_soon` (and out of `call_at`
+  when the delay rounded to zero, which `asyncio.sleep(0.001)` does depending
+  on the clock value). asyncio cancels such handles after they ran
+  (`sleep` does in its `finally`), which cancelled whatever callback had been
+  given the recycled handle since: every second sleeper never woke. Only the
+  fd event handles created inside `_dispatch` are pooled now; `call_soon`
+  and `call_at` return fresh handles.
 - **Re-arming a read select from the Python thread** - re-selecting READ on
   an fd the BEAM had moved into a scheduler poll set crashed inside
   `enif_select` when done from the loop thread (transport `resume_reading`,

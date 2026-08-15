@@ -49,6 +49,15 @@ EVENT_TYPE_WRITE = 2
 EVENT_TYPE_TIMER = 3
 
 
+class _PooledHandle(events.Handle):
+    """Handle recycled through ErlangEventLoop._handle_pool.
+
+    Only fd event dispatch creates these; they never leave the loop, so no
+    one can cancel one after it ran and hit its next occupant.
+    """
+    __slots__ = ()
+
+
 class ErlangEventLoop(asyncio.AbstractEventLoop):
     """asyncio event loop backed by Erlang's scheduler.
 
@@ -392,7 +401,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         Uses handle pooling (uvloop-style) to reduce allocations.
         """
         self._check_closed()
-        handle = self._get_handle(callback, args, context)
+        # A handle handed to the caller must not come from the pool: asyncio
+        # code keeps call_soon/call_later handles and cancels them after they
+        # ran (asyncio.sleep does), which would cancel whatever callback the
+        # recycled handle carries by then. Pooling stays for the fd event
+        # handles created in _dispatch, which never leave the loop.
+        if context is None:
+            context = contextvars.copy_context()
+        handle = events.Handle(callback, args, self, context)
         self._ready_append(handle)
         return handle
 
@@ -420,10 +436,15 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         """Schedule a callback to be called at a specific time."""
         self._check_closed()
 
-        # For zero or past times, schedule immediately via call_soon
+        # For zero or past times, run at the next iteration. Return a real
+        # TimerHandle (never pooled): callers cancel it after it ran.
         delay_ms = int((when - self.time()) * 1000)
         if delay_ms <= 0:
-            return self.call_soon(callback, *args, context=context)
+            if context is None:
+                context = contextvars.copy_context()
+            handle = events.TimerHandle(when, callback, args, self, context)
+            self._ready_append(handle)
+            return handle
 
         callback_id = self._next_id()
 
@@ -1244,7 +1265,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             handle._context = context
             return handle
         except IndexError:
-            return events.Handle(callback, args, self, context)
+            return _PooledHandle(callback, args, self, context)
 
     def _return_handle(self, handle):
         """Return a Handle to the pool for reuse.
@@ -1256,8 +1277,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         If the TimerHandle is recycled and reused for another callback, the
         cancel() call will incorrectly cancel the new callback.
         """
-        # Don't pool TimerHandle - asyncio.sleep holds a reference and cancels it
-        if isinstance(handle, events.TimerHandle):
+        # Only handles created by _dispatch are recycled (see _PooledHandle);
+        # call_soon/call_at handles are held by callers who may cancel them
+        if type(handle) is not _PooledHandle:
             return
 
         if len(self._handle_pool) < self._handle_pool_max:

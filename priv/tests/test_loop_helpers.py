@@ -117,3 +117,67 @@ class TestLoopHelpers(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestHandleReuse(unittest.TestCase):
+    """call_soon/call_at handles are the caller's: cancelling one after it
+    ran must not touch a later callback (the handle pool used to recycle
+    them, so asyncio.sleep's cancel in its finally block killed whichever
+    callback had been given the recycled handle)."""
+
+    def _loop(self):
+        impl = _impl()
+        return impl.new_event_loop()
+
+    def test_cancel_after_run_does_not_kill_next_callback(self):
+        loop = self._loop()
+        seen = []
+        try:
+            h1 = loop.call_soon(seen.append, 1)
+            loop.call_soon(loop.stop)
+            loop.run_forever()
+            self.assertEqual(seen, [1])
+            # h1 ran; a stale cancel must be a no-op
+            h1.cancel()
+            loop.call_soon(seen.append, 2)
+            loop.call_soon(loop.stop)
+            loop.run_forever()
+            self.assertEqual(seen, [1, 2])
+        finally:
+            loop.close()
+
+    def test_zero_delay_call_later_returns_timer_handle(self):
+        loop = self._loop()
+        seen = []
+        try:
+            h = loop.call_later(0, seen.append, 'x')
+            self.assertIsInstance(h, asyncio.TimerHandle)
+            loop.call_soon(loop.stop)
+            loop.run_forever()
+            self.assertEqual(seen, ['x'])
+            h.cancel()  # after it ran, no effect on anything else
+            loop.call_soon(seen.append, 'y')
+            loop.call_soon(loop.stop)
+            loop.run_forever()
+            self.assertEqual(seen, ['x', 'y'])
+        finally:
+            loop.close()
+
+    def test_many_sleeps_all_wake(self):
+        """500 concurrent sleep(0.001): every one comes back, whether the
+        delay rounds to a timer or to the next iteration."""
+        loop = self._loop()
+        woke = []
+
+        async def one(i):
+            await asyncio.sleep(0.001)
+            woke.append(i)
+
+        async def main():
+            await asyncio.gather(*(one(i) for i in range(500)))
+
+        try:
+            loop.run_until_complete(main())
+        finally:
+            loop.close()
+        self.assertEqual(sorted(woke), list(range(500)))
