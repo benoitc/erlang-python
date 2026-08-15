@@ -357,6 +357,11 @@ typedef struct erlang_event_loop {
      *  through loop_gil_acquire(). Guarded by mutex. */
     int external_attached;
 
+    /** @brief True while ErlangEventLoop.run_forever() drives this loop on
+     *  its own thread. Pending events then need no task_ready round trip
+     *  through the worker: the loop thread picks them up itself. */
+    _Atomic bool py_running;
+
     /* ========== Async Task Queue (uvloop-inspired) ========== */
     /*
      * Future optimization: Replace serialized task queue with native MPSC

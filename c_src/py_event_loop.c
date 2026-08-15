@@ -3018,7 +3018,19 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
     /* NOTE: We do NOT return early here even if num_tasks == 0.
      * We may have pending timer/FD events that need _run_once to process.
      * The first check (task_count == 0 && pending_count == 0) at the start
-     * of this function already handles the case where there's truly no work. */
+     * of this function already handles the case where there's truly no work.
+     *
+     * Exception: a loop driven by run_forever on its own thread consumes
+     * pending events itself. With no tasks to schedule there is nothing for
+     * us to do under its GIL; wake it and leave. */
+    if (num_tasks == 0 && atomic_load(&loop->py_running)) {
+        if (!loop->shutdown) {
+            pthread_mutex_lock(&loop->mutex);
+            pthread_cond_broadcast(&loop->event_cond);
+            pthread_mutex_unlock(&loop->mutex);
+        }
+        return ATOM_OK;
+    }
 
     /* ========================================================================
      * PHASE 2: Process all tasks WITH GIL (Python operations)
@@ -4435,7 +4447,7 @@ bool event_loop_add_pending(erlang_event_loop_t *loop, event_type_t type,
      *
      * Uses the same coalescing logic as submit_task to avoid message floods.
      */
-    if (loop->has_worker) {
+    if (loop->has_worker && !atomic_load(&loop->py_running)) {
         if (!atomic_exchange(&loop->task_wake_pending, true)) {
             ErlNifEnv *msg_env = enif_alloc_env();
             if (msg_env != NULL) {
@@ -8137,6 +8149,40 @@ static PyObject *py_cancel_timer_for(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+/* Python function: _set_running_for(capsule, running) -> None
+ *
+ * Marks the loop as driven by run_forever on the calling thread (or not).
+ * See erlang_event_loop_t.py_running. */
+static PyObject *py_set_running_for(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *capsule;
+    int running;
+
+    if (!PyArg_ParseTuple(args, "Op", &capsule, &running)) {
+        return NULL;
+    }
+    erlang_event_loop_t *loop = loop_from_capsule(capsule);
+    if (loop == NULL) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    atomic_store(&loop->py_running, running ? true : false);
+    if (!running && loop->has_worker && !loop->shutdown) {
+        /* Events queued while we were running but not yet consumed must
+         * now be handled by the worker path again */
+        if (atomic_load(&loop->pending_count) > 0 &&
+            !atomic_exchange(&loop->task_wake_pending, true)) {
+            ErlNifEnv *msg_env = enif_alloc_env();
+            if (msg_env != NULL) {
+                enif_send(NULL, &loop->worker_pid, msg_env,
+                          enif_make_atom(msg_env, "task_ready"));
+                enif_free_env(msg_env);
+            }
+        }
+    }
+    Py_RETURN_NONE;
+}
+
 /* Python function: _wakeup_for(capsule) -> None */
 static PyObject *py_wakeup_for(PyObject *self, PyObject *args) {
     (void)self;
@@ -8275,6 +8321,7 @@ static PyMethodDef PyEventLoopMethods[] = {
     {"_set_global_loop_ref", py_set_global_loop_ref, METH_VARARGS, "Store Python loop reference in global loop"},
     {"_run_once_native_for", py_run_once_for, METH_VARARGS, "Combined poll + get_pending for specific loop"},
     {"_get_pending_for", py_get_pending_for, METH_VARARGS, "Get and clear pending events for specific loop"},
+    {"_set_running_for", py_set_running_for, METH_VARARGS, "Mark loop as running under run_forever"},
     {"_wakeup_for", py_wakeup_for, METH_VARARGS, "Wake up specific event loop"},
     {"_is_initialized_for", py_is_initialized_for, METH_VARARGS, "Check if specific loop is initialized"},
     {"_add_reader_for", py_add_reader_for, METH_VARARGS, "Register fd for read monitoring on specific loop"},

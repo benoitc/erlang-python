@@ -227,6 +227,14 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         self._running = True
         # Don't reset _stopping here - honor stop() called before run_forever()
 
+        # Tell the NIF this loop consumes its own events from now on
+        set_running = getattr(self._pel, '_set_running_for', None)
+        if set_running is not None:
+            try:
+                set_running(self._loop_capsule, True)
+            except Exception:
+                set_running = None
+
         # Register as the running loop
         old_running_loop = events._get_running_loop()
         events._set_running_loop(self)
@@ -237,6 +245,11 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             events._set_running_loop(old_running_loop)
             self._stopping = False
             self._running = False
+            if set_running is not None:
+                try:
+                    set_running(self._loop_capsule, False)
+                except Exception:
+                    pass
             self._thread_id = None
             self._set_coroutine_origin_tracking(False)
 
