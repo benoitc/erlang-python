@@ -209,14 +209,18 @@ test_submit_errors_reported(Config) ->
     ok.
 
 %% @doc A burst of submits from one caller completes and comes back in order.
+%% More than MAX_TASK_BATCH (64) tasks are queued before the worker gets to
+%% them, so this also covers the running-loop branch returning `more'.
 test_submit_ordering(Config) ->
     C = new_ctx(Config),
     ok = py_context:start_loop(C),
+    {ok, LoopRef} = py_context:loop_ref(C),
     Refs = [begin
-        {ok, R} = py_context:submit(C, py_test_workerloop, add, [I, 0]),
+        R = make_ref(),
+        ok = py_nif:submit_task(LoopRef, self(), R, <<"py_test_workerloop">>, <<"add">>, [I, 0], #{}),
         {I, R}
     end || I <- lists:seq(1, 500)],
-    [{ok, I} = py_event_loop:await(R, 5000) || {I, R} <- Refs],
+    [{ok, I} = py_event_loop:await(R, 10000) || {I, R} <- Refs],
     ok = py_context:stop_loop(C),
     stop_ctx(C),
     ok.

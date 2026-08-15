@@ -3414,6 +3414,13 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
                 pthread_cond_broadcast(&loop->event_cond);
                 pthread_mutex_unlock(&loop->mutex);
             }
+            /* Same contract as the tail of this function: tasks beyond the
+             * batch limit are still queued, tell the worker to come back
+             * (submit_task will not send another wakeup while one is
+             * pending, so returning ok here would strand them). */
+            if (atomic_load(&loop->task_count) > 0) {
+                return ATOM_MORE;
+            }
             return ATOM_OK;
         }
     } else {
