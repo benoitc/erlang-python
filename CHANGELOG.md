@@ -65,6 +65,12 @@
   virtual environments and shared dicts to `py_stream`, `py_venv` and
   `py_shared_dict`. The public API is unchanged.
 
+### Documentation
+
+- `make check-code-map` (also run by CI) verifies that every source file is
+  in `docs/code-map.md`, every Erlang module has a moduledoc and a row in
+  the Modules table of `test/coverage_audit.md`.
+
 ### Removed
 
 - The legacy worker API (`py_nif:worker_new/0,1`, `worker_call`, `worker_eval`,

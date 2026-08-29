@@ -326,6 +326,9 @@ jobs:
       - name: Run dialyzer
         run: rebar3 dialyzer
 
+      - name: Check code map
+        run: make check-code-map
+
   docs:
     name: Documentation
     runs-on: ubuntu-24.04

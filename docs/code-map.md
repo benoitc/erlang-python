@@ -23,7 +23,8 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 | `py_thread_handler` | Coordinator that gives each Python thread calling Erlang a handler process and a pipe | live | threading | `py_thread_callback_SUITE`, `py_reentrant_SUITE` |
 | `py_event_loop` | Main-interpreter asyncio loop: `run`, `create_task`, `await`, and the loop callbacks Python needs | live | asyncio | `py_event_loop_SUITE`, `py_async_task_SUITE` |
 | `py_event_loop_pool` | Several main-interpreter loops with process affinity | live | asyncio | `py_event_loop_pool_SUITE` |
-| `py_event_worker`, `_sup`, `_registry` | One process per running loop receiving `enif_select` readiness and timers | live | event_loop_architecture | `py_event_loop_SUITE`, `py_fd_ops_SUITE` |
+| `py_event_worker` | One process per running loop receiving `enif_select` readiness and timers | live | event_loop_architecture | `py_event_loop_SUITE`, `py_fd_ops_SUITE` |
+| `py_event_worker_sup`, `py_event_worker_registry` | Supervisor and name registry of the event workers | live | event_loop_architecture | `py_event_loop_SUITE` |
 | `py_reactor_context` | FD-owning context for the protocol-based reactor | live | reactor | `py_reactor_SUITE` |
 | `py_channel`, `py_byte_channel` | Term and byte queues between Erlang and Python coroutines (NIF resources) | live | channel | `py_channel_SUITE`, `py_byte_channel_SUITE` |
 | `py_buffer` | Native streaming input buffer; shared variant delegates to `py_shm` | live | buffer, isolated | `py_buffer_SUITE`, `py_isolated_buffer_SUITE` |
@@ -56,6 +57,7 @@ files. Editing `py_convert.c` alone does not compile it alone; build with
 | `py_logging.c` | Logging and tracing NIFs | live |
 | `py_mem_limit.c` | Per-interpreter memory caps (owngil) | live |
 | `py_util.c/.h` | Macros and helpers | live |
+| `py_nif.h`, `py_event_loop.h`, `py_channel.h`, `py_buffer.h`, `py_reactor_buffer.h`, `py_subinterp_thread.h`, `py_util.h` | Declarations shared between the included files; the struct comments in `py_nif.h` and `py_event_loop.h` carry the lock contracts | live |
 
 The only code not on a live path is the "Test Helper Functions" section of
 `py_event_loop.c` (fd, pipe, TCP and UDP helpers the suites use).
@@ -79,7 +81,7 @@ loop, channels and servers.
 | `_erlang_impl/_isolated.py` | Child runtime: socket frames, reader thread, re-entrant main loop, interrupt signal, asyncio loop, the `erlang` shim | isolated child |
 | `_erlang_impl/_shm.py` | `SharedMemory` and `SharedBuffer` wrappers over mmap | all |
 | `py_isolated_child.py` | Child launcher: rlimits, parent-death signal, cgroup join, connect | isolated child |
-| `test_erlang_loop.py`, `tests/` | Python-side tests of the loop | test |
+| `test_erlang_loop.py`, `test_async_task.py`, `test_channel_ref.py`, `tests/` | Python-side tests of the loop, tasks and channels | test |
 
 ## Tests (`test/`)
 
@@ -87,7 +89,8 @@ Suites named `py_<area>_SUITE`. Cross-mode suites run the same cases in
 `worker` and `isolated` groups (`py_isolated_SUITE`, `py_isolated_vm_SUITE`,
 `py_isolated_shm_SUITE`, `py_isolated_buffer_SUITE`). Python helpers used by
 suites are `test/py_test_*.py`. `test/coverage_audit.md` maps public APIs to
-cases. `test/test.config` holds node-wide settings (memory limits flag).
+cases and every module to its suites; `make check-code-map` verifies this
+page and that table against the tree. `test/test.config` holds node-wide settings (memory limits flag).
 
 ## Build and docs
 

@@ -1,4 +1,4 @@
-.PHONY: all compile test lint-docs clean
+.PHONY: all compile test lint-docs check-code-map clean
 
 all: compile
 
@@ -15,6 +15,11 @@ test:
 # on the line immediately above the opening fence.
 lint-docs: compile
 	escript scripts/lint_doc_snippets.escript
+
+# Every source file in docs/code-map.md, every module with a moduledoc and
+# a row in the Modules table of test/coverage_audit.md.
+check-code-map:
+	sh scripts/check_code_map.sh
 
 clean:
 	rebar3 clean
