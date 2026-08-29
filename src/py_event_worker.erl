@@ -5,6 +5,13 @@
 %% - Receives `{select, FdRes, Ref, ready_input|ready_output}' directly from enif_select
 %% - Handles `{timeout, TimerRef}' messages for timer dispatch
 %% - Manages timers via erlang:send_after to self()
+%%
+%% Owns: the readiness and timer messages of one loop, and its `task_ready'
+%%   coalescing.
+%% Talks to: the `py_event_loop.c' NIFs (`process_ready_tasks', timers),
+%%   `py_event_worker_registry'.
+%% Never: runs the loop itself in owngil mode (the context thread does) and
+%%   never blocks on Python.
 -module(py_event_worker).
 -behaviour(gen_server).
 

@@ -12,23 +12,29 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
-%%% @doc Python context process.
+%%% @doc The context process: one Python execution environment, one request
+%%% at a time.
 %%%
-%%% A py_context process owns a Python context (subinterpreter or worker).
-%%% Each process has exclusive access to its context, eliminating mutex
-%%% contention and enabling true N-way parallelism.
+%%% Every mode goes through this module. In `worker' and `owngil' mode the
+%%% process holds a NIF context resource, forwards each request to the
+%%% context thread in C (`nif_context_call_async') and waits for its
+%%% `{py_result, Ref, Result}'. In `isolated' mode `init/4' hands the
+%%% process to `py_isolated', which speaks the same messages to a child OS
+%%% process. Callers do not see the difference.
 %%%
-%%% The context is created when the process starts and destroyed when it
-%%% stops. All Python operations are serialized through message passing.
+%%% == Callbacks ==
 %%%
-%%% == Callback Handling ==
+%%% When Python calls `erlang.call', the context thread blocks on the
+%%% callback pipe and sends `{erlang_callback, Id, Fun, Args}' to this
+%%% process, which runs the registered function and writes the reply frame
+%%% back. Nested requests from the callback are served inline, so callbacks
+%%% can call Python again to any depth.
 %%%
-%%% When Python code calls `erlang.call()`, the NIF returns a `{suspended, ...}`
-%%% tuple instead of blocking. The context process handles the callback inline
-%%% using a recursive receive pattern, enabling arbitrarily deep callback nesting.
-%%%
-%%% This approach is inspired by PyO3's suspension mechanism and avoids the
-%%% deadlock issues that occur with separate callback handler processes.
+%%% Owns: the context resource, the request in flight, its timeout and
+%%% the process-local envs (`py:call(Ctx, ...)').
+%%% Talks to: `py_nif' (context NIFs), `py_isolated', `py_callback',
+%%% `py_context_sup'.
+%%% Never: runs Python on a scheduler thread; the context thread does.
 %%%
 %%% @end
 -module(py_context).

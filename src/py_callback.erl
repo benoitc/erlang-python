@@ -18,6 +18,12 @@
 %%% from Python code via the erlang.call() function.
 %%%
 %%% @private
+%%%
+%%% Owns: the ETS registry name to fun.
+%%% Talks to: `py_context' and `py_thread_handler', which look functions up
+%%%   when Python calls `erlang.call'.
+%%% Never: runs the function itself; the caller process does, with the context
+%%%   blocked on the callback pipe.
 -module(py_callback).
 
 -behaviour(gen_server).

@@ -37,6 +37,14 @@
 %%% a region used as a ring, with the write position and the closed flag in
 %%% a header page and flow control through the `_py_buffer_wait' and
 %%% `_py_buffer_consumed' callbacks the Python side calls.
+%%%
+%%% Owns: the region table (ETS), the backing files, and the ring state of
+%%%   shared buffers.
+%%% Talks to: iommap (through `apply/3', optional dependency), `py_buffer'
+%%%   (shared variant), `py_callback' (registers `_py_buffer_wait',
+%%%   `_py_buffer_consumed', `_py_buffer_state').
+%%% Never: maps memory into Python itself; that is `_erlang_impl/_shm.py' in
+%%%   each interpreter.
 -module(py_shm).
 
 -behaviour(gen_server).

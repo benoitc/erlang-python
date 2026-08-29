@@ -49,6 +49,10 @@
 %%%         process(line)
 %%% '''
 %%%
+%%%
+%%% Owns: the native buffer resource (NIF) and the dispatch on handle shape.
+%%% Talks to: `py_buffer.c' for native buffers, `py_shm' for `shared => true'.
+%%% Never: reads on the Erlang side; Python is the only reader.
 %%% @end
 -module(py_buffer).
 

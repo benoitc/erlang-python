@@ -53,6 +53,10 @@
 %%% ok = py_context_router:unbind_context().
 %%% </pre>
 %%%
+%%%
+%%% Owns: the pool tables and the scheduler to context assignment.
+%%% Talks to: `py_context' (creation, calls), `py_context_sup'.
+%%% Never: executes Python; it picks a context and forwards.
 %%% @end
 -module(py_context_router).
 
