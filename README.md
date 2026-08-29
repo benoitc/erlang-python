@@ -603,6 +603,7 @@ When creating Python contexts, you can choose the execution mode:
 |------|----------------|-------------|
 | `worker` | Any | Dedicated pthread per context, main interpreter namespace (default) |
 | `owngil` | 3.14+ | Dedicated pthread + subinterpreter with its own GIL, true parallelism |
+| `isolated` | Any | CPython in a child OS process: killable, rlimit-bounded, crash-contained |
 
 ```erlang
 %% Default: worker mode (recommended)
@@ -612,7 +613,17 @@ When creating Python contexts, you can choose the execution mode:
 %% OWN_GIL mode for true parallelism (Python 3.14+ required)
 %% Each context runs in its own pthread with independent GIL
 {ok, Ctx} = py_context:new(#{mode => owngil}).
+
+%% Isolated mode: a child process per context. A stuck call is killed, a
+%% segfault only takes the child down, rlimits bound memory and CPU.
+{ok, Ctx} = py_context:new(#{mode => isolated, kill_after => 1000,
+                             rlimits => #{as => 512 * 1024 * 1024}}).
 ```
+
+**Isolated mode** is the only mode with a hard bound: `py_context:interrupt/1`
+stops a blocking C call, and `SIGKILL` is the backstop. It costs a process per
+context (about 16 MB and 40 ms to start) and roughly twice the call latency.
+See [Isolated Contexts](docs/isolated.md).
 
 **Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available. Each context owns a dedicated pthread, providing stable thread affinity for libraries with thread-local state (numpy, torch, tensorflow).
 
@@ -629,6 +640,7 @@ py:execution_mode().  %% => worker | owngil
 |------|----------------|-------------|
 | `worker` (default) | Any | One pthread per context; true parallelism on free-threaded 3.13t+ |
 | `owngil` | 3.14+ | Per-interpreter GIL, true parallelism across contexts |
+| `isolated` | Any | One OS process per context, parallel and failure-isolated |
 
 ## Error Handling
 
@@ -651,6 +663,7 @@ py:execution_mode().  %% => worker | owngil
 - [Logging and Tracing](docs/logging.md)
 - [Asyncio Event Loop](docs/asyncio.md) - Erlang-native asyncio with TCP/UDP support
 - [Worker Loops](docs/workers.md) - Long-lived loops in owngil contexts, serving on sockets Erlang owns
+- [Isolated Contexts](docs/isolated.md) - Python in a child process: kill, rlimits, crash containment
 - [Reactor](docs/reactor.md) - FD-based protocol handling
 - [Security](docs/security.md) - Sandbox and blocked operations
 - [Changelog](https://github.com/benoitc/erlang-python/releases)

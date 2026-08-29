@@ -131,6 +131,7 @@
     close_fd/1,
     %% File descriptor utilities
     dup_fd/1,
+    os_kill/2,
     %% Test helpers for fd monitoring (using pipes)
     create_test_pipe/0,
     close_test_fd/1,
@@ -990,6 +991,11 @@ create_test_pipe() ->
 %% Creates an independent copy of the fd.
 -spec dup_fd(integer()) -> {ok, integer()} | {error, term()}.
 dup_fd(_Fd) ->
+    ?NIF_STUB.
+
+%% @doc Send a signal to an OS process (kill(2)). Used by isolated contexts.
+-spec os_kill(pos_integer(), non_neg_integer()) -> ok | {error, esrch | eperm | einval}.
+os_kill(_Pid, _Signal) ->
     ?NIF_STUB.
 
 %% @doc Close a test file descriptor.

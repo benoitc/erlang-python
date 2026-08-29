@@ -112,6 +112,8 @@
     context/0,
     context/1,
     interrupt/1,
+    kill/1,
+    python_executable/0,
     start_contexts/0,
     start_contexts/1,
     stop_contexts/0,
@@ -928,6 +930,19 @@ create_venv(Path, Opts) ->
 %% @private Get the Python executable path
 %% When embedded, sys.executable returns the embedding app (beam.smp)
 %% so we reconstruct the path from sys.prefix and version info
+%% @doc Path of the Python interpreter matching the embedded runtime.
+%%
+%% Reconstructed from `sys.prefix' (when embedded, `sys.executable' is the
+%% VM). Used as the default interpreter of isolated contexts and for venvs.
+-spec python_executable() -> string().
+python_executable() ->
+    get_python_executable().
+
+%% @doc Kill the child of an isolated context. See py_context:kill/1.
+-spec kill(pid()) -> ok | {error, not_isolated}.
+kill(Ctx) when is_pid(Ctx) ->
+    py_context:kill(Ctx).
+
 -spec get_python_executable() -> string().
 get_python_executable() ->
     %% Use a single expression to find the Python executable

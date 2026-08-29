@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.2.0 (2026-08-29)
+
+### Added
+
+- **`isolated` context mode** - `py_context:new(#{mode => isolated})` runs
+  CPython in a child OS process per context, with the same `call/eval/exec`,
+  callback, `erlang.send`/`whereis`, worker-loop and pool API as the embedded
+  modes. It is the first mode with a hard bound: `py_context:interrupt/1`
+  stops a blocking C call (a signal in the child) and `SIGKILL` is the
+  backstop after `kill_after` ms; `py_context:kill/1` kills at once. `rlimits`
+  (`as`, `cpu`, `nofile`) and a cgroup v2 directory bound the child; a
+  segfault in a C extension returns `{error, {child_exited, {signal, 11}}}`
+  and the node survives. The child restarts on crash within a budget
+  (`restart`, `max_restarts`, `restart_period`); `py_context:child_info/1`
+  reports its OS pid. Children are reaped by the VM and exit when the BEAM
+  dies (socket EOF watchdog, `PR_SET_PDEATHSIG` on Linux, `PROC_PDEATHSIG_CTL`
+  on FreeBSD). `cgroup` is refused outside Linux; rlimits apply everywhere:
+  `as` is kernel-enforced on Linux and FreeBSD and enforced by an RSS
+  watchdog in the child on macOS (`{child_exited, {memory_limit, Bytes}}`).
+  Validated on macOS (arm64) and FreeBSD 14.3 (OTP 28, Python 3.11).
+- **`py_context:pass_fd/2`** - hands a file descriptor to an isolated child
+  over the control socket (`SCM_RIGHTS`), so `erlang.server.serve` works out
+  of process: Erlang binds once, N killable children accept.
+- **Pure-Python ETF codec** (`priv/_erlang_impl/_etf.py`) with the type
+  mapping of `py_convert.c`; the child needs no C extension. Integers beyond
+  64 bits round-trip exactly in isolated mode.
+- `py:python_executable/0`, `py:kill/1`, `py_nif:os_kill/2`.
+- `py_isolated` is a `gen_statem` (states `idle`, `{busy, Id}`, `looping`,
+  `stopping_loop`, `{restarting, Reason}`): `sys:get_state/1` and
+  `sys:trace/2` work on isolated contexts, requests arriving during a
+  restart are served by the new child, and `py_context:kill/1` returns once
+  the new child is up.
+- Timeouts on an isolated context cancel their own request only (queued
+  requests are dropped, the executing one is interrupted); the kill backstop
+  is bound to that request, so a busy shared context is never killed because
+  another caller gave up. Soak-tested: callback storms, interrupt/kill
+  storms, loop churn, 60 s mixed workload with resource counters checked.
+- Guide: `docs/isolated.md`, with what each of the three modes guarantees.
+
 ## 4.1.0 (2026-08-15)
 
 ### Added

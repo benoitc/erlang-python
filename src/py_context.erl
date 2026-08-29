@@ -69,6 +69,8 @@
 ]).
 
 %% Internal exports
+-export([kill/1, pass_fd/2, child_info/1]).
+
 -export([init/3, init/4, init_ref_tab/0]).
 
 %% Exported for py_reactor_context
@@ -83,7 +85,7 @@
 %% reply is drained instead of being left in the caller's mailbox.
 -define(INTERRUPT_GRACE_MS, 1000).
 
--type context_mode() :: worker | owngil.
+-type context_mode() :: worker | owngil | isolated.
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
@@ -115,9 +117,12 @@
 %% The process creates a Python context based on the mode:
 %% - `worker' - Create a thread-state worker (main interpreter namespace)
 %% - `owngil' - Create a sub-interpreter with its own GIL (Python 3.14+)
+%% - `isolated' - Run CPython in a child OS process (see py_isolated)
 %%
 %% The `owngil' mode creates a dedicated pthread for each context, allowing
-%% true parallel Python execution. Requires Python 3.14+.
+%% true parallel Python execution. Requires Python 3.14+. The `isolated'
+%% mode gives failure isolation: the child can be killed, capped with
+%% rlimits, and a crash in a C extension only takes the child down.
 %%
 %% @param Id Unique identifier for this context
 %% @param Mode Context mode
@@ -138,16 +143,24 @@ start_link(Id, Mode) ->
     {ok, pid()} | {error, term()}.
 start_link(Id, Mode, Opts) when is_map(Opts) ->
     Parent = self(),
-    Pid = spawn_link(fun() -> init(Parent, Id, Mode, Opts) end),
+    Pid = proc_lib:spawn_link(fun() -> init(Parent, Id, Mode, Opts) end),
     receive
         {Pid, started} ->
             {ok, Pid};
         {Pid, {error, Reason}} ->
             {error, Reason}
-    after 5000 ->
+    after start_timeout(Mode, Opts) ->
         exit(Pid, kill),
+        _ = ets:member(?REF_TAB, Pid) andalso ets:delete(?REF_TAB, Pid),
         {error, timeout}
     end.
+
+%% @private An isolated child has to spawn and connect; give it its
+%% start_timeout plus a margin. Embedded contexts start in well under 5 s.
+start_timeout(isolated, Opts) ->
+    maps:get(start_timeout, Opts, 10000) + 2000;
+start_timeout(_Mode, _Opts) ->
+    5000.
 
 %% @doc Stop a py_context process.
 -spec stop(context()) -> ok.
@@ -169,7 +182,7 @@ stop(Ctx) when is_pid(Ctx) ->
 %% @doc Create a new context with options map.
 %%
 %% Options:
-%% - `mode' - Context mode (worker | owngil), default: worker
+%% - `mode' - Context mode (worker | owngil | isolated), default: worker
 %% - `memory_limit' - Cap in bytes on memory allocated by this context.
 %%   Requires `mode => owngil' and the runtime started with
 %%   `enable_memory_limits'; see py_nif:context_set_memory_limit/2 for what
@@ -417,6 +430,15 @@ get_nif_ref(Ctx) when is_pid(Ctx) ->
 -spec interrupt(context()) -> ok | not_running.
 interrupt(Ctx) when is_pid(Ctx) ->
     case lookup_nif_ref(Ctx) of
+        {ok, isolated} ->
+            %% The context process is never blocked in a NIF: ask it. It
+            %% signals the child and arms the SIGKILL backstop.
+            MRef = erlang:monitor(process, Ctx),
+            Ctx ! {interrupt, self(), MRef},
+            case await_ctrl_reply(Ctx, MRef, 5000) of
+                ok -> ok;
+                _ -> not_running
+            end;
         {ok, Ref} ->
             try py_nif:context_interrupt(Ref) of
                 ok -> ok;
@@ -426,6 +448,73 @@ interrupt(Ctx) when is_pid(Ctx) ->
             end;
         error ->
             not_running
+    end.
+
+%% @doc Kill the child process of an isolated context with SIGKILL.
+%%
+%% Total and immediate, whatever the child is doing (a C call, a numpy
+%% kernel, a blocked read). In-flight calls return `{error, killed}'. With
+%% `restart => true' (the default) a fresh child is started and the context
+%% stays usable, with its Python state gone. Embedded contexts (`worker',
+%% `owngil') cannot be killed: they return `{error, not_isolated}'.
+%%
+%% @param Ctx Context process
+%% @returns ok | {error, not_isolated}
+-spec kill(context()) -> ok | {error, not_isolated}.
+kill(Ctx) when is_pid(Ctx) ->
+    case lookup_nif_ref(Ctx) of
+        {ok, isolated} ->
+            MRef = erlang:monitor(process, Ctx),
+            Ctx ! {kill, self(), MRef},
+            await_ctrl_reply(Ctx, MRef, 5000);
+        _ ->
+            {error, not_isolated}
+    end.
+
+%% @doc Hand a file descriptor to the child of an isolated context.
+%%
+%% The fd is sent over the control socket (`SCM_RIGHTS') and the number it
+%% got in the child is returned; use it with `erlang.server.serve' from a
+%% submitted coroutine. Get the fd with `py:dup_fd/1' on a listening socket.
+%%
+%% @param Ctx Context process
+%% @param Fd File descriptor in this VM
+%% @returns {ok, ChildFd} | {error, Reason}
+-spec pass_fd(context(), non_neg_integer()) -> {ok, non_neg_integer()} | {error, term()}.
+pass_fd(Ctx, Fd) when is_pid(Ctx), is_integer(Fd) ->
+    case lookup_nif_ref(Ctx) of
+        {ok, isolated} ->
+            MRef = erlang:monitor(process, Ctx),
+            Ctx ! {pass_fd, self(), MRef, Fd},
+            await_ctrl_reply(Ctx, MRef, 5000);
+        _ ->
+            {error, not_isolated}
+    end.
+
+%% @doc Information about the child of an isolated context: `os_pid',
+%% `python_version', `executable', `platform'.
+-spec child_info(context()) -> {ok, map()} | {error, term()}.
+child_info(Ctx) when is_pid(Ctx) ->
+    case lookup_nif_ref(Ctx) of
+        {ok, isolated} ->
+            MRef = erlang:monitor(process, Ctx),
+            Ctx ! {child_info, self(), MRef},
+            await_ctrl_reply(Ctx, MRef, 5000);
+        _ ->
+            {error, not_isolated}
+    end.
+
+%% @private Interrupt on behalf of a timed-out request. An isolated context
+%% cancels that request only (interrupting the child if it is the one
+%% executing, dropping it from the queue otherwise); embedded contexts can
+%% only interrupt whatever runs.
+interrupt_request(Ctx, ReqMRef) ->
+    case lookup_nif_ref(Ctx) of
+        {ok, isolated} ->
+            Ctx ! {interrupt_request, ReqMRef},
+            ok;
+        _ ->
+            interrupt(Ctx)
     end.
 
 %% @private Create the pid -> NIF reference table. Called by the supervisor
@@ -513,6 +602,18 @@ submit(Ctx, Module, Func, Args) ->
 -spec submit(context(), atom() | binary(), atom() | binary(), list(), map()) ->
     {ok, reference()} | {error, term()}.
 submit(Ctx, Module, Func, Args, Kwargs) when is_pid(Ctx), is_list(Args), is_map(Kwargs) ->
+    case lookup_nif_ref(Ctx) of
+        {ok, isolated} ->
+            TaskRef = make_ref(),
+            MRef = erlang:monitor(process, Ctx),
+            Ctx ! {submit, self(), MRef, TaskRef, to_binary(Module), to_binary(Func), Args, Kwargs},
+            await_ctrl_reply(Ctx, MRef, 5000);
+        _ ->
+            submit_embedded(Ctx, Module, Func, Args, Kwargs)
+    end.
+
+%% @private
+submit_embedded(Ctx, Module, Func, Args, Kwargs) ->
     case loop_ref(Ctx) of
         {ok, LoopRef} ->
             TaskRef = make_ref(),
@@ -563,7 +664,7 @@ await_reply(Ctx, MRef, Timeout) ->
         {'DOWN', MRef, process, Ctx, Reason} ->
             {error, {context_died, Reason}}
     after Timeout ->
-        _ = interrupt(Ctx),
+        _ = interrupt_request(Ctx, MRef),
         receive
             {MRef, _Late} ->
                 erlang:demonitor(MRef, [flush]);
@@ -586,6 +687,9 @@ await_ctrl_reply(Ctx, MRef, Timeout) ->
         {'DOWN', MRef, process, Ctx, Reason} ->
             {error, {context_died, Reason}}
     after Timeout ->
+        %% An isolated context drops the pending entry so a late reply is
+        %% not delivered to a caller that stopped waiting
+        Ctx ! {cancel_ctrl, MRef},
         erlang:demonitor(MRef, [flush]),
         {error, timeout}
     end.
@@ -622,6 +726,8 @@ init(Parent, Id, Mode) ->
     init(Parent, Id, Mode, #{}).
 
 %% @private
+init(Parent, Id, isolated, Opts) ->
+    py_isolated:init(Parent, Id, isolated, Opts);
 init(Parent, Id, Mode, Opts) ->
     process_flag(trap_exit, true),
     case create_context(Mode) of

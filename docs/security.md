@@ -144,6 +144,23 @@ if is_sandboxed():
     print("Running inside Erlang VM - subprocess operations blocked")
 ```
 
+## Process Isolation
+
+The audit hook keeps Python from forking the VM; it does not protect the VM
+from Python. A C extension can still segfault the node, and nothing can cap
+the memory or CPU of embedded code. For that boundary run the context in a
+child process:
+
+```erlang
+{ok, Ctx} = py_context:new(#{mode => isolated,
+                             rlimits => #{as => 256 * 1024 * 1024, cpu => 10},
+                             kill_after => 1000}).
+```
+
+A crash kills only the child, `py_context:kill/1` is total, and rlimits or
+cgroups bound resources. See [Isolated Contexts](isolated.md). The child is
+not sandboxed at the syscall level; that is a separate hardening step.
+
 ## Signal Handling Note
 
 Signal handling is also not supported in the Erlang event loop. The `ErlangEventLoop` raises `NotImplementedError` for `add_signal_handler()` and `remove_signal_handler()`. Signal handling should be done at the Erlang VM level using Erlang's signal handling facilities.
