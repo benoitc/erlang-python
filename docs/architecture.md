@@ -127,9 +127,9 @@ In isolated mode there is one path: a status-3 frame on the socket, answered
 by a process the `py_isolated` state machine spawns; nested calls into the
 same context are dispatched immediately because they come from that process.
 
-The frame format shared by the pipe and the socket, and the ETF conventions,
-will get their own page (protocols); until then `c_src/py_convert.c` (type
-mapping) and `priv/_erlang_impl/_etf.py` are the reference.
+Every message and frame, with the rules for changing them, is in
+[protocols](protocols.md); the states each process and thread moves through
+are in [state machines](state-machines.md).
 
 ## asyncio
 
