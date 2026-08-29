@@ -488,8 +488,12 @@ static int thread_worker_spawn_handler(thread_worker_t *tw) {
      * condition (Defect 5): both the byte count must match AND the
      * value must be zero. Short reads are not silently accepted. */
     uint32_t response_len = 0;
-    ssize_t n = read_with_timeout(tw->response_pipe[0], &response_len,
-                                  sizeof(response_len), 10000);
+    ssize_t n;
+    /* The coordinator answers without Python; do not hold the GIL for it. */
+    Py_BEGIN_ALLOW_THREADS
+    n = read_with_timeout(tw->response_pipe[0], &response_len,
+                          sizeof(response_len), 10000);
+    Py_END_ALLOW_THREADS
     if (n != (ssize_t)sizeof(response_len) || response_len != 0) {
         return -1;
     }

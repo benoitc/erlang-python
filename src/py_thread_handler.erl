@@ -115,11 +115,17 @@ handle_info({thread_worker_spawn, WorkerId, WriteFd}, #state{handlers = Handlers
     HandlerPid = spawn_link(fun() -> handler_loop(WorkerId, WriteFd) end),
 
     %% Signal readiness to Python (write 0 length to indicate success)
-    py_nif:thread_worker_signal_ready(WriteFd),
-
-    %% Store handler mapping
-    NewHandlers = Handlers#{WorkerId => {HandlerPid, WriteFd}},
-    {noreply, State#state{handlers = NewHandlers}};
+    case py_nif:thread_worker_signal_ready(WriteFd) of
+        ok ->
+            NewHandlers = Handlers#{WorkerId => {HandlerPid, WriteFd}},
+            {noreply, State#state{handlers = NewHandlers}};
+        {error, Reason} ->
+            %% The Python side times out and reports it; say why here
+            logger:error("py_thread_handler: ready signal for worker ~p (fd ~p) failed: ~p",
+                         [WorkerId, WriteFd, Reason]),
+            HandlerPid ! shutdown,
+            {noreply, State}
+    end;
 
 %% Handle callback request from Python thread
 handle_info({thread_callback, WorkerId, CallbackId, FuncName, Args},

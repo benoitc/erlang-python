@@ -66,6 +66,11 @@
 
 - `pthread_timedjoin_np` was called without `_GNU_SOURCE`, an implicit
   declaration on Linux that newer compilers reject.
+- Callback pipes waited with `select()`, which is undefined for a file
+  descriptor above 1024: in a VM with many open files a thread callback
+  could time out with "Failed to spawn thread handler". The waits use
+  `poll()`, the handler ready-wait no longer holds the GIL, and
+  `py_thread_handler` logs a failed ready signal.
 
 ## 4.1.0 (2026-08-15)
 
