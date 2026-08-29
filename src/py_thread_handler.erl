@@ -35,6 +35,13 @@
 %%% 6. Python thread receives response and continues
 %%%
 %%% @private
+%%%
+%%% Owns: the coordinator process, one handler process and one pipe per Python
+%%%   thread.
+%%% Talks to: `py_callback' (function lookup), the `py_thread_worker.c' side
+%%%   of the pipe.
+%%% Never: touches a context: Python threads that call Erlang are not on a
+%%%   context thread.
 -module(py_thread_handler).
 
 -behaviour(gen_server).

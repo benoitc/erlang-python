@@ -259,13 +259,52 @@ typedef struct {
 
 /**
  * @struct erlang_event_loop_t
- * @brief Main state for the Erlang-backed asyncio event loop
+ * @brief State of one ErlangEventLoop (asyncio loop backed by enif_select)
  *
- * This structure maintains all state needed for the event loop:
- * - Reference to the Erlang worker process (scalable I/O model)
- * - Reference to the Erlang router process (legacy)
- * - Pending events queue
- * - Synchronization primitives
+ * Three kinds of thread touch a loop: the loop thread (the context thread
+ * running `run_forever`, or a scheduler for main-interpreter loops driven by
+ * py_event_worker), scheduler threads running NIFs (`submit_task`,
+ * readiness and timer callbacks from py_event_worker), and the interpreter
+ * thread tearing the loop down.
+ *
+ * Lock and ownership contract:
+ *
+ * - mutex guards the pending event queue (pending_head/tail,
+ *   pending_capacity, event_freelist, freelist_count, the pending_hash_*
+ *   set), interp and external_attached, and event_cond. Never acquire a
+ *   GIL while holding it: the loop thread can hold the GIL while waiting
+ *   for mutex (loop_gil_acquire attaches under mutex, then takes the GIL
+ *   after releasing it).
+ *
+ * - task_queue_mutex guards task_queue (an ErlNifIOQueue of serialized
+ *   task tuples). Producers are scheduler threads in the submit NIFs; the
+ *   consumer is process_ready_tasks on the loop thread, which holds the
+ *   GIL while decoding. task_count and task_wake_pending are atomics used
+ *   to coalesce wakeups.
+ *
+ * - env_pool_mutex guards env_pool and env_pool_count only.
+ *
+ * - namespaces_mutex guards namespaces_head and pid_env_head. Lock order:
+ *   GIL first, then namespaces_mutex; the Python dicts in a namespace are
+ *   touched only under the GIL.
+ *
+ * - py_loop, cached_* and callable_cache are Python objects owned by the
+ *   loop thread and used only under its GIL. msg_env is allocated with the
+ *   loop and freed in the destructor; the notification paths do not use
+ *   it (each builds a local env per message so they need no lock).
+ *
+ * - worker_pid/has_worker, self_pid/has_self, loop_id and interp_id are
+ *   set once at creation or by the setter NIFs before the loop runs, then
+ *   read-only. router_pid/has_router are kept for layout compatibility
+ *   only. shutdown is set once by the stop NIF.
+ *
+ * - interp becomes NULL in event_loop_detach_interpreter, which then waits
+ *   for external_attached to drop to zero before Py_EndInterpreter; a
+ *   scheduler that finds interp NULL must not attach.
+ *
+ * @see loop_gil_acquire
+ * @see process_ready_tasks
+ * @see event_loop_detach_interpreter
  */
 typedef struct erlang_event_loop {
     /** @brief Legacy field - kept for binary compatibility */

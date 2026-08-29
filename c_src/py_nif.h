@@ -642,24 +642,72 @@ typedef struct {
 
 /**
  * @struct py_context_t
- * @brief Process-owned Python context with shared-GIL subinterpreter pool
+ * @brief One Python execution environment served by one Erlang process
  *
- * A py_context_t is owned by a single Erlang process, which serializes
- * all access to it. For subinterpreters, contexts reference a slot in
- * the pre-created subinterpreter pool (shared GIL model).
+ * A context has exactly one pthread that runs Python for it: the context
+ * thread (worker_context_thread_main for worker mode,
+ * owngil_context_thread_main for owngil mode). Erlang processes never run
+ * Python on a context; NIFs enqueue a ctx_request_t and return, the
+ * context thread dequeues, executes and replies with `{py_result, Id, R}`
+ * through msg_env. Isolated mode does not use this struct at all.
  *
- * Execution happens directly on dirty schedulers using PyThreadState_Swap()
- * to switch to the subinterpreter's thread state. This avoids:
- * - Dedicated pthread per context
- * - Mutex/condvar dispatch overhead
- * - Term copying between environments
+ * Lock and ownership contract, by field group:
  *
- * @note Python 3.12+ uses shared-GIL subinterpreters via pool slots
- * @note Older Python uses worker mode with main interpreter namespace
+ * - Identity and lifecycle (interp_id, is_subinterp, uses_worker_thread,
+ *   uses_own_gil): written once by nif_context_create before the thread
+ *   starts, read-only afterwards. destroyed, leaked, worker_running,
+ *   shutdown_requested and init_error are atomics; any thread may read
+ *   them, the writers are nif_context_destroy (destroyed, leaked), the
+ *   shutdown helpers (shutdown_requested) and the context thread
+ *   (worker_running, init_error).
+ *
+ * - Callback handler (has_callback_handler, callback_handler,
+ *   callback_pipe): set by the owning Erlang process through
+ *   nif_context_set_callback_handler before the first request; read by the
+ *   context thread inside erlang_call_impl. The pipe is closed by
+ *   nif_context_destroy only when the thread joined (`!leaked`): a stuck
+ *   thread still reads the fds, and closing them would let the kernel hand
+ *   the numbers to another file.
+ *
+ * - Request queue (queue_head, queue_tail, queue_not_empty): guarded by
+ *   queue_mutex. Producers are NIFs on scheduler threads, the consumer is
+ *   the context thread. Lock order: queue_mutex before req->mutex
+ *   (ctx_queue_cancel_all takes both in that order); nothing takes
+ *   queue_mutex while holding req->mutex, the GIL or interrupt_mutex.
+ *
+ * - msg_env: used only by the context thread, one message at a time
+ *   (enif_clear_env, build, enif_send). Freed by the shutdown helper after
+ *   the thread joined; never freed on the leak path.
+ *
+ * - Current request (shared_env, request_type, request_term,
+ *   response_term, response_ok, reactor_buffer_ptr, local_env_ptr): a
+ *   mirror of the ctx_request_t being executed, written and read by the
+ *   context thread only, cleared after each request. No lock: no other
+ *   thread may touch them. The execute functions take the context rather
+ *   than the request, which is why the mirror exists.
+ *
+ * - Python state (globals, locals, module_cache, own_gil_tstate,
+ *   own_gil_interp, thread_state, event_loop): created and destroyed on the
+ *   context thread while it holds the GIL (the sub-interpreter's own GIL in
+ *   owngil mode). Other threads may read own_gil_interp and event_loop as
+ *   opaque pointers (nif_context_interrupt, nif_context_get_event_loop)
+ *   but never dereference the Python objects. Refcounts belong to the
+ *   context thread.
+ *
+ * - Interrupt (interrupt_mutex, exec_in_flight, exec_thread_id,
+ *   interrupt_pending): see the invariant on interrupt_mutex below. It is
+ *   the only lock a scheduler thread holds while acquiring a GIL, so it
+ *   must never be taken by a thread that already holds one.
+ *
+ * Shutdown: nif_context_destroy marks destroyed, cancels the queue, wakes
+ * the thread and joins it with a timeout. If the thread does not exit the
+ * context is leaked on purpose (enif_keep_resource) rather than freed
+ * under a running pthread.
  *
  * @see nif_context_create
- * @see nif_context_call
- * @see subinterp_pool_alloc
+ * @see nif_context_call_async
+ * @see nif_context_interrupt
+ * @see nif_context_destroy
  */
 struct py_context {
     /** @brief Unique interpreter ID for routing (0 = main, >0 = subinterp) */
@@ -683,7 +731,7 @@ struct py_context {
     /** @brief Pipe for callback responses [read, write] */
     int callback_pipe[2];
 
-    /* ========== Worker thread fields (used by both worker and owngil modes) ========== */
+    /* ========== Context thread (worker and owngil modes) ========== */
 
     /** @brief Dedicated pthread for this context */
     pthread_t worker_thread;
@@ -700,7 +748,7 @@ struct py_context {
     /** @brief True if thread initialization failed */
     _Atomic bool init_error;
 
-    /* ========== Request queue (replaces single-slot pattern) ========== */
+    /* ========== Request queue (queue_mutex) ========== */
 
     /** @brief Mutex protecting the request queue */
     pthread_mutex_t queue_mutex;
@@ -717,10 +765,9 @@ struct py_context {
     /** @brief Environment for sending messages back to Erlang */
     ErlNifEnv *msg_env;
 
-    /* ========== Legacy compatibility fields (populated from queue request) ========== */
-    /* These fields are populated by the worker thread from the current request
-     * for compatibility with existing execute functions. They will be removed
-     * once all execute functions are refactored to use ctx_request_t directly. */
+    /* ========== Current request (mirror of the ctx_request_t in flight) ========== */
+    /* Written and cleared by the context thread around each request; the
+     * execute functions read the request from here. Context-thread only. */
 
     /** @brief Shared env for current request (points to current req->request_env) */
     ErlNifEnv *shared_env;

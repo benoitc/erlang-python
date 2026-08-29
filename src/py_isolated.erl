@@ -51,6 +51,12 @@
 %%% Use `sys:get_state/1' to see the state and `sys:trace/2' for events.
 %%%
 %%% @private
+%%%
+%%% Owns: the child OS process, its Unix socket and the request in flight.
+%%% Talks to: `py_context' (public API, the same messages as the embedded
+%%%   loop), `py_shm' (region handles crossing the socket), `py_callback'
+%%%   (registered functions the child calls).
+%%% Never: runs Python in the VM, touches NIF resources other than `os_kill'.
 -module(py_isolated).
 
 -behaviour(gen_statem).

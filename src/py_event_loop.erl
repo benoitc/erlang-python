@@ -19,6 +19,13 @@
 %% and registers callback functions for Python to call.
 %%
 %% @private
+%%
+%% Owns: the lifecycle of main-interpreter loops and the `erlang.*' loop
+%%   callbacks Python needs.
+%% Talks to: `py_event_worker' (one per loop), `py_event_loop_pool', the loop
+%%   NIFs.
+%% Never: dispatches to owngil loops; those are reached through
+%%   `py_context:loop_ref/1'.
 -module(py_event_loop).
 -behaviour(gen_server).
 
