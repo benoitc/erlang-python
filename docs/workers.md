@@ -28,6 +28,11 @@ Worker contexts get the same API on the shared main interpreter loop, which
 allows one running `ErlangEventLoop` per interpreter: use owngil (Python
 3.14+) for several workers.
 
+Isolated contexts (`mode => isolated`) get the same API on a plain asyncio
+loop in their child process; hand sockets over with `py_context:pass_fd/2`
+instead of `py:dup_fd/1`, and a wedged loop is killed by `stop_loop/2`. See
+[Isolated Contexts](isolated.md).
+
 ## Serve TCP on a socket Erlang owns
 
 Bind once in Erlang, duplicate the listen fd for each worker with

@@ -65,12 +65,29 @@ context to deal with that:
 ok = py_context:destroy(Ctx).
 ```
 
+## Interrupting a blocking C call: isolated mode
+
+The limits below apply to the embedded modes. An `isolated` context runs
+Python in a child process, where an interrupt is a signal that lands inside
+`time.sleep`, a socket read or any other blocking call, and `SIGKILL` is the
+backstop if the signal is ignored:
+
+```erlang
+{ok, Ctx} = py_context:new(#{mode => isolated, kill_after => 1000}),
+{error, timeout} = py_context:eval(Ctx, <<"__import__('time').sleep(60)">>, #{}, 200),
+%% Usable at once, no 60 s wait
+{ok, 4} = py_context:eval(Ctx, <<"2+2">>, #{}, 5000).
+```
+
+`py_context:kill/1` kills at once. See [Isolated Contexts](isolated.md).
+
 ## Limits
 
 - CPython delivers an async exception at the next bytecode boundary. Code
   blocked inside a C call (`time.sleep`, a numpy kernel, a socket read) is
   not interrupted until that call returns. The call still times out on the
-  Erlang side; the context becomes usable once the C call finishes.
+  Erlang side; the context becomes usable once the C call finishes. Only
+  `isolated` mode interrupts such a call.
 - An interrupt targets the context, not an individual request. Interrupting a
   context that just finished one call and started another stops the new one.
 - `py:call/3,4` and `py:eval/1,2` use `infinity` by default. Pass an explicit

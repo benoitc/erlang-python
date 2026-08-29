@@ -36,6 +36,14 @@
  * - py_callback.c: Callback system and asyncio support
  */
 
+/* pthread_timedjoin_np (used to bound the owngil worker join on Linux)
+ * is declared by <pthread.h> only under _GNU_SOURCE. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include <signal.h>
+#include <errno.h>
 #include "py_nif.h"
 #include "py_util.h"
 #include "py_event_loop.h"
@@ -8079,6 +8087,26 @@ static void unload(ErlNifEnv *env, void *priv_data) {
     /* Other cleanup handled by finalize */
 }
 
+/**
+ * @brief Send a signal to an OS process (kill(2)).
+ *
+ * Used by isolated contexts to SIGKILL their child. The caller holds the
+ * child's port open until exit_status arrives, so the pid cannot have been
+ * recycled.
+ */
+static ERL_NIF_TERM nif_os_kill(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    int pid, sig;
+    if (!enif_get_int(env, argv[0], &pid) || !enif_get_int(env, argv[1], &sig) || pid <= 0) {
+        return enif_make_badarg(env);
+    }
+    if (kill((pid_t)pid, sig) == 0) {
+        return ATOM_OK;
+    }
+    return enif_make_tuple2(env, ATOM_ERROR,
+        enif_make_atom(env, errno == ESRCH ? "esrch" : errno == EPERM ? "eperm" : "einval"));
+}
+
 static ErlNifFunc nif_funcs[] = {
     /* Initialization */
     {"init", 0, nif_py_init, 0},
@@ -8220,6 +8248,7 @@ static ErlNifFunc nif_funcs[] = {
     {"create_test_pipe", 0, nif_create_test_pipe, 0},
     {"close_test_fd", 1, nif_close_test_fd, 0},
     {"dup_fd", 1, nif_dup_fd, 0},
+    {"os_kill", 2, nif_os_kill, 0},
     {"write_test_fd", 2, nif_write_test_fd, 0},
     {"read_test_fd", 2, nif_read_test_fd, 0},
     /* TCP test helpers */
