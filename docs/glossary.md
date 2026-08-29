@@ -40,8 +40,6 @@ The most overloaded word. Meanings, by file:
 |---|---|---|
 | `py_context:new(#{mode => worker})` | the context mode above | worker mode |
 | `worker_context_thread_main`, `uses_worker_thread` (`py_nif.c`) | the pthread that serves a context's queue | context thread |
-| `worker_new/call/eval/exec` NIFs, `py_worker_t` | the legacy per-worker API, before contexts | legacy worker API |
-| `py_worker_pool.c`, `py_pool_worker_t` | an older pool, no caller | legacy pool |
 | `thread_worker`, `thread_worker_call` (`py_thread_worker.c`), `py_thread_handler` | the channel a Python thread uses to call Erlang | thread callback bridge |
 | `py_event_worker` | the Erlang process that drives one asyncio loop (readiness, timers) | loop driver |
 | `docs/workers.md`, "worker loop" | a long-running asyncio loop on a context thread, gunicorn-style | worker loop |
@@ -51,7 +49,7 @@ The most overloaded word. Meanings, by file:
 `py_context_router` pools (`py:call(Pool, M, F, A)`): named sets of contexts
 routed by scheduler. `py_event_loop_pool`: main-interpreter asyncio loops
 with process affinity. `g_thread_pool` in `py_subinterp_thread.c`: the
-threads behind owngil contexts. `g_pool` in `py_worker_pool.c`: legacy.
+threads behind owngil contexts.
 
 ## Callback
 

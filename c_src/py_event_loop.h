@@ -922,21 +922,7 @@ ERL_NIF_TERM nif_stop_writer(ErlNifEnv *env, int argc,
 ERL_NIF_TERM nif_start_writer(ErlNifEnv *env, int argc,
                                const ERL_NIF_TERM argv[]);
 
-/**
- * @brief Cancel read monitoring (legacy alias for stop_reader)
- *
- * NIF: cancel_reader(LoopRef, FdRef) -> ok | {error, Reason}
- */
-ERL_NIF_TERM nif_cancel_reader(ErlNifEnv *env, int argc,
-                                const ERL_NIF_TERM argv[]);
 
-/**
- * @brief Cancel write monitoring (legacy alias for stop_writer)
- *
- * NIF: cancel_writer(LoopRef, FdRef) -> ok | {error, Reason}
- */
-ERL_NIF_TERM nif_cancel_writer(ErlNifEnv *env, int argc,
-                                const ERL_NIF_TERM argv[]);
 
 /**
  * @brief Explicitly close an FD with proper lifecycle cleanup

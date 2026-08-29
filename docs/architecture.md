@@ -79,10 +79,9 @@ one Python execution environment and serves calls in order. Pools
    `{py_result, Ref, Result}` to the `py_context` process, which replies
    `From ! {MRef, Result}`.
 
-The older paths in `nif_context_call` (a blocking variant with an inline
-"legacy" executor) are kept for the fallback
-`{error, async_requires_worker_thread}` and are not taken by contexts
-created today; see [code map](code-map.md) for the list of legacy code.
+`nif_context_call` and friends also have a blocking variant used as a
+fallback when a context has no thread (`{error, async_requires_worker_thread}`),
+which never happens for contexts created today.
 
 ### isolated
 
@@ -118,9 +117,7 @@ this order (the comment above it is the authoritative version):
    a request on a pipe and blocks; the `py_context` process has a dedicated
    handler (`callback_handler_loop/1`) that runs the fun and writes the
    response frame back with `context_write_callback_response`.
-3. **Legacy worker handler** (`worker_*` NIFs): only used by
-   `examples/gen_test.erl`.
-4. **Thread worker** (`c_src/py_thread_worker.c`): any Python thread that is
+3. **Thread worker** (`c_src/py_thread_worker.c`): any Python thread that is
    not a context thread (`threading.Thread`, executors) asks the
    `py_thread_handler` coordinator for a handler process and talks to it
    over a pipe. There is also an async variant (`erlang.async_call`) using a
@@ -190,9 +187,8 @@ loop and [asyncio](asyncio.md) for the API.
 
 ## What is live and what is not
 
-Kept for now, not used by current contexts: the `worker_*` NIF API and its
-single executor thread (`c_src/py_exec.c`), the `async_worker_*` NIFs (they
-return `deprecated`), `c_src/py_worker_pool.c` (no caller), the inline
-"legacy" executor branches in `nif_context_*`, and the test-only fd NIFs in
-`c_src/py_event_loop.c`. They are listed in the [code map](code-map.md) so
-nobody debugs them by mistake; removing them is planned.
+Every code path in `src/` and `c_src/` is on the path of a context created
+today, with one exception: the test-only fd/TCP/UDP NIFs in
+`c_src/py_event_loop.c` ("Test Helper Functions"), which the suites use.
+The legacy worker API, its executor thread, the deprecated async worker
+NIFs and the unused worker pool were removed in 5.0.0.

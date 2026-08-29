@@ -495,7 +495,7 @@ def process(x):
 │  2. Erlang executes the registered callback                     │
 │     └──► May call py:call() to run Python (on different worker) │
 │                                                                 │
-│  3. Erlang calls resume_callback with result                    │
+│  3. Erlang calls context_resume with result                    │
 │     └──► Schedules dirty NIF to return result to Python         │
 │                                                                 │
 │  4. Python continues with the callback result                   │

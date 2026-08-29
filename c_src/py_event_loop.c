@@ -4838,21 +4838,7 @@ ERL_NIF_TERM nif_start_writer(ErlNifEnv *env, int argc,
 }
 
 /* Legacy aliases for backward compatibility */
-ERL_NIF_TERM nif_cancel_reader(ErlNifEnv *env, int argc,
-                                const ERL_NIF_TERM argv[]) {
-    /* cancel_reader(Loop, FdRef) -> stop_reader(FdRef) */
-    (void)argc;
-    ERL_NIF_TERM new_argv[1] = {argv[1]};  /* Skip Loop arg */
-    return nif_stop_reader(env, 1, new_argv);
-}
 
-ERL_NIF_TERM nif_cancel_writer(ErlNifEnv *env, int argc,
-                                const ERL_NIF_TERM argv[]) {
-    /* cancel_writer(Loop, FdRef) -> stop_writer(FdRef) */
-    (void)argc;
-    ERL_NIF_TERM new_argv[1] = {argv[1]};  /* Skip Loop arg */
-    return nif_stop_writer(env, 1, new_argv);
-}
 
 /**
  * close_fd(FdRef) -> ok
