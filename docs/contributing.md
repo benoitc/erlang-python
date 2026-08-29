@@ -205,6 +205,8 @@ supervisor to carry it.
   clean locally.
 - `CHANGELOG.md` updated under the unreleased version: `Added`, `Changed`,
   `Removed` or `Fixed`. Removing a public function is a major version.
+- A change that reverses or extends a decision in `docs/decisions/` gets a
+  new record there; the old one is not edited.
 - The PR text says what the change intends and which path it takes; the
   diff already lists the files.
 - One squashed commit per PR.
