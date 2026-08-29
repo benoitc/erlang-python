@@ -64,7 +64,7 @@
 #define NEED_DLOPEN_GLOBAL 1
 #endif
 
-#include <sys/select.h>
+#include <poll.h>
 /** @} */
 
 /* ============================================================================
@@ -1598,13 +1598,10 @@ static ssize_t read_with_timeout(int fd, void *buf, size_t count, int timeout_ms
                 errno = ETIMEDOUT;
                 return (ssize_t)got;
             }
-            struct timeval tv;
-            tv.tv_sec  = remain_ms / 1000;
-            tv.tv_usec = (remain_ms % 1000) * 1000;
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
-            int s = select(fd + 1, &fds, NULL, NULL, &tv);
+            /* poll, not select: select() is undefined for fd >= FD_SETSIZE
+             * (1024) and a VM with many open files gets pipe fds above it. */
+            struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+            int s = poll(&pfd, 1, (int)remain_ms);
             if (s < 0) {
                 if (errno == EINTR) continue;
                 return -1;
@@ -1690,7 +1687,7 @@ typedef enum {
  * @brief Write exactly @p count bytes to a (typically non-blocking) fd
  *        with a deadline.
  *
- * Loops on partial writes / EINTR / EAGAIN. On EAGAIN, uses select() for
+ * Loops on partial writes / EINTR / EAGAIN. On EAGAIN, uses poll() for
  * write-readiness with the remaining deadline. Used by the thread-worker
  * write path to avoid pinning a dirty I/O scheduler thread on a stalled
  * Python reader.
@@ -1741,13 +1738,8 @@ static write_result_t write_all_with_deadline(int fd, const void *buf,
                 (deadline.tv_sec  - now.tv_sec)  * 1000L +
                 (deadline.tv_nsec - now.tv_nsec) / 1000000L;
             if (remain_ms <= 0) return WRITE_TIMEOUT;
-            struct timeval tv;
-            tv.tv_sec  = remain_ms / 1000;
-            tv.tv_usec = (remain_ms % 1000) * 1000;
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
-            int s = select(fd + 1, NULL, &fds, NULL, &tv);
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT, .revents = 0 };
+            int s = poll(&pfd, 1, (int)remain_ms);
             if (s < 0) {
                 if (errno == EINTR) continue;
                 return WRITE_ERROR;

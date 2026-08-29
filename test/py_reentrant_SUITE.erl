@@ -22,6 +22,7 @@
     test_callback_with_complex_types/1,
     test_multiple_sequential_callbacks/1,
     test_call_from_non_worker_thread/1,
+    test_thread_callback_fd_above_fd_setsize/1,
     test_callback_with_try_except/1,
     test_async_call/1,
     test_callback_name_registry/1,
@@ -38,6 +39,7 @@ all() ->
         test_callback_with_complex_types,
         test_multiple_sequential_callbacks,
         test_call_from_non_worker_thread,
+        test_thread_callback_fd_above_fd_setsize,
         test_callback_with_try_except,
         test_async_call,
         test_callback_name_registry,
@@ -133,6 +135,12 @@ test_etf_decode_safe(_Config) ->
 
     %% Negative: many DISTINCT brand-new atoms wrapped in marker-shaped binaries
     %% must all come back verbatim, never decoded into atoms.
+    %% Warm up first so modules loaded on first use (base64, the callback
+    %% path) do not count as atoms minted by the round trips below.
+    Warm = etf_marker(novel_atom_etf("zzqx_etf_safe_warmup")),
+    py:register_function(etf_probe_novel, fun(_) -> Warm end),
+    {ok, Warm} = py:eval(<<"__import__('erlang').call('etf_probe_novel', [])">>),
+    assert_atom_absent("zzqx_etf_safe_warmup"),
     Before = erlang:system_info(atom_count),
     N = 50,
     lists:foreach(
@@ -348,6 +356,32 @@ test_call_from_non_worker_thread(_Config) ->
     %% Cleanup
     py:unregister_function(simple_add),
     ok.
+
+%% @doc Thread callbacks must work when the response pipe lands on an fd
+%% above FD_SETSIZE: select() is undefined there and used to make the
+%% handler ready-wait time out after 10 s ("Failed to spawn thread handler").
+test_thread_callback_fd_above_fd_setsize(_Config) ->
+    py:register_function(high_fd_add, fun([A, B]) -> A + B end),
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    try
+        case py:call(py_test_high_fds, prepare, [1200]) of
+            {ok, Last} when Last >= 1200 ->
+                ct:log("highest fd opened: ~p", [Last]),
+                N = 8,
+                {ok, Results} = py:call(py_test_high_fds, call_from_threads, [N]),
+                Expected = [I + 1 || I <- lists:seq(0, N - 1)],
+                Expected = Results;
+            {ok, -1} ->
+                {skip, "fd hard limit too low to open 1200 files"};
+            Other ->
+                ct:fail({prepare_failed, Other})
+        end
+    after
+        _ = py:call(py_test_high_fds, cleanup, []),
+        py:unregister_function(high_fd_add)
+    end.
 
 %% @doc Test that erlang.call() works even when wrapped in try/except blocks.
 %% This simulates ASGI/WSGI middleware that catches all exceptions.
