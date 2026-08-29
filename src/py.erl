@@ -145,7 +145,7 @@
 -type py_args() :: [term()].
 -type py_kwargs() :: #{atom() | binary() => term()}.
 
--export_type([py_result/0, py_ref/0]).
+-export_type([py_result/0, py_ref/0, py_module/0, py_func/0, py_args/0, py_kwargs/0]).
 
 %% Default timeout for synchronous calls (30 seconds)
 -define(DEFAULT_TIMEOUT, 30000).
@@ -404,83 +404,24 @@ await(Ref, Timeout) ->
 %% @doc Stream results from a Python generator.
 %% Returns a list of all yielded values.
 -spec stream(py_module(), py_func(), py_args()) -> py_result().
-stream(Module, Func, Args) ->
-    stream(Module, Func, Args, #{}).
+stream(A1, A2, A3) ->
+    py_stream:stream(A1, A2, A3).
 
 %% @doc Stream results from a Python generator with kwargs.
 -spec stream(py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
-stream(Module, Func, Args, Kwargs) when map_size(Kwargs) == 0 ->
-    %% No kwargs - use stream_start and collect results
-    {ok, Ref} = stream_start(Module, Func, Args),
-    collect_stream(Ref, []);
-stream(Module, Func, Args, Kwargs) ->
-    %% With kwargs - use eval approach
-    Ctx = py_context_router:get_context(),
-    ModuleBin = valid_py_module(ensure_binary(Module)),
-    FuncBin = valid_py_ident(ensure_binary(Func)),
-    KwargsCode = format_kwargs(Kwargs),
-    ArgsCode = format_args(Args),
-    Code = iolist_to_binary([
-        <<"list(__import__('">>, ModuleBin, <<"').">>, FuncBin,
-        <<"(">>, ArgsCode, KwargsCode, <<"))">>
-    ]),
-    py_context:eval(Ctx, Code, #{}).
-
-%% @private Collect all stream events into a list
-collect_stream(Ref, Acc) ->
-    receive
-        {py_stream, Ref, {data, Value}} ->
-            collect_stream(Ref, [Value | Acc]);
-        {py_stream, Ref, done} ->
-            {ok, lists:reverse(Acc)};
-        {py_stream, Ref, {error, Reason}} ->
-            {error, Reason}
-    after 30000 ->
-        {error, timeout}
-    end.
-
-%% @private Format arguments for Python code
-format_args([]) -> <<>>;
-format_args(Args) ->
-    ArgStrs = [format_arg(A) || A <- Args],
-    iolist_to_binary(lists:join(<<", ">>, ArgStrs)).
-
-%% @private Format a single argument
-format_arg(A) when is_integer(A) -> integer_to_binary(A);
-format_arg(A) when is_float(A) -> float_to_binary(A);
-format_arg(A) when is_binary(A) -> <<"'", (escape_py_literal(A))/binary, "'">>;
-format_arg(A) when is_atom(A) -> <<"'", (escape_py_literal(atom_to_binary(A)))/binary, "'">>;
-format_arg(A) when is_list(A) -> iolist_to_binary([<<"[">>, format_args(A), <<"]">>]);
-format_arg(_) -> <<"None">>.
-
-%% @private Format kwargs for Python code
-format_kwargs(Kwargs) when map_size(Kwargs) == 0 -> <<>>;
-format_kwargs(Kwargs) ->
-    KwList = maps:fold(fun(K, V, Acc) ->
-        KB = valid_py_ident(if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end),
-        [<<KB/binary, "=", (format_arg(V))/binary>> | Acc]
-    end, [], Kwargs),
-    iolist_to_binary([<<", ">>, lists:join(<<", ">>, KwList)]).
+stream(A1, A2, A3, A4) ->
+    py_stream:stream(A1, A2, A3, A4).
 
 %% @doc Stream results from a Python generator expression.
 %% Evaluates the expression and if it returns a generator, streams all values.
 -spec stream_eval(string() | binary()) -> py_result().
-stream_eval(Code) ->
-    stream_eval(Code, #{}).
+stream_eval(A1) ->
+    py_stream:stream_eval(A1).
 
 %% @doc Stream results from a Python generator expression with local variables.
 -spec stream_eval(string() | binary(), map()) -> py_result().
-stream_eval(Code, Locals) ->
-    %% Route through the new process-per-context system
-    %% Wrap the code in list() to collect generator values
-    Ctx = py_context_router:get_context(),
-    CodeBin = ensure_binary(Code),
-    WrappedCode = <<"list(", CodeBin/binary, ")">>,
-    py_context:eval(Ctx, WrappedCode, Locals).
-
-%%% ============================================================================
-%%% True Streaming API (Event-driven)
-%%% ============================================================================
+stream_eval(A1, A2) ->
+    py_stream:stream_eval(A1, A2).
 
 %% @doc Start a true streaming iteration from a Python generator.
 %%
@@ -516,8 +457,8 @@ stream_eval(Code, Locals) ->
 %%     end.
 %% '''
 -spec stream_start(py_module(), py_func(), py_args()) -> {ok, reference()}.
-stream_start(Module, Func, Args) ->
-    stream_start(Module, Func, Args, #{}).
+stream_start(A1, A2, A3) ->
+    py_stream:stream_start(A1, A2, A3).
 
 %% @doc Start a true streaming iteration with options.
 %%
@@ -530,83 +471,8 @@ stream_start(Module, Func, Args) ->
 %% @param Opts Options map
 %% @returns {ok, Ref} where Ref is used to identify stream events
 -spec stream_start(py_module(), py_func(), py_args(), map()) -> {ok, reference()}.
-stream_start(Module, Func, Args, Opts) ->
-    Owner = maps:get(owner, Opts, self()),
-    Ref = make_ref(),
-    ModuleBin = ensure_binary(Module),
-    FuncBin = ensure_binary(Func),
-    RefHash = erlang:phash2(Ref),
-    %% Store owner and ref for Python to retrieve
-    %% Use binary keys because Python strings become binaries
-    py_state:store({<<"stream_owner">>, RefHash}, Owner),
-    py_state:store({<<"stream_ref">>, RefHash}, Ref),
-    py_state:store({<<"stream_args">>, RefHash}, Args),
-    %% Spawn an Erlang process to run the streaming iteration
-    spawn(fun() ->
-        stream_run_python(ModuleBin, FuncBin, RefHash)
-    end),
-    {ok, Ref}.
-
-%% @private Run the streaming via Python code
-stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
-    ModuleBin = valid_py_module(ModuleBin0),
-    FuncBin = valid_py_ident(FuncBin0),
-    RefHashBin = integer_to_binary(RefHash),
-    %% Build Python code that streams values using callbacks
-    Code = iolist_to_binary([
-        <<"import erlang\n">>,
-        <<"_rh = ">>, RefHashBin, <<"\n">>,
-        <<"_args = erlang.call('state_get', ('stream_args', _rh))\n">>,
-        <<"if _args is None:\n">>,
-        <<"    _args = []\n">>,
-        <<"try:\n">>,
-        <<"    _mod = __import__('">>, ModuleBin, <<"')\n">>,
-        <<"    _fn = getattr(_mod, '">>, FuncBin, <<"')\n">>,
-        <<"    _gen = _fn(*_args) if _args else _fn()\n">>,
-        %% Async generators are driven on a private event loop. erlang.call is
-        %% a blocking pipe read, so it stalls that loop between yields, which
-        %% is fine for a sequential stream.
-        <<"    if hasattr(_gen, '__anext__'):\n">>,
-        <<"        import asyncio\n">>,
-        <<"        async def _drive():\n">>,
-        <<"            async for _val in _gen:\n">>,
-        <<"                if erlang.call('_py_stream_cancelled', _rh):\n">>,
-        <<"                    erlang.call('_py_stream_send', _rh, 'error', 'cancelled')\n">>,
-        <<"                    return\n">>,
-        <<"                erlang.call('_py_stream_send', _rh, 'data', _val)\n">>,
-        <<"            erlang.call('_py_stream_send', _rh, 'done', None)\n">>,
-        <<"        asyncio.run(_drive())\n">>,
-        <<"    else:\n">>,
-        <<"        for _val in _gen:\n">>,
-        <<"            if erlang.call('_py_stream_cancelled', _rh):\n">>,
-        <<"                erlang.call('_py_stream_send', _rh, 'error', 'cancelled')\n">>,
-        <<"                break\n">>,
-        <<"            erlang.call('_py_stream_send', _rh, 'data', _val)\n">>,
-        <<"        else:\n">>,
-        <<"            erlang.call('_py_stream_send', _rh, 'done', None)\n">>,
-        <<"except Exception as _e:\n">>,
-        <<"    erlang.call('_py_stream_send', _rh, 'error', str(_e))\n">>,
-        <<"finally:\n">>,
-        <<"    erlang.call('_py_stream_cleanup', _rh)\n">>
-    ]),
-    %% Execute the streaming code
-    case exec(Code) of
-        ok -> ok;
-        {error, Reason} ->
-            %% Try to notify owner of error
-            case py_state:fetch({<<"stream_owner">>, RefHash}) of
-                {ok, Owner} ->
-                    case py_state:fetch({<<"stream_ref">>, RefHash}) of
-                        {ok, Ref} ->
-                            Owner ! {py_stream, Ref, {error, Reason}},
-                            py_state:remove({<<"stream_owner">>, RefHash}),
-                            py_state:remove({<<"stream_ref">>, RefHash}),
-                            py_state:remove({<<"stream_args">>, RefHash});
-                        _ -> ok
-                    end;
-                _ -> ok
-            end
-    end.
+stream_start(A1, A2, A3, A4) ->
+    py_stream:stream_start(A1, A2, A3, A4).
 
 %% @doc Cancel an active stream.
 %%
@@ -616,13 +482,8 @@ stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
 %% @param Ref The stream reference from stream_start/3,4
 %% @returns ok
 -spec stream_cancel(reference()) -> ok.
-stream_cancel(Ref) when is_reference(Ref) ->
-    %% Store cancellation flag that the streaming task checks
-    %% Use hash because we can't pass Erlang refs to Python callbacks easily
-    %% Use binary key because Python strings become binaries
-    RefHash = erlang:phash2(Ref),
-    py_state:store({<<"stream_cancelled_hash">>, RefHash}, true),
-    ok.
+stream_cancel(A1) ->
+    py_stream:stream_cancel(A1).
 
 %%% ============================================================================
 %%% Info
@@ -844,6 +705,11 @@ parallel(Calls) when is_list(Calls) ->
 %%% Virtual Environment Support
 %%% ============================================================================
 
+%% @doc Kill the child of an isolated context. See py_context:kill/1.
+-spec kill(pid()) -> ok | {error, not_isolated}.
+kill(Ctx) when is_pid(Ctx) ->
+    py_context:kill(Ctx).
+
 %% @doc Ensure a virtual environment exists and activate it.
 %%
 %% Creates a venv at `Path' if it doesn't exist, installs dependencies from
@@ -858,8 +724,8 @@ parallel(Calls) when is_list(Calls) ->
 %% ok = py:ensure_venv("priv/venv", "requirements.txt").
 %% '''
 -spec ensure_venv(string() | binary(), string() | binary()) -> ok | {error, term()}.
-ensure_venv(Path, RequirementsFile) ->
-    ensure_venv(Path, RequirementsFile, []).
+ensure_venv(A1, A2) ->
+    py_venv:ensure_venv(A1, A2).
 
 %% @doc Ensure a virtual environment exists with options.
 %%
@@ -882,50 +748,8 @@ ensure_venv(Path, RequirementsFile) ->
 %% ]).
 %% '''
 -spec ensure_venv(string() | binary(), string() | binary(), list()) -> ok | {error, term()}.
-ensure_venv(Path, RequirementsFile, Opts) ->
-    PathStr = to_string(Path),
-    ReqFileStr = to_string(RequirementsFile),
-    Force = proplists:get_bool(force, Opts),
-    %% Create venv if needed
-    VenvReady = case venv_exists(PathStr) of
-        true when not Force ->
-            ok;
-        _ ->
-            create_venv(PathStr, Opts)
-    end,
-    case VenvReady of
-        ok ->
-            %% Always install/update dependencies (pip/uv skip existing)
-            case install_deps(PathStr, ReqFileStr, Opts) of
-                ok ->
-                    activate_venv(PathStr);
-                {error, _} = Err ->
-                    Err
-            end;
-        {error, _} = Err ->
-            Err
-    end.
-
-%% @private Check if venv exists by looking for pyvenv.cfg
--spec venv_exists(string()) -> boolean().
-venv_exists(Path) ->
-    filelib:is_file(filename:join(Path, "pyvenv.cfg")).
-
-%% @private Create a new virtual environment
--spec create_venv(string(), list()) -> ok | {error, term()}.
-create_venv(Path, Opts) ->
-    Installer = detect_installer(Opts),
-    Python = case proplists:get_value(python, Opts, undefined) of
-        undefined -> get_python_executable();
-        P -> P
-    end,
-    case Installer of
-        uv ->
-            %% uv venv is faster, use --python to match the running interpreter
-            run_cmd(uv_exe(), ["venv", "--python", Python, Path], []);
-        pip ->
-            run_cmd(Python, ["-m", "venv", Path], [])
-    end.
+ensure_venv(A1, A2, A3) ->
+    py_venv:ensure_venv(A1, A2, A3).
 
 %% @private Get the Python executable path
 %% When embedded, sys.executable returns the embedding app (beam.smp)
@@ -936,138 +760,7 @@ create_venv(Path, Opts) ->
 %% VM). Used as the default interpreter of isolated contexts and for venvs.
 -spec python_executable() -> string().
 python_executable() ->
-    get_python_executable().
-
-%% @doc Kill the child of an isolated context. See py_context:kill/1.
--spec kill(pid()) -> ok | {error, not_isolated}.
-kill(Ctx) when is_pid(Ctx) ->
-    py_context:kill(Ctx).
-
--spec get_python_executable() -> string().
-get_python_executable() ->
-    %% Use a single expression to find the Python executable
-    %% Searches for pythonX.Y, python3, python in sys.prefix/bin (Unix)
-    %% or python.exe in sys.prefix (Windows)
-    Expr = <<"(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if __import__('sys').platform == 'win32' and __import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, 'python.exe')) else next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3')))()">>,
-    case eval(Expr) of
-        {ok, Path} when is_binary(Path) -> binary_to_list(Path);
-        _ -> "python3"
-    end.
-
-%% @private Install dependencies from requirements file
--spec install_deps(string(), string(), list()) -> ok | {error, term()}.
-install_deps(Path, RequirementsFile, Opts) ->
-    Installer = detect_installer(Opts),
-    {Exe, BaseArgs, PortOpts} = pip_command(Path, Installer),
-    Extras = proplists:get_value(extras, Opts, []),
-
-    %% Determine file type and build the install argument list (no shell).
-    Args = case filename:extension(RequirementsFile) of
-        ".txt" ->
-            BaseArgs ++ ["install", "-r", RequirementsFile];
-        ".toml" ->
-            %% pyproject.toml - install as editable.
-            %% filename:dirname returns "." for files without directory component
-            InstallPath = filename:dirname(RequirementsFile),
-            case Extras of
-                [] ->
-                    BaseArgs ++ ["install", "-e", InstallPath];
-                _ ->
-                    ExtrasStr = string:join(Extras, ","),
-                    BaseArgs ++ ["install", "-e", InstallPath ++ "[" ++ ExtrasStr ++ "]"]
-            end;
-        _ ->
-            BaseArgs ++ ["install", "-r", RequirementsFile]
-    end,
-    run_cmd(Exe, Args, PortOpts).
-
-%% @private Detect which installer to use (uv or pip)
--spec detect_installer(list()) -> uv | pip.
-detect_installer(Opts) ->
-    case proplists:get_value(installer, Opts, auto) of
-        auto ->
-            case os:find_executable("uv") of
-                false -> pip;
-                _ -> uv
-            end;
-        Installer ->
-            Installer
-    end.
-
-%% @private Resolve the installer into {Executable, BaseArgs, PortOpts}.
-%% For uv the venv is selected via the VIRTUAL_ENV port env option (not a shell
-%% prefix); for pip we use the venv's own pip binary.
--spec pip_command(string(), uv | pip) -> {string(), [string()], list()}.
-pip_command(VenvPath, uv) ->
-    {uv_exe(), ["pip"], [{env, [{"VIRTUAL_ENV", VenvPath}]}]};
-pip_command(VenvPath, pip) ->
-    PipExe = case os:type() of
-        {win32, _} ->
-            filename:join([VenvPath, "Scripts", "pip"]);
-        _ ->
-            filename:join([VenvPath, "bin", "pip"])
-    end,
-    {PipExe, [], []}.
-
-%% @private Full path to the uv executable (falls back to the bare name).
--spec uv_exe() -> string().
-uv_exe() ->
-    case os:find_executable("uv") of
-        false -> "uv";
-        P -> P
-    end.
-
-%% @private Run an executable with an argv list (no shell) and return ok or error.
--spec run_cmd(string(), [string()], list()) -> ok | {error, term()}.
-run_cmd(Exe, Args, ExtraOpts) ->
-    case resolve_exe(Exe) of
-        {error, _} = Err ->
-            Err;
-        ExeFull ->
-            try open_port({spawn_executable, ExeFull},
-                          [exit_status, stderr_to_stdout, binary, {args, Args} | ExtraOpts]) of
-                Port -> collect_port(Port, [])
-            catch
-                error:Reason -> {error, {spawn_failed, Exe, Reason}}
-            end
-    end.
-
-%% @private Resolve an executable name/path to a full path (spawn_executable does
-%% not search PATH).
--spec resolve_exe(string()) -> string() | {error, term()}.
-resolve_exe(Exe) ->
-    case filename:pathtype(Exe) of
-        absolute ->
-            case filelib:is_file(Exe) of
-                true -> Exe;
-                false -> {error, {executable_not_found, Exe}}
-            end;
-        _ ->
-            case os:find_executable(Exe) of
-                false -> {error, {executable_not_found, Exe}};
-                Found -> Found
-            end
-    end.
-
-%% @private Collect a spawned port's output and exit status.
--spec collect_port(port(), [binary()]) -> ok | {error, term()}.
-collect_port(Port, Acc) ->
-    receive
-        {Port, {data, Data}} ->
-            collect_port(Port, [Data | Acc]);
-        {Port, {exit_status, 0}} ->
-            ok;
-        {Port, {exit_status, Code}} ->
-            {error, {exit_code, Code, iolist_to_binary(lists:reverse(Acc))}}
-    after 300000 ->
-        try port_close(Port) catch _:_ -> ok end,
-        {error, timeout}
-    end.
-
-%% @private Convert to string
--spec to_string(string() | binary()) -> string().
-to_string(B) when is_binary(B) -> binary_to_list(B);
-to_string(S) when is_list(S) -> S.
+    py_venv:python_executable().
 
 %% @doc Activate a Python virtual environment.
 %% This modifies sys.path to use packages from the specified venv.
@@ -1084,132 +777,20 @@ to_string(S) when is_list(S) -> S.
 %% {ok, _} = py:call(sentence_transformers, 'SentenceTransformer', [<<"all-MiniLM-L6-v2">>]).
 %% '''
 -spec activate_venv(string() | binary()) -> ok | {error, term()}.
-activate_venv(VenvPath) ->
-    VenvBin = ensure_binary(VenvPath),
-    %% Find site-packages directory dynamically (venv may use different Python version)
-    %% Uses a single expression to avoid multiline code issues
-    FindSitePackages = <<"(lambda vp: __import__('os').path.join(vp, 'Lib', 'site-packages') if __import__('os').path.exists(__import__('os').path.join(vp, 'Lib', 'site-packages')) else next((sp for name in (__import__('os').listdir(__import__('os').path.join(vp, 'lib')) if __import__('os').path.isdir(__import__('os').path.join(vp, 'lib')) else []) if name.startswith('python') for sp in [__import__('os').path.join(vp, 'lib', name, 'site-packages')] if __import__('os').path.isdir(sp)), None))(_venv_path)">>,
-    case eval(FindSitePackages, #{<<"_venv_path">> => VenvBin}) of
-        {ok, SitePackages} when SitePackages =/= none, SitePackages =/= null ->
-            activate_venv_with_site_packages(VenvBin, SitePackages);
-        {ok, _} ->
-            {error, {invalid_venv, no_site_packages_found}};
-        Error ->
-            Error
-    end.
-
-%% @private Activate venv with known site-packages path
-activate_venv_with_site_packages(VenvBin, SitePackages) ->
-    %% Verify site-packages exists
-    case eval(<<"__import__('os').path.isdir(sp)">>, #{sp => SitePackages}) of
-        {ok, true} ->
-            %% Save original path if not already saved
-            {ok, _} = eval(<<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>),
-            %% Set venv info
-            {ok, _} = eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
-            {ok, _} = eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{sp => SitePackages}),
-            %% Add site-packages and process .pth files (editable installs)
-            %% Note: We embed the site-packages path directly since exec doesn't support
-            %% variables and sys attributes may not persist across calls in subinterpreters
-            SitePackagesStr = binary_to_list(SitePackages),
-            ExecCode = iolist_to_binary([
-                <<"import site as _site, sys as _sys\n">>,
-                <<"_sp = '">>, escape_python_string(SitePackagesStr), <<"'\n">>,
-                <<"_b = frozenset(_sys.path)\n">>,
-                <<"_site.addsitedir(_sp)\n">>,
-                <<"_sys.path[:] = [p for p in _sys.path if p not in _b] + [p for p in _sys.path if p in _b]\n">>,
-                <<"del _site, _sys, _b, _sp\n">>
-            ]),
-            ok = exec(ExecCode),
-            ok;
-        {ok, false} ->
-            {error, {invalid_venv, SitePackages}};
-        Error ->
-            Error
-    end.
-
-%% @private Escape a string for embedding in Python code
-escape_python_string(Str) ->
-    lists:flatmap(fun($') -> "\\'";
-                     ($\\) -> "\\\\";
-                     (C) -> [C]
-                  end, Str).
-
-%% @private Escape a binary for safe embedding inside a single-quoted Python
-%% string literal: quote, backslash, and newline/CR/tab/other control bytes that
-%% would otherwise break out of or corrupt the literal.
-escape_py_literal(Bin) when is_binary(Bin) ->
-    << <<(escape_py_byte(B))/binary>> || <<B>> <= Bin >>.
-
-escape_py_byte($') -> <<"\\'">>;
-escape_py_byte($\\) -> <<"\\\\">>;
-escape_py_byte($\n) -> <<"\\n">>;
-escape_py_byte($\r) -> <<"\\r">>;
-escape_py_byte($\t) -> <<"\\t">>;
-escape_py_byte(B) when B < 16#20; B =:= 16#7f ->
-    list_to_binary(io_lib:format("\\x~2.16.0b", [B]));
-escape_py_byte(B) -> <<B>>.
-
-%% @private Validate a Python identifier ([A-Za-z_][A-Za-z0-9_]*). Crashes on a
-%% non-conforming value so an attacker-controlled module/func/kwarg name can't
-%% inject code at an identifier position (where quoting is meaningless).
-valid_py_ident(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
-    case ident_ok(Bin, first) of
-        true -> Bin;
-        false -> error({invalid_python_identifier, Bin})
-    end;
-valid_py_ident(Other) ->
-    error({invalid_python_identifier, Other}).
-
-%% @private Validate a dotted Python module path (each segment an identifier).
-valid_py_module(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
-    Segments = binary:split(Bin, <<".">>, [global]),
-    lists:foreach(fun valid_py_ident/1, Segments),
-    Bin;
-valid_py_module(Other) ->
-    error({invalid_python_identifier, Other}).
-
-ident_ok(<<>>, first) -> false;   %% empty segment (leading/trailing/double dot)
-ident_ok(<<>>, rest) -> true;
-ident_ok(<<C, Rest/binary>>, first)
-  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z); C =:= $_ ->
-    ident_ok(Rest, rest);
-ident_ok(<<C, Rest/binary>>, rest)
-  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z);
-       (C >= $0 andalso C =< $9); C =:= $_ ->
-    ident_ok(Rest, rest);
-ident_ok(_, _) -> false.
+activate_venv(A1) ->
+    py_venv:activate_venv(A1).
 
 %% @doc Deactivate the current virtual environment.
 %% Restores sys.path to its original state.
 -spec deactivate_venv() -> ok | {error, term()}.
 deactivate_venv() ->
-    case eval(<<"hasattr(__import__('sys'), '_original_path')">>) of
-        {ok, true} ->
-            ok = exec(<<"import sys as _sys\n"
-                         "_sys.path[:] = _sys._original_path\n"
-                         "del _sys\n">>),
-            {ok, _} = eval(<<"delattr(__import__('sys'), '_original_path')">>),
-            {ok, _} = eval(<<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>),
-            {ok, _} = eval(<<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>),
-            ok;
-        {ok, false} ->
-            ok;
-        Error ->
-            Error
-    end.
+    py_venv:deactivate_venv().
 
 %% @doc Get information about the currently active virtual environment.
 %% Returns a map with venv_path and site_packages, or none if no venv is active.
 -spec venv_info() -> {ok, map() | none} | {error, term()}.
 venv_info() ->
-    %% Check both attributes exist to handle partial activation/deactivation state
-    Code = <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if (hasattr(__import__('sys'), '_active_venv') and hasattr(__import__('sys'), '_venv_site_packages')) else {'active': False})">>,
-    eval(Code).
-
-%% @private
-ensure_binary(S) ->
-    py_util:to_binary(S).
+    py_venv:venv_info().
 
 %%% ============================================================================
 %%% Execution Info
@@ -1305,7 +886,7 @@ state_decr(Key, Amount) ->
 %% if any contexts failed.
 -spec reload(py_module()) -> ok | {error, [{context, term()}]}.
 reload(Module) ->
-    ModuleBin = ensure_binary(Module),
+    ModuleBin = py_util:to_binary(Module),
     %% Build Python code that:
     %% 1. Checks if module is loaded in sys.modules
     %% 2. If yes, reloads it with importlib.reload()
@@ -1372,13 +953,13 @@ configure_logging(Opts) ->
             iolist_to_binary([
                 "__import__('erlang').setup_logging(",
                 integer_to_binary(LevelInt),
-                ", '", escape_py_literal(F), "')"
+                ", '", py_util:escape_py_literal(F), "')"
             ]);
         F when is_list(F) ->
             iolist_to_binary([
                 "__import__('erlang').setup_logging(",
                 integer_to_binary(LevelInt),
-                ", '", escape_py_literal(iolist_to_binary(F)), "')"
+                ", '", py_util:escape_py_literal(iolist_to_binary(F)), "')"
             ])
     end,
     case eval(Code) of
@@ -1529,7 +1110,7 @@ interrupt(Ctx) when is_pid(Ctx) ->
 %% @returns {ok, Result} | {error, Reason}
 -spec call_method(reference(), atom() | binary(), list()) -> py_result().
 call_method(Ref, Method, Args) ->
-    MethodBin = ensure_binary(Method),
+    MethodBin = py_util:to_binary(Method),
     py_nif:ref_call_method(Ref, MethodBin, Args).
 
 %% @doc Get an attribute from a Python object reference.
@@ -1539,7 +1120,7 @@ call_method(Ref, Method, Args) ->
 %% @returns {ok, Value} | {error, Reason}
 -spec getattr(reference(), atom() | binary()) -> py_result().
 getattr(Ref, Name) ->
-    NameBin = ensure_binary(Name),
+    NameBin = py_util:to_binary(Name),
     py_nif:ref_getattr(Ref, NameBin).
 
 %% @doc Convert a Python object reference to an Erlang term.
@@ -1645,7 +1226,7 @@ unregister_pool({Module, Func}) when is_atom(Module), is_atom(Func) ->
 %% @returns {ok, Reference} on success, {error, Reason} on failure
 -spec shared_dict_new() -> {ok, reference()} | {error, term()}.
 shared_dict_new() ->
-    py_nif:shared_dict_new().
+    py_shared_dict:shared_dict_new().
 
 %% @doc Get a value from SharedDict with default undefined.
 %%
@@ -1653,8 +1234,8 @@ shared_dict_new() ->
 %% @param Key Binary key
 %% @returns Value or undefined if key not found
 -spec shared_dict_get(reference(), binary()) -> term().
-shared_dict_get(Handle, Key) ->
-    shared_dict_get(Handle, Key, undefined).
+shared_dict_get(A1, A2) ->
+    py_shared_dict:shared_dict_get(A1, A2).
 
 %% @doc Get a value from SharedDict with custom default.
 %%
@@ -1663,8 +1244,8 @@ shared_dict_get(Handle, Key) ->
 %% @param Default Default value if key not found
 %% @returns Value or Default
 -spec shared_dict_get(reference(), binary(), term()) -> term().
-shared_dict_get(Handle, Key, Default) when is_binary(Key) ->
-    py_nif:shared_dict_get(Handle, Key, Default).
+shared_dict_get(A1, A2, A3) ->
+    py_shared_dict:shared_dict_get(A1, A2, A3).
 
 %% @doc Set a value in SharedDict.
 %%
@@ -1675,8 +1256,8 @@ shared_dict_get(Handle, Key, Default) when is_binary(Key) ->
 %% @param Value Erlang term value (will be pickled)
 %% @returns ok on success
 -spec shared_dict_set(reference(), binary(), term()) -> ok | {error, term()}.
-shared_dict_set(Handle, Key, Value) when is_binary(Key) ->
-    py_nif:shared_dict_set(Handle, Key, Value).
+shared_dict_set(A1, A2, A3) ->
+    py_shared_dict:shared_dict_set(A1, A2, A3).
 
 %% @doc Delete a key from SharedDict.
 %%
@@ -1684,16 +1265,16 @@ shared_dict_set(Handle, Key, Value) when is_binary(Key) ->
 %% @param Key Binary key
 %% @returns ok (even if key didn't exist)
 -spec shared_dict_del(reference(), binary()) -> ok.
-shared_dict_del(Handle, Key) when is_binary(Key) ->
-    py_nif:shared_dict_del(Handle, Key).
+shared_dict_del(A1, A2) ->
+    py_shared_dict:shared_dict_del(A1, A2).
 
 %% @doc Get all keys from SharedDict.
 %%
 %% @param Handle SharedDict reference
 %% @returns List of binary keys
 -spec shared_dict_keys(reference()) -> [binary()].
-shared_dict_keys(Handle) ->
-    py_nif:shared_dict_keys(Handle).
+shared_dict_keys(A1) ->
+    py_shared_dict:shared_dict_keys(A1).
 
 %% @doc Explicitly destroy a SharedDict.
 %%
@@ -1705,6 +1286,5 @@ shared_dict_keys(Handle) ->
 %% @param Handle SharedDict reference
 %% @returns ok
 -spec shared_dict_destroy(reference()) -> ok.
-shared_dict_destroy(Handle) ->
-    py_nif:shared_dict_destroy(Handle).
-
+shared_dict_destroy(A1) ->
+    py_shared_dict:shared_dict_destroy(A1).

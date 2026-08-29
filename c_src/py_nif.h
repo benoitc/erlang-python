@@ -645,21 +645,21 @@ typedef struct {
  * @brief One Python execution environment served by one Erlang process
  *
  * A context has exactly one pthread that runs Python for it: the context
- * thread (worker_context_thread_main for worker mode,
- * owngil_context_thread_main for owngil mode). Erlang processes never run
+ * thread (ctx_thread_main_worker for worker mode,
+ * ctx_thread_main_owngil for owngil mode). Erlang processes never run
  * Python on a context; NIFs enqueue a ctx_request_t and return, the
  * context thread dequeues, executes and replies with `{py_result, Id, R}`
  * through msg_env. Isolated mode does not use this struct at all.
  *
  * Lock and ownership contract, by field group:
  *
- * - Identity and lifecycle (interp_id, is_subinterp, uses_worker_thread,
+ * - Identity and lifecycle (interp_id, is_subinterp, has_thread,
  *   uses_own_gil): written once by nif_context_create before the thread
- *   starts, read-only afterwards. destroyed, leaked, worker_running,
+ *   starts, read-only afterwards. destroyed, leaked, thread_running,
  *   shutdown_requested and init_error are atomics; any thread may read
  *   them, the writers are nif_context_destroy (destroyed, leaked), the
  *   shutdown helpers (shutdown_requested) and the context thread
- *   (worker_running, init_error).
+ *   (thread_running, init_error).
  *
  * - Callback handler (has_callback_handler, callback_handler,
  *   callback_pipe): set by the owning Erlang process through
@@ -734,16 +734,16 @@ struct py_context {
     /* ========== Context thread (worker and owngil modes) ========== */
 
     /** @brief Dedicated pthread for this context */
-    pthread_t worker_thread;
+    pthread_t thread;
 
     /** @brief True when worker thread is running */
-    _Atomic bool worker_running;
+    _Atomic bool thread_running;
 
     /** @brief True when shutdown has been requested */
     _Atomic bool shutdown_requested;
 
     /** @brief True if this context uses a dedicated worker thread (worker mode) */
-    bool uses_worker_thread;
+    bool has_thread;
 
     /** @brief True if thread initialization failed */
     _Atomic bool init_error;
@@ -2050,40 +2050,13 @@ static inline void log_and_clear_python_error(const char *context) {
 
 #ifdef HAVE_SUBINTERPRETERS
 
-/**
- * @brief Dispatch reactor on_read_ready to OWN_GIL thread
- *
- * @param env Caller's NIF environment
- * @param ctx OWN_GIL context
- * @param fd File descriptor
- * @param buffer_ptr Reactor buffer resource (ownership transferred)
- * @return Result term
- */
-ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
-                                              int fd, void *buffer_ptr);
-
-/**
- * @brief Dispatch reactor on_write_ready to OWN_GIL thread
- *
- * @param env Caller's NIF environment
- * @param ctx OWN_GIL context
- * @param fd File descriptor
- * @return Result term
- */
-ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
-                                               int fd);
-
-/**
- * @brief Dispatch reactor init_connection to OWN_GIL thread
- *
- * @param env Caller's NIF environment
- * @param ctx OWN_GIL context
- * @param fd File descriptor
- * @param client_info Client info map term
- * @return Result term
- */
-ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
-                                              int fd, ERL_NIF_TERM client_info);
+/* Reactor callbacks run on the context thread through the request queue
+ * (ctx_dispatch_wait in py_nif.c); py_event_loop.c calls these. */
+ERL_NIF_TERM dispatch_reactor_read(ErlNifEnv *env, py_context_t *ctx,
+                                   int fd, void *buffer_ptr);
+ERL_NIF_TERM dispatch_reactor_write(ErlNifEnv *env, py_context_t *ctx, int fd);
+ERL_NIF_TERM dispatch_reactor_init(ErlNifEnv *env, py_context_t *ctx,
+                                   int fd, ERL_NIF_TERM client_info);
 
 #endif /* HAVE_SUBINTERPRETERS */
 

@@ -50,7 +50,7 @@ one Python execution environment and serves calls in order. Pools
 | | `worker` | `owngil` | `isolated` |
 |---|---|---|---|
 | Python runs in | the VM, main interpreter | the VM, a sub-interpreter with its own GIL | a child process |
-| Thread | one pthread per context (`worker_context_thread_main`) | one pthread per context (`owngil_context_thread_main`) | the child's main thread |
+| Thread | one pthread per context (`ctx_thread_main_worker`) | one pthread per context (`ctx_thread_main_owngil`) | the child's main thread |
 | Erlang process loop | the receive loop in `py_context` | the receive loop in `py_context` | `py_isolated` (`gen_statem`) |
 | Transport | NIF request queue on `py_context_t` | same | Unix socket, frames of the callback pipe format |
 | Python -> Erlang | suspension protocol | blocking callback pipe | socket frames |
@@ -71,9 +71,9 @@ one Python execution environment and serves calls in order. Pools
    arguments (`term_to_py`, `c_src/py_convert.c`) into a request, enqueues it
    on the context's queue (`ctx_queue_enqueue`) and returns `{enqueued, Ref}`
    at once. The Erlang process is now free to serve callbacks.
-3. The context's pthread (`worker_context_thread_main` or
-   `owngil_context_thread_main`, `c_src/py_nif.c`) dequeues the request and
-   runs it through `owngil_execute_request` (despite its name it serves both
+3. The context's pthread (`ctx_thread_main_worker` or
+   `ctx_thread_main_owngil`, `c_src/py_nif.c`) dequeues the request and
+   runs it through `ctx_execute_request` (one function for both
    modes), which calls into Python with the GIL held.
 4. The thread converts the result (`py_to_term`) and sends
    `{py_result, Ref, Result}` to the `py_context` process, which replies

@@ -49,6 +49,22 @@
   storms, loop churn, 60 s mixed workload with resource counters checked.
 - Guide: `docs/isolated.md`, with what each of the three modes guarantees.
 
+### Changed
+
+- The NIF side of every context request goes through one dispatcher
+  (`ctx_dispatch`, `ctx_dispatch_async` in `c_src/py_nif.c`) instead of a
+  per-request copy of the enqueue-and-wait loop; the execute functions are
+  `ctx_execute_*` and the thread functions `ctx_thread_main_*`, since both
+  serve worker and owngil contexts. Creating a process-local env and
+  applying imports or paths run on the context thread in `worker` mode too;
+  the scheduler-side copies of those paths are gone.
+- The NIF function table is assembled from one `PY_*_NIFS` macro per area,
+  defined at the end of the file that owns the NIFs.
+- `py_context` keeps the API and the reply protocol; the process body for
+  embedded modes moved to `py_context_embedded`. `py` delegates streaming,
+  virtual environments and shared dicts to `py_stream`, `py_venv` and
+  `py_shared_dict`. The public API is unchanged.
+
 ### Removed
 
 - The legacy worker API (`py_nif:worker_new/0,1`, `worker_call`, `worker_eval`,

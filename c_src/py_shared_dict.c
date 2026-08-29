@@ -813,3 +813,13 @@ static PyObject *py_shared_dict_keys_impl(PyObject *self, PyObject *args) {
     pthread_mutex_unlock(&sd->mutex);
     return result;
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_SHARED_DICT_NIFS \
+    {"shared_dict_new", 0, nif_shared_dict_new, 0}, \
+    {"shared_dict_get", 3, nif_shared_dict_get, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"shared_dict_set", 3, nif_shared_dict_set, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"shared_dict_del", 2, nif_shared_dict_del, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"shared_dict_keys", 1, nif_shared_dict_keys, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"shared_dict_destroy", 1, nif_shared_dict_destroy, 0}

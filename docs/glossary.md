@@ -22,7 +22,7 @@ descriptors for the reactor; "coordinator context" in C comments means the
 per context, shared GIL), `owngil` (a sub-interpreter with its own GIL per
 context, one pthread), `isolated` (a child process). `py_context:new(#{mode => ...})`.
 
-Related flags on `py_context_t`: `uses_worker_thread` (has its own pthread;
+Related flags on `py_context_t`: `has_thread` (has its own pthread;
 true for worker and owngil contexts created today), `is_subinterp` (has its
 own sub-interpreter), `uses_own_gil` (that sub-interpreter has its own GIL).
 `subinterp` in file and NIF names (`py_subinterp_thread.c`,
@@ -39,7 +39,7 @@ The most overloaded word. Meanings, by file:
 | Where | Meaning | Prefer to say |
 |---|---|---|
 | `py_context:new(#{mode => worker})` | the context mode above | worker mode |
-| `worker_context_thread_main`, `uses_worker_thread` (`py_nif.c`) | the pthread that serves a context's queue | context thread |
+| `ctx_thread_main_worker`, `has_thread` (`py_nif.c`) | the pthread that serves a context's queue | context thread |
 | `thread_worker`, `thread_worker_call` (`py_thread_worker.c`), `py_thread_handler` | the channel a Python thread uses to call Erlang | thread callback bridge |
 | `py_event_worker` | the Erlang process that drives one asyncio loop (readiness, timers) | loop driver |
 | `docs/workers.md`, "worker loop" | a long-running asyncio loop on a context thread, gunicorn-style | worker loop |

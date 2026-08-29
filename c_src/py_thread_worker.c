@@ -844,3 +844,11 @@ static ERL_NIF_TERM nif_async_callback_response(ErlNifEnv *env, int argc,
     }
     return make_error(env, "write_failed");
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_THREAD_WORKER_NIFS \
+    {"thread_worker_set_coordinator", 1, nif_thread_worker_set_coordinator, 0}, \
+    {"thread_worker_write_with_id", 3, nif_thread_worker_write_with_id, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"thread_worker_signal_ready", 1, nif_thread_worker_signal_ready, 0}, \
+    {"async_callback_response", 3, nif_async_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND}

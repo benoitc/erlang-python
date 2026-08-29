@@ -1033,3 +1033,21 @@ ERL_NIF_TERM nif_byte_channel_wait_bytes(ErlNifEnv *env, int argc, const ERL_NIF
     /* Return ok - Python will await Future */
     return ATOM_OK;
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_CHANNEL_NIFS \
+    {"channel_create", 0, nif_channel_create, 0}, \
+    {"channel_create", 1, nif_channel_create, 0}, \
+    {"channel_send", 2, nif_channel_send, 0}, \
+    {"channel_receive", 2, nif_channel_receive, 0}, \
+    {"channel_try_receive", 1, nif_channel_try_receive, 0}, \
+    {"channel_reply", 3, nif_channel_reply, 0}, \
+    {"channel_close", 1, nif_channel_close, 0}, \
+    {"channel_info", 1, nif_channel_info, 0}, \
+    {"channel_wait", 3, nif_channel_wait, 0}, \
+    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0}, \
+    {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0}, \
+    {"byte_channel_send_bytes", 2, nif_byte_channel_send_bytes, 0}, \
+    {"byte_channel_try_receive_bytes", 1, nif_byte_channel_try_receive_bytes, 0}, \
+    {"byte_channel_wait_bytes", 3, nif_byte_channel_wait_bytes, 0}

@@ -68,7 +68,7 @@ All major erlang_python features work with OWN_GIL mode:
 │          │                           │                              │
 └──────────┼───────────────────────────┼──────────────────────────────┘
            │                           │
-           │ dispatch_to_owngil_thread │
+           │ ctx_dispatch │
            ▼                           ▼
 ┌──────────────────────┐    ┌──────────────────────┐
 │  OWN_GIL Thread 1    │    │  OWN_GIL Thread 2    │
@@ -150,8 +150,8 @@ nif_context_create(env, "owngil")
     └── owngil_context_init(ctx)
         ├── Initialize mutex/condvars
         ├── Create shared_env
-        └── pthread_create(owngil_context_thread_main)
-            └── owngil_context_thread_main(ctx)
+        └── pthread_create(ctx_thread_main_owngil)
+            └── ctx_thread_main_owngil(ctx)
                 ├── Py_NewInterpreterFromConfig(OWN_GIL)
                 ├── Initialize globals/locals
                 ├── Register py_event_loop module
@@ -164,7 +164,7 @@ nif_context_create(env, "owngil")
 nif_context_call(env, ctx, module, func, args, kwargs)
     │
     ├── [ctx->uses_own_gil == true]
-    │   └── dispatch_to_owngil_thread(env, ctx, CTX_REQ_CALL, request)
+    │   └── ctx_dispatch(env, ctx, CTX_REQ_CALL, request, NULL)
     │       ├── pthread_mutex_lock(&ctx->request_mutex)
     │       ├── Copy request term to shared_env
     │       ├── Set ctx->request_type = CTX_REQ_CALL
@@ -180,15 +180,15 @@ nif_context_call(env, ctx, module, func, args, kwargs)
 ### 3. Request Processing (OWN_GIL Thread)
 
 ```
-owngil_context_thread_main(ctx)
+ctx_thread_main_owngil(ctx)
     while (!shutdown_requested) {
         pthread_cond_wait(&ctx->request_ready)
 
-        owngil_execute_request(ctx)
+        ctx_execute_request(ctx)
             switch (ctx->request_type) {
-                case CTX_REQ_CALL: owngil_execute_call(ctx); break;
-                case CTX_REQ_EVAL: owngil_execute_eval(ctx); break;
-                case CTX_REQ_EXEC: owngil_execute_exec(ctx); break;
+                case CTX_REQ_CALL: ctx_execute_call(ctx); break;
+                case CTX_REQ_EVAL: ctx_execute_eval(ctx); break;
+                case CTX_REQ_EXEC: ctx_execute_exec(ctx); break;
                 // ... other cases
             }
 
@@ -224,8 +224,8 @@ OWN_GIL contexts support process-local environments for namespace isolation:
 ```
 py_context:create_local_env(Ctx)
     └── nif_create_local_env(CtxRef)
-        └── dispatch_create_local_env_to_owngil(env, ctx, res)
-            └── owngil_execute_create_local_env(ctx)
+        └── ctx_dispatch_wait(env, ctx, req)  (CTX_REQ_CREATE_LOCAL_ENV)
+            └── ctx_execute_create_local_env(ctx)
                 ├── res->globals = PyDict_New()
                 ├── res->locals = PyDict_New()
                 └── res->interp_id = ctx->interp_id
@@ -262,7 +262,7 @@ while (!shutdown_requested) {
     if (shutdown_requested) break;
 
     // Process request (GIL already held within subinterpreter)
-    owngil_execute_request(ctx);
+    ctx_execute_request(ctx);
 
     pthread_cond_signal(&response_ready);
     pthread_mutex_unlock(&request_mutex);
@@ -336,7 +336,7 @@ Each Python subinterpreter has its own module namespace. The `py_event_loop` mod
                  │ [ctx->uses_own_gil == true]
                  ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  dispatch_reactor_read_to_owngil(env, ctx, fd, buffer_ptr)             │
+│  dispatch_reactor_read(env, ctx, fd, buffer_ptr)             │
 │       │                                                                 │
 │       ├── ctx->reactor_buffer_ptr = buffer_ptr                         │
 │       ├── ctx->request_type = CTX_REQ_REACTOR_READ                     │
@@ -349,7 +349,7 @@ Each Python subinterpreter has its own module namespace. The `py_event_loop` mod
 │  OWN_GIL Thread                                                         │
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  owngil_execute_reactor_read(ctx)                                       │
+│  ctx_execute_reactor_read(ctx)                                       │
 │       │                                                                 │
 │       ├── Create ReactorBuffer Python object                           │
 │       │                                                                 │
@@ -390,9 +390,9 @@ The `ensure_reactor_cached_for_interp()` function lazily imports `erlang.reactor
 
 | Request Type | Dispatch Function | Execute Function |
 |--------------|-------------------|------------------|
-| `CTX_REQ_REACTOR_READ` | `dispatch_reactor_read_to_owngil` | `owngil_execute_reactor_read` |
-| `CTX_REQ_REACTOR_WRITE` | `dispatch_reactor_write_to_owngil` | `owngil_execute_reactor_write` |
-| `CTX_REQ_REACTOR_INIT` | `dispatch_reactor_init_to_owngil` | `owngil_execute_reactor_init` |
+| `CTX_REQ_REACTOR_READ` | `dispatch_reactor_read` | `ctx_execute_reactor_read` |
+| `CTX_REQ_REACTOR_WRITE` | `dispatch_reactor_write` | `ctx_execute_reactor_write` |
+| `CTX_REQ_REACTOR_INIT` | `dispatch_reactor_init` | `ctx_execute_reactor_init` |
 
 ### Buffer Handling
 
