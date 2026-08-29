@@ -453,3 +453,11 @@ static ERL_NIF_TERM nif_clear_trace_receiver(ErlNifEnv *env, int argc, const ERL
 
     return ATOM_OK;
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_LOGGING_NIFS \
+    {"set_log_receiver", 2, nif_set_log_receiver, 0}, \
+    {"clear_log_receiver", 0, nif_clear_log_receiver, 0}, \
+    {"set_trace_receiver", 1, nif_set_trace_receiver, 0}, \
+    {"clear_trace_receiver", 0, nif_clear_trace_receiver, 0}

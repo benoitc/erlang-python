@@ -4053,3 +4053,9 @@ static ERL_NIF_TERM nif_unregister_callback_name(ErlNifEnv *env, int argc, const
 
     return ATOM_OK;
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_CALLBACK_NIFS \
+    {"register_callback_name", 1, nif_register_callback_name, 0}, \
+    {"unregister_callback_name", 1, nif_unregister_callback_name, 0}

@@ -187,7 +187,7 @@ init(Parent, Id, Mode, Opts) ->
             py_nif:context_set_callback_handler(Ref, self()),
 
             %% Extend erlang module to make erlang.reactor available
-            py_context:extend_erlang_module_in_context(Ref),
+            py_context_embedded:extend_erlang_module_in_context(Ref),
 
             MaxConns = maps:get(max_connections, Opts, ?DEFAULT_MAX_CONNECTIONS),
             AppModule = maps:get(app_module, Opts, undefined),

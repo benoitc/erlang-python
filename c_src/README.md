@@ -14,7 +14,7 @@ where things are.
 | File | What it owns | Notes |
 |---|---|---|
 | `py_nif.h` | All shared types: `py_context_t` and its request queue, request types, callback and suspension state, runtime state machine, atoms, globals, declarations | 2.4k lines. The struct comments carry the locking rules; read `py_context_t` before touching threads |
-| `py_nif.c` | Runtime init and finalize, resource types, context create/destroy, the request queue, `worker_context_thread_main` and `owngil_context_thread_main`, `owngil_execute_*` (used by both thread kinds), the `nif_context_*` NIFs, process-local envs, `py_ref`, the NIF function table at the end | Sections are banner-separated; `grep -n '^ \* ===\|^/\* ==='` lists them |
+| `py_nif.c` | Runtime init and finalize, resource types, context create/destroy, the request queue, `ctx_thread_main_worker` and `ctx_thread_main_owngil`, `ctx_execute_*` (one set for both thread kinds), `ctx_dispatch` / `ctx_dispatch_async` (the only way a NIF reaches a context thread), the `nif_context_*` NIFs, process-local envs, `py_ref`, the NIF function table at the end, assembled from the `PY_*_NIFS` macros of the other files | Sections are banner-separated; `grep -n '^ \* ===\|^/\* ==='` lists them |
 | `py_convert.c` | `py_to_term`, `term_to_py`, depth limits, tagged tuples (`{bytes, B}`, `{'$py_shm', ...}`), error tuples `{error, {Type, Msg}}` | The type mapping tables in the comments are the reference for `_etf.py` |
 | `py_exec.c` | Execution mode detection (free-threaded or GIL build) | |
 | `py_callback.c` | The `erlang` Python module: `call`, `send`, `whereis`, `schedule*`, `Atom`/`Pid`/`Ref` types, callback delivery paths (suspension, blocking pipe, async pipe), channel and shared-dict methods, callback name registry | `erlang_call_impl` documents the path precedence |
@@ -29,8 +29,8 @@ where things are.
 ## Where the live paths are
 
 - `py:call/3` in worker or owngil mode: `nif_context_call_async` (`py_nif.c`)
-  enqueues; `worker_context_thread_main` or `owngil_context_thread_main`
-  dequeues and calls `owngil_execute_request`; the reply goes out as
+  enqueues; `ctx_thread_main_worker` or `ctx_thread_main_owngil`
+  dequeues and calls `ctx_execute_request`; the reply goes out as
   `{py_result, Ref, Result}`.
 - `erlang.call` from Python: `erlang_call_impl` (`py_callback.c`).
 - Interrupt: `nif_context_interrupt` (`py_nif.c`), `interrupt_mutex` rules on
@@ -57,7 +57,9 @@ where things are.
 
 1. Implement `static ERL_NIF_TERM nif_x(ErlNifEnv*, int, const ERL_NIF_TERM[])`
    next to related code.
-2. Add `{"x", Arity, nif_x, Flags}` to `nif_funcs[]` at the end of `py_nif.c`.
+2. Add `{"x", Arity, nif_x, Flags}` to the `PY_*_NIFS` macro at the end of
+   that file (or to the `py_nif.c` block of `nif_funcs[]` for NIFs that
+   live there).
 3. Add the stub and its `-spec` and doc to `src/py_nif.erl`.
 4. Cover it in a suite; `rebar3 dialyzer` and `rebar3 xref` must stay clean.
 

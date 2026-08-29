@@ -9,8 +9,12 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 
 | Module | Owns | Status | Guide | Suites |
 |---|---|---|---|---|
-| `py` | Public API facade: call/eval/exec, streams, async helpers, venvs, memory, function registration | live | README, getting-started | `py_SUITE`, `py_api_SUITE`, `py_stream_SUITE`, `py_venv_SUITE` |
-| `py_context` | The context process for embedded modes and the API every mode answers (`call/eval/exec`, `interrupt`, `kill`, loops, `pass_fd`); dispatch to `py_isolated` for isolated mode | live | context-affinity, workers, interrupts | `py_context_SUITE`, `py_context_process_SUITE`, `py_interrupt_SUITE`, `py_worker_loop_SUITE` |
+| `py` | Public API facade: call/eval/exec, async helpers, memory, function registration; delegates streams, venvs and shared dicts | live | README, getting-started | `py_SUITE`, `py_api_SUITE` |
+| `py_stream` | Generator streaming behind `py:stream*` | live | streaming | `py_stream_SUITE` |
+| `py_venv` | Virtual environments behind `py:ensure_venv` and friends | live | README (venvs) | `py_venv_SUITE` |
+| `py_shared_dict` | `py:shared_dict_*` over the shared dict NIFs | live | shared-dict | `py_SUITE` |
+| `py_context` | The API every mode answers (`call/eval/exec`, `interrupt`, `kill`, loops, `pass_fd`), the reply protocol and the pid to NIF reference table; `init/4` hands the process to `py_context_embedded` or `py_isolated` | live | context-affinity, workers, interrupts | `py_context_SUITE`, `py_context_process_SUITE`, `py_interrupt_SUITE`, `py_worker_loop_SUITE` |
+| `py_context_embedded` | Process body for `worker` and `owngil` mode: the receive loop, callbacks (suspension and pipe), worker loops | live | architecture, state-machines | same |
 | `py_isolated` | `gen_statem` driving a child process over the socket; restart policy | live | isolated | `py_isolated_*_SUITE` |
 | `py_context_router` | Pools and scheduler-affinity routing | live | pools, context-affinity | `py_context_router_SUITE`, `py_pool_SUITE` |
 | `py_context_sup`, `py_context_init` | Supervisor of contexts; starts the default pool at boot | live | pools | (through the above) |

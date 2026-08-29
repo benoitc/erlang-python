@@ -1,6 +1,6 @@
 # 0001: One pthread per context, NIFs only enqueue
 
-Since 3.0.0. Code: `worker_context_thread_main`, `owngil_context_thread_main`,
+Since 3.0.0. Code: `ctx_thread_main_worker`, `ctx_thread_main_owngil`,
 the request queue on `py_context_t` (`c_src/py_nif.c`, `c_src/py_nif.h`).
 
 ## Situation

@@ -670,218 +670,6 @@ static inline_continuation_t *create_inline_continuation(
     return cont;
 }
 
-/**
- * @brief NIF: Execute inline continuation
- *
- * This is the continuation function called by enif_schedule_nif().
- * It executes the Python function and handles the result:
- * - InlineScheduleMarker: chain via another enif_schedule_nif
- * - ScheduleMarker: return {schedule, ...} to Erlang
- * - Suspension: return {suspended, ...} to Erlang
- * - Normal result: return {ok, Result}
- */
-static ERL_NIF_TERM nif_inline_continuation(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-    (void)argc;
-
-    inline_continuation_t *cont;
-    if (!enif_get_resource(env, argv[0], INLINE_CONTINUATION_RESOURCE_TYPE, (void **)&cont)) {
-        return make_error(env, "invalid_continuation");
-    }
-
-    if (!runtime_is_running()) {
-        return make_error(env, "python_not_running");
-    }
-
-    /* Check depth limit */
-    if (cont->depth >= MAX_INLINE_CONTINUATION_DEPTH) {
-        return make_error(env, "inline_continuation_depth_exceeded");
-    }
-
-    py_context_t *ctx = cont->ctx;
-    if (ctx == NULL || ctx->destroyed) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Acquire thread state */
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        return make_error(env, "acquire_failed");
-    }
-
-    /* Set thread-local context for callback support */
-    py_context_t *prev_context = tl_current_context;
-    tl_current_context = ctx;
-
-    /* Enable suspension for callback support */
-    bool prev_allow_suspension = tl_allow_suspension;
-    tl_allow_suspension = true;
-
-    /* Set callback env for consume_time_slice */
-    ErlNifEnv *prev_callback_env = tl_callback_env;
-    tl_callback_env = env;
-
-    ERL_NIF_TERM result;
-
-    /* Import module and get function */
-    PyObject *func = NULL;
-    PyObject *module = NULL;
-
-    /* Priority for __main__ lookups:
-     * 1. Captured globals/locals from the marker (caller's frame)
-     * 2. local_env globals (process-local environment)
-     * 3. ctx->globals/locals (context defaults)
-     */
-    py_env_resource_t *local_env = (py_env_resource_t *)cont->local_env;
-
-    if (strcmp(cont->module_name, "__main__") == 0) {
-        /* Try captured globals first (from caller's frame) */
-        if (cont->globals != NULL) {
-            func = PyDict_GetItemString(cont->globals, cont->func_name);
-        }
-        /* Try captured locals */
-        if (func == NULL && cont->locals != NULL) {
-            func = PyDict_GetItemString(cont->locals, cont->func_name);
-        }
-        /* Fallback to local_env globals */
-        if (func == NULL && local_env != NULL) {
-            func = PyDict_GetItemString(local_env->globals, cont->func_name);
-        }
-        /* Fallback to context globals/locals */
-        if (func == NULL) {
-            func = PyDict_GetItemString(ctx->globals, cont->func_name);
-        }
-        if (func == NULL) {
-            func = PyDict_GetItemString(ctx->locals, cont->func_name);
-        }
-        if (func != NULL) {
-            Py_INCREF(func);
-        } else {
-            PyErr_Format(PyExc_NameError, "name '%s' is not defined", cont->func_name);
-        }
-    } else {
-        module = PyImport_ImportModule(cont->module_name);
-        if (module != NULL) {
-            func = PyObject_GetAttrString(module, cont->func_name);
-            Py_DECREF(module);
-        }
-    }
-
-    if (func == NULL) {
-        result = make_py_error(env);
-        goto cleanup;
-    }
-
-    /* Build args tuple */
-    PyObject *args = cont->args;
-    if (args == NULL) {
-        args = PyTuple_New(0);
-        if (args == NULL) {
-            Py_DECREF(func);
-            result = make_py_error(env);
-            goto cleanup;
-        }
-    } else {
-        Py_INCREF(args);
-    }
-
-    /* Get kwargs */
-    PyObject *kwargs = cont->kwargs;
-
-    /* Call the function */
-    PyObject *py_result = PyObject_Call(func, args, kwargs);
-    Py_DECREF(func);
-    Py_DECREF(args);
-
-    if (py_result == NULL) {
-        /* Check for pending callback */
-        if (tl_pending_callback) {
-            PyErr_Clear();
-
-            /* Create suspended context state for callback handling */
-            ErlNifBinary module_bin, func_bin;
-            enif_alloc_binary(cont->module_len, &module_bin);
-            memcpy(module_bin.data, cont->module_name, cont->module_len);
-            enif_alloc_binary(cont->func_len, &func_bin);
-            memcpy(func_bin.data, cont->func_name, cont->func_len);
-
-            /* Convert args to Erlang term for replay */
-            ERL_NIF_TERM args_term = enif_make_list(env, 0);
-            if (cont->args != NULL) {
-                args_term = py_to_term(env, cont->args);
-            }
-
-            ERL_NIF_TERM kwargs_term = enif_make_new_map(env);
-            if (cont->kwargs != NULL) {
-                kwargs_term = py_to_term(env, cont->kwargs);
-            }
-
-            suspended_context_state_t *suspended = create_suspended_context_state_for_call(
-                env, ctx, &module_bin, &func_bin, args_term, kwargs_term);
-
-            enif_release_binary(&module_bin);
-            enif_release_binary(&func_bin);
-
-            if (suspended == NULL) {
-                tl_pending_callback = false;
-                Py_CLEAR(tl_pending_args);
-                result = make_error(env, "create_suspended_state_failed");
-            } else {
-                result = build_suspended_context_result(env, suspended);
-            }
-        } else {
-            result = make_py_error(env);
-        }
-    } else if (is_inline_schedule_marker(py_result)) {
-        /* Chain via another enif_schedule_nif */
-        inline_continuation_t *next_cont = create_inline_continuation(
-            ctx, cont->local_env, py_result, cont->depth + 1);
-        Py_DECREF(py_result);
-
-        if (next_cont == NULL) {
-            result = make_error(env, "create_continuation_failed");
-        } else {
-            ERL_NIF_TERM cont_ref = enif_make_resource(env, next_cont);
-            enif_release_resource(next_cont);
-
-            /* Restore thread-local state before scheduling */
-            tl_allow_suspension = prev_allow_suspension;
-            tl_current_context = prev_context;
-            tl_callback_env = prev_callback_env;
-            clear_pending_callback_tls();
-
-            py_context_release(&guard);
-
-            return enif_schedule_nif(env, "inline_continuation",
-                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
-        }
-    } else if (is_schedule_marker(py_result)) {
-        /* Switch to schedule_py path */
-        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
-        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
-        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
-        Py_DECREF(py_result);
-        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
-    } else {
-        /* Normal result */
-        ERL_NIF_TERM term_result = py_to_term(env, py_result);
-        Py_DECREF(py_result);
-        result = enif_make_tuple2(env, ATOM_OK, term_result);
-    }
-
-cleanup:
-    /* Restore thread-local state */
-    tl_allow_suspension = prev_allow_suspension;
-    tl_current_context = prev_context;
-    tl_callback_env = prev_callback_env;
-
-    /* Clear pending callback TLS */
-    clear_pending_callback_tls();
-
-    /* Release thread state */
-    py_context_release(&guard);
-
-    return result;
-}
 
 /* ============================================================================
  * Initialization
@@ -1571,7 +1359,7 @@ static void ctx_queue_cancel_all(py_context_t *ctx) {
 /**
  * @brief Execute a call request in the OWN_GIL thread
  */
-static void owngil_execute_call(py_context_t *ctx) {
+static void ctx_execute_call(py_context_t *ctx) {
     /* Decode request from shared_env */
     ERL_NIF_TERM module_term, func_term, args_term, kwargs_term;
     const ERL_NIF_TERM *tuple_terms;
@@ -1713,7 +1501,7 @@ static void owngil_execute_call(py_context_t *ctx) {
 /**
  * @brief Execute an eval request in the OWN_GIL thread
  */
-static void owngil_execute_eval(py_context_t *ctx) {
+static void ctx_execute_eval(py_context_t *ctx) {
     /* Decode request: {Code, Locals} */
     const ERL_NIF_TERM *tuple_terms;
     int tuple_arity;
@@ -1782,7 +1570,7 @@ static void owngil_execute_eval(py_context_t *ctx) {
 /**
  * @brief Execute an exec request in the OWN_GIL thread
  */
-static void owngil_execute_exec(py_context_t *ctx) {
+static void ctx_execute_exec(py_context_t *ctx) {
     ErlNifBinary code_bin;
     if (!enif_inspect_binary(ctx->shared_env, ctx->request_term, &code_bin)) {
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
@@ -1829,7 +1617,7 @@ static void owngil_execute_exec(py_context_t *ctx) {
 /**
  * @brief Execute a reactor on_read_ready request in OWN_GIL thread
  */
-static void owngil_execute_reactor_read(py_context_t *ctx) {
+static void ctx_execute_reactor_read(py_context_t *ctx) {
     /* Extract fd from request term (it's just an integer) */
     int fd;
     if (!enif_get_int(ctx->shared_env, ctx->request_term, &fd)) {
@@ -1860,7 +1648,7 @@ static void owngil_execute_reactor_read(py_context_t *ctx) {
 /**
  * @brief Execute a reactor on_write_ready request in OWN_GIL thread
  */
-static void owngil_execute_reactor_write(py_context_t *ctx) {
+static void ctx_execute_reactor_write(py_context_t *ctx) {
     /* Extract fd from request term */
     int fd;
     if (!enif_get_int(ctx->shared_env, ctx->request_term, &fd)) {
@@ -1879,7 +1667,7 @@ static void owngil_execute_reactor_write(py_context_t *ctx) {
 /**
  * @brief Execute a reactor init_connection request in OWN_GIL thread
  */
-static void owngil_execute_reactor_init(py_context_t *ctx) {
+static void ctx_execute_reactor_init(py_context_t *ctx) {
     /* Extract {Fd, ClientInfo} from request term */
     const ERL_NIF_TERM *tuple;
     int arity;
@@ -1910,7 +1698,7 @@ static void owngil_execute_reactor_init(py_context_t *ctx) {
  *
  * Uses penv->globals/locals instead of ctx->globals/locals
  */
-static void owngil_execute_exec_with_env(py_context_t *ctx) {
+static void ctx_execute_exec_with_env(py_context_t *ctx) {
     py_env_resource_t *penv = (py_env_resource_t *)ctx->local_env_ptr;
     ctx->local_env_ptr = NULL;  /* Clear after use */
 
@@ -1987,7 +1775,7 @@ static void owngil_execute_exec_with_env(py_context_t *ctx) {
  *
  * Uses penv->globals/locals instead of ctx->globals/locals
  */
-static void owngil_execute_eval_with_env(py_context_t *ctx) {
+static void ctx_execute_eval_with_env(py_context_t *ctx) {
     py_env_resource_t *penv = (py_env_resource_t *)ctx->local_env_ptr;
     ctx->local_env_ptr = NULL;  /* Clear after use */
 
@@ -2250,7 +2038,7 @@ cleanup:
  *
  * Uses penv->globals for function lookup in __main__ module
  */
-static void owngil_execute_call_with_env(py_context_t *ctx) {
+static void ctx_execute_call_with_env(py_context_t *ctx) {
     py_env_resource_t *penv = (py_env_resource_t *)ctx->local_env_ptr;
     ctx->local_env_ptr = NULL;  /* Clear after use */
 
@@ -2427,7 +2215,7 @@ static void owngil_execute_call_with_env(py_context_t *ctx) {
  * Creates globals/locals dicts in the correct interpreter context.
  * The py_env_resource_t is passed via local_env_ptr.
  */
-static void owngil_execute_create_local_env(py_context_t *ctx) {
+static void ctx_execute_create_local_env(py_context_t *ctx) {
     py_env_resource_t *res = (py_env_resource_t *)ctx->local_env_ptr;
     ctx->local_env_ptr = NULL;  /* Clear after use */
 
@@ -2498,7 +2286,7 @@ static void owngil_execute_create_local_env(py_context_t *ctx) {
  * Note: OWN_GIL contexts have their own dedicated interpreter,
  * so sys.modules is per-context in this mode.
  */
-static void owngil_execute_apply_imports(py_context_t *ctx) {
+static void ctx_execute_apply_imports(py_context_t *ctx) {
     /* Process each import from request_term */
     ERL_NIF_TERM head, tail = ctx->request_term;
     int arity;
@@ -2547,7 +2335,7 @@ static void owngil_execute_apply_imports(py_context_t *ctx) {
  *
  * Paths are inserted at the beginning of sys.path.
  */
-static void owngil_execute_apply_paths(py_context_t *ctx) {
+static void ctx_execute_apply_paths(py_context_t *ctx) {
     /* Get sys.path */
     PyObject *sys_module = PyImport_ImportModule("sys");
     if (sys_module == NULL) {
@@ -2616,43 +2404,43 @@ static void owngil_execute_apply_paths(py_context_t *ctx) {
 /**
  * @brief Execute a request based on its type
  */
-static void owngil_execute_request(py_context_t *ctx) {
+static void ctx_execute_request(py_context_t *ctx) {
     switch (ctx->request_type) {
         case CTX_REQ_CALL:
-            owngil_execute_call(ctx);
+            ctx_execute_call(ctx);
             break;
         case CTX_REQ_EVAL:
-            owngil_execute_eval(ctx);
+            ctx_execute_eval(ctx);
             break;
         case CTX_REQ_EXEC:
-            owngil_execute_exec(ctx);
+            ctx_execute_exec(ctx);
             break;
         case CTX_REQ_REACTOR_ON_READ_READY:
-            owngil_execute_reactor_read(ctx);
+            ctx_execute_reactor_read(ctx);
             break;
         case CTX_REQ_REACTOR_ON_WRITE_READY:
-            owngil_execute_reactor_write(ctx);
+            ctx_execute_reactor_write(ctx);
             break;
         case CTX_REQ_REACTOR_INIT_CONNECTION:
-            owngil_execute_reactor_init(ctx);
+            ctx_execute_reactor_init(ctx);
             break;
         case CTX_REQ_EXEC_WITH_ENV:
-            owngil_execute_exec_with_env(ctx);
+            ctx_execute_exec_with_env(ctx);
             break;
         case CTX_REQ_EVAL_WITH_ENV:
-            owngil_execute_eval_with_env(ctx);
+            ctx_execute_eval_with_env(ctx);
             break;
         case CTX_REQ_CALL_WITH_ENV:
-            owngil_execute_call_with_env(ctx);
+            ctx_execute_call_with_env(ctx);
             break;
         case CTX_REQ_CREATE_LOCAL_ENV:
-            owngil_execute_create_local_env(ctx);
+            ctx_execute_create_local_env(ctx);
             break;
         case CTX_REQ_APPLY_IMPORTS:
-            owngil_execute_apply_imports(ctx);
+            ctx_execute_apply_imports(ctx);
             break;
         case CTX_REQ_APPLY_PATHS:
-            owngil_execute_apply_paths(ctx);
+            ctx_execute_apply_paths(ctx);
             break;
         default:
             ctx->response_term = enif_make_tuple2(ctx->shared_env,
@@ -2681,7 +2469,7 @@ static void owngil_execute_request(py_context_t *ctx) {
  * with other Python threads. The benefit is stable thread affinity and
  * compatibility with all Python extensions.
  */
-static void *worker_context_thread_main(void *arg) {
+static void *ctx_thread_main_worker(void *arg) {
     py_context_t *ctx = (py_context_t *)arg;
 
     /* Create namespace dictionaries on the worker thread under GIL */
@@ -2696,7 +2484,7 @@ static void *worker_context_thread_main(void *arg) {
         if (ctx->globals == NULL || ctx->locals == NULL || ctx->module_cache == NULL) {
             PyGILState_Release(gstate);
             atomic_store(&ctx->init_error, true);
-            atomic_store(&ctx->worker_running, false);
+            atomic_store(&ctx->thread_running, false);
             return NULL;
         }
 
@@ -2717,7 +2505,7 @@ static void *worker_context_thread_main(void *arg) {
     PyGILState_Release(gstate);
 
     /* Signal that we're ready */
-    atomic_store(&ctx->worker_running, true);
+    atomic_store(&ctx->thread_running, true);
 
     /* Main request loop - uses queue instead of single-slot */
     while (!atomic_load(&ctx->shutdown_requested)) {
@@ -2786,7 +2574,7 @@ static void *worker_context_thread_main(void *arg) {
          * invariant on py_context::interrupt_mutex). */
         py_context_exec_enter(ctx);
         gstate = PyGILState_Ensure();
-        owngil_execute_request(ctx);  /* Reuse execute functions */
+        ctx_execute_request(ctx);  /* Reuse execute functions */
         PyGILState_Release(gstate);
         py_context_exec_leave(ctx);
 
@@ -2842,7 +2630,7 @@ static void *worker_context_thread_main(void *arg) {
     ctx->module_cache = NULL;
     PyGILState_Release(gstate);
 
-    atomic_store(&ctx->worker_running, false);
+    atomic_store(&ctx->thread_running, false);
     return NULL;
 }
 
@@ -2853,10 +2641,10 @@ static void *worker_context_thread_main(void *arg) {
  * @return 0 on success, -1 on failure
  */
 static int worker_context_init(py_context_t *ctx) {
-    ctx->uses_worker_thread = true;
+    ctx->has_thread = true;
 
     /* Initialize worker thread state */
-    atomic_store(&ctx->worker_running, false);
+    atomic_store(&ctx->thread_running, false);
     atomic_store(&ctx->shutdown_requested, false);
     atomic_store(&ctx->leaked, false);
 
@@ -2898,7 +2686,7 @@ static int worker_context_init(py_context_t *ctx) {
     ctx->module_cache = NULL;
 
     /* Start the worker thread */
-    if (pthread_create(&ctx->worker_thread, NULL, worker_context_thread_main, ctx) != 0) {
+    if (pthread_create(&ctx->thread, NULL, ctx_thread_main_worker, ctx) != 0) {
         enif_free_env(ctx->msg_env);
         ctx->msg_env = NULL;
         pthread_cond_destroy(&ctx->queue_not_empty);
@@ -2908,16 +2696,16 @@ static int worker_context_init(py_context_t *ctx) {
 
     /* Wait for thread to initialize or fail */
     int wait_count = 0;
-    while (!atomic_load(&ctx->worker_running) &&
+    while (!atomic_load(&ctx->thread_running) &&
            !atomic_load(&ctx->init_error) &&
            wait_count < 2000) {
         usleep(1000);  /* 1ms */
         wait_count++;
     }
 
-    if (atomic_load(&ctx->init_error) || !atomic_load(&ctx->worker_running)) {
+    if (atomic_load(&ctx->init_error) || !atomic_load(&ctx->thread_running)) {
         /* Thread failed to start */
-        pthread_join(ctx->worker_thread, NULL);
+        pthread_join(ctx->thread, NULL);
         if (ctx->msg_env != NULL) {
             enif_free_env(ctx->msg_env);
             ctx->msg_env = NULL;
@@ -2939,10 +2727,10 @@ static int worker_context_init(py_context_t *ctx) {
  *
  * @param ctx Context to shutdown
  */
-#define WORKER_SHUTDOWN_TIMEOUT_SECS 30
+#define CTX_THREAD_JOIN_TIMEOUT_SECS 30
 
-static void worker_context_shutdown(py_context_t *ctx) {
-    if (!ctx->uses_worker_thread) {
+static void ctx_thread_shutdown_worker(py_context_t *ctx) {
+    if (!ctx->has_thread) {
         return;
     }
 
@@ -2969,19 +2757,19 @@ static void worker_context_shutdown(py_context_t *ctx) {
 #if defined(__linux__)
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += WORKER_SHUTDOWN_TIMEOUT_SECS;
-    int rc = pthread_timedjoin_np(ctx->worker_thread, NULL, &deadline);
+    deadline.tv_sec += CTX_THREAD_JOIN_TIMEOUT_SECS;
+    int rc = pthread_timedjoin_np(ctx->thread, NULL, &deadline);
     join_succeeded = (rc == 0);
 #else
-    /* macOS/other: poll worker_running flag with timeout */
+    /* macOS/other: poll thread_running flag with timeout */
     int wait_ms = 0;
-    while (atomic_load(&ctx->worker_running) &&
-           wait_ms < WORKER_SHUTDOWN_TIMEOUT_SECS * 1000) {
+    while (atomic_load(&ctx->thread_running) &&
+           wait_ms < CTX_THREAD_JOIN_TIMEOUT_SECS * 1000) {
         usleep(100000);  /* 100ms */
         wait_ms += 100;
     }
-    if (!atomic_load(&ctx->worker_running)) {
-        pthread_join(ctx->worker_thread, NULL);
+    if (!atomic_load(&ctx->thread_running)) {
+        pthread_join(ctx->thread, NULL);
         join_succeeded = true;
     }
 #endif
@@ -2999,7 +2787,7 @@ static void worker_context_shutdown(py_context_t *ctx) {
          * !ctx->leaked for the same reason). Future cleanup happens
          * at VM exit. */
         fprintf(stderr, "Worker thread shutdown timeout after %d seconds, leaking context\n",
-                WORKER_SHUTDOWN_TIMEOUT_SECS);
+                CTX_THREAD_JOIN_TIMEOUT_SECS);
         atomic_store(&ctx->leaked, true);
         enif_keep_resource(ctx);
         return;
@@ -3014,7 +2802,7 @@ static void worker_context_shutdown(py_context_t *ctx) {
     pthread_cond_destroy(&ctx->queue_not_empty);
     pthread_mutex_destroy(&ctx->queue_mutex);
 
-    ctx->uses_worker_thread = false;
+    ctx->has_thread = false;
 }
 
 /**
@@ -3029,93 +2817,94 @@ static void worker_context_shutdown(py_context_t *ctx) {
  * @param request_data Request data term
  * @return Result term copied back to caller's env
  */
-#define WORKER_DISPATCH_TIMEOUT_SECS 30
+#define CTX_DISPATCH_TIMEOUT_SECS 30
 
 /**
- * @brief Dispatch a request to the worker thread with optional local environment
+ * @brief Allocate a request for @p ctx, or return NULL with *err set
  *
- * @param env NIF environment
- * @param ctx Context to dispatch to
- * @param req_type Request type
- * @param request_data Request data term
- * @param local_env Optional local environment (NULL for default)
- * @return Result term
+ * Every dispatch starts here: the context must have a running thread
+ * and must not be destroyed. The caller fills the request fields and
+ * hands it to ctx_dispatch_wait() or ctx_dispatch_async().
  */
-static ERL_NIF_TERM dispatch_to_worker_thread_impl(
-    ErlNifEnv *env,
-    py_context_t *ctx,
-    ctx_request_type_t req_type,
-    ERL_NIF_TERM request_data,
-    void *local_env
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
+static ctx_request_t *ctx_request_begin(ErlNifEnv *env, py_context_t *ctx,
+                                        ctx_request_type_t req_type,
+                                        ERL_NIF_TERM *err) {
+    if (!atomic_load(&ctx->thread_running)) {
+        *err = make_error(env, "thread_not_running");
+        return NULL;
     }
-
     if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
+        *err = make_error(env, "context_destroyed");
+        return NULL;
     }
-
-    /* Create request struct */
     ctx_request_t *req = ctx_request_create();
     if (req == NULL) {
-        return make_error(env, "alloc_failed");
+        *err = make_error(env, "alloc_failed");
+        return NULL;
     }
-
-    /* Populate request */
     req->type = req_type;
-    req->request_data = enif_make_copy(req->request_env, request_data);
-    req->local_env_ptr = local_env;
+    return req;
+}
 
-    /* Add extra reference for queue (caller holds 1, queue holds 1) */
+/**
+ * @brief Enqueue a prepared request and block until the context thread
+ *        answers it (or the dispatch timeout passes)
+ *
+ * Takes over the caller's reference on @p req. Used by the blocking NIFs
+ * and by the reactor callbacks; the async NIFs use ctx_dispatch_async().
+ */
+static ERL_NIF_TERM ctx_dispatch_wait(ErlNifEnv *env, py_context_t *ctx,
+                                      ctx_request_t *req) {
+    /* Queue holds one reference, the caller keeps one */
     ctx_request_addref(req);
     ctx_queue_enqueue(ctx, req);
 
-    /* Wait for completion with timeout */
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += WORKER_DISPATCH_TIMEOUT_SECS;
+    deadline.tv_sec += CTX_DISPATCH_TIMEOUT_SECS;
 
-    ERL_NIF_TERM result;
     pthread_mutex_lock(&req->mutex);
-
     while (!atomic_load(&req->completed)) {
         int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
         if (rc == ETIMEDOUT) {
-            /* Timeout - mark as cancelled and return error */
+            /* The thread may still be inside a long Python call: fail this
+             * request only, the thread will skip it as cancelled. */
             atomic_store(&req->cancelled, true);
             pthread_mutex_unlock(&req->mutex);
+            fprintf(stderr, "context dispatch timeout after %d seconds (request type %d)\n",
+                    CTX_DISPATCH_TIMEOUT_SECS, (int)req->type);
             ctx_request_release(req);
             return make_error(env, "worker_timeout");
         }
     }
-
     pthread_mutex_unlock(&req->mutex);
 
-    /* Copy result to caller's environment */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    /* Release caller's reference */
+    ERL_NIF_TERM result = (req->result_env != NULL)
+        ? enif_make_copy(env, req->result)
+        : make_error(env, "no_result");
     ctx_request_release(req);
-
     return result;
 }
 
 /**
- * @brief Convenience wrapper for dispatch without local environment
+ * @brief Blocking dispatch of a request whose data is one term
+ *
+ * @param local_env Process-local env resource for *_WITH_ENV requests,
+ *                  NULL otherwise.
  */
-static ERL_NIF_TERM dispatch_to_worker_thread(
-    ErlNifEnv *env,
-    py_context_t *ctx,
-    ctx_request_type_t req_type,
-    ERL_NIF_TERM request_data
-) {
-    return dispatch_to_worker_thread_impl(env, ctx, req_type, request_data, NULL);
+static ERL_NIF_TERM ctx_dispatch(ErlNifEnv *env, py_context_t *ctx,
+                                 ctx_request_type_t req_type,
+                                 ERL_NIF_TERM request_data, void *local_env) {
+    ERL_NIF_TERM err;
+    ctx_request_t *req = ctx_request_begin(env, ctx, req_type, &err);
+    if (req == NULL) {
+        return err;
+    }
+    req->request_data = enif_make_copy(req->request_env, request_data);
+    req->local_env_ptr = local_env;
+    return ctx_dispatch_wait(env, ctx, req);
 }
+
 
 /**
  * @brief Async dispatch to worker thread (non-blocking)
@@ -3143,10 +2932,10 @@ static inline bool ctx_uses_async_thread(const py_context_t *ctx) {
         return true;
     }
 #endif
-    return ctx->uses_worker_thread;
+    return ctx->has_thread;
 }
 
-static ERL_NIF_TERM dispatch_to_worker_thread_async(
+static ERL_NIF_TERM ctx_dispatch_async(
     ErlNifEnv *env,
     py_context_t *ctx,
     ctx_request_type_t req_type,
@@ -3155,22 +2944,11 @@ static ERL_NIF_TERM dispatch_to_worker_thread_async(
     ERL_NIF_TERM request_id,
     void *local_env
 ) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
+    ERL_NIF_TERM err;
+    ctx_request_t *req = ctx_request_begin(env, ctx, req_type, &err);
     if (req == NULL) {
-        return make_error(env, "alloc_failed");
+        return err;
     }
-
-    /* Populate request */
-    req->type = req_type;
     req->request_data = enif_make_copy(req->request_env, request_data);
     req->local_env_ptr = local_env;
 
@@ -3198,7 +2976,7 @@ static ERL_NIF_TERM dispatch_to_worker_thread_async(
  * The queue-based pattern replaces the old single-slot pattern which had race
  * conditions when multiple callers dispatched concurrently.
  */
-static void *owngil_context_thread_main(void *arg) {
+static void *ctx_thread_main_owngil(void *arg) {
     py_context_t *ctx = (py_context_t *)arg;
 
     /* Attach to Python runtime to create the subinterpreter.
@@ -3222,7 +3000,7 @@ static void *owngil_context_thread_main(void *arg) {
                 status.err_msg ? status.err_msg : "unknown error");
         PyGILState_Release(gstate);
         atomic_store(&ctx->init_error, true);
-        atomic_store(&ctx->worker_running, false);
+        atomic_store(&ctx->thread_running, false);
         return NULL;
     }
 
@@ -3238,7 +3016,7 @@ static void *owngil_context_thread_main(void *arg) {
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
         atomic_store(&ctx->init_error, true);
-        atomic_store(&ctx->worker_running, false);
+        atomic_store(&ctx->thread_running, false);
         return NULL;
     }
 
@@ -3251,7 +3029,7 @@ static void *owngil_context_thread_main(void *arg) {
         PyErr_Print();
         Py_EndInterpreter(ctx->own_gil_tstate);
         atomic_store(&ctx->init_error, true);
-        atomic_store(&ctx->worker_running, false);
+        atomic_store(&ctx->thread_running, false);
         return NULL;
     }
     ctx->event_loop = get_current_interpreter_event_loop();
@@ -3271,7 +3049,7 @@ static void *owngil_context_thread_main(void *arg) {
         Py_XDECREF(ctx->module_cache);
         Py_EndInterpreter(ctx->own_gil_tstate);
         atomic_store(&ctx->init_error, true);
-        atomic_store(&ctx->worker_running, false);
+        atomic_store(&ctx->thread_running, false);
         return NULL;
     }
 
@@ -3293,7 +3071,7 @@ static void *owngil_context_thread_main(void *arg) {
     PyEval_SaveThread();
 
     /* Signal that we're ready */
-    atomic_store(&ctx->worker_running, true);
+    atomic_store(&ctx->thread_running, true);
 
     /* Main request loop - uses queue instead of single-slot */
     while (!atomic_load(&ctx->shutdown_requested)) {
@@ -3360,7 +3138,7 @@ static void *owngil_context_thread_main(void *arg) {
          * invariant on py_context::interrupt_mutex). */
         py_context_exec_enter(ctx);
         PyEval_RestoreThread(ctx->own_gil_tstate);
-        owngil_execute_request(ctx);
+        ctx_execute_request(ctx);
         PyEval_SaveThread();
         py_context_exec_leave(ctx);
 
@@ -3443,7 +3221,7 @@ static void *owngil_context_thread_main(void *arg) {
      * After Py_NewInterpreterFromConfig switched us to the OWN_GIL interpreter,
      * the original gstate is no longer valid. Py_EndInterpreter handles cleanup. */
 
-    atomic_store(&ctx->worker_running, false);
+    atomic_store(&ctx->thread_running, false);
     return NULL;
 }
 
@@ -3451,730 +3229,58 @@ static void *owngil_context_thread_main(void *arg) {
  * Timeout for OWN_GIL dispatch in seconds.
  * If worker thread doesn't respond within this time, assume it's dead.
  */
-#define OWNGIL_DISPATCH_TIMEOUT_SECS 30
+
 
 /**
- * @brief Dispatch a request to the worker thread and wait for response
+ * @brief Run the reactor on_read_ready handler on the context thread
  *
- * Uses the queue-based pattern: creates a request, enqueues it, waits for
- * completion, and copies the result back to the caller's environment.
- *
- * This replaces the old single-slot pattern which had race conditions when
- * multiple callers dispatched concurrently.
- *
- * @param env Caller's NIF environment
- * @param ctx Context with worker thread
- * @param req_type Request type (CTX_REQ_CALL, CTX_REQ_EVAL, CTX_REQ_EXEC, etc.)
- * @param request_data Request data term
- * @return Result term copied back to caller's env
+ * @param buffer_ptr Reactor buffer resource; ownership moves to the request.
  */
-static ERL_NIF_TERM dispatch_to_owngil_thread(
-    ErlNifEnv *env,
-    py_context_t *ctx,
-    ctx_request_type_t req_type,
-    ERL_NIF_TERM request_data
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
+ERL_NIF_TERM dispatch_reactor_read(ErlNifEnv *env, py_context_t *ctx,
+                                   int fd, void *buffer_ptr) {
+    ERL_NIF_TERM err;
+    ctx_request_t *req = ctx_request_begin(env, ctx, CTX_REQ_REACTOR_ON_READ_READY, &err);
     if (req == NULL) {
-        return make_error(env, "alloc_failed");
+        return err;
     }
-
-    /* Populate request */
-    req->type = req_type;
-    req->request_data = enif_make_copy(req->request_env, request_data);
-
-    /* Add ref for queue (now refcount = 2: caller + queue) */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            /* Worker thread is unresponsive - mark request as cancelled */
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            /* Don't mark worker as dead - it might still be processing
-             * a long-running Python operation. Just fail this request. */
-            fprintf(stderr, "OWN_GIL dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);  /* Release caller's ref */
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    /* Release caller's ref */
-    ctx_request_release(req);
-
-    return result;
-}
-
-/**
- * @brief Dispatch reactor on_read_ready to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-ERL_NIF_TERM dispatch_reactor_read_to_owngil(ErlNifEnv *env, py_context_t *ctx,
-                                              int fd, void *buffer_ptr) {
-    if (!atomic_load(&ctx->worker_running)) {
-        enif_release_resource(buffer_ptr);
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        enif_release_resource(buffer_ptr);
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        enif_release_resource(buffer_ptr);
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Populate request */
-    req->type = CTX_REQ_REACTOR_ON_READ_READY;
     req->request_data = enif_make_int(req->request_env, fd);
-    req->reactor_buffer_ptr = buffer_ptr;  /* Transfer ownership */
+    req->reactor_buffer_ptr = buffer_ptr;
     req->reactor_fd = fd;
-
-    /* Add ref for queue (now refcount = 2: caller + queue) */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            /* Request timeout - mark as cancelled but don't release buffer
-             * (worker will handle it when it gets to this request) */
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL reactor dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);  /* Release caller's ref */
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    /* Release caller's ref */
-    ctx_request_release(req);
-
-    return result;
+    return ctx_dispatch_wait(env, ctx, req);
 }
 
-/**
- * @brief Dispatch reactor on_write_ready to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-ERL_NIF_TERM dispatch_reactor_write_to_owngil(ErlNifEnv *env, py_context_t *ctx,
-                                               int fd) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
+/** @brief Run the reactor on_write_ready handler on the context thread */
+ERL_NIF_TERM dispatch_reactor_write(ErlNifEnv *env, py_context_t *ctx, int fd) {
+    ERL_NIF_TERM err;
+    ctx_request_t *req = ctx_request_begin(env, ctx, CTX_REQ_REACTOR_ON_WRITE_READY, &err);
     if (req == NULL) {
-        return make_error(env, "alloc_failed");
+        return err;
     }
-
-    /* Populate request */
-    req->type = CTX_REQ_REACTOR_ON_WRITE_READY;
     req->request_data = enif_make_int(req->request_env, fd);
     req->reactor_fd = fd;
-
-    /* Add ref for queue (now refcount = 2: caller + queue) */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL reactor write dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
+    return ctx_dispatch_wait(env, ctx, req);
 }
 
-/**
- * @brief Dispatch reactor init_connection to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-ERL_NIF_TERM dispatch_reactor_init_to_owngil(ErlNifEnv *env, py_context_t *ctx,
-                                              int fd, ERL_NIF_TERM client_info) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
+/** @brief Run the reactor init_connection handler on the context thread */
+ERL_NIF_TERM dispatch_reactor_init(ErlNifEnv *env, py_context_t *ctx,
+                                   int fd, ERL_NIF_TERM client_info) {
+    ERL_NIF_TERM err;
+    ctx_request_t *req = ctx_request_begin(env, ctx, CTX_REQ_REACTOR_INIT_CONNECTION, &err);
     if (req == NULL) {
-        return make_error(env, "alloc_failed");
+        return err;
     }
-
-    /* Populate request */
-    req->type = CTX_REQ_REACTOR_INIT_CONNECTION;
-    ERL_NIF_TERM fd_term = enif_make_int(req->request_env, fd);
-    ERL_NIF_TERM info_copy = enif_make_copy(req->request_env, client_info);
-    req->request_data = enif_make_tuple2(req->request_env, fd_term, info_copy);
+    req->request_data = enif_make_tuple2(req->request_env,
+        enif_make_int(req->request_env, fd),
+        enif_make_copy(req->request_env, client_info));
     req->reactor_fd = fd;
-
-    /* Add ref for queue (now refcount = 2: caller + queue) */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL reactor init dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
+    return ctx_dispatch_wait(env, ctx, req);
 }
 
-/**
- * @brief Dispatch exec_with_env to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-static ERL_NIF_TERM dispatch_exec_with_env_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx,
-    ERL_NIF_TERM code, py_env_resource_t *penv
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
 
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
 
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        return make_error(env, "alloc_failed");
-    }
 
-    /* Populate request */
-    req->type = CTX_REQ_EXEC_WITH_ENV;
-    req->request_data = enif_make_copy(req->request_env, code);
-    req->local_env_ptr = penv;
 
-    /* Add ref for queue */
-    ctx_request_addref(req);
 
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL exec_with_env dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
-}
-
-/**
- * @brief Dispatch eval_with_env to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-static ERL_NIF_TERM dispatch_eval_with_env_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx,
-    ERL_NIF_TERM code, ERL_NIF_TERM locals,
-    py_env_resource_t *penv
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Populate request: {Code, Locals} */
-    req->type = CTX_REQ_EVAL_WITH_ENV;
-    ERL_NIF_TERM code_copy = enif_make_copy(req->request_env, code);
-    ERL_NIF_TERM locals_copy = enif_make_copy(req->request_env, locals);
-    req->request_data = enif_make_tuple2(req->request_env, code_copy, locals_copy);
-    req->local_env_ptr = penv;
-
-    /* Add ref for queue */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL eval_with_env dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
-}
-
-/**
- * @brief Dispatch call_with_env to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-static ERL_NIF_TERM dispatch_call_with_env_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx,
-    ERL_NIF_TERM module, ERL_NIF_TERM func,
-    ERL_NIF_TERM args, ERL_NIF_TERM kwargs,
-    py_env_resource_t *penv
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Populate request: {Module, Func, Args, Kwargs} */
-    req->type = CTX_REQ_CALL_WITH_ENV;
-    ERL_NIF_TERM module_copy = enif_make_copy(req->request_env, module);
-    ERL_NIF_TERM func_copy = enif_make_copy(req->request_env, func);
-    ERL_NIF_TERM args_copy = enif_make_copy(req->request_env, args);
-    ERL_NIF_TERM kwargs_copy = enif_make_copy(req->request_env, kwargs);
-    req->request_data = enif_make_tuple4(req->request_env,
-        module_copy, func_copy, args_copy, kwargs_copy);
-    req->local_env_ptr = penv;
-
-    /* Add ref for queue */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL call_with_env dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
-}
-
-/**
- * @brief Dispatch create_local_env to OWN_GIL thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-static ERL_NIF_TERM dispatch_create_local_env_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx,
-    py_env_resource_t *res
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Populate request */
-    req->type = CTX_REQ_CREATE_LOCAL_ENV;
-    req->local_env_ptr = res;
-
-    /* Add ref for queue */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL create_local_env dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
-}
-
-/**
- * @brief Dispatch apply_imports to OWN_GIL worker thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-static ERL_NIF_TERM dispatch_apply_imports_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx, ERL_NIF_TERM imports_term
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Populate request */
-    req->type = CTX_REQ_APPLY_IMPORTS;
-    req->request_data = enif_make_copy(req->request_env, imports_term);
-
-    /* Add ref for queue */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL apply_imports dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
-}
-
-/**
- * @brief Dispatch apply_paths request to OWN_GIL worker thread
- *
- * Uses queue-based dispatch with per-request synchronization.
- */
-static ERL_NIF_TERM dispatch_apply_paths_to_owngil(
-    ErlNifEnv *env, py_context_t *ctx, ERL_NIF_TERM paths_term
-) {
-    if (!atomic_load(&ctx->worker_running)) {
-        return make_error(env, "thread_not_running");
-    }
-
-    if (atomic_load(&ctx->destroyed)) {
-        return make_error(env, "context_destroyed");
-    }
-
-    /* Create request struct */
-    ctx_request_t *req = ctx_request_create();
-    if (req == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    /* Populate request */
-    req->type = CTX_REQ_APPLY_PATHS;
-    req->request_data = enif_make_copy(req->request_env, paths_term);
-
-    /* Add ref for queue */
-    ctx_request_addref(req);
-
-    /* Enqueue the request */
-    ctx_queue_enqueue(ctx, req);
-
-    /* Wait for completion with timeout */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += OWNGIL_DISPATCH_TIMEOUT_SECS;
-
-    ERL_NIF_TERM result;
-    pthread_mutex_lock(&req->mutex);
-
-    while (!atomic_load(&req->completed)) {
-        int rc = pthread_cond_timedwait(&req->cond, &req->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            atomic_store(&req->cancelled, true);
-            pthread_mutex_unlock(&req->mutex);
-
-            fprintf(stderr, "OWN_GIL apply_paths dispatch timeout after %d seconds\n",
-                    OWNGIL_DISPATCH_TIMEOUT_SECS);
-
-            ctx_request_release(req);
-            return make_error(env, "worker_timeout");
-        }
-    }
-
-    pthread_mutex_unlock(&req->mutex);
-
-    /* Copy result to caller's env */
-    if (req->result_env != NULL) {
-        result = enif_make_copy(env, req->result);
-    } else {
-        result = make_error(env, "no_result");
-    }
-
-    ctx_request_release(req);
-
-    return result;
-}
 
 #endif /* HAVE_SUBINTERPRETERS */
 
@@ -4192,7 +3298,7 @@ static int owngil_context_init(py_context_t *ctx) {
     ctx->event_loop = NULL;
 
     /* Initialize worker thread state */
-    atomic_store(&ctx->worker_running, false);
+    atomic_store(&ctx->thread_running, false);
     atomic_store(&ctx->init_error, false);
     atomic_store(&ctx->shutdown_requested, false);
     atomic_store(&ctx->leaked, false);
@@ -4230,7 +3336,7 @@ static int owngil_context_init(py_context_t *ctx) {
     }
 
     /* Start the worker thread */
-    if (pthread_create(&ctx->worker_thread, NULL, owngil_context_thread_main, ctx) != 0) {
+    if (pthread_create(&ctx->thread, NULL, ctx_thread_main_owngil, ctx) != 0) {
         enif_free_env(ctx->msg_env);
         ctx->msg_env = NULL;
         pthread_cond_destroy(&ctx->queue_not_empty);
@@ -4240,16 +3346,16 @@ static int owngil_context_init(py_context_t *ctx) {
 
     /* Wait for thread to initialize or fail */
     int wait_count = 0;
-    while (!atomic_load(&ctx->worker_running) &&
+    while (!atomic_load(&ctx->thread_running) &&
            !atomic_load(&ctx->init_error) &&
            wait_count < 2000) {
         usleep(1000);  /* 1ms */
         wait_count++;
     }
 
-    if (atomic_load(&ctx->init_error) || !atomic_load(&ctx->worker_running)) {
+    if (atomic_load(&ctx->init_error) || !atomic_load(&ctx->thread_running)) {
         /* Thread failed to start */
-        pthread_join(ctx->worker_thread, NULL);
+        pthread_join(ctx->thread, NULL);
         if (ctx->msg_env != NULL) {
             enif_free_env(ctx->msg_env);
             ctx->msg_env = NULL;
@@ -4273,13 +3379,13 @@ static int owngil_context_init(py_context_t *ctx) {
  */
 #define OWNGIL_SHUTDOWN_TIMEOUT_SECS 30
 
-static void owngil_context_shutdown(py_context_t *ctx) {
+static void ctx_thread_shutdown_owngil(py_context_t *ctx) {
     if (!ctx->uses_own_gil) {
         return;
     }
 
     /* Signal shutdown and wake any worker parked on the condvar.
-     * See worker_context_shutdown for why we broadcast instead of
+     * See ctx_thread_shutdown_worker for why we broadcast instead of
      * enqueuing a CTX_REQ_SHUTDOWN sentinel. */
     atomic_store(&ctx->shutdown_requested, true);
     ctx_queue_cancel_all(ctx);
@@ -4294,18 +3400,18 @@ static void owngil_context_shutdown(py_context_t *ctx) {
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += OWNGIL_SHUTDOWN_TIMEOUT_SECS;
-    int rc = pthread_timedjoin_np(ctx->worker_thread, NULL, &deadline);
+    int rc = pthread_timedjoin_np(ctx->thread, NULL, &deadline);
     join_succeeded = (rc == 0);
 #else
-    /* macOS/other: poll worker_running flag with timeout */
+    /* macOS/other: poll thread_running flag with timeout */
     int wait_ms = 0;
-    while (atomic_load(&ctx->worker_running) &&
+    while (atomic_load(&ctx->thread_running) &&
            wait_ms < OWNGIL_SHUTDOWN_TIMEOUT_SECS * 1000) {
         usleep(100000);  /* 100ms */
         wait_ms += 100;
     }
-    if (!atomic_load(&ctx->worker_running)) {
-        pthread_join(ctx->worker_thread, NULL);
+    if (!atomic_load(&ctx->thread_running)) {
+        pthread_join(ctx->thread, NULL);
         join_succeeded = true;
     }
 #endif
@@ -4313,7 +3419,7 @@ static void owngil_context_shutdown(py_context_t *ctx) {
     if (!join_succeeded) {
         /* Worker thread is unresponsive - leak the context. Pin the
          * resource so the BEAM doesn't free its memory under the
-         * stuck pthread (UAF). See worker_context_shutdown for the
+         * stuck pthread (UAF). See ctx_thread_shutdown_worker for the
          * full rationale. */
         fprintf(stderr, "OWN_GIL shutdown timeout after %d seconds, leaking context\n",
                 OWNGIL_SHUTDOWN_TIMEOUT_SECS);
@@ -4401,7 +3507,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
-    ctx->uses_worker_thread = false;
+    ctx->has_thread = false;
 
     /* Interrupt support */
     ctx->interrupt_mutex_init = (pthread_mutex_init(&ctx->interrupt_mutex, NULL) == 0);
@@ -4640,7 +3746,7 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
 #ifdef HAVE_SUBINTERPRETERS
     /* OWN_GIL mode: shutdown the dedicated thread */
     if (ctx->uses_own_gil) {
-        owngil_context_shutdown(ctx);
+        ctx_thread_shutdown_owngil(ctx);
         /* Close callback pipes only on a clean shutdown. If the
          * worker timed out (ctx->leaked == true) it may still write
          * to / read from these fds; closing them here would let the
@@ -4662,8 +3768,8 @@ static ERL_NIF_TERM nif_context_destroy(ErlNifEnv *env, int argc, const ERL_NIF_
 #endif
 
     /* Worker mode: shutdown the dedicated worker thread */
-    if (ctx->uses_worker_thread) {
-        worker_context_shutdown(ctx);
+    if (ctx->has_thread) {
+        ctx_thread_shutdown_worker(ctx);
         /* Close callback pipes (see OWN_GIL branch for why this is
          * gated on !ctx->leaked). */
         if (!atomic_load(&ctx->leaked)) {
@@ -4736,36 +3842,15 @@ static ERL_NIF_TERM nif_context_call(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_context");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to dedicated thread */
-    if (ctx->uses_own_gil) {
-        /* Build request tuple: {Module, Func, Args, Kwargs} */
-        ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
-            ? argv[4] : enif_make_new_map(env);
-        ERL_NIF_TERM request = enif_make_tuple4(env,
-            argv[1],  /* Module */
-            argv[2],  /* Func */
-            argv[3],  /* Args */
-            kwargs);
-        return dispatch_to_owngil_thread(env, ctx, CTX_REQ_CALL, request);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    /* Worker thread mode: dispatch to dedicated thread */
-    if (ctx->uses_worker_thread) {
-        /* Build request tuple: {Module, Func, Args, Kwargs} */
-        ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
-            ? argv[4] : enif_make_new_map(env);
-        ERL_NIF_TERM request = enif_make_tuple4(env,
-            argv[1],  /* Module */
-            argv[2],  /* Func */
-            argv[3],  /* Args */
-            kwargs);
-        return dispatch_to_worker_thread(env, ctx, CTX_REQ_CALL, request);
-    }
-
-    /* Every context created by nif_context_create has a thread */
-    return make_error(env, "context_has_no_thread");
+    /* Request tuple: {Module, Func, Args, Kwargs} */
+    ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
+        ? argv[4] : enif_make_new_map(env);
+    ERL_NIF_TERM request = enif_make_tuple4(env, argv[1], argv[2], argv[3], kwargs);
+    return ctx_dispatch(env, ctx, CTX_REQ_CALL, request, NULL);
 }
 
 /**
@@ -4810,12 +3895,12 @@ static ERL_NIF_TERM nif_context_call_async(ErlNifEnv *env, int argc, const ERL_N
             argv[4],  /* Func */
             argv[5],  /* Args */
             kwargs);
-        return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_CALL,
+        return ctx_dispatch_async(env, ctx, CTX_REQ_CALL,
             request, caller_pid, request_id, NULL);
     }
 
     /* Not using worker thread - fall back to blocking call */
-    return make_error(env, "async_requires_worker_thread");
+    return make_error(env, "context_has_no_thread");
 }
 
 /**
@@ -4856,12 +3941,12 @@ static ERL_NIF_TERM nif_context_eval_async(ErlNifEnv *env, int argc, const ERL_N
         ERL_NIF_TERM locals = (argc > 4 && enif_is_map(env, argv[4]))
             ? argv[4] : enif_make_new_map(env);
         ERL_NIF_TERM request = enif_make_tuple2(env, argv[3], locals);
-        return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EVAL,
+        return ctx_dispatch_async(env, ctx, CTX_REQ_EVAL,
             request, caller_pid, request_id, NULL);
     }
 
     /* Not using worker thread - fall back to blocking call */
-    return make_error(env, "async_requires_worker_thread");
+    return make_error(env, "context_has_no_thread");
 }
 
 /**
@@ -4898,12 +3983,12 @@ static ERL_NIF_TERM nif_context_exec_async(ErlNifEnv *env, int argc, const ERL_N
 
     /* Dedicated thread (worker or OWN_GIL): dispatch async */
     if (ctx_uses_async_thread(ctx)) {
-        return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EXEC,
+        return ctx_dispatch_async(env, ctx, CTX_REQ_EXEC,
             argv[3], caller_pid, request_id, NULL);
     }
 
     /* Not using worker thread - fall back to blocking call */
-    return make_error(env, "async_requires_worker_thread");
+    return make_error(env, "context_has_no_thread");
 }
 
 /**
@@ -4941,7 +4026,7 @@ static ERL_NIF_TERM nif_context_call_with_env_async(ErlNifEnv *env, int argc,
     }
 
     if (!ctx_uses_async_thread(ctx)) {
-        return make_error(env, "async_requires_worker_thread");
+        return make_error(env, "context_has_no_thread");
     }
 
     ERL_NIF_TERM kwargs = enif_is_map(env, argv[6])
@@ -4951,7 +4036,7 @@ static ERL_NIF_TERM nif_context_call_with_env_async(ErlNifEnv *env, int argc,
         argv[4],  /* Func */
         argv[5],  /* Args */
         kwargs);
-    return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_CALL_WITH_ENV,
+    return ctx_dispatch_async(env, ctx, CTX_REQ_CALL_WITH_ENV,
         request, caller_pid, request_id, penv);
 }
 
@@ -4986,13 +4071,13 @@ static ERL_NIF_TERM nif_context_eval_with_env_async(ErlNifEnv *env, int argc,
     }
 
     if (!ctx_uses_async_thread(ctx)) {
-        return make_error(env, "async_requires_worker_thread");
+        return make_error(env, "context_has_no_thread");
     }
 
     ERL_NIF_TERM locals = enif_is_map(env, argv[4])
         ? argv[4] : enif_make_new_map(env);
     ERL_NIF_TERM request = enif_make_tuple2(env, argv[3], locals);
-    return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EVAL_WITH_ENV,
+    return ctx_dispatch_async(env, ctx, CTX_REQ_EVAL_WITH_ENV,
         request, caller_pid, request_id, penv);
 }
 
@@ -5027,10 +4112,10 @@ static ERL_NIF_TERM nif_context_exec_with_env_async(ErlNifEnv *env, int argc,
     }
 
     if (!ctx_uses_async_thread(ctx)) {
-        return make_error(env, "async_requires_worker_thread");
+        return make_error(env, "context_has_no_thread");
     }
 
-    return dispatch_to_worker_thread_async(env, ctx, CTX_REQ_EXEC_WITH_ENV,
+    return ctx_dispatch_async(env, ctx, CTX_REQ_EXEC_WITH_ENV,
         argv[3], caller_pid, request_id, penv);
 }
 
@@ -5055,28 +4140,15 @@ static ERL_NIF_TERM nif_context_eval(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_context");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to dedicated thread */
-    if (ctx->uses_own_gil) {
-        /* Build request tuple: {Code, Locals} */
-        ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
-            ? argv[2] : enif_make_new_map(env);
-        ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
-        return dispatch_to_owngil_thread(env, ctx, CTX_REQ_EVAL, request);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    /* Worker thread mode: dispatch to dedicated thread */
-    if (ctx->uses_worker_thread) {
-        /* Build request tuple: {Code, Locals} */
-        ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
-            ? argv[2] : enif_make_new_map(env);
-        ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
-        return dispatch_to_worker_thread(env, ctx, CTX_REQ_EVAL, request);
-    }
-
-    /* Every context created by nif_context_create has a thread */
-    return make_error(env, "context_has_no_thread");
+    /* Request tuple: {Code, Locals} */
+    ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
+        ? argv[2] : enif_make_new_map(env);
+    ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
+    return ctx_dispatch(env, ctx, CTX_REQ_EVAL, request, NULL);
 }
 
 /**
@@ -5098,20 +4170,11 @@ static ERL_NIF_TERM nif_context_exec(ErlNifEnv *env, int argc, const ERL_NIF_TER
         return make_error(env, "invalid_context");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_to_owngil_thread(env, ctx, CTX_REQ_EXEC, argv[1]);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    /* Worker thread mode: dispatch to dedicated thread */
-    if (ctx->uses_worker_thread) {
-        return dispatch_to_worker_thread(env, ctx, CTX_REQ_EXEC, argv[1]);
-    }
-
-    /* Every context created by nif_context_create has a thread */
-    return make_error(env, "context_has_no_thread");
+    return ctx_dispatch(env, ctx, CTX_REQ_EXEC, argv[1], NULL);
 }
 
 /* ============================================================================
@@ -5152,79 +4215,32 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     res->locals = NULL;
     res->interp_id = 0;
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread to create dicts */
-    if (ctx->uses_own_gil) {
-        ERL_NIF_TERM dispatch_result = dispatch_create_local_env_to_owngil(env, ctx, res);
-
-        /* Check if dispatch succeeded */
-        ERL_NIF_TERM error_atom = enif_make_atom(env, "error");
-        const ERL_NIF_TERM *tuple_elems;
-        int arity;
-        if (enif_get_tuple(env, dispatch_result, &arity, &tuple_elems) &&
-            arity == 2 && enif_is_identical(tuple_elems[0], error_atom)) {
-            /* Dispatch failed - release resource and return error */
-            enif_release_resource(res);
-            return dispatch_result;
-        }
-
-        /* Success - return the resource */
-        ERL_NIF_TERM ref = enif_make_resource(env, res);
-        enif_release_resource(res);  /* Ref now owns it */
-        return enif_make_tuple2(env, ATOM_OK, ref);
-    }
-#endif
-
-    /* Acquire context to switch to correct interpreter */
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
+    if (!ctx_uses_async_thread(ctx)) {
         enif_release_resource(res);
-        return make_error(env, "acquire_failed");
+        return make_error(env, "context_has_no_thread");
     }
 
-    /* Copy globals from context to inherit preloaded code */
-    res->globals = PyDict_Copy(ctx->globals);
-    if (res->globals == NULL) {
-        py_context_release(&guard);
+    /* The dicts are created on the context thread so they belong to the
+     * right interpreter and allocator. */
+    ERL_NIF_TERM err;
+    ctx_request_t *req = ctx_request_begin(env, ctx, CTX_REQ_CREATE_LOCAL_ENV, &err);
+    if (req == NULL) {
         enif_release_resource(res);
-        return make_error(env, "globals_copy_failed");
+        return err;
     }
+    req->local_env_ptr = res;
+    ERL_NIF_TERM dispatch_result = ctx_dispatch_wait(env, ctx, req);
 
-    /* Ensure __builtins__ is present (may not be in subinterpreter mode) */
-    if (PyDict_GetItemString(res->globals, "__builtins__") == NULL) {
-        PyObject *builtins = PyEval_GetBuiltins();
-        if (builtins != NULL) {
-            PyDict_SetItemString(res->globals, "__builtins__", builtins);
-        }
+    const ERL_NIF_TERM *tuple_elems;
+    int arity;
+    if (enif_get_tuple(env, dispatch_result, &arity, &tuple_elems) &&
+        arity == 2 && enif_is_identical(tuple_elems[0], enif_make_atom(env, "error"))) {
+        enif_release_resource(res);
+        return dispatch_result;
     }
-
-    /* Ensure __name__ = '__main__' is set */
-    if (PyDict_GetItemString(res->globals, "__name__") == NULL) {
-        PyObject *main_name = PyUnicode_FromString("__main__");
-        if (main_name != NULL) {
-            PyDict_SetItemString(res->globals, "__name__", main_name);
-            Py_DECREF(main_name);
-        }
-    }
-
-    /* Ensure erlang module is available */
-    if (PyDict_GetItemString(res->globals, "erlang") == NULL) {
-        PyObject *erlang = PyImport_ImportModule("erlang");
-        if (erlang != NULL) {
-            PyDict_SetItemString(res->globals, "erlang", erlang);
-            Py_DECREF(erlang);
-        }
-    }
-
-    /* Use the same dict for locals (module-level execution) */
-    res->locals = res->globals;
-    Py_INCREF(res->locals);
-
-    py_context_release(&guard);
 
     ERL_NIF_TERM ref = enif_make_resource(env, res);
     enif_release_resource(res);  /* Ref now owns it */
-
     return enif_make_tuple2(env, ATOM_OK, ref);
 }
 
@@ -5257,60 +4273,11 @@ static ERL_NIF_TERM nif_interp_apply_imports(ErlNifEnv *env, int argc, const ERL
         return make_error(env, "context_destroyed");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_apply_imports_to_owngil(env, ctx, argv[1]);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        return make_error(env, "acquire_failed");
-    }
-
-    /* Process each import - imports go into interpreter's sys.modules */
-    ERL_NIF_TERM head, tail = argv[1];
-    int arity;
-    const ERL_NIF_TERM *tuple;
-
-    while (enif_get_list_cell(env, tail, &head, &tail)) {
-        if (!enif_get_tuple(env, head, &arity, &tuple) || arity != 2) {
-            continue;
-        }
-
-        ErlNifBinary module_bin;
-        if (!enif_inspect_binary(env, tuple[0], &module_bin)) {
-            continue;
-        }
-
-        /* Convert to C string */
-        char *module_name = enif_alloc(module_bin.size + 1);
-        if (module_name == NULL) continue;
-        memcpy(module_name, module_bin.data, module_bin.size);
-        module_name[module_bin.size] = '\0';
-
-        /* Skip __main__ */
-        if (strcmp(module_name, "__main__") == 0) {
-            enif_free(module_name);
-            continue;
-        }
-
-        /* Import the module - this caches in interpreter's sys.modules
-         * which is shared by all contexts using this interpreter */
-        PyObject *mod = PyImport_ImportModule(module_name);
-        if (mod != NULL) {
-            Py_DECREF(mod);  /* sys.modules holds the reference */
-        } else {
-            /* Clear error - import failure is not fatal */
-            PyErr_Clear();
-        }
-
-        enif_free(module_name);
-    }
-
-    py_context_release(&guard);
-    return ATOM_OK;
+    return ctx_dispatch(env, ctx, CTX_REQ_APPLY_IMPORTS, argv[1], NULL);
 }
 
 /**
@@ -5337,78 +4304,11 @@ static ERL_NIF_TERM nif_interp_apply_paths(ErlNifEnv *env, int argc, const ERL_N
         return make_error(env, "context_destroyed");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_apply_paths_to_owngil(env, ctx, argv[1]);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        return make_error(env, "acquire_failed");
-    }
-
-    /* Get sys.path */
-    PyObject *sys_module = PyImport_ImportModule("sys");
-    if (sys_module == NULL) {
-        py_context_release(&guard);
-        return make_error(env, "sys_import_failed");
-    }
-
-    PyObject *sys_path = PyObject_GetAttrString(sys_module, "path");
-    Py_DECREF(sys_module);
-    if (sys_path == NULL || !PyList_Check(sys_path)) {
-        Py_XDECREF(sys_path);
-        py_context_release(&guard);
-        return make_error(env, "sys_path_not_list");
-    }
-
-    /* Process each path - insert at beginning in reverse order */
-    /* First, collect all paths */
-    ERL_NIF_TERM head, tail = argv[1];
-    int path_count = 0;
-    ERL_NIF_TERM paths_list = argv[1];
-
-    /* Count paths */
-    while (enif_get_list_cell(env, tail, &head, &tail)) {
-        path_count++;
-    }
-
-    /* Insert in reverse order so first path ends up first */
-    tail = paths_list;
-    for (int i = 0; i < path_count; i++) {
-        /* Skip to the i-th element from the end */
-        ERL_NIF_TERM current = paths_list;
-        for (int j = 0; j < path_count - 1 - i; j++) {
-            enif_get_list_cell(env, current, &head, &current);
-        }
-        enif_get_list_cell(env, current, &head, &current);
-
-        ErlNifBinary path_bin;
-        if (!enif_inspect_binary(env, head, &path_bin)) {
-            continue;
-        }
-
-        /* Convert to Python string */
-        PyObject *path_str = PyUnicode_FromStringAndSize((char *)path_bin.data, path_bin.size);
-        if (path_str == NULL) {
-            PyErr_Clear();
-            continue;
-        }
-
-        /* Check if already in sys.path */
-        int already_present = PySequence_Contains(sys_path, path_str);
-        if (already_present <= 0) {
-            /* Insert at position 0 */
-            PyList_Insert(sys_path, 0, path_str);
-        }
-        Py_DECREF(path_str);
-    }
-
-    Py_DECREF(sys_path);
-    py_context_release(&guard);
-    return ATOM_OK;
+    return ctx_dispatch(env, ctx, CTX_REQ_APPLY_PATHS, argv[1], NULL);
 }
 
 /**
@@ -5446,61 +4346,11 @@ static ERL_NIF_TERM nif_context_exec_with_env(ErlNifEnv *env, int argc, const ER
         return make_error(env, "invalid_env");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_exec_with_env_to_owngil(env, ctx, argv[1], penv);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    /* Worker thread mode: dispatch to dedicated thread with local env */
-    if (ctx->uses_worker_thread) {
-        /* For exec, we just pass the code binary */
-        return dispatch_to_worker_thread_impl(env, ctx, CTX_REQ_EXEC_WITH_ENV, argv[1], penv);
-    }
-
-    char *code = binary_to_string(&code_bin);
-    if (code == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    ERL_NIF_TERM result;
-
-    /* Acquire thread state */
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        enif_free(code);
-        return make_error(env, "acquire_failed");
-    }
-
-    /* Set thread-local context and env for callback/reentrant support */
-    py_context_t *prev_context = tl_current_context;
-    tl_current_context = ctx;
-    py_env_resource_t *prev_local_env = tl_current_local_env;
-    tl_current_local_env = penv;
-
-    /* Always use process-local environment */
-    PyObject *exec_globals = penv->globals;
-    PyObject *exec_locals = penv->globals;
-
-    /* Execute statements */
-    PyObject *py_result = PyRun_String(code, Py_file_input, exec_globals, exec_locals);
-
-    if (py_result == NULL) {
-        result = make_py_error(env);
-    } else {
-        Py_DECREF(py_result);
-        result = ATOM_OK;
-    }
-
-    /* Restore thread-local state */
-    tl_current_context = prev_context;
-    tl_current_local_env = prev_local_env;
-
-    enif_free(code);
-    py_context_release(&guard);
-
-    return result;
+    return ctx_dispatch(env, ctx, CTX_REQ_EXEC_WITH_ENV, argv[1], penv);
 }
 
 /**
@@ -5534,135 +4384,14 @@ static ERL_NIF_TERM nif_context_eval_with_env(ErlNifEnv *env, int argc, const ER
         return make_error(env, "invalid_env");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_eval_with_env_to_owngil(env, ctx, argv[1], argv[2], penv);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    /* Worker thread mode: dispatch to dedicated thread with local env */
-    if (ctx->uses_worker_thread) {
-        /* Build request tuple: {Code, Locals} */
-        ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
-            ? argv[2] : enif_make_new_map(env);
-        ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
-        return dispatch_to_worker_thread_impl(env, ctx, CTX_REQ_EVAL_WITH_ENV, request, penv);
-    }
-
-    char *code = binary_to_string(&code_bin);
-    if (code == NULL) {
-        return make_error(env, "alloc_failed");
-    }
-
-    ERL_NIF_TERM result;
-
-    /* Acquire thread state */
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        enif_free(code);
-        return make_error(env, "acquire_failed");
-    }
-
-    /* Set thread-local context and env for callback/reentrant support */
-    py_context_t *prev_context = tl_current_context;
-    tl_current_context = ctx;
-    py_env_resource_t *prev_local_env = tl_current_local_env;
-    tl_current_local_env = penv;
-
-    /* Enable suspension for callback support */
-    bool prev_allow_suspension = tl_allow_suspension;
-    tl_allow_suspension = true;
-
-    /* Always use process-local environment */
-    PyObject *eval_globals = penv->globals;
-
-    /* Build locals dict from Erlang map (if provided) */
-    PyObject *eval_locals = PyDict_Copy(eval_globals);
-    if (enif_is_map(env, argv[2])) {
-        ErlNifMapIterator iter;
-        ERL_NIF_TERM key, value;
-
-        enif_map_iterator_create(env, argv[2], &iter, ERL_NIF_MAP_ITERATOR_FIRST);
-        while (enif_map_iterator_get_pair(env, &iter, &key, &value)) {
-            PyObject *py_key = term_to_py(env, key);
-            PyObject *py_value = term_to_py(env, value);
-            if (py_key != NULL && py_value != NULL) {
-                PyDict_SetItem(eval_locals, py_key, py_value);
-            }
-            Py_XDECREF(py_key);
-            Py_XDECREF(py_value);
-            enif_map_iterator_next(env, &iter);
-        }
-        enif_map_iterator_destroy(env, &iter);
-    }
-
-    /* Evaluate expression */
-    PyObject *py_result = PyRun_String(code, Py_eval_input, eval_globals, eval_locals);
-    Py_DECREF(eval_locals);
-
-    if (py_result == NULL) {
-        /* Check for pending callback (flag-based detection) */
-        if (tl_pending_callback) {
-            PyErr_Clear();
-            /* Create suspended state for callback handling */
-            suspended_context_state_t *suspended = create_suspended_context_state_for_eval(
-                env, ctx, &code_bin, argv[2]);
-            if (suspended == NULL) {
-                tl_pending_callback = false;
-                Py_CLEAR(tl_pending_args);
-                result = make_error(env, "create_suspended_state_failed");
-            } else {
-                result = build_suspended_context_result(env, suspended);
-            }
-        } else {
-            result = make_py_error(env);
-        }
-    } else if (is_inline_schedule_marker(py_result)) {
-        /* Inline schedule marker: chain via enif_schedule_nif with local_env */
-        inline_continuation_t *cont = create_inline_continuation(ctx, penv, py_result, 0);
-        Py_DECREF(py_result);
-
-        if (cont == NULL) {
-            result = make_error(env, "create_continuation_failed");
-        } else {
-            ERL_NIF_TERM cont_ref = enif_make_resource(env, cont);
-            enif_release_resource(cont);
-
-            /* Restore thread-local state before scheduling */
-            tl_allow_suspension = prev_allow_suspension;
-            tl_current_context = prev_context;
-            tl_current_local_env = prev_local_env;
-            clear_pending_callback_tls();
-            enif_free(code);
-            py_context_release(&guard);
-
-            return enif_schedule_nif(env, "inline_continuation",
-                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
-        }
-    } else if (is_schedule_marker(py_result)) {
-        /* Schedule marker: release dirty scheduler, continue via callback */
-        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
-        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
-        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
-        Py_DECREF(py_result);
-        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
-    } else {
-        ERL_NIF_TERM term_result = py_to_term(env, py_result);
-        Py_DECREF(py_result);
-        result = enif_make_tuple2(env, ATOM_OK, term_result);
-    }
-
-    /* Restore thread-local state */
-    tl_allow_suspension = prev_allow_suspension;
-    tl_current_context = prev_context;
-    tl_current_local_env = prev_local_env;
-
-    clear_pending_callback_tls();
-    enif_free(code);
-    py_context_release(&guard);
-
-    return result;
+    ERL_NIF_TERM locals = (argc > 2 && enif_is_map(env, argv[2]))
+        ? argv[2] : enif_make_new_map(env);
+    ERL_NIF_TERM request = enif_make_tuple2(env, argv[1], locals);
+    return ctx_dispatch(env, ctx, CTX_REQ_EVAL_WITH_ENV, request, penv);
 }
 
 /**
@@ -5701,187 +4430,14 @@ static ERL_NIF_TERM nif_context_call_with_env(ErlNifEnv *env, int argc, const ER
         return make_error(env, "invalid_env");
     }
 
-#ifdef HAVE_SUBINTERPRETERS
-    /* OWN_GIL mode: dispatch to the dedicated thread */
-    if (ctx->uses_own_gil) {
-        return dispatch_call_with_env_to_owngil(env, ctx, argv[1], argv[2], argv[3], argv[4], penv);
+    if (!ctx_uses_async_thread(ctx)) {
+        /* Every context created by nif_context_create has a thread */
+        return make_error(env, "context_has_no_thread");
     }
-#endif
-
-    /* Worker thread mode: dispatch to dedicated thread with local env */
-    if (ctx->uses_worker_thread) {
-        /* Build request tuple: {Module, Func, Args, Kwargs} */
-        ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
-            ? argv[4] : enif_make_new_map(env);
-        ERL_NIF_TERM request = enif_make_tuple4(env,
-            argv[1],  /* Module */
-            argv[2],  /* Func */
-            argv[3],  /* Args */
-            kwargs);
-        return dispatch_to_worker_thread_impl(env, ctx, CTX_REQ_CALL_WITH_ENV, request, penv);
-    }
-
-    char *module_name = binary_to_string(&module_bin);
-    char *func_name = binary_to_string(&func_bin);
-    if (module_name == NULL || func_name == NULL) {
-        enif_free(module_name);
-        enif_free(func_name);
-        return make_error(env, "alloc_failed");
-    }
-
-    ERL_NIF_TERM result;
-
-    /* Acquire thread state */
-    py_context_guard_t guard = py_context_acquire(ctx);
-    if (!guard.acquired) {
-        enif_free(module_name);
-        enif_free(func_name);
-        return make_error(env, "acquire_failed");
-    }
-
-    /* Set thread-local context and env for callback/reentrant support */
-    py_context_t *prev_context = tl_current_context;
-    tl_current_context = ctx;
-    py_env_resource_t *prev_local_env = tl_current_local_env;
-    tl_current_local_env = penv;
-
-    /* Enable suspension for callback support */
-    bool prev_allow_suspension = tl_allow_suspension;
-    tl_allow_suspension = true;
-
-    /* Always use process-local environment */
-    PyObject *lookup_globals = penv->globals;
-
-    PyObject *module = NULL;
-    PyObject *func = NULL;
-
-    /* Special handling for __main__ module - look up in process-local globals */
-    if (strcmp(module_name, "__main__") == 0) {
-        func = PyDict_GetItemString(lookup_globals, func_name);  /* Borrowed ref */
-        if (func != NULL) {
-            Py_INCREF(func);
-        }
-    }
-
-    if (func == NULL) {
-        /* Get or import module from context cache */
-        module = context_get_module(ctx, module_name);
-        if (module == NULL) {
-            result = make_py_error(env);
-            goto cleanup;
-        }
-
-        /* Get function */
-        func = PyObject_GetAttrString(module, func_name);
-        if (func == NULL) {
-            result = make_py_error(env);
-            goto cleanup;
-        }
-    }
-
-    /* Convert args */
-    unsigned int args_len;
-    if (!enif_get_list_length(env, argv[3], &args_len)) {
-        Py_DECREF(func);
-        result = make_error(env, "invalid_args");
-        goto cleanup;
-    }
-
-    PyObject *args = PyTuple_New(args_len);
-    if (args == NULL) {
-        Py_DECREF(func);
-        result = make_error(env, "alloc_failed");
-        goto cleanup;
-    }
-    ERL_NIF_TERM head, tail = argv[3];
-    for (unsigned int i = 0; i < args_len; i++) {
-        enif_get_list_cell(env, tail, &head, &tail);
-        PyObject *arg = term_to_py(env, head);
-        if (arg == NULL) {
-            Py_DECREF(args);
-            Py_DECREF(func);
-            result = make_error(env, "arg_conversion_failed");
-            goto cleanup;
-        }
-        PyTuple_SET_ITEM(args, i, arg);
-    }
-
-    /* Convert kwargs */
-    PyObject *kwargs = NULL;
-    if (argc > 4 && enif_is_map(env, argv[4])) {
-        kwargs = term_to_py(env, argv[4]);
-    }
-
-    /* Call the function */
-    PyObject *py_result = PyObject_Call(func, args, kwargs);
-    Py_DECREF(func);
-    Py_DECREF(args);
-    Py_XDECREF(kwargs);
-
-    if (py_result == NULL) {
-        /* Check for pending callback */
-        if (tl_pending_callback) {
-            PyErr_Clear();
-            suspended_context_state_t *suspended = create_suspended_context_state_for_call(
-                env, ctx, &module_bin, &func_bin, argv[3],
-                argc > 4 ? argv[4] : enif_make_new_map(env));
-            if (suspended == NULL) {
-                tl_pending_callback = false;
-                Py_CLEAR(tl_pending_args);
-                result = make_error(env, "create_suspended_state_failed");
-            } else {
-                result = build_suspended_context_result(env, suspended);
-            }
-        } else {
-            result = make_py_error(env);
-        }
-    } else if (is_inline_schedule_marker(py_result)) {
-        /* Inline schedule marker: chain via enif_schedule_nif with local_env */
-        inline_continuation_t *cont = create_inline_continuation(ctx, penv, py_result, 0);
-        Py_DECREF(py_result);
-
-        if (cont == NULL) {
-            result = make_error(env, "create_continuation_failed");
-        } else {
-            ERL_NIF_TERM cont_ref = enif_make_resource(env, cont);
-            enif_release_resource(cont);
-
-            /* Restore thread-local state before scheduling */
-            tl_allow_suspension = prev_allow_suspension;
-            tl_current_context = prev_context;
-            tl_current_local_env = prev_local_env;
-            clear_pending_callback_tls();
-            enif_free(module_name);
-            enif_free(func_name);
-            py_context_release(&guard);
-
-            return enif_schedule_nif(env, "inline_continuation",
-                ERL_NIF_DIRTY_JOB_IO_BOUND, nif_inline_continuation, 1, &cont_ref);
-        }
-    } else if (is_schedule_marker(py_result)) {
-        ScheduleMarkerObject *marker = (ScheduleMarkerObject *)py_result;
-        ERL_NIF_TERM callback_name = py_to_term(env, marker->callback_name);
-        ERL_NIF_TERM callback_args = py_to_term(env, marker->args);
-        Py_DECREF(py_result);
-        result = enif_make_tuple3(env, ATOM_SCHEDULE, callback_name, callback_args);
-    } else {
-        ERL_NIF_TERM term_result = py_to_term(env, py_result);
-        Py_DECREF(py_result);
-        result = enif_make_tuple2(env, ATOM_OK, term_result);
-    }
-
-cleanup:
-    /* Restore thread-local state */
-    tl_allow_suspension = prev_allow_suspension;
-    tl_current_context = prev_context;
-    tl_current_local_env = prev_local_env;
-
-    clear_pending_callback_tls();
-    enif_free(module_name);
-    enif_free(func_name);
-    py_context_release(&guard);
-
-    return result;
+    ERL_NIF_TERM kwargs = (argc > 4 && enif_is_map(env, argv[4]))
+        ? argv[4] : enif_make_new_map(env);
+    ERL_NIF_TERM request = enif_make_tuple4(env, argv[1], argv[2], argv[3], kwargs);
+    return ctx_dispatch(env, ctx, CTX_REQ_CALL_WITH_ENV, request, penv);
 }
 
 /**
@@ -7330,20 +5886,11 @@ static ERL_NIF_TERM nif_os_kill(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
 }
 
 static ErlNifFunc nif_funcs[] = {
-    /* Initialization */
+    /* py_nif.c: runtime, contexts, process-local envs, py_ref */
     {"init", 0, nif_py_init, 0},
     {"init", 1, nif_py_init, 0},
     {"finalize", 0, nif_finalize, 0},
-
-
-    /* Python execution - dirty I/O NIFs */
-
-    /* Module operations */
-
-    /* Info */
     {"version", 0, nif_version, 0},
-
-    /* Memory and GC */
     {"memory_stats", 0, nif_memory_stats, 0},
     {"get_debug_counters", 0, nif_get_debug_counters, 0},
     {"gc", 0, nif_gc, 0},
@@ -7351,123 +5898,20 @@ static ErlNifFunc nif_funcs[] = {
     {"tracemalloc_start", 0, nif_tracemalloc_start, 0},
     {"tracemalloc_start", 1, nif_tracemalloc_start, 0},
     {"tracemalloc_stop", 0, nif_tracemalloc_stop, 0},
-
-    /* Callback support */
-
-    /* Async worker management */
-
-    /* Async execution - dirty I/O NIFs */
-
-    /* Subinterpreter capability probes */
     {"subinterp_supported", 0, nif_subinterp_supported, 0},
     {"owngil_supported", 0, nif_owngil_supported, 0},
-
-    /* OWN_GIL thread pool (used internally by py_event_loop_pool) */
     {"subinterp_thread_pool_start", 0, nif_subinterp_thread_pool_start, 0},
     {"subinterp_thread_pool_start", 1, nif_subinterp_thread_pool_start, 0},
     {"subinterp_thread_pool_stop", 0, nif_subinterp_thread_pool_stop, 0},
     {"subinterp_thread_pool_ready", 0, nif_subinterp_thread_pool_ready, 0},
     {"subinterp_thread_pool_stats", 0, nif_subinterp_thread_pool_stats, 0},
-
-    /* OWN_GIL session management for event loop pool */
     {"owngil_create_session", 1, nif_owngil_create_session, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"owngil_submit_task", 7, nif_owngil_submit_task, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"owngil_destroy_session", 2, nif_owngil_destroy_session, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"owngil_apply_imports", 3, nif_owngil_apply_imports, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"owngil_apply_paths", 3, nif_owngil_apply_paths, ERL_NIF_DIRTY_JOB_IO_BOUND},
-
-    /* Execution mode info */
     {"execution_mode", 0, nif_execution_mode, 0},
-
-    /* Thread worker support (ThreadPoolExecutor).
-     * Writes are ERL_NIF_DIRTY_JOB_IO_BOUND because the response pipe
-     * has a non-blocking write end and the looped write may briefly
-     * wait for write-readiness when the Python reader is slow. */
-    {"thread_worker_set_coordinator", 1, nif_thread_worker_set_coordinator, 0},
-    {"thread_worker_write_with_id",   3, nif_thread_worker_write_with_id,
-        ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"thread_worker_signal_ready",    1, nif_thread_worker_signal_ready, 0},
-
-    /* Async callback support (for erlang.async_call). Same dirty-IO
-     * rationale as thread_worker_write_with_id above. */
-    {"async_callback_response", 3, nif_async_callback_response,
-        ERL_NIF_DIRTY_JOB_IO_BOUND},
-
-    /* Callback name registry (prevents torch introspection issues) */
-    {"register_callback_name", 1, nif_register_callback_name, 0},
-    {"unregister_callback_name", 1, nif_unregister_callback_name, 0},
-
-    /* Logging and tracing */
-    {"set_log_receiver", 2, nif_set_log_receiver, 0},
-    {"clear_log_receiver", 0, nif_clear_log_receiver, 0},
-    {"set_trace_receiver", 1, nif_set_trace_receiver, 0},
-    {"clear_trace_receiver", 0, nif_clear_trace_receiver, 0},
-
-    /* Erlang-native event loop NIFs */
-    {"set_event_loop_priv_dir", 1, nif_set_event_loop_priv_dir, 0},
-    {"event_loop_new", 0, nif_event_loop_new, 0},
-    {"event_loop_destroy", 1, nif_event_loop_destroy, 0},
-    {"event_loop_set_router", 2, nif_event_loop_set_router, 0},
-    {"event_loop_set_worker", 2, nif_event_loop_set_worker, 0},
-    {"event_loop_set_id", 2, nif_event_loop_set_id, 0},
-    {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0},
-    {"event_loop_run_async", 7, nif_event_loop_run_async, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    /* Async task queue NIFs (uvloop-inspired) */
-    {"submit_task", 7, nif_submit_task, 0},  /* Thread-safe, no GIL needed */
-    {"submit_task_with_env", 8, nif_submit_task_with_env, 0},  /* With process-local env */
-    {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"event_loop_set_py_loop", 2, nif_event_loop_set_py_loop, 0},
-    /* Per-process namespace NIFs */
-    {"event_loop_exec", 2, nif_event_loop_exec, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"event_loop_eval", 2, nif_event_loop_eval, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"add_reader", 3, nif_add_reader, 0},
-    {"remove_reader", 2, nif_remove_reader, 0},
-    {"add_writer", 3, nif_add_writer, 0},
-    {"remove_writer", 2, nif_remove_writer, 0},
-    {"call_later", 3, nif_call_later, 0},
-    {"cancel_timer", 2, nif_cancel_timer, 0},
-    {"poll_events", 2, nif_poll_events, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"get_pending", 1, nif_get_pending, 0},
-    {"dispatch_callback", 3, nif_dispatch_callback, 0},
-    {"dispatch_timer", 2, nif_dispatch_timer, 0},
-    {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0},
-    {"reselect_reader", 2, nif_reselect_reader, 0},
-    {"reselect_writer", 2, nif_reselect_writer, 0},
-    {"reselect_reader_fd", 1, nif_reselect_reader_fd, 0},
-    {"reselect_writer_fd", 1, nif_reselect_writer_fd, 0},
-    /* FD lifecycle management (uvloop-like API) */
-    {"handle_fd_event", 2, nif_handle_fd_event, 0},
-    {"handle_fd_event_and_reselect", 2, nif_handle_fd_event_and_reselect, 0},
-    {"fd_arm", 2, nif_fd_arm, 0},
-    {"stop_reader", 1, nif_stop_reader, 0},
-    {"start_reader", 1, nif_start_reader, 0},
-    {"stop_writer", 1, nif_stop_writer, 0},
-    {"start_writer", 1, nif_start_writer, 0},
-    {"close_fd", 1, nif_close_fd, 0},
-    /* Test helpers for fd monitoring (using pipes) */
-    {"create_test_pipe", 0, nif_create_test_pipe, 0},
-    {"close_test_fd", 1, nif_close_test_fd, 0},
-    {"dup_fd", 1, nif_dup_fd, 0},
     {"os_kill", 2, nif_os_kill, 0},
-    {"write_test_fd", 2, nif_write_test_fd, 0},
-    {"read_test_fd", 2, nif_read_test_fd, 0},
-    /* TCP test helpers */
-    {"create_test_tcp_listener", 1, nif_create_test_tcp_listener, 0},
-    {"accept_test_tcp", 1, nif_accept_test_tcp, 0},
-    {"connect_test_tcp", 2, nif_connect_test_tcp, 0},
-    /* UDP test helpers */
-    {"create_test_udp_socket", 1, nif_create_test_udp_socket, 0},
-    {"recvfrom_test_udp", 2, nif_recvfrom_test_udp, 0},
-    {"sendto_test_udp", 4, nif_sendto_test_udp, 0},
-    {"set_udp_broadcast", 2, nif_set_udp_broadcast, 0},
-    /* Python event loop integration */
-    {"set_python_event_loop", 1, nif_set_python_event_loop, 0},
-    {"set_isolation_mode", 1, nif_set_isolation_mode, 0},
-    {"set_shared_worker", 1, nif_set_shared_worker, 0},
-
-    /* Worker pool */
-
-    /* Process-per-context API (no mutex) */
     {"context_create", 1, nif_context_create, 0},
     {"context_destroy", 1, nif_context_destroy, 0},
     {"context_interrupt", 1, nif_context_interrupt, ERL_NIF_DIRTY_JOB_IO_BOUND},
@@ -7479,7 +5923,6 @@ static ErlNifFunc nif_funcs[] = {
     {"context_exec", 3, nif_context_exec_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_eval", 4, nif_context_eval_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_call", 6, nif_context_call_with_env, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    /* Async dispatch - non-blocking, returns immediately */
     {"context_call_async", 7, nif_context_call_async, 0},
     {"context_eval_async", 5, nif_context_eval_async, 0},
     {"context_exec_async", 4, nif_context_exec_async, 0},
@@ -7497,9 +5940,6 @@ static ErlNifFunc nif_funcs[] = {
     {"context_write_callback_response", 2, nif_context_write_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"context_resume", 3, nif_context_resume, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"context_cancel_resume", 2, nif_context_cancel_resume, 0},
-    {"context_get_event_loop", 1, nif_context_get_event_loop, 0},
-
-    /* py_ref API (Python object references with interp_id) */
     {"ref_wrap", 2, nif_ref_wrap, 0},
     {"is_ref", 1, nif_is_ref, 0},
     {"ref_interp_id", 1, nif_ref_interp_id, 0},
@@ -7507,54 +5947,14 @@ static ErlNifFunc nif_funcs[] = {
     {"ref_getattr", 2, nif_ref_getattr, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"ref_call_method", 3, nif_ref_call_method, ERL_NIF_DIRTY_JOB_CPU_BOUND},
 
-    /* Reactor NIFs - Erlang-as-Reactor architecture */
-    {"reactor_register_fd", 3, nif_reactor_register_fd, 0},
-    {"reactor_reselect_read", 1, nif_reactor_reselect_read, 0},
-    {"reactor_select_write", 1, nif_reactor_select_write, 0},
-    {"get_fd_from_resource", 1, nif_get_fd_from_resource, 0},
-    {"reactor_on_read_ready", 2, nif_reactor_on_read_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"reactor_on_write_ready", 2, nif_reactor_on_write_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"reactor_init_connection", 3, nif_reactor_init_connection, ERL_NIF_DIRTY_JOB_CPU_BOUND},
-    {"reactor_close_fd", 2, nif_reactor_close_fd, 0},
-
-    /* Direct FD operations */
-    {"fd_read", 2, nif_fd_read, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"fd_write", 2, nif_fd_write, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"fd_select_read", 1, nif_fd_select_read, 0},
-    {"fd_select_write", 1, nif_fd_select_write, 0},
-    {"fd_close", 1, nif_fd_close, 0},
-    {"socketpair", 0, nif_socketpair, 0},
-
-    /* Channel API - bidirectional message passing */
-    {"channel_create", 0, nif_channel_create, 0},
-    {"channel_create", 1, nif_channel_create, 0},
-    {"channel_send", 2, nif_channel_send, 0},
-    {"channel_receive", 2, nif_channel_receive, 0},
-    {"channel_try_receive", 1, nif_channel_try_receive, 0},
-    {"channel_reply", 3, nif_channel_reply, 0},
-    {"channel_close", 1, nif_channel_close, 0},
-    {"channel_info", 1, nif_channel_info, 0},
-    {"channel_wait", 3, nif_channel_wait, 0},
-    {"channel_cancel_wait", 2, nif_channel_cancel_wait, 0},
-    {"channel_register_sync_waiter", 1, nif_channel_register_sync_waiter, 0},
-
-    /* ByteChannel API - raw bytes, no term conversion */
-    {"byte_channel_send_bytes", 2, nif_byte_channel_send_bytes, 0},
-    {"byte_channel_try_receive_bytes", 1, nif_byte_channel_try_receive_bytes, 0},
-    {"byte_channel_wait_bytes", 3, nif_byte_channel_wait_bytes, 0},
-
-    /* PyBuffer API - zero-copy input */
-    {"py_buffer_create", 1, nif_py_buffer_create, 0},
-    {"py_buffer_write", 2, nif_py_buffer_write, 0},
-    {"py_buffer_close", 1, nif_py_buffer_close, 0},
-
-    /* SharedDict API - process-scoped shared dictionary */
-    {"shared_dict_new", 0, nif_shared_dict_new, 0},
-    {"shared_dict_get", 3, nif_shared_dict_get, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"shared_dict_set", 3, nif_shared_dict_set, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"shared_dict_del", 2, nif_shared_dict_del, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"shared_dict_keys", 1, nif_shared_dict_keys, ERL_NIF_DIRTY_JOB_IO_BOUND},
-    {"shared_dict_destroy", 1, nif_shared_dict_destroy, 0}
+    /* One macro per area, defined at the end of the file that owns it */
+    PY_CALLBACK_NIFS,
+    PY_THREAD_WORKER_NIFS,
+    PY_LOGGING_NIFS,
+    PY_EVENT_LOOP_NIFS,
+    PY_CHANNEL_NIFS,
+    PY_BUFFER_NIFS,
+    PY_SHARED_DICT_NIFS
 };
 
 ERL_NIF_INIT(py_nif, nif_funcs, load, NULL, upgrade, unload)

@@ -5735,7 +5735,7 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
 #ifdef HAVE_SUBINTERPRETERS
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
-        return dispatch_reactor_read_to_owngil(env, ctx, fd, buffer);
+        return dispatch_reactor_read(env, ctx, fd, buffer);
     }
 #endif
 
@@ -5831,7 +5831,7 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
 #ifdef HAVE_SUBINTERPRETERS
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
-        return dispatch_reactor_write_to_owngil(env, ctx, fd);
+        return dispatch_reactor_write(env, ctx, fd);
     }
 #endif
 
@@ -5917,7 +5917,7 @@ ERL_NIF_TERM nif_reactor_init_connection(ErlNifEnv *env, int argc,
 #ifdef HAVE_SUBINTERPRETERS
     /* OWN_GIL mode: dispatch to dedicated thread */
     if (ctx->uses_own_gil) {
-        return dispatch_reactor_init_to_owngil(env, ctx, fd, argv[2]);
+        return dispatch_reactor_init(env, ctx, fd, argv[2]);
     }
 #endif
 
@@ -8528,3 +8528,74 @@ int init_subinterpreter_event_loop(ErlNifEnv *env) {
     }
     return 0;
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_EVENT_LOOP_NIFS \
+    {"set_event_loop_priv_dir", 1, nif_set_event_loop_priv_dir, 0}, \
+    {"event_loop_new", 0, nif_event_loop_new, 0}, \
+    {"event_loop_destroy", 1, nif_event_loop_destroy, 0}, \
+    {"event_loop_set_router", 2, nif_event_loop_set_router, 0}, \
+    {"event_loop_set_worker", 2, nif_event_loop_set_worker, 0}, \
+    {"event_loop_set_id", 2, nif_event_loop_set_id, 0}, \
+    {"event_loop_wakeup", 1, nif_event_loop_wakeup, 0}, \
+    {"event_loop_run_async", 7, nif_event_loop_run_async, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"submit_task", 7, nif_submit_task, 0}, \
+    {"submit_task_with_env", 8, nif_submit_task_with_env, 0}, \
+    {"process_ready_tasks", 1, nif_process_ready_tasks, ERL_NIF_DIRTY_JOB_CPU_BOUND}, \
+    {"event_loop_set_py_loop", 2, nif_event_loop_set_py_loop, 0}, \
+    {"event_loop_exec", 2, nif_event_loop_exec, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"event_loop_eval", 2, nif_event_loop_eval, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"add_reader", 3, nif_add_reader, 0}, \
+    {"remove_reader", 2, nif_remove_reader, 0}, \
+    {"add_writer", 3, nif_add_writer, 0}, \
+    {"remove_writer", 2, nif_remove_writer, 0}, \
+    {"call_later", 3, nif_call_later, 0}, \
+    {"cancel_timer", 2, nif_cancel_timer, 0}, \
+    {"poll_events", 2, nif_poll_events, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"get_pending", 1, nif_get_pending, 0}, \
+    {"dispatch_callback", 3, nif_dispatch_callback, 0}, \
+    {"dispatch_timer", 2, nif_dispatch_timer, 0}, \
+    {"get_fd_callback_id", 2, nif_get_fd_callback_id, 0}, \
+    {"reselect_reader", 2, nif_reselect_reader, 0}, \
+    {"reselect_writer", 2, nif_reselect_writer, 0}, \
+    {"reselect_reader_fd", 1, nif_reselect_reader_fd, 0}, \
+    {"reselect_writer_fd", 1, nif_reselect_writer_fd, 0}, \
+    {"handle_fd_event", 2, nif_handle_fd_event, 0}, \
+    {"handle_fd_event_and_reselect", 2, nif_handle_fd_event_and_reselect, 0}, \
+    {"fd_arm", 2, nif_fd_arm, 0}, \
+    {"stop_reader", 1, nif_stop_reader, 0}, \
+    {"start_reader", 1, nif_start_reader, 0}, \
+    {"stop_writer", 1, nif_stop_writer, 0}, \
+    {"start_writer", 1, nif_start_writer, 0}, \
+    {"close_fd", 1, nif_close_fd, 0}, \
+    {"create_test_pipe", 0, nif_create_test_pipe, 0}, \
+    {"close_test_fd", 1, nif_close_test_fd, 0}, \
+    {"dup_fd", 1, nif_dup_fd, 0}, \
+    {"write_test_fd", 2, nif_write_test_fd, 0}, \
+    {"read_test_fd", 2, nif_read_test_fd, 0}, \
+    {"create_test_tcp_listener", 1, nif_create_test_tcp_listener, 0}, \
+    {"accept_test_tcp", 1, nif_accept_test_tcp, 0}, \
+    {"connect_test_tcp", 2, nif_connect_test_tcp, 0}, \
+    {"create_test_udp_socket", 1, nif_create_test_udp_socket, 0}, \
+    {"recvfrom_test_udp", 2, nif_recvfrom_test_udp, 0}, \
+    {"sendto_test_udp", 4, nif_sendto_test_udp, 0}, \
+    {"set_udp_broadcast", 2, nif_set_udp_broadcast, 0}, \
+    {"set_python_event_loop", 1, nif_set_python_event_loop, 0}, \
+    {"set_isolation_mode", 1, nif_set_isolation_mode, 0}, \
+    {"set_shared_worker", 1, nif_set_shared_worker, 0}, \
+    {"context_get_event_loop", 1, nif_context_get_event_loop, 0}, \
+    {"reactor_register_fd", 3, nif_reactor_register_fd, 0}, \
+    {"reactor_reselect_read", 1, nif_reactor_reselect_read, 0}, \
+    {"reactor_select_write", 1, nif_reactor_select_write, 0}, \
+    {"get_fd_from_resource", 1, nif_get_fd_from_resource, 0}, \
+    {"reactor_on_read_ready", 2, nif_reactor_on_read_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND}, \
+    {"reactor_on_write_ready", 2, nif_reactor_on_write_ready, ERL_NIF_DIRTY_JOB_CPU_BOUND}, \
+    {"reactor_init_connection", 3, nif_reactor_init_connection, ERL_NIF_DIRTY_JOB_CPU_BOUND}, \
+    {"reactor_close_fd", 2, nif_reactor_close_fd, 0}, \
+    {"fd_read", 2, nif_fd_read, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"fd_write", 2, nif_fd_write, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
+    {"fd_select_read", 1, nif_fd_select_read, 0}, \
+    {"fd_select_write", 1, nif_fd_select_write, 0}, \
+    {"fd_close", 1, nif_fd_close, 0}, \
+    {"socketpair", 0, nif_socketpair, 0}

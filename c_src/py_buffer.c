@@ -1103,3 +1103,10 @@ static ERL_NIF_TERM nif_py_buffer_close(ErlNifEnv *env, int argc,
 
     return ATOM_OK;
 }
+
+/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
+ * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
+#define PY_BUFFER_NIFS \
+    {"py_buffer_create", 1, nif_py_buffer_create, 0}, \
+    {"py_buffer_write", 2, nif_py_buffer_write, 0}, \
+    {"py_buffer_close", 1, nif_py_buffer_close, 0}

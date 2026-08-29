@@ -111,8 +111,9 @@ unreleased version.
 
 1. Implement `static ERL_NIF_TERM nif_x(ErlNifEnv*, int, const ERL_NIF_TERM[])`
    in the `c_src` file that owns the area (see `c_src/README.md`).
-2. Add `{"x", Arity, nif_x, Flags}` to `nif_funcs[]` at the end of
-   `c_src/py_nif.c`. `Flags` is `ERL_NIF_DIRTY_JOB_CPU_BOUND` or
+2. Add `{"x", Arity, nif_x, Flags}` to the `PY_*_NIFS` macro at the end of
+   that file (`nif_funcs[]` in `c_src/py_nif.c` concatenates them; NIFs
+   that live in `py_nif.c` go in its own block there). `Flags` is `ERL_NIF_DIRTY_JOB_CPU_BOUND` or
    `ERL_NIF_DIRTY_JOB_IO_BOUND` when the NIF can block or run Python, `0`
    otherwise.
 3. Add the stub, its `-spec` and a `@doc` to `src/py_nif.erl`, and the

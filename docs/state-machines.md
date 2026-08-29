@@ -25,7 +25,7 @@ UNINIT --init--> INITING --ok--> RUNNING --finalize--> SHUTTING_DOWN --> STOPPED
 
 Two cooperating machines: the Erlang process and the pthread in C.
 
-Context thread (`worker_context_thread_main`, `owngil_context_thread_main`
+Context thread (`ctx_thread_main_worker`, `ctx_thread_main_owngil`
 in `c_src/py_nif.c`):
 
 ```
@@ -38,11 +38,11 @@ starting --namespaces created--> waiting --dequeue--> executing --reply--> waiti
 - `executing` is bracketed by `py_context_exec_enter` / `exec_leave`
   (interrupt bookkeeping) around the GIL; the request mirror on
   `py_context_t` is valid only here.
-- `exited` sets `worker_running = false`; `nif_context_destroy` joins with a
+- `exited` sets `thread_running = false`; `nif_context_destroy` joins with a
   timeout and, if the join fails, marks the context `leaked` and pins the
   resource instead of freeing it.
 
-Erlang process (`loop/1` in `py_context`):
+Erlang process (`loop/1` in `py_context_embedded`):
 
 ```
 idle --{call|eval|exec|submit}--> in_request --{py_result}--> idle
