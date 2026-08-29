@@ -29,11 +29,10 @@
  * - Resource types for Python objects to ensure proper cleanup
  * - Dirty NIF flags for GIL-holding operations
  *
- * This file is the main entry point. It includes the following modules:
- * - py_nif.h: Shared header with types and declarations
- * - py_convert.c: Type conversion (Python <-> Erlang)
- * - py_exec.c: Python execution and GIL management
- * - py_callback.c: Callback system and asyncio support
+ * This file is the main entry point and the single translation unit: it
+ * includes the other .c files (see "Include module implementations"). The
+ * file map is c_src/README.md; the request lifecycle per context mode is
+ * docs/architecture.md.
  */
 
 /* pthread_timedjoin_np (used to bound the owngil worker join on Linux)

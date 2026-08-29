@@ -654,6 +654,7 @@ py:execution_mode().  %% => worker | owngil
 
 ## Documentation
 
+- [Architecture](docs/architecture.md), [Code map](docs/code-map.md), [Glossary](docs/glossary.md) - how the pieces fit
 - [Getting Started](docs/getting-started.md)
 - [Process-Bound Environments](docs/process-bound-envs.md) - Isolated Python state per Erlang process
 - [AI Integration Guide](docs/ai-integration.md)

@@ -34,7 +34,8 @@
   such a region with ring backpressure, usable as `wsgi.input` in isolated
   contexts. Handles are plain terms and travel inside any argument or result;
   `py_shm:read_only/1` and `new(Size, #{writable => false})` hand Python a
-  read-only mapping.
+  read-only mapping. `py_buffer:write/3` takes a timeout for the case where
+  the ring is full and nobody reads (default 30 s).
 - `py:python_executable/0`, `py:kill/1`, `py_nif:os_kill/2`.
 - `py_isolated` is a `gen_statem` (states `idle`, `{busy, Id}`, `looping`,
   `stopping_loop`, `{restarting, Reason}`): `sys:get_state/1` and
@@ -47,6 +48,11 @@
   another caller gave up. Soak-tested: callback storms, interrupt/kill
   storms, loop churn, 60 s mixed workload with resource counters checked.
 - Guide: `docs/isolated.md`, with what each of the three modes guarantees.
+
+### Fixed
+
+- `pthread_timedjoin_np` was called without `_GNU_SOURCE`, an implicit
+  declaration on Linux that newer compilers reject.
 
 ## 4.1.0 (2026-08-15)
 

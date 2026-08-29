@@ -21,54 +21,19 @@
  *
  * @mainpage Python-Erlang NIF Integration
  *
- * @section intro_sec Introduction
+ * This NIF embeds CPython in the Erlang VM. The map of the code, the life
+ * of a call in each context mode, the callback paths and the locking rules
+ * are documented in docs/architecture.md, c_src/README.md and
+ * docs/glossary.md; keep those current instead of this comment.
  *
- * This NIF (Native Implemented Function) library provides seamless integration
- * between Erlang/OTP and Python. It embeds a Python interpreter within the
- * Erlang VM and provides bidirectional communication capabilities.
- *
- * @section arch_sec Architecture
- *
- * The implementation follows a modular design with four main components:
- *
- * - **py_nif.h** - Shared types, macros, and declarations
- * - **py_convert.c** - Bidirectional type conversion (Python ↔ Erlang)
- * - **py_exec.c** - Python execution engine and GIL management
- * - **py_callback.c** - Erlang callback support and asyncio integration
- *
- * @section modes_sec Execution Modes
- *
- * The library supports three execution modes based on Python version:
- *
- * | Mode | Python Version | Description |
- * |------|----------------|-------------|
- * | FREE_THREADED | 3.13+ (no-GIL) | Direct execution without GIL |
- * | SUBINTERP | 3.12+ | Per-interpreter GIL isolation |
- * | MULTI_EXECUTOR | Any | Multiple executor threads with GIL |
- *
- * @section gil_sec GIL Management
- *
- * The GIL (Global Interpreter Lock) is managed following PyO3/Granian patterns:
- *
- * - `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` around blocking ops
- * - Executor threads hold the GIL and process queued requests
- * - Dirty I/O schedulers are used for Python-calling NIFs
- *
- * @section callback_sec Callback Mechanism
- *
- * Python code can call back to Erlang using a suspension/resume pattern:
- *
- * 1. Python calls `erlang.call('func', args)`
- * 2. NIF raises `SuspensionRequired` exception
- * 3. Dirty scheduler is released, callback sent to Erlang
- * 4. Erlang processes callback, calls `resume_callback/2`
- * 5. Python execution resumes with cached result
- *
- * @section mem_sec Memory Management
- *
- * - Erlang resources wrap Python objects (prevent GC)
- * - Thread-local storage for callback context
- * - Proper cleanup in resource destructors
+ * In one paragraph: py_nif.c is the single translation unit and includes
+ * the other .c files; a context (py_context_t) owns a request queue and a
+ * pthread that runs Python for it (worker mode: main interpreter, shared
+ * GIL; owngil mode: a sub-interpreter with its own GIL); Erlang enqueues
+ * through nif_context_call_async and receives {py_result, Ref, Result};
+ * Python calls Erlang through erlang_call_impl (py_callback.c), by
+ * suspension in worker mode and a blocking pipe in owngil mode. Isolated
+ * mode runs Python in a child process and uses no C code beyond os_kill.
  */
 
 #ifndef PY_NIF_H
