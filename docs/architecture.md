@@ -129,7 +129,8 @@ same context are dispatched immediately because they come from that process.
 
 Every message and frame, with the rules for changing them, is in
 [protocols](protocols.md); the states each process and thread moves through
-are in [state machines](state-machines.md).
+are in [state machines](state-machines.md); the reasons behind the design
+are in the [decision records](decisions/overview.md).
 
 ## asyncio
 
