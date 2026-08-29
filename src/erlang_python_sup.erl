@@ -66,6 +66,7 @@ init([]) ->
     ok = py_state:register_callbacks(),
     ok = py_event_loop:register_callbacks(),
     ok = py_channel:register_callbacks(),
+    ok = py_shm:register_callbacks(),
 
     %% Callback registry - must start before contexts
     CallbackSpec = #{
@@ -75,6 +76,16 @@ init([]) ->
         shutdown => 5000,
         type => worker,
         modules => [py_callback]
+    },
+
+    %% Shared memory regions and shared buffers (py_shm, needs iommap at use)
+    ShmSpec = #{
+        id => py_shm,
+        start => {py_shm, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [py_shm]
     },
 
     %% Thread worker coordinator (for ThreadPoolExecutor support)
@@ -167,7 +178,7 @@ init([]) ->
         modules => [py_event_loop_pool]
     },
 
-    Children = [CallbackSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
+    Children = [CallbackSpec, ShmSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
                 ContextSupSpec, ContextRouterInitSpec,
                 WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec,
                 EventLoopPoolSpec],

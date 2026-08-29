@@ -56,6 +56,7 @@
     new/0,
     new/1,
     write/2,
+    write/3,
     close/1
 ]).
 
@@ -75,11 +76,19 @@ new() ->
 %%
 %% @param ContentLength Expected total size in bytes, or `undefined' for chunked
 %% @returns {ok, BufferRef} | {error, Reason}
--spec new(non_neg_integer() | undefined) -> {ok, reference()} | {error, term()}.
+-spec new(non_neg_integer() | undefined | map()) ->
+    {ok, reference() | py_shm:buffer()} | {error, term()}.
 new(undefined) ->
     py_nif:py_buffer_create(undefined);
 new(ContentLength) when is_integer(ContentLength), ContentLength >= 0 ->
-    py_nif:py_buffer_create(ContentLength).
+    py_nif:py_buffer_create(ContentLength);
+new(#{shared := true} = Opts) ->
+    %% Shared buffer: a py_shm ring, usable in every context mode,
+    %% including isolated ones. Options: size (ring bytes, default 4 MB),
+    %% owner (pid whose exit closes it). Needs iommap.
+    py_shm:buffer_new(maps:remove(shared, Opts));
+new(Opts) when is_map(Opts) ->
+    new(maps:get(content_length, Opts, undefined)).
 
 %% @doc Write data to the buffer.
 %%
@@ -90,8 +99,17 @@ new(ContentLength) when is_integer(ContentLength), ContentLength >= 0 ->
 %% @param Ref Buffer reference from new/0 or new/1
 %% @param Data Binary data to append
 %% @returns ok | {error, Reason}
--spec write(reference(), binary()) -> ok | {error, term()}.
+-spec write(reference() | py_shm:buffer(), binary()) -> ok | {error, term()}.
+write({'$py_buffer', _, _, _} = Buf, Data) when is_binary(Data) ->
+    py_shm:buffer_write(Buf, Data);
 write(Ref, Data) when is_binary(Data) ->
+    py_nif:py_buffer_write(Ref, Data).
+
+%% @doc Write with a timeout (shared buffers block while the ring is full).
+-spec write(reference() | py_shm:buffer(), binary(), timeout()) -> ok | {error, term()}.
+write({'$py_buffer', _, _, _} = Buf, Data, Timeout) when is_binary(Data) ->
+    py_shm:buffer_write(Buf, Data, Timeout);
+write(Ref, Data, _Timeout) when is_binary(Data) ->
     py_nif:py_buffer_write(Ref, Data).
 
 %% @doc Close the buffer (signal end of data).
@@ -102,6 +120,8 @@ write(Ref, Data) when is_binary(Data) ->
 %%
 %% @param Ref Buffer reference
 %% @returns ok
--spec close(reference()) -> ok.
+-spec close(reference() | py_shm:buffer()) -> ok.
+close({'$py_buffer', _, _, _} = Buf) ->
+    py_shm:buffer_close(Buf);
 close(Ref) ->
     py_nif:py_buffer_close(Ref).
