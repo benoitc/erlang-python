@@ -146,7 +146,7 @@ typedef enum {
     /**
      * @brief Conventional GIL mode (every other supported build)
      *
-     * Coordinator-side work runs through the single executor thread.
+     * Coordinator-side work (thread callbacks) runs on the thread-worker bridge.
      * Per-context worker / OWN_GIL pthreads handle the public context
      * APIs directly; this mode label only governs the coordinator path.
      */
@@ -300,52 +300,6 @@ extern py_invariant_counters_t g_counters;
  * @{
  */
 
-/**
- * @struct py_worker_t
- * @brief Represents a Python worker with its own namespace
- *
- * A worker encapsulates a Python execution context with isolated
- * global and local namespaces. Workers are created per-process in
- * Erlang and can execute Python code independently.
- *
- * @note Workers should be created via `py:worker_new/0` and destroyed
- *       via `py:worker_destroy/1` or automatically via GC.
- *
- * @see nif_worker_new
- * @see nif_worker_destroy
- */
-typedef struct {
-    /** @brief Python thread state for this worker */
-    PyThreadState *thread_state;
-
-    /** @brief Global namespace dictionary (`__globals__`) */
-    PyObject *globals;
-
-    /** @brief Local namespace dictionary (`__locals__`) */
-    PyObject *locals;
-
-    /** @brief Whether this worker currently owns the GIL */
-    bool owns_gil;
-
-    /* Callback support fields */
-
-    /**
-     * @brief Pipe file descriptors for callback IPC
-     *
-     * - `callback_pipe[0]` - Read end (Python reads responses)
-     * - `callback_pipe[1]` - Write end (Erlang writes responses)
-     */
-    int callback_pipe[2];
-
-    /** @brief PID of the Erlang callback handler process */
-    ErlNifPid callback_handler;
-
-    /** @brief Whether a callback handler is registered */
-    bool has_callback_handler;
-
-    /** @brief Environment for building callback messages */
-    ErlNifEnv *callback_env;
-} py_worker_t;
 
 /* async_pending_t and py_async_worker_t removed - async workers replaced by event loop model */
 
@@ -394,7 +348,7 @@ typedef struct {
 
 /**
  * @defgroup requests Request Handling
- * @brief Structures for executor request processing
+ * @brief Request kinds shared by the context executors and callback replay
  * @{
  */
 
@@ -403,7 +357,7 @@ typedef struct py_context py_context_t;
 
 /**
  * @enum py_request_type_t
- * @brief Types of requests that can be submitted to the executor
+ * @brief Kinds of Python work a context can run
  */
 typedef enum {
     PY_REQ_CALL,         /**< Call a Python function */
@@ -414,98 +368,9 @@ typedef enum {
     PY_REQ_GETATTR,      /**< Get attribute from Python object */
     PY_REQ_MEMORY_STATS, /**< Get Python memory statistics */
     PY_REQ_GC,           /**< Trigger Python garbage collection */
-    PY_REQ_SHUTDOWN      /**< Signal executor shutdown */
+    PY_REQ_SHUTDOWN      /**< Shutdown marker */
 } py_request_type_t;
 
-/**
- * @struct py_request_t
- * @brief Request submitted to the executor thread for processing
- *
- * Encapsulates all information needed to execute a Python operation.
- * The caller thread blocks on the condition variable until the
- * executor signals completion.
- *
- * @note Requests are allocated on the stack by the caller NIF and
- *       passed to the executor. The executor processes them with
- *       the GIL held.
- */
-typedef struct py_request {
-    /** @brief Type of operation to perform */
-    py_request_type_t type;
-
-    /* Synchronization primitives */
-
-    /** @brief Mutex for condition variable */
-    pthread_mutex_t mutex;
-
-    /** @brief Condition variable for completion signaling */
-    pthread_cond_t cond;
-
-    /** @brief Flag set when processing is complete */
-    volatile bool completed;
-
-    /* Common parameters */
-
-    /** @brief Worker context (may be NULL for global ops) */
-    py_worker_t *worker;
-
-    /** @brief Context for process-owned operations (may be NULL) */
-    py_context_t *context;
-
-    /** @brief Caller's NIF environment for term creation */
-    ErlNifEnv *env;
-
-    /* Call/Import parameters */
-
-    /** @brief Module name as binary */
-    ErlNifBinary module_bin;
-
-    /** @brief Function name as binary */
-    ErlNifBinary func_bin;
-
-    /** @brief Code string for eval/exec */
-    ErlNifBinary code_bin;
-
-    /** @brief Arguments list term */
-    ERL_NIF_TERM args_term;
-
-    /** @brief Keyword arguments map term */
-    ERL_NIF_TERM kwargs_term;
-
-    /** @brief Local variables map for eval */
-    ERL_NIF_TERM locals_term;
-
-    /** @brief Execution timeout in milliseconds (0 = no timeout) */
-    unsigned long timeout_ms;
-
-    /* Iterator parameters */
-
-    /** @brief Generator/iterator wrapper for PY_REQ_NEXT */
-    py_object_t *gen_wrapper;
-
-    /* Getattr parameters */
-
-    /** @brief Object wrapper for PY_REQ_GETATTR */
-    py_object_t *obj_wrapper;
-
-    /** @brief Attribute name as binary */
-    ErlNifBinary attr_bin;
-
-    /* GC parameters */
-
-    /** @brief Generation to collect (0, 1, or 2) */
-    int gc_generation;
-
-    /* Result */
-
-    /** @brief Result term set by executor */
-    ERL_NIF_TERM result;
-
-    /* Queue linkage */
-
-    /** @brief Next request in executor queue */
-    struct py_request *next;
-} py_request_t;
 
 /** @} */
 
@@ -519,94 +384,6 @@ typedef struct py_request {
  * @{
  */
 
-/**
- * @struct suspended_state_t
- * @brief State for a suspended Python execution awaiting callback result
- *
- * When Python code calls `erlang.call()`, execution is suspended and
- * this structure captures all state needed to resume after Erlang
- * processes the callback.
- *
- * @par Suspension Flow:
- * 1. Python calls `erlang.call('func', args)`
- * 2. `erlang_call_impl` raises `SuspensionRequired` exception
- * 3. `process_request` catches exception, creates `suspended_state_t`
- * 4. Returns `{suspended, CallbackId, StateRef, {Func, Args}}` to Erlang
- * 5. Erlang executes callback, calls `resume_callback(StateRef, Result)`
- * 6. `nif_resume_callback_dirty` replays Python with cached result
- *
- * @see erlang_call_impl
- * @see nif_resume_callback
- */
-typedef struct {
-    /** @brief Worker context for replay */
-    py_worker_t *worker;
-
-    /** @brief Unique identifier for this callback */
-    uint64_t callback_id;
-
-    /* Callback invocation info */
-
-    /** @brief Name of Erlang function being called */
-    char *callback_func_name;
-
-    /** @brief Length of callback_func_name */
-    size_t callback_func_len;
-
-    /** @brief Arguments passed to the callback */
-    PyObject *callback_args;
-
-    /* Original request context for replay */
-
-    /** @brief Original module name binary */
-    ErlNifBinary orig_module;
-
-    /** @brief Original function name binary */
-    ErlNifBinary orig_func;
-
-    /** @brief Original arguments (copied to orig_env) */
-    ERL_NIF_TERM orig_args;
-
-    /** @brief Original keyword arguments */
-    ERL_NIF_TERM orig_kwargs;
-
-    /** @brief Environment owning copied terms */
-    ErlNifEnv *orig_env;
-
-    /** @brief Original timeout setting */
-    int orig_timeout_ms;
-
-    /** @brief Original request type (PY_REQ_CALL, PY_REQ_EVAL) */
-    int request_type;
-
-    /** @brief Original code for eval/exec replay */
-    ErlNifBinary orig_code;
-
-    /** @brief Original locals map for eval replay */
-    ERL_NIF_TERM orig_locals;
-
-    /* Callback result */
-
-    /** @brief Raw result data from Erlang callback */
-    unsigned char *result_data;
-
-    /** @brief Length of result_data */
-    size_t result_len;
-
-    /** @brief Flag: result is available for replay */
-    _Atomic bool has_result;
-
-    /** @brief Flag: result represents an error */
-    _Atomic bool is_error;
-
-    /* Synchronization */
-
-    /** @brief Mutex for result access */
-    pthread_mutex_t mutex;
-
-    /** @brief Condition for blocking callback mode */
-    pthread_cond_t cond;
-} suspended_state_t;
 
 /** @} */
 
@@ -1403,16 +1180,12 @@ typedef struct {
  * @{
  */
 
-/** @brief Resource type for py_worker_t */
-extern ErlNifResourceType *WORKER_RESOURCE_TYPE;
 
 /** @brief Resource type for py_object_t */
 extern ErlNifResourceType *PYOBJ_RESOURCE_TYPE;
 
 /* ASYNC_WORKER_RESOURCE_TYPE removed - async workers replaced by event loop model */
 
-/** @brief Resource type for suspended_state_t */
-extern ErlNifResourceType *SUSPENDED_STATE_RESOURCE_TYPE;
 
 /** @brief Resource type for py_context_t (process-per-context) */
 extern ErlNifResourceType *PY_CONTEXT_RESOURCE_TYPE;
@@ -1495,28 +1268,13 @@ extern PyThreadState *g_main_thread_state;
 /** @brief Current execution mode */
 extern py_execution_mode_t g_execution_mode;
 
-/* Single executor state */
 
-/** @brief Single executor thread handle */
-extern pthread_t g_executor_thread;
 
-/** @brief Single executor queue mutex */
-extern pthread_mutex_t g_executor_mutex;
 
-/** @brief Single executor queue condition */
-extern pthread_cond_t g_executor_cond;
 
-/** @brief Single executor queue head */
-extern py_request_t *g_executor_queue_head;
 
-/** @brief Single executor queue tail */
-extern py_request_t *g_executor_queue_tail;
 
-/** @brief Single executor running flag (atomic for thread-safe access) */
-extern _Atomic bool g_executor_running;
 
-/** @brief Single executor shutdown flag (atomic for thread-safe access) */
-extern _Atomic bool g_executor_shutdown;
 
 /** @brief Global counter for unique callback IDs */
 extern _Atomic uint64_t g_callback_id_counter;
@@ -1551,8 +1309,6 @@ extern PyObject *g_numpy_ndarray_type;
 
 /* Thread-local state */
 
-/** @brief Current worker for callback context (legacy) */
-extern __thread py_worker_t *tl_current_worker;
 
 /** @brief Current context for callback context (new process-per-context API) */
 extern __thread py_context_t *tl_current_context;
@@ -1560,8 +1316,6 @@ extern __thread py_context_t *tl_current_context;
 /** @brief Current NIF environment for callbacks */
 extern __thread ErlNifEnv *tl_callback_env;
 
-/** @brief Current suspended state (for replay) */
-extern __thread suspended_state_t *tl_current_suspended;
 
 /** @brief Flag: suspension is allowed in current context */
 extern __thread bool tl_allow_suspension;
@@ -1987,33 +1741,8 @@ static inline uint64_t get_monotonic_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/**
- * @brief Start timeout monitoring for Python execution
- *
- * Sets up a trace callback that checks elapsed time and raises
- * `TimeoutError` if the deadline is exceeded.
- *
- * @param timeout_ms Timeout in milliseconds (0 = no timeout)
- *
- * @see stop_timeout
- */
-static void start_timeout(unsigned long timeout_ms);
 
-/**
- * @brief Stop timeout monitoring
- *
- * Removes the trace callback and resets timeout state.
- *
- * @see start_timeout
- */
-static void stop_timeout(void);
 
-/**
- * @brief Check if current Python exception is a timeout error
- *
- * @return true if TimeoutError is pending, false otherwise
- */
-static bool check_timeout_error(void);
 
 /** @} */
 
@@ -2027,75 +1756,12 @@ static bool check_timeout_error(void);
  * @{
  */
 
-/**
- * @brief Process a single request with GIL held
- *
- * Main dispatch function called by executor threads. Handles all
- * request types and stores results in the request structure.
- *
- * @param req Request to process (must not be NULL)
- *
- * @note Caller must hold the GIL
- * @note Sets req->result on completion
- */
-static void process_request(py_request_t *req);
 
-/**
- * @brief Submit a request to the executor
- *
- * Routes the request based on execution mode:
- * - FREE_THREADED: Execute directly
- * - MULTI_EXECUTOR: Route to executor pool
- * - SUBINTERP: Use single executor
- *
- * @param req Request to submit
- */
-static int executor_enqueue(py_request_t *req);
 
-/**
- * @brief Wait for a request to complete
- *
- * Blocks until the executor signals completion by setting
- * req->completed and signaling req->cond.
- *
- * @param req Request to wait for
- */
-static void executor_wait(py_request_t *req);
 
-/**
- * @brief Initialize a request structure
- *
- * Zeroes the structure and initializes mutex/condvar.
- *
- * @param req Request to initialize
- */
-static void request_init(py_request_t *req);
 
-/**
- * @brief Clean up a request structure
- *
- * Destroys mutex and condvar. Does not free the request itself.
- *
- * @param req Request to clean up
- */
-static void request_cleanup(py_request_t *req);
 
-/**
- * @brief Start the single executor thread
- *
- * Creates and starts the executor thread, waiting for it to
- * become ready before returning.
- *
- * @return 0 on success, -1 on failure
- */
-static int executor_start(void);
 
-/**
- * @brief Stop the single executor thread
- *
- * Sends shutdown request and waits for thread to terminate.
- */
-static void executor_stop(void);
 
 /** @} */
 
@@ -2148,19 +1814,6 @@ static PyObject *erlang_module_getattr(PyObject *module, PyObject *name);
 
 /* async_event_loop_thread removed - replaced by event loop model */
 
-/**
- * @brief Create suspended state for callback handling
- *
- * Captures all state needed to resume Python execution after
- * Erlang processes the callback.
- *
- * @param env NIF environment
- * @param exc_args Exception args tuple (callback_id, func_name, args)
- * @param req Original request being processed
- * @return New suspended state resource, or NULL on error
- */
-static suspended_state_t *create_suspended_state(ErlNifEnv *env, PyObject *exc_args,
-                                                  py_request_t *req);
 
 /**
  * @brief Parse callback response from Erlang

@@ -1,9 +1,8 @@
 # Code map
 
 Every source file, what it owns, and where to look for its behaviour. Status
-is `live` (on the path of a context created today), `legacy` (kept for
-compatibility, no current caller in `src/`), or `test` (only exercised by
-suites). Guides are in `docs/`, suites in `test/`. Start with
+is `live` (on the path of a context created today) or `test` (only
+exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 [architecture](architecture.md).
 
 ## Erlang (`src/`)
@@ -42,9 +41,9 @@ files. Editing `py_convert.c` alone does not compile it alone; build with
 | File | Owns | Status |
 |---|---|---|
 | `py_nif.h` | Every shared type: `py_context_t`, request types, runtime state machine, atoms, globals | live |
-| `py_nif.c` | Runtime init, context creation and destruction, the request queue and the two context thread mains, the process-per-context NIFs (`nif_context_*`), process-local envs, `py_ref`, the NIF table | live, with legacy branches |
+| `py_nif.c` | Runtime init, context creation and destruction, the request queue and the two context thread mains, the process-per-context NIFs (`nif_context_*`), process-local envs, `py_ref`, the NIF table | live |
 | `py_convert.c` | `py_to_term` / `term_to_py`, the type mapping, tagged tuples (`{bytes, B}`, shared handles) | live |
-| `py_exec.c` | Execution with suspension support; the legacy single executor thread | live (suspension), legacy (executor) |
+| `py_exec.c` | Execution mode detection and GIL helpers | live |
 | `py_callback.c` | The `erlang` Python module: `call`, `send`, `whereis`, `Atom`/`Pid`/`Ref` types, schedule markers, callback pipes, channel and shared dict methods | live |
 | `py_thread_worker.c` | Python threads calling Erlang through `py_thread_handler` | live |
 | `py_subinterp_thread.c` | Sub-interpreter thread pool used by owngil contexts and loop pools | live |
@@ -52,14 +51,10 @@ files. Editing `py_convert.c` alone does not compile it alone; build with
 | `py_channel.c`, `py_buffer.c`, `py_reactor_buffer.c`, `py_shared_dict.c` | The corresponding resources and their Python-facing methods | live |
 | `py_logging.c` | Logging and tracing NIFs | live |
 | `py_mem_limit.c` | Per-interpreter memory caps (owngil) | live |
-| `py_worker_pool.c/.h` | An older worker pool | legacy, no caller |
 | `py_util.c/.h` | Macros and helpers | live |
 
-Inside `py_nif.c`, these are legacy: the `worker_*` NIFs and the "Worker
-management" section, the `async_worker_*` NIFs (return `deprecated`), the
-inline executor branches marked "Legacy mode" in `nif_context_call`,
-`nif_context_eval`, `nif_context_exec`, and the `cancel_reader/writer`
-aliases.
+The only code not on a live path is the "Test Helper Functions" section of
+`py_event_loop.c` (fd, pipe, TCP and UDP helpers the suites use).
 
 ## Python (`priv/`)
 

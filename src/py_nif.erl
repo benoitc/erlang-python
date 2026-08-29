@@ -24,17 +24,6 @@
     init/0,
     init/1,
     finalize/0,
-    worker_new/0,
-    worker_new/1,
-    worker_destroy/1,
-    worker_call/5,
-    worker_call/6,
-    worker_eval/3,
-    worker_eval/4,
-    worker_exec/2,
-    worker_next/2,
-    import_module/2,
-    get_attr/3,
     version/0,
     memory_stats/0,
     get_debug_counters/0,
@@ -43,15 +32,7 @@
     tracemalloc_start/0,
     tracemalloc_start/1,
     tracemalloc_stop/0,
-    set_callback_handler/2,
-    send_callback_response/2,
-    resume_callback/2,
     %% Async workers
-    async_worker_new/0,
-    async_worker_destroy/1,
-    async_call/6,
-    async_gather/3,
-    async_stream/6,
     %% Subinterpreter capability probes (Python 3.12+ / 3.14+)
     subinterp_supported/0,
     owngil_supported/0,
@@ -126,8 +107,6 @@
     start_reader/1,
     stop_writer/1,
     start_writer/1,
-    cancel_reader/2,  %% Legacy alias for stop_reader
-    cancel_writer/2,  %% Legacy alias for stop_writer
     close_fd/1,
     %% File descriptor utilities
     dup_fd/1,
@@ -151,10 +130,6 @@
     set_isolation_mode/1,
     set_shared_worker/1,
     %% Worker pool
-    pool_start/1,
-    pool_stop/0,
-    pool_submit/5,
-    pool_stats/0,
     %% Process-per-context API (no mutex)
     context_create/1,
     context_destroy/1,
@@ -287,80 +262,8 @@ finalize() ->
     ?NIF_STUB.
 
 %%% ============================================================================
-%%% Worker Management
-%%% ============================================================================
-
-%% @doc Create a new Python worker context.
-%% Returns an opaque reference to be used with other worker functions.
--spec worker_new() -> {ok, reference()} | {error, term()}.
-worker_new() ->
-    worker_new(#{}).
-
-%% @doc Create a worker with options.
-%% Options:
-%%   use_subinterpreter => boolean() - Use a separate sub-interpreter (Python 3.12+)
--spec worker_new(map()) -> {ok, reference()} | {error, term()}.
-worker_new(_Opts) ->
-    ?NIF_STUB.
-
-%% @doc Destroy a worker context.
--spec worker_destroy(reference()) -> ok.
-worker_destroy(_WorkerRef) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function from a worker.
-%% This is a dirty NIF that acquires the GIL.
-%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
--spec worker_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
-worker_call(_WorkerRef, _Module, _Func, _Args, _Kwargs) ->
-    ?NIF_STUB.
-
-%% @doc Call a Python function from a worker with timeout.
-%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
--spec worker_call(reference(), binary(), binary(), list(), map(), non_neg_integer()) ->
-    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
-worker_call(_WorkerRef, _Module, _Func, _Args, _Kwargs, _TimeoutMs) ->
-    ?NIF_STUB.
-
-%% @doc Evaluate a Python expression in a worker.
-%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
--spec worker_eval(reference(), binary(), map()) ->
-    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
-worker_eval(_WorkerRef, _Code, _Locals) ->
-    ?NIF_STUB.
-
-%% @doc Evaluate a Python expression in a worker with timeout.
-%% May return {suspended, ...} if Python calls erlang.call() (reentrant callback).
--spec worker_eval(reference(), binary(), map(), non_neg_integer()) ->
-    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
-worker_eval(_WorkerRef, _Code, _Locals, _TimeoutMs) ->
-    ?NIF_STUB.
-
-%% @doc Execute Python statements in a worker.
--spec worker_exec(reference(), binary()) -> ok | {error, term()}.
-worker_exec(_WorkerRef, _Code) ->
-    ?NIF_STUB.
-
-%% @doc Get next item from a generator/iterator.
-%% Returns {ok, Value} | {error, stop_iteration} | {error, Error}
--spec worker_next(reference(), reference()) -> {ok, term()} | {error, term()}.
-worker_next(_WorkerRef, _GeneratorRef) ->
-    ?NIF_STUB.
-
-%%% ============================================================================
 %%% Module Operations
 %%% ============================================================================
-
-%% @doc Import a Python module in a worker context.
--spec import_module(reference(), binary()) -> {ok, reference()} | {error, term()}.
-import_module(_WorkerRef, _ModuleName) ->
-    ?NIF_STUB.
-
-%% @doc Get an attribute from a Python object.
--spec get_attr(reference(), reference(), binary()) -> {ok, term()} | {error, term()}.
-get_attr(_WorkerRef, _ObjRef, _AttrName) ->
-    ?NIF_STUB.
 
 %%% ============================================================================
 %%% Info
@@ -420,64 +323,9 @@ tracemalloc_stop() ->
 %%% Callback Support
 %%% ============================================================================
 
-%% @doc Set callback handler process for a worker.
-%% Returns {ok, Fd} where Fd is the file descriptor for sending responses.
--spec set_callback_handler(reference(), pid()) -> {ok, integer()} | {error, term()}.
-set_callback_handler(_WorkerRef, _HandlerPid) ->
-    ?NIF_STUB.
-
-%% @doc Send a callback response to a worker via file descriptor.
--spec send_callback_response(integer(), binary()) -> ok | {error, term()}.
-send_callback_response(_Fd, _Response) ->
-    ?NIF_STUB.
-
-%% @doc Resume a suspended Python callback with the result.
-%% StateRef is the reference returned in the {suspended, ...} tuple.
-%% Result is the callback result as a binary (status byte + data).
-%% Returns {ok, FinalResult}, {error, Reason}, or another {suspended, ...} for nested callbacks.
--spec resume_callback(reference(), binary()) ->
-    {ok, term()} | {error, term()} | {suspended, term(), reference(), {binary(), term()}}.
-resume_callback(_StateRef, _Result) ->
-    ?NIF_STUB.
-
 %%% ============================================================================
 %%% Async Worker Support
 %%% ============================================================================
-
-%% @doc Create a new async worker with background event loop.
-%% Returns an opaque reference to be used with async functions.
--spec async_worker_new() -> {ok, reference()} | {error, term()}.
-async_worker_new() ->
-    ?NIF_STUB.
-
-%% @doc Destroy an async worker.
--spec async_worker_destroy(reference()) -> ok.
-async_worker_destroy(_WorkerRef) ->
-    ?NIF_STUB.
-
-%% @doc Submit an async call to the event loop.
-%% Args: AsyncWorkerRef, Module, Func, Args, Kwargs, CallerPid
-%% Returns: {ok, AsyncId} | {ok, {immediate, Result}} | {error, term()}
--spec async_call(reference(), binary(), binary(), list(), map(), pid()) ->
-    {ok, non_neg_integer() | {immediate, term()}} | {error, term()}.
-async_call(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
-    ?NIF_STUB.
-
-%% @doc Execute multiple async calls concurrently using asyncio.gather.
-%% Args: AsyncWorkerRef, CallsList (list of {Module, Func, Args}), CallerPid
-%% Returns: {ok, AsyncId} | {ok, {immediate, Results}} | {error, term()}
--spec async_gather(reference(), [{binary(), binary(), list()}], pid()) ->
-    {ok, non_neg_integer() | {immediate, list()}} | {error, term()}.
-async_gather(_WorkerRef, _Calls, _CallerPid) ->
-    ?NIF_STUB.
-
-%% @doc Stream from an async generator.
-%% Args: AsyncWorkerRef, Module, Func, Args, Kwargs, CallerPid
-%% Returns: {ok, AsyncId} | {error, term()}
--spec async_stream(reference(), binary(), binary(), list(), map(), pid()) ->
-    {ok, non_neg_integer()} | {error, term()}.
-async_stream(_WorkerRef, _Module, _Func, _Args, _Kwargs, _CallerPid) ->
-    ?NIF_STUB.
 
 %%% ============================================================================
 %%% Sub-interpreter Support (Python 3.12+)
@@ -958,18 +806,6 @@ stop_writer(_FdRef) ->
 start_writer(_FdRef) ->
     ?NIF_STUB.
 
-%% @doc Cancel read monitoring (legacy alias for stop_reader).
-%% Kept for backward compatibility.
--spec cancel_reader(reference(), reference()) -> ok | {error, term()}.
-cancel_reader(_LoopRef, _FdRef) ->
-    ?NIF_STUB.
-
-%% @doc Cancel write monitoring (legacy alias for stop_writer).
-%% Kept for backward compatibility.
--spec cancel_writer(reference(), reference()) -> ok | {error, term()}.
-cancel_writer(_LoopRef, _FdRef) ->
-    ?NIF_STUB.
-
 %% @doc Explicitly close an FD with proper lifecycle cleanup.
 %% Transfers ownership and triggers proper cleanup via ERL_NIF_SELECT_STOP.
 %% Safe to call multiple times (idempotent).
@@ -1091,73 +927,6 @@ set_shared_worker(_WorkerPid) ->
 %%% ============================================================================
 %%% Worker Pool
 %%% ============================================================================
-
-%% @doc Start the worker pool with the specified number of workers.
-%%
-%% Creates a pool of worker threads that process Python operations.
-%% Each worker may have its own subinterpreter (Python 3.12+) for true
-%% parallelism, or share the GIL with optimized batching.
-%%
-%% If NumWorkers is 0, the pool will use the number of CPU cores.
-%%
-%% @param NumWorkers Number of worker threads (0 = auto-detect)
-%% @returns ok on success, or {error, Reason}
--spec pool_start(non_neg_integer()) -> ok | {error, term()}.
-pool_start(_NumWorkers) ->
-    ?NIF_STUB.
-
-%% @doc Stop the worker pool.
-%%
-%% Signals all workers to shut down and waits for them to terminate.
-%% Any pending requests will receive {error, pool_shutdown}.
-%%
-%% @returns ok
--spec pool_stop() -> ok.
-pool_stop() ->
-    ?NIF_STUB.
-
-%% @doc Submit a request to the worker pool.
-%%
-%% Submits an asynchronous request to the pool. The caller will receive
-%% a {py_response, RequestId, Result} message when the request completes.
-%%
-%% Request types and arguments:
-%% <ul>
-%% <li>`call' - Module, Func, Args, undefined (or Timeout)</li>
-%% <li>`apply' - Module, Func, Args, Kwargs</li>
-%% <li>`eval' - Code, Locals, undefined, undefined</li>
-%% <li>`exec' - Code, undefined, undefined, undefined</li>
-%% <li>`asgi' - Runner, Module, Callable, {Scope, Body}</li>
-%% <li>`wsgi' - Module, Callable, Environ, undefined</li>
-%% </ul>
-%%
-%% @param Type Request type atom
-%% @param Arg1 First argument (varies by type)
-%% @param Arg2 Second argument (varies by type)
-%% @param Arg3 Third argument (varies by type)
-%% @param Arg4 Fourth argument (varies by type)
-%% @returns {ok, RequestId} on success, or {error, Reason}
--spec pool_submit(atom(), term(), term(), term(), term()) ->
-    {ok, non_neg_integer()} | {error, term()}.
-pool_submit(_Type, _Arg1, _Arg2, _Arg3, _Arg4) ->
-    ?NIF_STUB.
-
-%% @doc Get worker pool statistics.
-%%
-%% Returns a map with the following keys:
-%% <ul>
-%% <li>`num_workers' - Number of worker threads</li>
-%% <li>`initialized' - Whether the pool is started</li>
-%% <li>`use_subinterpreters' - Whether using subinterpreters (Python 3.12+)</li>
-%% <li>`free_threaded' - Whether using free-threaded Python (3.13+)</li>
-%% <li>`pending_count' - Number of pending requests in queue</li>
-%% <li>`total_enqueued' - Total requests submitted</li>
-%% </ul>
-%%
-%% @returns Stats map
--spec pool_stats() -> map().
-pool_stats() ->
-    ?NIF_STUB.
 
 %%% ============================================================================
 %%% Process-per-context API (no mutex)

@@ -16,7 +16,7 @@ where things are.
 | `py_nif.h` | All shared types: `py_context_t` and its request queue, request types, callback and suspension state, runtime state machine, atoms, globals, declarations | 2.4k lines. The struct comments carry the locking rules; read `py_context_t` before touching threads |
 | `py_nif.c` | Runtime init and finalize, resource types, context create/destroy, the request queue, `worker_context_thread_main` and `owngil_context_thread_main`, `owngil_execute_*` (used by both thread kinds), the `nif_context_*` NIFs, process-local envs, `py_ref`, the NIF function table at the end | Sections are banner-separated; `grep -n '^ \* ===\|^/\* ==='` lists them |
 | `py_convert.c` | `py_to_term`, `term_to_py`, depth limits, tagged tuples (`{bytes, B}`, `{'$py_shm', ...}`), error tuples `{error, {Type, Msg}}` | The type mapping tables in the comments are the reference for `_etf.py` |
-| `py_exec.c` | Executing a call/eval/exec with suspension support; the legacy single executor thread | |
+| `py_exec.c` | Execution mode detection (free-threaded or GIL build) | |
 | `py_callback.c` | The `erlang` Python module: `call`, `send`, `whereis`, `schedule*`, `Atom`/`Pid`/`Ref` types, callback delivery paths (suspension, blocking pipe, async pipe), channel and shared-dict methods, callback name registry | `erlang_call_impl` documents the path precedence |
 | `py_thread_worker.c` | Python threads calling Erlang through `py_thread_handler` | |
 | `py_subinterp_thread.c/.h` | Thread pool of sub-interpreters (owngil contexts, loop pools) | |
@@ -24,7 +24,6 @@ where things are.
 | `py_channel.c/.h`, `py_buffer.c/.h`, `py_reactor_buffer.c/.h`, `py_shared_dict.c` | Resources with a Python-facing object each | |
 | `py_logging.c` | Logging and tracing NIFs | |
 | `py_mem_limit.c` | obmalloc arena accounting for owngil memory caps | |
-| `py_worker_pool.c/.h` | Legacy pool, no caller in `src/` | Candidate for removal |
 | `py_util.c/.h` | Macros, small helpers | |
 
 ## Where the live paths are
@@ -62,10 +61,3 @@ where things are.
 3. Add the stub and its `-spec` and doc to `src/py_nif.erl`.
 4. Cover it in a suite; `rebar3 dialyzer` and `rebar3 xref` must stay clean.
 
-## Legacy code, for orientation
-
-Not on the path of contexts created today: the `worker_*` NIFs and
-"Worker management" section, `async_worker_*` NIFs (return `deprecated`),
-the "Legacy mode" inline branches in `nif_context_call/eval/exec`,
-`py_worker_pool.c`, and the `cancel_reader/writer` aliases. When in doubt,
-follow `nif_context_call_async` and ignore the rest.

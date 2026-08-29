@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.2.0 (2026-08-29)
+## 5.0.0 (2026-08-29)
 
 ### Added
 
@@ -48,6 +48,19 @@
   another caller gave up. Soak-tested: callback storms, interrupt/kill
   storms, loop churn, 60 s mixed workload with resource counters checked.
 - Guide: `docs/isolated.md`, with what each of the three modes guarantees.
+
+### Removed
+
+- The legacy worker API (`py_nif:worker_new/0,1`, `worker_call`, `worker_eval`,
+  `worker_exec`, `worker_next`, `worker_destroy`, `import_module/2`,
+  `get_attr/3`, `set_callback_handler/2`, `send_callback_response/2`,
+  `resume_callback/2`) and the single executor thread behind it, the
+  `async_worker_*`/`async_call`/`async_gather`/`async_stream` NIFs that only
+  returned `deprecated`, the unused worker pool (`pool_*` NIFs), the
+  `cancel_reader/writer` aliases, and the unreachable inline executor
+  branches of the context NIFs. Contexts (`py_context`, `py:call/3`) are the
+  only execution path. `py:memory_stats/0` and `py:gc/0,1` now run on the
+  calling scheduler under the GIL.
 
 ### Fixed
 
