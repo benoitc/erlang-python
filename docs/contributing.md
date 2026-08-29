@@ -33,6 +33,7 @@ rebar3 ct --suite test/py_isolated_SUITE           # one suite
 rebar3 ct --suite test/py_context_SUITE --case test_call   # one case
 rebar3 dialyzer && rebar3 xref                     # required before a PR
 make lint-docs                                     # snippets in README and docs/
+make check-code-map                                # every file in the code map
 ```
 
 Notes:
@@ -182,7 +183,8 @@ supervisor to carry it.
 4. Skip, do not fail, when a platform or interpreter cannot run a case:
    `{skip, Reason}` with the reason a human can act on.
 5. Add the suite to the table in `docs/code-map.md` and the cases that
-   cover a documented API to `test/coverage_audit.md`.
+   cover a documented API to `test/coverage_audit.md`; a new module also
+   needs a row in its Modules table. `make check-code-map` verifies both.
 6. Cases that measure time or memory print their numbers with `ct:pal`
    and assert only on invariants, never on absolute timings.
 

@@ -5,6 +5,46 @@ README and `docs/*.md` to at least one `*_SUITE.erl` test that
 exercises it. Update this table whenever a documented API is added,
 renamed, or removed.
 
+## Modules
+
+Every Erlang module and the suites that exercise it, so a module without a
+suite is visible. `scripts/check_code_map.sh` requires a row per module.
+
+| Module | Suites |
+|---|---|
+| `py` | `py_SUITE`, `py_api_SUITE`, `py_stream_SUITE`, `py_venv_SUITE` |
+| `py_context` | `py_context_SUITE`, `py_context_process_SUITE`, `py_interrupt_SUITE`, `py_worker_loop_SUITE` |
+| `py_context_embedded` | `py_context_SUITE`, `py_context_process_SUITE`, `py_interrupt_SUITE`, `py_worker_loop_SUITE` |
+| `py_stream` | `py_stream_SUITE` |
+| `py_venv` | `py_venv_SUITE` |
+| `py_shared_dict` | `py_SUITE` |
+| `py_isolated` | `py_isolated_*_SUITE` |
+| `py_context_router` | `py_context_router_SUITE`, `py_pool_SUITE` |
+| `py_context_sup` | (through the above) |
+| `py_context_init` | (through the above) |
+| `py_nif` | all |
+| `py_callback` | `py_callback_encoding_SUITE`, `py_thread_callback_SUITE` |
+| `py_thread_handler` | `py_thread_callback_SUITE`, `py_reentrant_SUITE` |
+| `py_event_loop` | `py_event_loop_SUITE`, `py_async_task_SUITE` |
+| `py_event_loop_pool` | `py_event_loop_pool_SUITE` |
+| `py_event_worker` | `py_event_loop_SUITE`, `py_fd_ops_SUITE` |
+| `py_event_worker_sup` | `py_event_loop_SUITE` |
+| `py_event_worker_registry` | `py_event_loop_SUITE` |
+| `py_reactor_context` | `py_reactor_SUITE` |
+| `py_channel` | `py_channel_SUITE`, `py_byte_channel_SUITE` |
+| `py_byte_channel` | `py_channel_SUITE`, `py_byte_channel_SUITE` |
+| `py_buffer` | `py_buffer_SUITE`, `py_isolated_buffer_SUITE` |
+| `py_shm` | `py_isolated_shm_SUITE` |
+| `py_import` | `py_import_SUITE` |
+| `py_preload` | `py_preload_SUITE` |
+| `py_state` | `py_state_SUITE` |
+| `py_semaphore` | (through `py_SUITE`) |
+| `py_logger` | `py_logging_SUITE` |
+| `py_util` | (through every suite) |
+| `py_tracer` | `py_logging_SUITE` |
+| `erlang_python_app` | all |
+| `erlang_python_sup` | all |
+
 ## Erlang public API (`src/py.erl` exports)
 
 | API | Documented in | Test suite | Test case |
