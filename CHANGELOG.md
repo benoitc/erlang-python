@@ -26,6 +26,15 @@
 - **Pure-Python ETF codec** (`priv/_erlang_impl/_etf.py`) with the type
   mapping of `py_convert.c`; the child needs no C extension. Integers beyond
   64 bits round-trip exactly in isolated mode.
+- **Shared memory** - `py_shm:new/1,2`, `write/3`, `read/3`, `binary/3`
+  (no copy), `close/1`: fixed-size regions over
+  [iommap](https://hex.pm/packages/iommap) (optional dependency) that any
+  context mode maps as `erlang.SharedMemory` (buffer protocol, numpy
+  friendly). `py_buffer:new(#{shared => true})` is a streaming buffer over
+  such a region with ring backpressure, usable as `wsgi.input` in isolated
+  contexts. Handles are plain terms and travel inside any argument or result;
+  `py_shm:read_only/1` and `new(Size, #{writable => false})` hand Python a
+  read-only mapping.
 - `py:python_executable/0`, `py:kill/1`, `py_nif:os_kill/2`.
 - `py_isolated` is a `gen_statem` (states `idle`, `{busy, Id}`, `looping`,
   `stopping_loop`, `{restarting, Reason}`): `sys:get_state/1` and

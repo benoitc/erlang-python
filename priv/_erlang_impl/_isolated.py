@@ -58,7 +58,11 @@ import threading
 import traceback
 
 from . import _etf
+from . import _shm
 from ._etf import Atom, Pid, Ref, Port, DecodeError
+
+# Shared memory wrappers returned to Erlang travel as their handle tuple
+_etf.register_encoder(_shm.is_shared, lambda obj: obj.to_term())
 
 __all__ = ['Runtime', 'install_erlang_module']
 
@@ -379,6 +383,8 @@ class Runtime:
                 # raises when the nested request finishes
                 self.inbox.put(('interrupt', target))
             # else: already finished (or still queued: cancel handles that)
+        elif isinstance(term, tuple) and len(term) == 2 and term[0] == 'shm_close':
+            _shm.forget(term[1])
         elif isinstance(term, tuple) and len(term) == 2 and term[0] == 'cancel':
             with self._cancel_lock:
                 self._cancelled.add(term[1])
@@ -425,7 +431,8 @@ class Runtime:
         def schedule():
             try:
                 fn = _resolve(module, func)
-                result = fn(*_as_list(args), **_as_dict(kwargs))
+                result = fn(*_shm.convert_args(_as_list(args)),
+                            **_shm.convert_args(_as_dict(kwargs)))
                 if inspect.isawaitable(result):
                     task = asyncio.ensure_future(result)
                     task.add_done_callback(
@@ -554,11 +561,12 @@ class Runtime:
         if tag == 'call':
             _, module, func, args, kwargs = term
             fn = _resolve(module, func, self.globals)
-            result = fn(*_as_list(args), **_as_dict(kwargs))
+            result = fn(*_shm.convert_args(_as_list(args)),
+                        **_shm.convert_args(_as_dict(kwargs)))
         elif tag == 'eval':
             _, code, locals_ = term
             loc = dict(self.globals)
-            loc.update(_as_dict(locals_))
+            loc.update(_shm.convert_args(_as_dict(locals_)))
             result = eval(compile(_as_text(code), '<erlang>', 'eval'), self.globals, loc)
         elif tag == 'exec':
             _, code = term
@@ -792,12 +800,14 @@ def install_erlang_module(runtime):
         return Function(name)
 
     from . import _server as server
+    from ._shm import SharedMemory, SharedBuffer
 
     ns = dict(
         call=call, async_call=async_call, send=send, whereis=whereis,
         self=self_, atom=atom, Atom=Atom, Pid=Pid, Ref=Ref, Port=Port,
         ProcessError=ProcessError, SuspensionRequired=SuspensionRequired,
         Function=Function, is_isolated=is_isolated, run=run,
+        SharedMemory=SharedMemory, SharedBuffer=SharedBuffer,
         new_event_loop=new_event_loop, get_event_loop_policy=get_event_loop_policy,
         install=install, spawn_task=spawn_task, sleep=sleep, log=log,
         server=server, __getattr__=__getattr__,

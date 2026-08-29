@@ -404,6 +404,18 @@ static ERL_NIF_TERM py_to_term_d(ErlNifEnv *env, PyObject *obj, int depth) {
         return enif_make_atom(env, atom_obj->name);
     }
 
+    /* Shared memory wrappers (_erlang_impl._shm) travel as their handle tuple */
+    if (PyObject_HasAttrString(obj, "to_term") &&
+        PyObject_HasAttrString(obj, "_mmap")) {
+        PyObject *term = PyObject_CallMethod(obj, "to_term", NULL);
+        if (term != NULL) {
+            ERL_NIF_TERM result = py_to_term_d(env, term, depth + 1);
+            Py_DECREF(term);
+            return result;
+        }
+        PyErr_Clear();
+    }
+
     /* Handle NumPy arrays by converting to Python list first */
     if (is_numpy_ndarray(obj)) {
         PyObject *tolist = PyObject_CallMethod(obj, "tolist", NULL);
@@ -597,6 +609,37 @@ static PyObject *term_to_py_d(ErlNifEnv *env, ERL_NIF_TERM term, int depth) {
                     }
                     /* Not a binary - fall through to normal tuple handling */
                 }
+            }
+        }
+    }
+
+    /* {'$py_shm', Id, Path, Size} / {'$py_buffer', Id, Path, Ring}: a shared
+     * region handle, turned into the Python wrapper (mapped once per
+     * interpreter, see priv/_erlang_impl/_shm.py). */
+    {
+        int arity4;
+        const ERL_NIF_TERM *el;
+        if (enif_get_tuple(env, term, &arity4, &el) && arity4 == 4) {
+            char tag_buf[16];
+            if (enif_get_atom(env, el[0], tag_buf, sizeof(tag_buf), ERL_NIF_LATIN1) &&
+                (strcmp(tag_buf, "$py_shm") == 0 || strcmp(tag_buf, "$py_shm_ro") == 0 ||
+                 strcmp(tag_buf, "$py_buffer") == 0)) {
+                PyObject *mod = PyImport_ImportModule("_erlang_impl._shm");
+                if (mod == NULL) {
+                    return NULL;
+                }
+                PyObject *id = term_to_py_d(env, el[1], depth + 1);
+                PyObject *path = term_to_py_d(env, el[2], depth + 1);
+                PyObject *size = term_to_py_d(env, el[3], depth + 1);
+                PyObject *result = NULL;
+                if (id != NULL && path != NULL && size != NULL) {
+                    result = PyObject_CallMethod(mod, "from_term", "sOOO", tag_buf, id, path, size);
+                }
+                Py_XDECREF(id);
+                Py_XDECREF(path);
+                Py_XDECREF(size);
+                Py_DECREF(mod);
+                return result;
             }
         }
     }

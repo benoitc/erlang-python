@@ -623,7 +623,9 @@ When creating Python contexts, you can choose the execution mode:
 **Isolated mode** is the only mode with a hard bound: `py_context:interrupt/1`
 stops a blocking C call, and `SIGKILL` is the backstop. It costs a process per
 context (about 16 MB and 40 ms to start) and roughly twice the call latency.
-See [Isolated Contexts](docs/isolated.md).
+Bulk data crosses through shared memory (`py_shm`, with the optional
+[iommap](https://hex.pm/packages/iommap) dependency). See
+[Isolated Contexts](docs/isolated.md).
 
 **Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available. Each context owns a dedicated pthread, providing stable thread affinity for libraries with thread-local state (numpy, torch, tensorflow).
 

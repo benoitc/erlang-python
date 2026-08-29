@@ -202,6 +202,73 @@ socket with `SCM_RIGHTS`:
 Inside a coroutine, `await erlang.async_call(name, *args)` keeps the loop
 running while Erlang answers.
 
+## Bulk data with shared memory
+
+Arguments and results cross the socket as a copy. For large payloads use a
+shared region: a file mapped `MAP_SHARED` on both sides through
+[iommap](https://hex.pm/packages/iommap). Add it to your deps:
+
+```erlang
+{deps, [{iommap, "1.1.3"}]}.
+```
+
+A region is a fixed-size handle you pass like any other argument, in any
+context mode:
+
+```erlang
+{ok, Shm} = py_shm:new(64 * 1024 * 1024),
+ok = py_shm:write(Shm, 0, Floats),                       %% one copy
+{ok, Sum} = py_context:call(Ctx, myapp, sum_floats, [Shm]),
+Out = py_shm:binary(Shm, 0, 1024),                       %% no copy
+ok = py_shm:close(Shm).
+```
+
+```python
+import numpy
+
+def sum_floats(shm):                        # erlang.SharedMemory
+    a = numpy.frombuffer(shm.buffer, dtype=numpy.float32)   # no copy
+    a[:1024] = 0                            # Erlang sees it
+    return float(a.sum())
+```
+
+Python-produced data is zero-copy in both directions (write into the
+region, read it in Erlang with `py_shm:binary/3`); Erlang-produced data
+costs one `write/3` copy instead of encode, socket, decode and copy. A
+region is mapped once per interpreter and reused across calls; it is
+closed by `close/1` or when its owner process exits.
+
+Streaming bodies use the same mechanism through `py_buffer`:
+
+```erlang
+{ok, Buf} = py_buffer:new(#{shared => true}),            %% 4 MB ring
+ok = py_buffer:write(Buf, Chunk),                        %% blocks when full
+ok = py_buffer:close(Buf),
+py_context:call(Ctx, myapp, handle, [#{<<"wsgi.input">> => Buf}]).
+```
+
+The Python side gets `erlang.SharedBuffer` with the `read`, `readline`,
+`readlines`, iteration and `read_nonblock` of the native buffer. Flow
+control is a callback round trip per blocking read, so in an embedded
+context the native `py_buffer:new/0,1` is still the cheaper choice; use
+`shared => true` when the buffer may reach an isolated context or a pool
+mixing modes. A native buffer cannot cross into a child.
+
+Rules: regions are never resized (a truncated file would be a `SIGBUS`, so
+the size is checked when mapping); mapped pages count against the child's
+`as` limit and its resident set; `/dev/shm` is used when present, else a
+private directory under `TMPDIR`; while a call holds a handle the child
+owns the region, and a concurrent `write/3` is a caller error.
+
+What sharing changes about isolation: the child can still only crash or
+exhaust itself, but it can write anything into a region it holds, at any
+time, and `py_shm:binary/3` sees those bytes (a binary that changes under
+you; take it once the callee is done, or copy with `read/3`). Hand the child
+a read-only handle when it only needs to read: `py_shm:new(Size, #{writable => false})`
+or `py_shm:read_only(Shm)` map it `PROT_READ` in Python, and Erlang keeps
+writing. A child that runs as your user could still truncate the region
+file on purpose; sealing and syscall filtering are separate hardening work.
+
 ## Process model
 
 - One child per context, started with `open_port` so the VM reaps it and
@@ -252,12 +319,7 @@ running while Erlang answers.
   seccomp (Linux) or Capsicum (FreeBSD) sandbox is a separate hardening step.
 - Each call copies its arguments and result through the socket: a 1 MB
   binary round-trips in about 1.3 ms, 16 MB in about 27 ms (worker mode:
-  0.2 ms and 3 ms). For bulk data prefer a file, a socket the child reads
-  itself, or a shared mapping: `erlang-iommap` opens a file `MAP_SHARED` and
-  `region_binary/3` gives a binary over it, while the child maps the same
-  file with `mmap`; a 64 MB region costs 3 us on the Erlang side and 5 ms to
-  map in Python, against 12 ms to copy it through ETF. `py_buffer` is not
-  ported to that yet.
+  0.2 ms and 3 ms). For bulk data use shared memory (below).
 
 ## See also
 

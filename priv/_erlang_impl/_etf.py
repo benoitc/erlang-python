@@ -42,8 +42,16 @@ import struct
 
 __all__ = [
     'Atom', 'Pid', 'Ref', 'Port',
-    'encode', 'decode', 'DecodeError',
+    'encode', 'decode', 'DecodeError', 'register_encoder',
 ]
+
+# (predicate, to_term) pairs consulted before the generic fallback
+_encoders = []
+
+
+def register_encoder(predicate, to_term):
+    """Encode objects matching `predicate` as the term `to_term(obj)` returns."""
+    _encoders.append((predicate, to_term))
 
 VERSION = 131
 
@@ -234,6 +242,10 @@ def _encode(obj, out):
     elif isinstance(obj, (set, frozenset)):
         _encode(list(obj), out)
     else:
+        for predicate, to_term in _encoders:
+            if predicate(obj):
+                _encode(to_term(obj), out)
+                return
         # Same fallback as py_to_term: the string representation as a binary
         _encode(str(obj), out)
 

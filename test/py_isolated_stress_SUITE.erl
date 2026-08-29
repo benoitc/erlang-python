@@ -15,7 +15,8 @@
     test_context_churn_no_leak/1,
     test_startup_time/1,
     test_payload_throughput/1,
-    test_parallel_contexts_cpu_bound/1
+    test_parallel_contexts_cpu_bound/1,
+    test_shared_memory_vs_copy/1
 ]).
 
 all() -> [
@@ -24,7 +25,8 @@ all() -> [
     test_context_churn_no_leak,
     test_startup_time,
     test_payload_throughput,
-    test_parallel_contexts_cpu_bound
+    test_parallel_contexts_cpu_bound,
+    test_shared_memory_vs_copy
 ].
 
 init_per_suite(Config) ->
@@ -138,6 +140,55 @@ test_parallel_contexts_cpu_bound(_Config) ->
     %% overcommitted, so only assert the children did not serialise.
     true = T4 < 4 * T1,
     [py_context:stop(C) || C <- Ctxs],
+    ok.
+
+%% @doc Bulk data both ways: a py_shm region against the socket copy, in
+%% isolated and worker mode, for 1, 16 and 64 MB.
+test_shared_memory_vs_copy(_Config) ->
+    case py_shm:available() of
+        false -> {skip, "iommap not available"};
+        true -> shared_memory_vs_copy()
+    end.
+
+shared_memory_vs_copy() ->
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    {ok, I} = py_context:new(#{mode => isolated, paths => [TestDir]}),
+    {ok, W} = py_context:new(#{mode => worker}),
+    ok = py_context:exec(W, iolist_to_binary(io_lib:format(
+        "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')", [TestDir, TestDir]))),
+    ok = py_context:exec(I, <<"def ident(x): return x">>),
+    ok = py_context:exec(W, <<"def ident(x): return x">>),
+    lists:foreach(fun(Mb) ->
+        Size = Mb * 1024 * 1024,
+        Bin = crypto:strong_rand_bytes(Size),
+        {ok, Shm} = py_shm:new(Size),
+        %% Erlang -> Python: copy through the socket vs write into the region
+        %% and sum the first 4 KB through a memoryview
+        CopyI = timed(fun() -> {ok, _} = py_context:call(I, '__main__', ident, [Bin]) end),
+        ShmI = timed(fun() ->
+            ok = py_shm:write(Shm, 0, Bin),
+            {ok, _} = py_context:call(I, py_test_isolated_shm, shm_sum, [Shm, 4096])
+        end),
+        ShmW = timed(fun() ->
+            ok = py_shm:write(Shm, 0, Bin),
+            {ok, _} = py_context:call(W, py_test_isolated_shm, shm_sum, [Shm, 4096])
+        end),
+        %% Python -> Erlang: result through the socket vs fill the region and
+        %% read it with a region binary
+        OutI = timed(fun() -> {ok, _} = py_context:call(I, py_test_isolated, big_payload, [Size]) end),
+        FillI = timed(fun() ->
+            {ok, _} = py_context:call(I, py_test_isolated_shm, shm_fill, [Shm, 1, Size]),
+            _ = py_shm:binary(Shm, 0, Size)
+        end),
+        ct:log("~p MB  Erlang->Python: socket ~.1f ms, shm isolated ~.1f ms, shm worker ~.1f ms~n"
+               "       Python->Erlang: socket ~.1f ms, shm isolated ~.1f ms",
+               [Mb, CopyI / 1000, ShmI / 1000, ShmW / 1000, OutI / 1000, FillI / 1000]),
+        ct:print("~p MB: to Python socket ~.1f ms vs shm ~.1f ms; from Python socket ~.1f ms vs shm ~.1f ms",
+                 [Mb, CopyI / 1000, ShmI / 1000, OutI / 1000, FillI / 1000]),
+        ok = py_shm:close(Shm)
+    end, [1, 16, 64]),
+    py_context:stop(I),
+    py_context:stop(W),
     ok.
 
 %%% ============================================================================
