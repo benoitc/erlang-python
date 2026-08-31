@@ -29,6 +29,7 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 | `py_channel`, `py_byte_channel` | Term and byte queues between Erlang and Python coroutines (NIF resources) | live | channel | `py_channel_SUITE`, `py_byte_channel_SUITE` |
 | `py_buffer` | Native streaming input buffer; shared variant delegates to `py_shm` | live | buffer, isolated | `py_buffer_SUITE`, `py_isolated_buffer_SUITE` |
 | `py_shm` | Shared memory regions over iommap and the ring behind shared buffers | live | isolated | `py_isolated_shm_SUITE` |
+| `py_caps` | The `caps' option: what an isolated child may reach, and its wire form | live | capabilities | `py_isolated_caps_SUITE` |
 | `py_import` | Registry of imports and `sys.path` entries applied to every interpreter | live | imports | `py_import_SUITE` |
 | `py_preload` | Code run once per interpreter at start | live | preload | `py_preload_SUITE` |
 | `py_state` | Shared key/value store visible from Python as `erlang.state_get/set/delete/keys` | live | README (shared state) | `py_state_SUITE` |
@@ -80,6 +81,7 @@ loop, channels and servers.
 | `_erlang_impl/_etf.py` | Pure-Python ETF codec with the `py_convert.c` mapping | isolated child |
 | `_erlang_impl/_isolated.py` | Child runtime: socket frames, reader thread, re-entrant main loop, interrupt signal, asyncio loop, the `erlang` shim | isolated child |
 | `_erlang_impl/_shm.py` | `SharedMemory` and `SharedBuffer` wrappers over mmap | all |
+| `_erlang_impl/_caps.py` | Capability enforcement in the child: path containment, address matching, the audit hook | isolated child |
 | `py_isolated_child.py` | Child launcher: rlimits, parent-death signal, cgroup join, connect | isolated child |
 | `test_erlang_loop.py`, `test_async_task.py`, `test_channel_ref.py`, `tests/` | Python-side tests of the loop, tasks and channels | test |
 

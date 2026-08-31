@@ -16,3 +16,4 @@ what was decided, what it costs, and where the code is.
 | [0006](0006-shared-memory-over-iommap.md) | Bulk data through iommap regions, handles as plain tuples | 5.0.0 |
 | [0007](0007-remove-legacy-execution-paths.md) | One execution path per mode; the legacy API is removed | 5.0.0 |
 | [0008](0008-pipe-io-rules.md) | Pipe I/O is non-blocking, deadlined and waited with poll | 3.1.0, 5.0.0 |
+| [0009](0009-child-capabilities.md) | An isolated child reaches only what it was granted | 5.1.0 |

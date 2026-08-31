@@ -188,7 +188,32 @@ stop(Ctx) when is_pid(Ctx) ->
 new(Opts) when is_map(Opts) ->
     Mode = maps:get(mode, Opts, worker),
     Id = erlang:unique_integer([positive]),
-    start_link(Id, Mode, Opts).
+    case check_caps(Mode, Opts) of
+        ok -> start_link(Id, Mode, Opts);
+        {error, _} = Err -> Err
+    end.
+
+%% @private A capability grant is only meaningful where the interpreter is a
+%% child process. Read it here, in the caller, so a malformed rule is the
+%% configuration error it is rather than a connection refused much later.
+check_caps(Mode, Opts) ->
+    case maps:get(caps, Opts, undefined) of
+        undefined ->
+            ok;
+        _ when Mode =/= isolated ->
+            {error, {caps_requires_isolated, Mode}};
+        _ when is_map_key(env, Opts) ->
+            %% The `env' option adds to the child's environment and a grant
+            %% says what the whole of it is. Taking both would mean one of
+            %% them silently losing, so say so instead: `caps.env' is the
+            %% one that names an environment.
+            {error, {bad_caps, env_option_conflicts_with_caps_env}};
+        Caps ->
+            case py_caps:validate(Caps) of
+                {ok, _} -> ok;
+                {error, _} = Err -> Err
+            end
+    end.
 
 %% @doc Alias for stop/1 for API consistency.
 -spec destroy(context()) -> ok.

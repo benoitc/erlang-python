@@ -622,14 +622,21 @@ When creating Python contexts, you can choose the execution mode:
 %% segfault only takes the child down, rlimits bound memory and CPU.
 {ok, Ctx} = py_context:new(#{mode => isolated, kill_after => 1000,
                              rlimits => #{as => 512 * 1024 * 1024}}).
+
+%% Name what the child may reach, and it reaches nothing else.
+{ok, Ctx} = py_context:new(#{mode => isolated,
+                             caps => #{dirs => [{"/srv/models", read}],
+                                       net  => #{connect => [{tcp, <<"10.0.0.0/8">>, 5432}]}}}).
 ```
 
 **Isolated mode** is the only mode with a hard bound: `py_context:interrupt/1`
 stops a blocking C call, and `SIGKILL` is the backstop. It costs a process per
 context (about 16 MB and 40 ms to start) and roughly twice the call latency.
 Bulk data crosses through shared memory (`py_shm`, with the optional
-[iommap](https://hex.pm/packages/iommap) dependency). See
-[Isolated Contexts](docs/isolated.md).
+[iommap](https://hex.pm/packages/iommap) dependency), and the `caps` option
+names the files, addresses and environment the child may reach, as a
+cooperative policy over Python rather than a kernel boundary. See
+[Isolated Contexts](docs/isolated.md) and [Capabilities](docs/capabilities.md).
 
 **Worker mode is recommended** because it works with any Python version and automatically benefits from free-threaded Python (3.13t+) when available. Each context owns a dedicated pthread, providing stable thread affinity for libraries with thread-local state (numpy, torch, tensorflow).
 

@@ -38,7 +38,7 @@ def _die(reason):
 def _parse_args(argv):
     if len(argv) < 2:
         _die('usage: py_isolated_child.py SOCKET_PATH [options]')
-    opts = {'socket': argv[1], 'rlimits': {}, 'cgroup': None}
+    opts = {'socket': argv[1], 'rlimits': {}, 'cgroup': None, 'caps': None}
     i = 2
     while i < len(argv):
         flag = argv[i]
@@ -47,6 +47,13 @@ def _parse_args(argv):
             i += 2
         elif flag == '--cgroup':
             opts['cgroup'] = argv[i + 1]
+            i += 2
+        elif flag == '--caps-json':
+            import json
+            try:
+                opts['caps'] = json.loads(argv[i + 1])
+            except ValueError as exc:
+                _die('bad --caps-json: %s' % exc)
             i += 2
         else:
             _die('unknown option %s' % flag)
@@ -167,6 +174,15 @@ def _connect(path):
     return sock
 
 
+def _caps_summary():
+    """What was granted, so `py_context:child_info/1` can report it."""
+    try:
+        from _erlang_impl import _caps
+        return _caps.grants()
+    except Exception:
+        return None
+
+
 def main(argv):
     opts = _parse_args(argv)
     _arm_parent_death()
@@ -191,10 +207,20 @@ def main(argv):
     if _AS_VIA_WATCHDOG and 'as' in opts['rlimits']:
         _start_memory_watchdog(opts['rlimits']['as'], runtime)
 
-    if rlimit_errors or cgroup_error:
+    # Last thing before the parent is told this child is ready, so the
+    # runtime's own imports are not subject to the grants and everything
+    # that runs afterwards is: the registered imports, the preload, and
+    # every request.
+    caps_errors = []
+    if opts['caps'] is not None:
+        from _erlang_impl import _caps
+        caps_errors = _caps.install(opts['caps'])
+
+    if rlimit_errors or cgroup_error or caps_errors:
         problems = [(Atom('rlimit'), Atom(k), msg) for k, msg in rlimit_errors]
         if cgroup_error:
             problems.append((Atom('cgroup'), cgroup_error))
+        problems += [(Atom('caps'), msg) for msg in caps_errors]
         try:
             runtime.event((Atom('startup_error'), problems))
         finally:
@@ -205,6 +231,7 @@ def main(argv):
         Atom('python_version'): '%d.%d.%d' % sys.version_info[:3],
         Atom('executable'): sys.executable,
         Atom('platform'): sys.platform,
+        Atom('caps'): _caps_summary(),
     }
     runtime.event((Atom('ready'), info))
 
