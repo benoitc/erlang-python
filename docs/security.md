@@ -160,21 +160,27 @@ child process:
 A crash kills only the child, `py_context:kill/1` is total, and rlimits or
 cgroups bound resources. See [Isolated Contexts](isolated.md).
 
-That bounds what Python may consume. What it may *reach* is named with the
-`caps` option:
+That is a boundary against Python *failing*, not against Python *reaching*.
+The child runs as the same user as the node, so it can read and write
+whatever that user can, open any connection, spawn processes, and read the
+environment the node was started with. Nothing in this library confines it,
+and confining it from inside the interpreter does not work: an audit hook
+never sees a C extension calling `open(2)`, and the audit event for `open`
+does not say which directory a relative path is resolved against, so a
+check written in Python can be walked around with documented calls.
 
-```erlang
-{ok, Ctx} = py_context:new(#{mode => isolated,
-                             caps => #{dirs => [{"/srv/models", read}],
-                                       net  => #{connect => [{tcp, <<"10.0.0.0/8">>, 5432}]}}}).
-```
+If you need to bound what Python may reach, use the mechanisms the
+operating system already has, around the node rather than inside it:
 
-Anything not named is refused. That is a cooperative policy over Python: it
-binds Python code, not a C extension, because it is built on an audit hook.
-[Capabilities](capabilities.md) says what holds and what does not. The child
-is not sandboxed at the syscall level; that is a separate hardening step,
-and the point at which capability sets would bind an adversary rather than
-a mistake.
+- a container or jail, with the filesystem and network the job should see;
+- a separate user, with file permissions to match, and `py_context:new/1`
+  started from a node running as that user;
+- on Linux, a systemd unit with `ProtectSystem`, `ReadWritePaths` and
+  `IPAddressDeny`, which express the same intent and are enforced by the
+  kernel.
+
+Kernel sandboxing per context (Landlock, Seatbelt) would let this library
+express it directly; it is not implemented.
 
 ## Signal Handling Note
 

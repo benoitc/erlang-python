@@ -1,6 +1,6 @@
 {application, erlang_python, [
     {description, "Execute Python applications from Erlang using dirty NIFs"},
-    {vsn, "5.1.0"},
+    {vsn, "5.0.0"},
     {registered, []},
     {mod, {erlang_python_app, []}},
     {applications, [

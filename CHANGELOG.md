@@ -1,30 +1,5 @@
 # Changelog
 
-## 5.1.0 (unreleased)
-
-### Added
-
-- **Capabilities for isolated children** - `py_context:new(#{mode => isolated,
-  caps => ...})` names the directories, environment variables and network
-  addresses a child may reach; anything not named is refused. Leaving a key
-  out grants none of it, and omitting `caps` leaves existing behaviour
-  unchanged. Paths are resolved a component at a time with `openat` and
-  `O_NOFOLLOW` from the descriptor of the grant, so `..`, absolute paths,
-  symlinks out of a grant and symlinked directory prefixes are all refused,
-  and refusals are `PermissionError` rather than `FileNotFoundError` so they
-  disclose nothing about what exists outside. Network rules name addresses
-  and never host names, resolution is its own capability covering every
-  resolver, and binding is checked against `listen` rather than `connect`.
-  Process creation, `ctypes`, signals to another process and Unix-socket
-  addresses are refused outright. The model and its vocabulary come from
-  erlang_wasm's WASI implementation.
-
-  This is a cooperative policy over Python and not a boundary: it is built
-  on a CPython audit hook, so it binds Python and not a C extension, and it
-  covers only what CPython announces. `docs/capabilities.md` says what holds
-  and what does not. Shared memory and capability sets do not combine yet,
-  because a region reaches the child as a path.
-
 ## 5.0.0 (2026-08-29)
 
 ### Added

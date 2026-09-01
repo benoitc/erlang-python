@@ -751,12 +751,6 @@ def install_erlang_module(runtime):
     def is_isolated():
         return True
 
-    def caps():
-        """What this child was granted, or None when it holds every
-        authority the user it runs as holds."""
-        from . import _caps
-        return _caps.grants()
-
     def run(main, *, debug=None):
         loop = rt.get_loop()
         if debug is not None:
@@ -812,7 +806,7 @@ def install_erlang_module(runtime):
         call=call, async_call=async_call, send=send, whereis=whereis,
         self=self_, atom=atom, Atom=Atom, Pid=Pid, Ref=Ref, Port=Port,
         ProcessError=ProcessError, SuspensionRequired=SuspensionRequired,
-        Function=Function, is_isolated=is_isolated, caps=caps, run=run,
+        Function=Function, is_isolated=is_isolated, run=run,
         SharedMemory=SharedMemory, SharedBuffer=SharedBuffer,
         new_event_loop=new_event_loop, get_event_loop_policy=get_event_loop_policy,
         install=install, spawn_task=spawn_task, sleep=sleep, log=log,
@@ -829,8 +823,7 @@ def install_erlang_module(runtime):
         ByteChannel=_not_supported('erlang.ByteChannel'),
         __all__=['call', 'async_call', 'send', 'whereis', 'self', 'atom',
                  'Atom', 'Pid', 'Ref', 'ProcessError', 'SuspensionRequired',
-                 'run', 'sleep', 'spawn_task', 'server', 'is_isolated',
-                 'caps'],
+                 'run', 'sleep', 'spawn_task', 'server', 'is_isolated'],
     )
     mod.__dict__.update(ns)
     sys.modules['erlang'] = mod
