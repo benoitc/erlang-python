@@ -34,7 +34,6 @@ suite is visible. `scripts/check_code_map.sh` requires a row per module.
 | `py_channel` | `py_channel_SUITE`, `py_byte_channel_SUITE` |
 | `py_byte_channel` | `py_channel_SUITE`, `py_byte_channel_SUITE` |
 | `py_buffer` | `py_buffer_SUITE`, `py_isolated_buffer_SUITE` |
-| `py_caps` | `py_isolated_caps_SUITE` |
 | `py_shm` | `py_isolated_shm_SUITE` |
 | `py_import` | `py_import_SUITE` |
 | `py_preload` | `py_preload_SUITE` |

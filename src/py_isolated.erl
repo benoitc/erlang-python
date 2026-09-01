@@ -446,37 +446,9 @@ resolve_exe(Exe) ->
 
 start_child(#data{opts = Opts} = St) ->
     case check_platform_opts(Opts) of
-        ok ->
-            case caps(Opts) of
-                {ok, _} -> start_child_1(St);
-                {error, _} = Err -> Err
-            end;
-        {error, _} = Err ->
-            Err
+        ok -> start_child_1(St);
+        {error, _} = Err -> Err
     end.
-
-%% A grant is read here as well as in py_context:new/1, so a context started
-%% by any other route still fails with the configuration error rather than
-%% with a child that refuses everything.
-caps(Opts) ->
-    case maps:get(caps, Opts, undefined) of
-        undefined ->
-            {ok, none};
-        _ when is_map_key(env, Opts) ->
-            {error, {bad_caps, env_option_conflicts_with_caps_env}};
-        Caps ->
-            case py_caps:validate(Caps) of
-                {ok, Valid} -> {ok, with_import_paths(Valid, Opts)};
-                {error, _} = Err -> Err
-            end
-    end.
-
-%% A directory named in `paths' is one the child was told to import from, so
-%% it is granted for reading. Saying it twice would be a trap, and leaving it
-%% ungranted turns `paths' into an import error rather than a grant error.
-with_import_paths(#{dirs := Dirs} = Caps, Opts) ->
-    Extra = [{to_bin(P), read} || P <- maps:get(paths, Opts, [])],
-    Caps#{dirs => Dirs ++ [D || D <- Extra, not lists:member(D, Dirs)]}.
 
 %% cgroups exist only on Linux; rlimits are POSIX and apply everywhere.
 %% RLIMIT_AS is enforced by the kernel on Linux and FreeBSD; on macOS the
@@ -511,8 +483,7 @@ spawn_child(Python, Opts) ->
                 ok = socket:bind(L, #{family => local, path => Path}),
                 ok = socket:listen(L),
                 Script = filename:join(priv_dir(), "py_isolated_child.py"),
-                Args = [Script, Path | rlimit_args(Opts) ++ cgroup_args(Opts)
-                        ++ caps_args(Opts)],
+                Args = [Script, Path | rlimit_args(Opts) ++ cgroup_args(Opts)],
                 PortOpts = [exit_status, stderr_to_stdout, binary, use_stdio,
                             {args, Args}, {env, env_opt(Opts)}],
                 Port = open_port({spawn_executable, Python}, PortOpts),
@@ -1216,35 +1187,8 @@ cgroup_args(Opts) ->
         Dir -> ["--cgroup", to_list(Dir)]
     end.
 
-%% The grant travels in argv rather than in the handshake because argv is
-%% read in the child's prologue, before the socket exists and before any
-%% user code can run.
-caps_args(Opts) ->
-    case caps(Opts) of
-        {ok, none} -> [];
-        {ok, Caps} -> ["--caps-json", binary_to_list(py_caps:to_json(Caps))]
-    end.
-
-%% Without a grant the child inherits the VM's environment and the `env'
-%% option adds to it. With one, it gets what the grant names and nothing
-%% else, except the loader variables, which belong to whoever started the
-%% node rather than to the workload and without which an interpreter built
-%% against a private libpython does not start at all.
 env_opt(Opts) ->
-    User = [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(maps:get(env, Opts, #{}))],
-    case caps(Opts) of
-        {ok, none} ->
-            User;
-        {ok, #{env := Granted}} ->
-            %% `User' is empty here: a grant and the `env' option together
-            %% are refused in caps/1, because the port keeps the last of two
-            %% settings for the same name and the option would win.
-            Keep = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
-                    "DYLD_FALLBACK_LIBRARY_PATH"],
-            Clear = [{Name, false} || {Name, _} <- os:env(),
-                                      not lists:member(Name, Keep)],
-            Clear ++ [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(Granted)]
-    end.
+    [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(maps:get(env, Opts, #{}))].
 
 to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
 to_bin(L) when is_list(L) -> unicode:characters_to_binary(L);
