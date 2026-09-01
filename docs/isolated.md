@@ -312,11 +312,19 @@ file on purpose; sealing and syscall filtering are separate hardening work.
   event worker to step an idle loop).
 - `erlang.call` from inside a coroutine blocks the loop, as in the embedded
   modes; use `erlang.async_call`.
+- Without `caps` the child holds every authority the user running the node
+  holds: it reads and writes what that user can, dials anywhere and can
+  spawn processes.
 - The child decodes terms with the same rules as the NIF, so atoms sent from
   Python are created in the VM's atom table. Do not let untrusted code mint
   unbounded distinct atoms.
-- No syscall filtering: process isolation plus rlimits is the boundary. A
-  seccomp (Linux) or Capsicum (FreeBSD) sandbox is a separate hardening step.
+- No syscall filtering: process isolation plus rlimits is the boundary. What
+  the child may *reach* (files, addresses, environment) is named with the
+  `caps` option, which is a cooperative policy over Python rather than a
+  kernel boundary: see [capabilities](capabilities.md).
+- Shared memory and `caps` do not combine: a region reaches the child as a
+  path, and granting it would grant every region the node owns. A seccomp (Linux) or Capsicum (FreeBSD)
+  sandbox is a separate hardening step.
 - Each call copies its arguments and result through the socket: a 1 MB
   binary round-trips in about 1.3 ms, 16 MB in about 27 ms (worker mode:
   0.2 ms and 3 ms). For bulk data use shared memory (below).

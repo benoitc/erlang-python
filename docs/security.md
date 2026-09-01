@@ -158,8 +158,23 @@ child process:
 ```
 
 A crash kills only the child, `py_context:kill/1` is total, and rlimits or
-cgroups bound resources. See [Isolated Contexts](isolated.md). The child is
-not sandboxed at the syscall level; that is a separate hardening step.
+cgroups bound resources. See [Isolated Contexts](isolated.md).
+
+That bounds what Python may consume. What it may *reach* is named with the
+`caps` option:
+
+```erlang
+{ok, Ctx} = py_context:new(#{mode => isolated,
+                             caps => #{dirs => [{"/srv/models", read}],
+                                       net  => #{connect => [{tcp, <<"10.0.0.0/8">>, 5432}]}}}).
+```
+
+Anything not named is refused. That is a cooperative policy over Python: it
+binds Python code, not a C extension, because it is built on an audit hook.
+[Capabilities](capabilities.md) says what holds and what does not. The child
+is not sandboxed at the syscall level; that is a separate hardening step,
+and the point at which capability sets would bind an adversary rather than
+a mistake.
 
 ## Signal Handling Note
 
