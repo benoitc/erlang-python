@@ -21,7 +21,11 @@
 -record(state, {
     worker_id :: binary(),
     loop_ref :: reference(),
-    timers = #{} :: #{reference() => {reference(), non_neg_integer()}},
+    %% TimerRef => {ErlTimerRef, LoopRef, CallbackId}. The loop is the one
+    %% named in the start_timer message: a loop without a worker of its own
+    %% borrows this one, so an expiry is dispatched to the loop that set it.
+    timers = #{} :: #{reference() | non_neg_integer() =>
+                      {reference(), reference(), non_neg_integer()}},
     stats = #{select_count => 0, timer_count => 0, dispatch_count => 0} :: map()
 }).
 
@@ -62,38 +66,42 @@ handle_info({select, FdRes, _Ref, ready_output}, State) ->
     maybe_send_task_ready(),
     {noreply, State};
 
-handle_info({start_timer, _LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
+handle_info({start_timer, LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
     #state{timers = Timers} = State,
     ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
-    NewTimers = maps:put(TimerRef, {ErlTimerRef, CallbackId}, Timers),
+    NewTimers = maps:put(TimerRef, {ErlTimerRef, LoopRef, CallbackId}, Timers),
     {noreply, State#state{timers = NewTimers}};
 
 handle_info({start_timer, DelayMs, CallbackId, TimerRef}, State) ->
-    #state{timers = Timers} = State,
+    #state{loop_ref = LoopRef, timers = Timers} = State,
     ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
-    NewTimers = maps:put(TimerRef, {ErlTimerRef, CallbackId}, Timers),
+    NewTimers = maps:put(TimerRef, {ErlTimerRef, LoopRef, CallbackId}, Timers),
     {noreply, State#state{timers = NewTimers}};
 
 handle_info({cancel_timer, TimerRef}, State) ->
     #state{timers = Timers} = State,
     case maps:get(TimerRef, Timers, undefined) of
         undefined -> {noreply, State};
-        {ErlTimerRef, _CallbackId} ->
+        {ErlTimerRef, _LoopRef, _CallbackId} ->
             erlang:cancel_timer(ErlTimerRef),
             NewTimers = maps:remove(TimerRef, Timers),
             {noreply, State#state{timers = NewTimers}}
     end;
 
 handle_info({timeout, TimerRef}, State) ->
-    #state{loop_ref = LoopRef, timers = Timers} = State,
+    #state{loop_ref = OwnLoopRef, timers = Timers} = State,
     case maps:get(TimerRef, Timers, undefined) of
         undefined -> {noreply, State};
-        {_ErlTimerRef, CallbackId} ->
+        {_ErlTimerRef, LoopRef, CallbackId} ->
             py_nif:dispatch_timer(LoopRef, CallbackId),
             NewTimers = maps:remove(TimerRef, Timers),
-            %% Trigger event processing after timer dispatch
-            %% This ensures _run_once is called to handle the timer callback
-            maybe_send_task_ready(),
+            %% Trigger event processing after timer dispatch so _run_once
+            %% handles the timer callback. A borrowed loop is not served by
+            %% the task_ready loop of this worker, so drive it directly.
+            case LoopRef of
+                OwnLoopRef -> maybe_send_task_ready();
+                _ -> _ = py_nif:process_ready_tasks(LoopRef)
+            end,
             {noreply, State#state{timers = NewTimers}}
     end;
 
@@ -116,7 +124,7 @@ handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
 handle_info(_Info, State) -> {noreply, State}.
 
 terminate(_Reason, #state{timers = Timers}) ->
-    maps:foreach(fun(_TimerRef, {ErlTimerRef, _CallbackId}) ->
+    maps:foreach(fun(_TimerRef, {ErlTimerRef, _LoopRef, _CallbackId}) ->
         erlang:cancel_timer(ErlTimerRef)
     end, Timers),
     ok.

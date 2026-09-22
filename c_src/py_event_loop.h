@@ -560,6 +560,8 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
  *
  * NIF: event_loop_destroy(LoopRef) -> ok | {error, Reason}
  */
+ERL_NIF_TERM nif_event_loop_release_python_loop(ErlNifEnv *env, int argc,
+                                                const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM nif_event_loop_destroy(ErlNifEnv *env, int argc,
                                      const ERL_NIF_TERM argv[]);
 

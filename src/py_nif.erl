@@ -68,6 +68,7 @@
     set_event_loop_priv_dir/1,
     event_loop_new/0,
     event_loop_destroy/1,
+    event_loop_release_python_loop/1,
     event_loop_set_router/2,
     event_loop_set_worker/2,
     event_loop_set_id/2,
@@ -544,6 +545,15 @@ event_loop_new() ->
 %% @doc Destroy an event loop.
 -spec event_loop_destroy(reference()) -> ok | {error, term()}.
 event_loop_destroy(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Drop the loop's reference to its Python `ErlangEventLoop'.
+%%
+%% The Python loop holds a capsule that keeps the loop resource alive, so
+%% a loop that ran tasks must release it before `event_loop_destroy/1' or
+%% neither side is ever freed.
+-spec event_loop_release_python_loop(reference()) -> ok | {error, term()}.
+event_loop_release_python_loop(_LoopRef) ->
     ?NIF_STUB.
 
 %% @doc Set the router process for an event loop (legacy).

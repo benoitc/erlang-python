@@ -95,6 +95,15 @@ ERL_NIF_TERM ATOM_DISPATCH;
 /** @brief Name for the PyCapsule storing event loop pointer */
 static const char *EVENT_LOOP_CAPSULE_NAME = "erlang_python.event_loop";
 
+/* Capsule over a loop resource for ErlangEventLoop (defined with the
+ * capsule helpers below). */
+static PyObject *make_loop_capsule(erlang_event_loop_t *loop);
+
+/* Timer refs are keyed in the receiving worker's map. Loops without a
+ * worker of their own share the global worker, so the ids must be unique
+ * across loops, not per loop. */
+static _Atomic uint64_t g_next_timer_ref = 1;
+
 /** @brief Module attribute name for storing the event loop */
 static const char *EVENT_LOOP_ATTR_NAME = "_loop";
 
@@ -2862,6 +2871,41 @@ static void loop_gil_release(erlang_event_loop_t *loop, loop_gil_t *g) {
     PyGILState_Release(g->gstate);
 }
 
+/**
+ * event_loop_release_python_loop(LoopRef) -> ok | {error, Reason}
+ *
+ * Drops the loop's reference to its Python ErlangEventLoop. That object
+ * holds a capsule that keeps the loop resource alive, so without this the
+ * two keep each other forever once the loop was driven by
+ * process_ready_tasks. Called by the pool before event_loop_destroy.
+ * Dirty: takes the loop's GIL.
+ */
+ERL_NIF_TERM nif_event_loop_release_python_loop(ErlNifEnv *env, int argc,
+                                                const ERL_NIF_TERM argv[]) {
+    (void)argc;
+
+    erlang_event_loop_t *loop;
+    if (!enif_get_resource(env, argv[0], EVENT_LOOP_RESOURCE_TYPE,
+                           (void **)&loop)) {
+        return make_error(env, "invalid_loop");
+    }
+    if (loop->py_loop == NULL) {
+        return ATOM_OK;
+    }
+    if (!runtime_is_running()) {
+        return make_error(env, "python_not_running");
+    }
+
+    loop_gil_t gil;
+    if (!loop_gil_acquire(loop, &gil)) {
+        return make_error(env, "interpreter_gone");
+    }
+    Py_CLEAR(loop->py_loop);
+    loop->py_loop_valid = false;
+    loop_gil_release(loop, &gil);
+    return ATOM_OK;
+}
+
 void event_loop_detach_interpreter(erlang_event_loop_t *loop) {
     if (loop == NULL) {
         return;
@@ -3118,6 +3162,13 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
 
     /* Lazy loop creation (uvloop-style): create Python loop on first use */
     if (!loop->py_loop_valid || loop->py_loop == NULL) {
+        if (num_tasks == 0) {
+            /* Nothing to schedule and no Python loop to run callbacks in:
+             * the pending events stay queued for whoever polls this loop
+             * (get_pending, or a Python loop attached later). */
+            loop_gil_release(loop, &gil);
+            return ATOM_OK;
+        }
         /* Create ErlangEventLoop directly instead of via asyncio.new_event_loop().
          * This is necessary because dirty NIF scheduler threads don't have the
          * event loop policy set. asyncio.new_event_loop() would create a
@@ -3147,7 +3198,22 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             return make_error(env, "loop_class_not_found");
         }
 
-        PyObject *new_loop = PyObject_CallNoArgs(loop_class);
+        /* The interpreter's default loop keeps the global capsule path in
+         * ErlangEventLoop.__init__. Any other loop (the event loop pool)
+         * gets a capsule over its own resource, so its timers, fd events
+         * and pending queue stay on this loop instead of the global one. */
+        PyObject *new_loop;
+        if (loop == get_interpreter_event_loop()) {
+            new_loop = PyObject_CallNoArgs(loop_class);
+        } else {
+            PyObject *capsule = make_loop_capsule(loop);
+            if (capsule == NULL) {
+                new_loop = NULL;
+            } else {
+                new_loop = PyObject_CallOneArg(loop_class, capsule);
+                Py_DECREF(capsule);
+            }
+        }
         Py_DECREF(loop_class);
         if (new_loop == NULL) {
             PyErr_Clear();
@@ -6963,7 +7029,7 @@ static PyObject *py_schedule_timer(PyObject *self, PyObject *args) {
     }
     if (delay_ms < 0) delay_ms = 0;
 
-    uint64_t timer_ref_id = atomic_fetch_add(&loop->next_callback_id, 1);
+    uint64_t timer_ref_id = atomic_fetch_add(&g_next_timer_ref, 1);
 
     /* Use per-call env for thread safety in free-threaded Python */
     ErlNifEnv *msg_env = enif_alloc_env();
@@ -7214,6 +7280,21 @@ static void global_loop_capsule_destructor(PyObject *capsule) {
         /* Only release the reference, don't shutdown */
         enif_release_resource(loop);
     }
+}
+
+/**
+ * Capsule over an Erlang-owned loop resource. The capsule keeps the
+ * resource alive and releases it when collected; it never signals
+ * shutdown, Erlang does that through event_loop_destroy.
+ */
+static PyObject *make_loop_capsule(erlang_event_loop_t *loop) {
+    enif_keep_resource(loop);
+    PyObject *capsule = PyCapsule_New(loop, LOOP_CAPSULE_NAME,
+                                      global_loop_capsule_destructor);
+    if (capsule == NULL) {
+        enif_release_resource(loop);
+    }
+    return capsule;
 }
 
 /* Python function: _loop_new() -> capsule */
@@ -7470,10 +7551,7 @@ static PyObject *py_get_global_loop_capsule(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    /* Keep the resource alive while capsule exists */
-    enif_keep_resource(loop);
-
-    return PyCapsule_New(loop, LOOP_CAPSULE_NAME, global_loop_capsule_destructor);
+    return make_loop_capsule(loop);
 }
 
 /**
@@ -8044,27 +8122,18 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    /* For timer scheduling, we need to use the global interpreter loop which
-     * has the worker process. The capsule's loop may be a Python-created loop
-     * that doesn't have has_worker set, which would cause timer dispatches
-     * to go to the router instead of the worker, breaking the event loop flow.
-     *
-     * The global loop (created by Erlang) has has_worker=true and its worker
-     * properly triggers process_ready_tasks after timer dispatch. */
-    erlang_event_loop_t *target_loop = get_interpreter_event_loop();
-    if (target_loop == NULL) {
-        /* Fall back to capsule's loop if global not available */
-        target_loop = loop;
-    }
-
-    if (!event_loop_ensure_worker(target_loop)) {
+    /* The timer belongs to the capsule's loop: the message carries that
+     * loop and the worker dispatches the expiry to it, so a pool loop's
+     * timers never land in another loop's pending queue. A loop without a
+     * worker of its own borrows the global shared worker. */
+    if (!event_loop_ensure_worker(loop)) {
         PyErr_SetString(PyExc_RuntimeError, "Event loop has no router or worker");
         return NULL;
     }
 
     if (delay_ms < 0) delay_ms = 0;
 
-    uint64_t timer_ref_id = atomic_fetch_add(&target_loop->next_callback_id, 1);
+    uint64_t timer_ref_id = atomic_fetch_add(&g_next_timer_ref, 1);
 
     ErlNifEnv *msg_env = enif_alloc_env();
     if (msg_env == NULL) {
@@ -8072,8 +8141,8 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    /* Include the target loop resource in message so dispatch goes to correct loop */
-    ERL_NIF_TERM loop_term = enif_make_resource(msg_env, target_loop);
+    /* Include the loop resource in message so dispatch goes to correct loop */
+    ERL_NIF_TERM loop_term = enif_make_resource(msg_env, loop);
 
     ERL_NIF_TERM msg = enif_make_tuple5(
         msg_env,
@@ -8084,9 +8153,7 @@ static PyObject *py_schedule_timer_for(PyObject *self, PyObject *args) {
         enif_make_uint64(msg_env, timer_ref_id)
     );
 
-    /* Use worker_pid when available for scalable I/O */
-    ErlNifPid *target_pid = &target_loop->worker_pid;
-    int send_result = enif_send(NULL, target_pid, msg_env, msg);
+    int send_result = enif_send(NULL, &loop->worker_pid, msg_env, msg);
     enif_free_env(msg_env);
 
     if (!send_result) {
@@ -8535,6 +8602,7 @@ int init_subinterpreter_event_loop(ErlNifEnv *env) {
     {"set_event_loop_priv_dir", 1, nif_set_event_loop_priv_dir, 0}, \
     {"event_loop_new", 0, nif_event_loop_new, 0}, \
     {"event_loop_destroy", 1, nif_event_loop_destroy, 0}, \
+    {"event_loop_release_python_loop", 1, nif_event_loop_release_python_loop, ERL_NIF_DIRTY_JOB_CPU_BOUND}, \
     {"event_loop_set_router", 2, nif_event_loop_set_router, 0}, \
     {"event_loop_set_worker", 2, nif_event_loop_set_worker, 0}, \
     {"event_loop_set_id", 2, nif_event_loop_set_id, 0}, \

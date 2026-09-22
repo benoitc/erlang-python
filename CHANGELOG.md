@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Tasks on the event loop pool that awaited `asyncio.sleep` for more than a
+  few milliseconds never completed when several ran at once: with 24
+  concurrent 50 ms sleeps, 23 timed out, while the same tasks run one after
+  another always finished (in Hornbeam, concurrent ASGI requests hung until
+  the request timeout). Every pool loop scheduled its timers on the default
+  loop and polled that loop's queue, where the per-loop callback ids
+  collided. Each pool loop now drives a Python loop bound to its own
+  resource, a timer expiry is dispatched to the loop that set it, and a loop
+  with no tasks leaves its pending events to whoever polls it.
+
 ## 5.0.0 (2026-08-29)
 
 ### Added

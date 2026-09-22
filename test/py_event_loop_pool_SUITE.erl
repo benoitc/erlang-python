@@ -29,6 +29,9 @@
     %% Ordering test
     test_tasks_execute_in_order/1,
 
+    %% Timer test
+    test_concurrent_sleeps_complete/1,
+
     %% Exec/Eval tests
     test_exec_basic/1,
     test_eval_basic/1,
@@ -47,6 +50,7 @@ all() ->
         test_spawn_task,
         test_concurrent_tasks,
         test_tasks_execute_in_order,
+        test_concurrent_sleeps_complete,
         test_exec_basic,
         test_eval_basic,
         test_exec_eval_namespace,
@@ -170,6 +174,46 @@ test_tasks_execute_in_order(_Config) ->
 
     %% Results should be in submission order
     [{ok, 1.0}, {ok, 2.0}, {ok, 3.0}, {ok, 4.0}, {ok, 5.0}] = Results,
+    ok.
+
+%% ============================================================================
+%% Timer Test
+%% ============================================================================
+
+%% @doc Many tasks sleeping at once, spread over the pool, must all wake up.
+%%
+%% Regression: every pool loop used to schedule its timers on the global
+%% loop and poll the global pending queue, and per-loop callback ids
+%% collided there, so with 24 concurrent 50 ms sleeps only one task ever
+%% resumed. Sleeps of 0 or 1 ms bypass the timer path, so the sleep here is
+%% long enough to go through erlang:send_after.
+test_concurrent_sleeps_complete(_Config) ->
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    N = 32,
+    SleepMs = 100,
+    Self = self(),
+    %% One process per task: get_loop/0 binds a loop per calling process
+    Pids = [spawn_link(fun() ->
+        {ok, Loop} = py_event_loop_pool:get_loop(),
+        Ref = make_ref(),
+        ok = py_nif:submit_task(Loop, self(), Ref, <<"py_test_pool_sleep">>,
+                                <<"nap">>, [SleepMs], #{}),
+        R = receive {async_result, Ref, X} -> X after 5000 -> timeout end,
+        Self ! {done, self(), Loop, R}
+    end) || _ <- lists:seq(1, N)],
+    Results = [receive {done, Pid, Loop, R} -> {Loop, R} end || Pid <- Pids],
+    Timeouts = [x || {_, timeout} <- Results],
+    ct:log("results: ~p", [Results]),
+    [] = Timeouts,
+    [{ok, _} = R || {_, R} <- Results],
+    Loops = lists:usort([Loop || {Loop, _} <- Results]),
+    ct:log("tasks ran on ~p loops", [length(Loops)]),
+    case maps:get(num_loops, py_event_loop_pool:get_stats(), 1) of
+        1 -> ok;
+        _ -> true = length(Loops) > 1
+    end,
     ok.
 
 %% ============================================================================
