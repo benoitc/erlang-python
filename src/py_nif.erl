@@ -68,6 +68,7 @@
     set_event_loop_priv_dir/1,
     event_loop_new/0,
     event_loop_destroy/1,
+    event_loop_release_python_loop/1,
     event_loop_set_router/2,
     event_loop_set_worker/2,
     event_loop_set_id/2,
@@ -157,6 +158,7 @@
     context_get_callback_pipe/1,
     context_write_callback_response/2,
     context_resume/3,
+    context_callback_reply/3,
     context_cancel_resume/2,
     context_get_event_loop/1,
     %% py_ref API (Python object references with interp_id)
@@ -544,6 +546,15 @@ event_loop_new() ->
 %% @doc Destroy an event loop.
 -spec event_loop_destroy(reference()) -> ok | {error, term()}.
 event_loop_destroy(_LoopRef) ->
+    ?NIF_STUB.
+
+%% @doc Drop the loop's reference to its Python `ErlangEventLoop'.
+%%
+%% The Python loop holds a capsule that keeps the loop resource alive, so
+%% a loop that ran tasks must release it before `event_loop_destroy/1' or
+%% neither side is ever freed.
+-spec event_loop_release_python_loop(reference()) -> ok | {error, term()}.
+event_loop_release_python_loop(_LoopRef) ->
     ?NIF_STUB.
 
 %% @doc Set the router process for an event loop (legacy).
@@ -1272,6 +1283,17 @@ context_write_callback_response(_ContextRef, _Data) ->
     {ok, term()} | {error, term()} | {error, not_supported_in_thread_model} |
     {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
 context_resume(_ContextRef, _StateRef, _Result) ->
+    ?NIF_STUB.
+
+%% @doc Deliver the result of an inline callback to the context thread.
+%%
+%% The thread sent `{py_callback, CallbackId, Name, Args}' from an
+%% `erlang.call' in a call request and waits for this reply while it
+%% serves the context's queue. Result is the frame the callback decoder
+%% reads: a status byte (2 ok, 1 error) then the payload.
+-spec context_callback_reply(reference(), non_neg_integer(), binary()) ->
+    ok | {error, term()}.
+context_callback_reply(_ContextRef, _CallbackId, _Result) ->
     ?NIF_STUB.
 
 %% @doc Cancel a suspended context resume (cleanup on error).

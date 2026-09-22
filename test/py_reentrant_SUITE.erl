@@ -27,7 +27,11 @@
     test_async_call/1,
     test_callback_name_registry/1,
     test_etf_decode_safe/1,
-    test_reentrant_resume_stress/1
+    test_reentrant_resume_stress/1,
+    test_call_reentrant_depths/1,
+    test_call_reentrant_repeated/1,
+    test_call_sequential_callbacks/1,
+    test_readme_reentrant_example/1
 ]).
 
 all() ->
@@ -44,7 +48,11 @@ all() ->
         test_async_call,
         test_callback_name_registry,
         test_etf_decode_safe,
-        test_reentrant_resume_stress
+        test_reentrant_resume_stress,
+        test_call_reentrant_depths,
+        test_call_reentrant_repeated,
+        test_call_sequential_callbacks,
+        test_readme_reentrant_example
     ].
 
 init_per_suite(Config) ->
@@ -74,6 +82,94 @@ end_per_testcase(_TestCase, _Config) ->
     try py:unregister_function(etf_probe_ok) catch _:_ -> ok end,
     try py:unregister_function(etf_probe_novel) catch _:_ -> ok end,
     try py:unregister_function(rs_double) catch _:_ -> ok end,
+    try py:unregister_function(nest_step) catch _:_ -> ok end,
+    ok.
+
+%%% ============================================================================
+%%% py:call as the outer call
+%%%
+%%% py:call used to run without suspension enabled: erlang.call blocked the
+%%% context thread on the thread worker pipe, the callback's nested py:call
+%%% landed on a busy context and the chain hung until the timeout, ending
+%%% with "callback synchronisation lost; retry". py:eval chains worked.
+%%% ============================================================================
+
+reentrant_test_dir() ->
+    TestDir = filename:join(code:lib_dir(erlang_python), "test"),
+    ok = py:exec(iolist_to_binary(io_lib:format(
+        "import sys; sys.path.insert(0, '~s')", [TestDir]))).
+
+register_nest_step() ->
+    py:register_function(nest_step, fun([N, D]) ->
+        {ok, R} = py:call(py_test_reentrant, down, [N + 1, D - 1], #{}, 10000),
+        R
+    end).
+
+%% @doc py:call -> erlang.call -> py:call, nested 1, 2, 3 and 5 deep.
+test_call_reentrant_depths(_Config) ->
+    reentrant_test_dir(),
+    register_nest_step(),
+    lists:foreach(fun(Depth) ->
+        {ok, Depth} = py:call(py_test_reentrant, down, [0, Depth], #{}, 10000)
+    end, [1, 2, 3, 5]),
+    py:unregister_function(nest_step),
+    ok.
+
+%% @doc One depth, many times: the nested py:call must not depend on which
+%% context the scheduler picks.
+test_call_reentrant_repeated(_Config) ->
+    reentrant_test_dir(),
+    register_nest_step(),
+    lists:foreach(fun(I) ->
+        {ok, I} = py:call(py_test_reentrant, down, [I - 1, 1], #{}, 10000)
+    end, lists:seq(1, 20)),
+    py:unregister_function(nest_step),
+    ok.
+
+%% @doc Several sequential erlang.call in one function called with py:call,
+%% the last callback calling Python again (the hooks pattern). The function
+%% runs once; each call blocks inline while the context serves the nested
+%% py:call.
+test_call_sequential_callbacks(_Config) ->
+    reentrant_test_dir(),
+    py:register_function(add_ten, fun([X]) -> X + 10 end),
+    py:register_function(multiply_by_two, fun([X]) -> X * 2 end),
+    py:register_function(subtract_five, fun([X]) ->
+        {ok, R} = py:call(py_test_reentrant, minus, [X, 5], #{}, 10000),
+        R
+    end),
+    lists:foreach(fun(I) ->
+        %% ((I + 10) * 2) - 5
+        Expected = ((I + 10) * 2) - 5,
+        {ok, Expected} = py:call(py_test_reentrant, chain, [I], #{}, 10000)
+    end, lists:seq(1, 5)),
+    ok.
+
+%% @doc The README "Reentrant Callbacks" example, as written there: the
+%% callback's py:call('__main__', double, ...) must see the double the
+%% caller defined with py:exec.
+test_readme_reentrant_example(_Config) ->
+    %% Register an Erlang function that calls Python
+    py:register_function(double_via_python, fun([X]) ->
+        {ok, Result} = py:call('__main__', double, [X]),
+        Result
+    end),
+
+    %% Define Python functions
+    ok = py:exec(<<"
+def double(x):
+    return x * 2
+
+def process(x):
+    from erlang import call
+    # This calls Erlang, which calls Python's double()
+    doubled = call('double_via_python', x)
+    return doubled + 1
+">>),
+
+    %% Test the full round-trip
+    {ok, 21} = py:call('__main__', process, [10]),
+    %% 10 -> double_via_python -> double(10)=20 -> +1 = 21
     ok.
 
 %%% ============================================================================

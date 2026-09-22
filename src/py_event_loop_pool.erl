@@ -549,6 +549,7 @@ terminate(_Reason, State) ->
         Loops ->
             lists:foreach(fun({LoopRef, WorkerPid}) ->
                 try py_event_worker:stop(WorkerPid) catch _:_ -> ok end,
+                try py_nif:event_loop_release_python_loop(LoopRef) catch _:_ -> ok end,
                 try py_nif:event_loop_destroy(LoopRef) catch _:_ -> ok end
             end, tuple_to_list(Loops))
     end,

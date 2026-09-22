@@ -260,6 +260,10 @@ static int is_inline_schedule_marker(PyObject *obj);
 #include "py_exec.c"
 #include "py_logging.c"
 #include "py_shared_dict.c"
+/* Inline callback path for call requests on worker contexts (defined with
+ * the context thread below, used by erlang_call_impl). */
+static PyObject *ctx_call_erlang_inline(py_context_t *ctx, const char *func_name,
+                                        size_t func_name_len, PyObject *call_args);
 #include "py_callback.c"
 #include "py_thread_worker.c"
 #include "py_event_loop.c"
@@ -483,7 +487,11 @@ static void suspended_context_state_destructor(ErlNifEnv *env, void *obj) {
         enif_release_binary(&state->orig_code);
     }
 
-    /* Release the context resource (was kept in create_suspended_context_state_*) */
+    /* Release the env and context resources (kept in create_suspended_context_state_*) */
+    if (state->penv != NULL) {
+        enif_release_resource(state->penv);
+        state->penv = NULL;
+    }
     if (state->ctx != NULL) {
         enif_release_resource(state->ctx);
         state->ctx = NULL;
@@ -1357,35 +1365,106 @@ static void ctx_queue_cancel_all(py_context_t *ctx) {
  * ============================================================================ */
 
 /**
- * @brief Execute a call request in the OWN_GIL thread
+ * @brief Set an {error, Reason} response
  */
-static void ctx_execute_call(py_context_t *ctx) {
-    /* Decode request from shared_env */
-    ERL_NIF_TERM module_term, func_term, args_term, kwargs_term;
+static void ctx_set_error(py_context_t *ctx, const char *reason) {
+    ctx->response_term = enif_make_tuple2(ctx->shared_env,
+        enif_make_atom(ctx->shared_env, "error"),
+        enif_make_atom(ctx->shared_env, reason));
+    ctx->response_ok = false;
+}
+
+/**
+ * @brief Resolve Module.Func for a call request or its replay
+ *
+ * `__main__` is the caller's namespace: the process-local env when the
+ * request has one, then the context globals. Other modules go through the
+ * context module cache.
+ *
+ * @return New reference, or NULL with the Python error set
+ */
+static PyObject *ctx_resolve_call_target(py_context_t *ctx, py_env_resource_t *penv,
+                                         const char *module_name, const char *func_name) {
+    if (strcmp(module_name, "__main__") == 0) {
+        PyObject *func = NULL;
+        if (penv != NULL && penv->globals != NULL) {
+            func = PyDict_GetItemString(penv->globals, func_name);  /* Borrowed ref */
+        }
+        if (func == NULL && ctx->globals != NULL) {
+            func = PyDict_GetItemString(ctx->globals, func_name);  /* Borrowed ref */
+        }
+        if (func != NULL) {
+            Py_INCREF(func);
+            return func;
+        }
+    }
+    PyObject *module = context_get_module(ctx, module_name);  /* Borrowed ref (cached) */
+    if (module == NULL) {
+        return NULL;
+    }
+    return PyObject_GetAttrString(module, func_name);
+}
+
+/**
+ * @brief Build the positional argument tuple of a call request
+ *
+ * @return New tuple, or NULL with *reason set to the error atom name
+ */
+static PyObject *ctx_build_call_args(ErlNifEnv *env, ERL_NIF_TERM args_term,
+                                     const char **reason) {
+    unsigned int args_len;
+    if (!enif_get_list_length(env, args_term, &args_len)) {
+        *reason = "invalid_args";
+        return NULL;
+    }
+    PyObject *args = PyTuple_New(args_len);
+    if (args == NULL) {
+        PyErr_Clear();
+        *reason = "arg_conversion_failed";
+        return NULL;
+    }
+    ERL_NIF_TERM head, tail = args_term;
+    for (unsigned int i = 0; i < args_len; i++) {
+        enif_get_list_cell(env, tail, &head, &tail);
+        PyObject *arg = term_to_py(env, head);
+        if (arg == NULL) {
+            PyErr_Clear();
+            Py_DECREF(args);
+            *reason = "arg_conversion_failed";
+            return NULL;
+        }
+        PyTuple_SET_ITEM(args, i, arg);
+    }
+    return args;
+}
+
+/**
+ * @brief Execute a call request, with or without a process-local env
+ *
+ * Shared body of ctx_execute_call and ctx_execute_call_with_env. An
+ * erlang.call in the function waits inline (ctx_call_erlang_inline): the
+ * thread serves this context's queue meanwhile and nothing is replayed.
+ *
+ * @param penv Process-local env for `__main__` lookups, or NULL
+ */
+static void ctx_execute_call_in(py_context_t *ctx, py_env_resource_t *penv) {
+    /* Decode request from shared_env: {Module, Func, Args, Kwargs} */
     const ERL_NIF_TERM *tuple_terms;
     int tuple_arity;
 
     if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &tuple_arity, &tuple_terms) ||
         tuple_arity < 4) {
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_request"));
-        ctx->response_ok = false;
+        ctx_set_error(ctx, "invalid_request");
         return;
     }
 
-    module_term = tuple_terms[0];
-    func_term = tuple_terms[1];
-    args_term = tuple_terms[2];
-    kwargs_term = tuple_terms[3];
+    ERL_NIF_TERM args_term = tuple_terms[2];
+    ERL_NIF_TERM kwargs_term = tuple_terms[3];
 
     ErlNifBinary module_bin, func_bin;
-    if (!enif_inspect_binary(ctx->shared_env, module_term, &module_bin) ||
-        !enif_inspect_binary(ctx->shared_env, func_term, &func_bin)) {
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_module_or_func"));
-        ctx->response_ok = false;
+    if (!enif_inspect_binary(ctx->shared_env, tuple_terms[0], &module_bin) ||
+        !enif_inspect_binary(ctx->shared_env, tuple_terms[1], &func_bin)) {
+        ctx_set_error(ctx, "invalid_module_or_func");
         return;
     }
 
@@ -1395,83 +1474,33 @@ static void ctx_execute_call(py_context_t *ctx) {
     if (module_name == NULL || func_name_str == NULL) {
         enif_free(module_name);
         enif_free(func_name_str);
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "alloc_failed"));
-        ctx->response_ok = false;
+        ctx_set_error(ctx, "alloc_failed");
         return;
     }
 
-    PyObject *module = NULL;
-    PyObject *func = NULL;
+    /* Thread-local state for callbacks: with tl_current_context set and
+     * suspension left off, an erlang.call in the function takes the inline
+     * path (ctx_call_erlang_inline) and the function runs exactly once. */
+    py_context_t *prev_context = tl_current_context;
+    tl_current_context = ctx;
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = penv;
 
-    /* Special handling for __main__ module - check ctx->globals first */
-    if (strcmp(module_name, "__main__") == 0) {
-        func = PyDict_GetItemString(ctx->globals, func_name_str);  /* Borrowed ref */
-        if (func != NULL) {
-            Py_INCREF(func);
-        }
-    }
-
-    if (func == NULL) {
-        /* Get or import module */
-        module = context_get_module(ctx, module_name);
-        if (module == NULL) {
-            ctx->response_term = make_py_error(ctx->shared_env);
-            ctx->response_ok = false;
-            enif_free(module_name);
-            enif_free(func_name_str);
-            return;
-        }
-
-        /* Get function */
-        func = PyObject_GetAttrString(module, func_name_str);
-        if (func == NULL) {
-            ctx->response_term = make_py_error(ctx->shared_env);
-            ctx->response_ok = false;
-            enif_free(module_name);
-            enif_free(func_name_str);
-            return;
-        }
-    }
-
+    PyObject *func = ctx_resolve_call_target(ctx, penv, module_name, func_name_str);
     enif_free(module_name);
     enif_free(func_name_str);
-
-    /* Convert args */
-    unsigned int args_len;
-    if (!enif_get_list_length(ctx->shared_env, args_term, &args_len)) {
-        Py_DECREF(func);
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_args"));
+    if (func == NULL) {
+        ctx->response_term = make_py_error(ctx->shared_env);
         ctx->response_ok = false;
-        return;
+        goto cleanup;
     }
 
-    PyObject *args = PyTuple_New(args_len);
+    const char *reason = NULL;
+    PyObject *args = ctx_build_call_args(ctx->shared_env, args_term, &reason);
     if (args == NULL) {
         Py_DECREF(func);
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
-        ctx->response_ok = false;
-        return;
-    }
-    ERL_NIF_TERM head, tail = args_term;
-    for (unsigned int i = 0; i < args_len; i++) {
-        enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
-        PyObject *arg = term_to_py(ctx->shared_env, head);
-        if (arg == NULL) {
-            Py_DECREF(args);
-            Py_DECREF(func);
-            ctx->response_term = enif_make_tuple2(ctx->shared_env,
-                enif_make_atom(ctx->shared_env, "error"),
-                enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
-            ctx->response_ok = false;
-            return;
-        }
-        PyTuple_SET_ITEM(args, i, arg);
+        ctx_set_error(ctx, reason);
+        goto cleanup;
     }
 
     /* Convert kwargs */
@@ -1486,16 +1515,30 @@ static void ctx_execute_call(py_context_t *ctx) {
     Py_DECREF(args);
     Py_XDECREF(kwargs);
 
-    if (py_result == NULL) {
-        ctx->response_term = make_py_error(ctx->shared_env);
-        ctx->response_ok = false;
-    } else {
+    if (py_result != NULL) {
         ERL_NIF_TERM term_result = py_to_term(ctx->shared_env, py_result);
         Py_DECREF(py_result);
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
             enif_make_atom(ctx->shared_env, "ok"), term_result);
         ctx->response_ok = true;
+    } else {
+        ctx->response_term = make_py_error(ctx->shared_env);
+        ctx->response_ok = false;
     }
+
+cleanup:
+    /* Restore thread-local state */
+    tl_current_local_env = prev_local_env;
+    tl_current_context = prev_context;
+}
+
+/**
+ * @brief Execute a call request in the OWN_GIL thread
+ *
+ * `__main__` functions are looked up in ctx->globals.
+ */
+static void ctx_execute_call(py_context_t *ctx) {
+    ctx_execute_call_in(ctx, NULL);
 }
 
 /**
@@ -1871,7 +1914,7 @@ static void ctx_execute_eval_with_env(py_context_t *ctx) {
             PyErr_Clear();
             /* Create suspended state for callback handling */
             suspended_context_state_t *suspended = create_suspended_context_state_for_eval(
-                ctx->shared_env, ctx, &code_bin, tuple_terms[1]);
+                ctx->shared_env, ctx, &code_bin, tuple_terms[1], penv);
             if (suspended == NULL) {
                 tl_pending_callback = false;
                 Py_CLEAR(tl_pending_args);
@@ -1974,7 +2017,7 @@ static void ctx_execute_eval_with_env(py_context_t *ctx) {
             if (tl_pending_callback) {
                 PyErr_Clear();
                 suspended_context_state_t *suspended = create_suspended_context_state_for_eval(
-                    ctx->shared_env, ctx, &code_bin, tuple_terms[1]);
+                    ctx->shared_env, ctx, &code_bin, tuple_terms[1], penv);
                 if (suspended == NULL) {
                     tl_pending_callback = false;
                     Py_CLEAR(tl_pending_args);
@@ -2043,10 +2086,7 @@ static void ctx_execute_call_with_env(py_context_t *ctx) {
     ctx->local_env_ptr = NULL;  /* Clear after use */
 
     if (penv == NULL || penv->globals == NULL) {
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_env"));
-        ctx->response_ok = false;
+        ctx_set_error(ctx, "invalid_env");
         return;
     }
 
@@ -2054,159 +2094,11 @@ static void ctx_execute_call_with_env(py_context_t *ctx) {
      * Compare env's interp_id with the current Python interpreter's ID. */
     PyInterpreterState *current_interp = PyInterpreterState_Get();
     if (current_interp != NULL && penv->interp_id != PyInterpreterState_GetID(current_interp)) {
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "env_wrong_interpreter"));
-        ctx->response_ok = false;
+        ctx_set_error(ctx, "env_wrong_interpreter");
         return;
     }
 
-    /* Decode request from shared_env: {Module, Func, Args, Kwargs} */
-    ERL_NIF_TERM module_term, func_term, args_term, kwargs_term;
-    const ERL_NIF_TERM *tuple_terms;
-    int tuple_arity;
-
-    if (!enif_get_tuple(ctx->shared_env, ctx->request_term, &tuple_arity, &tuple_terms) ||
-        tuple_arity < 4) {
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_request"));
-        ctx->response_ok = false;
-        return;
-    }
-
-    module_term = tuple_terms[0];
-    func_term = tuple_terms[1];
-    args_term = tuple_terms[2];
-    kwargs_term = tuple_terms[3];
-
-    ErlNifBinary module_bin, func_bin;
-    if (!enif_inspect_binary(ctx->shared_env, module_term, &module_bin) ||
-        !enif_inspect_binary(ctx->shared_env, func_term, &func_bin)) {
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_module_or_func"));
-        ctx->response_ok = false;
-        return;
-    }
-
-    char *module_name = binary_to_string(&module_bin);
-    char *func_name_str = binary_to_string(&func_bin);
-
-    if (module_name == NULL || func_name_str == NULL) {
-        enif_free(module_name);
-        enif_free(func_name_str);
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "alloc_failed"));
-        ctx->response_ok = false;
-        return;
-    }
-
-    /* Set thread-local env for callback support */
-    py_env_resource_t *prev_local_env = tl_current_local_env;
-    tl_current_local_env = penv;
-
-    PyObject *func = NULL;
-
-    /* Special handling for __main__ module - look up in process-local globals */
-    if (strcmp(module_name, "__main__") == 0) {
-        func = PyDict_GetItemString(penv->globals, func_name_str);  /* Borrowed ref */
-        if (func != NULL) {
-            Py_INCREF(func);
-        }
-    }
-
-    if (func == NULL) {
-        /* Get or import module from context cache */
-        PyObject *module = context_get_module(ctx, module_name);
-        if (module == NULL) {
-            enif_free(module_name);
-            enif_free(func_name_str);
-            tl_current_local_env = prev_local_env;
-            ctx->response_term = make_py_error(ctx->shared_env);
-            ctx->response_ok = false;
-            return;
-        }
-
-        /* Get function */
-        func = PyObject_GetAttrString(module, func_name_str);
-        if (func == NULL) {
-            enif_free(module_name);
-            enif_free(func_name_str);
-            tl_current_local_env = prev_local_env;
-            ctx->response_term = make_py_error(ctx->shared_env);
-            ctx->response_ok = false;
-            return;
-        }
-    }
-
-    enif_free(module_name);
-    enif_free(func_name_str);
-
-    /* Convert args */
-    unsigned int args_len;
-    if (!enif_get_list_length(ctx->shared_env, args_term, &args_len)) {
-        Py_DECREF(func);
-        tl_current_local_env = prev_local_env;
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "invalid_args"));
-        ctx->response_ok = false;
-        return;
-    }
-
-    PyObject *args = PyTuple_New(args_len);
-    if (args == NULL) {
-        Py_DECREF(func);
-        tl_current_local_env = prev_local_env;
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "error"),
-            enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
-        ctx->response_ok = false;
-        return;
-    }
-    ERL_NIF_TERM head, tail = args_term;
-    for (unsigned int i = 0; i < args_len; i++) {
-        enif_get_list_cell(ctx->shared_env, tail, &head, &tail);
-        PyObject *arg = term_to_py(ctx->shared_env, head);
-        if (arg == NULL) {
-            Py_DECREF(args);
-            Py_DECREF(func);
-            tl_current_local_env = prev_local_env;
-            ctx->response_term = enif_make_tuple2(ctx->shared_env,
-                enif_make_atom(ctx->shared_env, "error"),
-                enif_make_atom(ctx->shared_env, "arg_conversion_failed"));
-            ctx->response_ok = false;
-            return;
-        }
-        PyTuple_SET_ITEM(args, i, arg);
-    }
-
-    /* Convert kwargs */
-    PyObject *kwargs = NULL;
-    if (enif_is_map(ctx->shared_env, kwargs_term)) {
-        kwargs = term_to_py(ctx->shared_env, kwargs_term);
-    }
-
-    /* Call the function */
-    PyObject *py_result = PyObject_Call(func, args, kwargs);
-    Py_DECREF(func);
-    Py_DECREF(args);
-    Py_XDECREF(kwargs);
-
-    tl_current_local_env = prev_local_env;
-
-    if (py_result == NULL) {
-        ctx->response_term = make_py_error(ctx->shared_env);
-        ctx->response_ok = false;
-    } else {
-        ERL_NIF_TERM term_result = py_to_term(ctx->shared_env, py_result);
-        Py_DECREF(py_result);
-        ctx->response_term = enif_make_tuple2(ctx->shared_env,
-            enif_make_atom(ctx->shared_env, "ok"), term_result);
-        ctx->response_ok = true;
-    }
+    ctx_execute_call_in(ctx, penv);
 }
 
 /**
@@ -2460,6 +2352,235 @@ static void ctx_execute_request(py_context_t *ctx) {
  * ============================================================================ */
 
 /**
+ * @brief Serve one dequeued request on the context thread
+ *
+ * Executes the request through the context's mirror fields and delivers
+ * the result (message in async mode, condvar otherwise). Called by the
+ * request loop and, with @p nested set, by ctx_call_erlang_inline while an
+ * erlang.call waits for its callback: the GIL is then already held and the
+ * caller saves and restores the mirror fields of the outer request.
+ */
+static void ctx_serve_request(py_context_t *ctx, ctx_request_t *req, bool nested) {
+    /* Check if request was cancelled while queued */
+    if (atomic_load(&req->cancelled)) {
+        /* Request cancelled - deliver error without processing */
+        if (req->async_mode) {
+            /* Async mode: send cancellation message */
+            enif_clear_env(ctx->msg_env);
+            ERL_NIF_TERM cancel_msg = enif_make_tuple3(ctx->msg_env,
+                enif_make_atom(ctx->msg_env, "py_result"),
+                enif_make_copy(ctx->msg_env, req->request_id),
+                enif_make_tuple2(ctx->msg_env,
+                    enif_make_atom(ctx->msg_env, "error"),
+                    enif_make_atom(ctx->msg_env, "cancelled")));
+            enif_send(NULL, &req->caller_pid, ctx->msg_env, cancel_msg);
+        } else {
+            /* Blocking mode: signal condvar */
+            req->result_env = enif_alloc_env();
+            if (req->result_env) {
+                req->result = enif_make_tuple2(req->result_env,
+                    enif_make_atom(req->result_env, "error"),
+                    enif_make_atom(req->result_env, "cancelled"));
+            }
+            req->success = false;
+
+            pthread_mutex_lock(&req->mutex);
+            atomic_store(&req->completed, true);
+            pthread_cond_signal(&req->cond);
+            pthread_mutex_unlock(&req->mutex);
+        }
+
+        ctx_request_release(req);
+        return;
+    }
+
+    /* Populate legacy compatibility fields from request */
+    ctx->shared_env = req->request_env;
+    ctx->request_type = req->type;
+    ctx->request_term = req->request_data;
+    ctx->reactor_buffer_ptr = req->reactor_buffer_ptr;
+    ctx->local_env_ptr = req->local_env_ptr;
+    ctx->has_current_caller = req->async_mode;
+    if (req->async_mode) {
+        ctx->current_caller = req->caller_pid;
+    }
+    ctx->response_ok = false;
+    ctx->response_term = 0;
+
+    if (nested) {
+        /* Inside an outer request: GIL held, exec marker already set */
+        ctx_execute_request(ctx);
+    } else {
+        /* Acquire GIL and process the request.
+         * exec_enter before / exec_leave after the GIL (see the locking
+         * invariant on py_context::interrupt_mutex). */
+        py_context_exec_enter(ctx);
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        ctx_execute_request(ctx);  /* Reuse execute functions */
+        PyGILState_Release(gstate);
+        py_context_exec_leave(ctx);
+    }
+
+    /* Copy response to request struct */
+    req->result_env = enif_alloc_env();
+    if (req->result_env && ctx->response_term != 0) {
+        req->result = enif_make_copy(req->result_env, ctx->response_term);
+    } else if (req->result_env) {
+        req->result = enif_make_tuple2(req->result_env,
+            enif_make_atom(req->result_env, "error"),
+            enif_make_atom(req->result_env, "no_response"));
+    }
+    req->success = ctx->response_ok;
+
+    /* Clear legacy fields */
+    ctx->shared_env = NULL;
+    ctx->request_type = CTX_REQ_NONE;
+    ctx->request_term = 0;
+    ctx->reactor_buffer_ptr = NULL;
+    ctx->local_env_ptr = NULL;
+    ctx->has_current_caller = false;
+
+    /* Deliver result - async or blocking */
+    if (req->async_mode) {
+        /* Async mode: send result message to caller */
+        enif_clear_env(ctx->msg_env);
+        ERL_NIF_TERM result_msg = enif_make_tuple3(ctx->msg_env,
+            enif_make_atom(ctx->msg_env, "py_result"),
+            enif_make_copy(ctx->msg_env, req->request_id),
+            req->result_env ? enif_make_copy(ctx->msg_env, req->result)
+                : enif_make_tuple2(ctx->msg_env,
+                    enif_make_atom(ctx->msg_env, "error"),
+                    enif_make_atom(ctx->msg_env, "no_result")));
+        enif_send(NULL, &req->caller_pid, ctx->msg_env, result_msg);
+    } else {
+        /* Blocking mode: signal condvar */
+        pthread_mutex_lock(&req->mutex);
+        atomic_store(&req->completed, true);
+        pthread_cond_signal(&req->cond);
+        pthread_mutex_unlock(&req->mutex);
+    }
+
+    /* Release queue's reference to request */
+    ctx_request_release(req);
+}
+
+/**
+ * @brief erlang.call from a call request: wait inline, serving the queue
+ *
+ * Sends {py_callback, CallbackId, Name, Args} to the py_context process
+ * that issued the current request, then waits with the GIL released for
+ * the reply delivered by context_callback_reply. While waiting, every
+ * request queued for this context is served on this thread, so the
+ * callback's nested py:call (bound to this context by py_context) runs
+ * here, at any depth, and the outer Python frame is never replayed.
+ *
+ * @return New reference to the callback result, or NULL with a Python
+ *         error set (callback error, context shutting down)
+ */
+static PyObject *ctx_call_erlang_inline(py_context_t *ctx, const char *func_name,
+                                        size_t func_name_len, PyObject *call_args) {
+    uint64_t callback_id = atomic_fetch_add(&g_callback_id_counter, 1);
+
+    ErlNifEnv *msg_env = enif_alloc_env();
+    if (msg_env == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate callback env");
+        return NULL;
+    }
+    ERL_NIF_TERM name_term;
+    unsigned char *name_buf = enif_make_new_binary(msg_env, func_name_len, &name_term);
+    memcpy(name_buf, func_name, func_name_len);
+    ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
+    ERL_NIF_TERM msg = enif_make_tuple4(msg_env,
+        enif_make_atom(msg_env, "py_callback"),
+        enif_make_uint64(msg_env, callback_id),
+        name_term, args_term);
+    int sent = enif_send(NULL, &ctx->current_caller, msg_env, msg);
+    enif_free_env(msg_env);
+    if (!sent) {
+        PyErr_SetString(PyExc_RuntimeError, "erlang.call: context process is gone");
+        return NULL;
+    }
+
+    /* Save the outer request's mirror fields: nested requests reuse them */
+    ErlNifEnv *saved_shared_env = ctx->shared_env;
+    int saved_request_type = ctx->request_type;
+    ERL_NIF_TERM saved_request_term = ctx->request_term;
+    ERL_NIF_TERM saved_response_term = ctx->response_term;
+    bool saved_response_ok = ctx->response_ok;
+    void *saved_reactor_buffer_ptr = ctx->reactor_buffer_ptr;
+    void *saved_local_env_ptr = ctx->local_env_ptr;
+    ErlNifPid saved_caller = ctx->current_caller;
+    bool saved_has_caller = ctx->has_current_caller;
+    py_env_resource_t *saved_local_env = tl_current_local_env;
+
+    unsigned char *reply = NULL;
+    size_t reply_len = 0;
+    bool shutdown = false;
+
+    PyThreadState *tstate = PyEval_SaveThread();
+    for (;;) {
+        pthread_mutex_lock(&ctx->queue_mutex);
+        while (!(ctx->cb_reply_ready && ctx->cb_reply_id == callback_id) &&
+               ctx->queue_head == NULL &&
+               !atomic_load(&ctx->shutdown_requested)) {
+            pthread_cond_wait(&ctx->queue_not_empty, &ctx->queue_mutex);
+        }
+        if (ctx->cb_reply_ready && ctx->cb_reply_id == callback_id) {
+            reply = ctx->cb_reply_data;
+            reply_len = ctx->cb_reply_len;
+            ctx->cb_reply_data = NULL;
+            ctx->cb_reply_len = 0;
+            ctx->cb_reply_ready = false;
+            pthread_mutex_unlock(&ctx->queue_mutex);
+            break;
+        }
+        if (atomic_load(&ctx->shutdown_requested)) {
+            pthread_mutex_unlock(&ctx->queue_mutex);
+            shutdown = true;
+            break;
+        }
+        ctx_request_t *req = ctx->queue_head;
+        if (req->type == CTX_REQ_SHUTDOWN) {
+            /* Leave the sentinel for the request loop; unwind this request */
+            pthread_mutex_unlock(&ctx->queue_mutex);
+            shutdown = true;
+            break;
+        }
+        ctx->queue_head = req->next;
+        if (ctx->queue_head == NULL) {
+            ctx->queue_tail = NULL;
+        }
+        req->next = NULL;
+        pthread_mutex_unlock(&ctx->queue_mutex);
+
+        PyEval_RestoreThread(tstate);
+        ctx_serve_request(ctx, req, true);
+        tstate = PyEval_SaveThread();
+    }
+    PyEval_RestoreThread(tstate);
+
+    /* Restore the outer request */
+    ctx->shared_env = saved_shared_env;
+    ctx->request_type = saved_request_type;
+    ctx->request_term = saved_request_term;
+    ctx->response_term = saved_response_term;
+    ctx->response_ok = saved_response_ok;
+    ctx->reactor_buffer_ptr = saved_reactor_buffer_ptr;
+    ctx->local_env_ptr = saved_local_env_ptr;
+    ctx->current_caller = saved_caller;
+    ctx->has_current_caller = saved_has_caller;
+    tl_current_local_env = saved_local_env;
+
+    if (shutdown) {
+        PyErr_SetString(PyExc_RuntimeError, "erlang.call: context shut down while waiting");
+        return NULL;
+    }
+    PyObject *result = parse_callback_response(reply, reply_len);
+    enif_free(reply);
+    return result;
+}
+
+/**
  * @brief Main loop for worker context thread (main interpreter mode)
  *
  * This function runs in a dedicated pthread. It processes requests from the
@@ -2527,97 +2648,7 @@ static void *ctx_thread_main_worker(void *arg) {
             break;
         }
 
-        /* Check if request was cancelled while queued */
-        if (atomic_load(&req->cancelled)) {
-            /* Request cancelled - deliver error without processing */
-            if (req->async_mode) {
-                /* Async mode: send cancellation message */
-                enif_clear_env(ctx->msg_env);
-                ERL_NIF_TERM cancel_msg = enif_make_tuple3(ctx->msg_env,
-                    enif_make_atom(ctx->msg_env, "py_result"),
-                    enif_make_copy(ctx->msg_env, req->request_id),
-                    enif_make_tuple2(ctx->msg_env,
-                        enif_make_atom(ctx->msg_env, "error"),
-                        enif_make_atom(ctx->msg_env, "cancelled")));
-                enif_send(NULL, &req->caller_pid, ctx->msg_env, cancel_msg);
-            } else {
-                /* Blocking mode: signal condvar */
-                req->result_env = enif_alloc_env();
-                if (req->result_env) {
-                    req->result = enif_make_tuple2(req->result_env,
-                        enif_make_atom(req->result_env, "error"),
-                        enif_make_atom(req->result_env, "cancelled"));
-                }
-                req->success = false;
-
-                pthread_mutex_lock(&req->mutex);
-                atomic_store(&req->completed, true);
-                pthread_cond_signal(&req->cond);
-                pthread_mutex_unlock(&req->mutex);
-            }
-
-            ctx_request_release(req);
-            continue;
-        }
-
-        /* Populate legacy compatibility fields from request */
-        ctx->shared_env = req->request_env;
-        ctx->request_type = req->type;
-        ctx->request_term = req->request_data;
-        ctx->reactor_buffer_ptr = req->reactor_buffer_ptr;
-        ctx->local_env_ptr = req->local_env_ptr;
-        ctx->response_ok = false;
-        ctx->response_term = 0;
-
-        /* Acquire GIL and process the request.
-         * exec_enter before / exec_leave after the GIL (see the locking
-         * invariant on py_context::interrupt_mutex). */
-        py_context_exec_enter(ctx);
-        gstate = PyGILState_Ensure();
-        ctx_execute_request(ctx);  /* Reuse execute functions */
-        PyGILState_Release(gstate);
-        py_context_exec_leave(ctx);
-
-        /* Copy response to request struct */
-        req->result_env = enif_alloc_env();
-        if (req->result_env && ctx->response_term != 0) {
-            req->result = enif_make_copy(req->result_env, ctx->response_term);
-        } else if (req->result_env) {
-            req->result = enif_make_tuple2(req->result_env,
-                enif_make_atom(req->result_env, "error"),
-                enif_make_atom(req->result_env, "no_response"));
-        }
-        req->success = ctx->response_ok;
-
-        /* Clear legacy fields */
-        ctx->shared_env = NULL;
-        ctx->request_type = CTX_REQ_NONE;
-        ctx->request_term = 0;
-        ctx->reactor_buffer_ptr = NULL;
-        ctx->local_env_ptr = NULL;
-
-        /* Deliver result - async or blocking */
-        if (req->async_mode) {
-            /* Async mode: send result message to caller */
-            enif_clear_env(ctx->msg_env);
-            ERL_NIF_TERM result_msg = enif_make_tuple3(ctx->msg_env,
-                enif_make_atom(ctx->msg_env, "py_result"),
-                enif_make_copy(ctx->msg_env, req->request_id),
-                req->result_env ? enif_make_copy(ctx->msg_env, req->result)
-                    : enif_make_tuple2(ctx->msg_env,
-                        enif_make_atom(ctx->msg_env, "error"),
-                        enif_make_atom(ctx->msg_env, "no_result")));
-            enif_send(NULL, &req->caller_pid, ctx->msg_env, result_msg);
-        } else {
-            /* Blocking mode: signal condvar */
-            pthread_mutex_lock(&req->mutex);
-            atomic_store(&req->completed, true);
-            pthread_cond_signal(&req->cond);
-            pthread_mutex_unlock(&req->mutex);
-        }
-
-        /* Release queue's reference to request */
-        ctx_request_release(req);
+        ctx_serve_request(ctx, req, false);
     }
 
     /* Cleanup: release namespace dictionaries under GIL */
@@ -2797,6 +2828,11 @@ static void ctx_thread_shutdown_worker(py_context_t *ctx) {
     if (ctx->msg_env != NULL) {
         enif_free_env(ctx->msg_env);
         ctx->msg_env = NULL;
+    }
+    if (ctx->cb_reply_data != NULL) {
+        enif_free(ctx->cb_reply_data);
+        ctx->cb_reply_data = NULL;
+        ctx->cb_reply_ready = false;
     }
 
     pthread_cond_destroy(&ctx->queue_not_empty);
@@ -3433,6 +3469,11 @@ static void ctx_thread_shutdown_owngil(py_context_t *ctx) {
         enif_free_env(ctx->msg_env);
         ctx->msg_env = NULL;
     }
+    if (ctx->cb_reply_data != NULL) {
+        enif_free(ctx->cb_reply_data);
+        ctx->cb_reply_data = NULL;
+        ctx->cb_reply_ready = false;
+    }
 
     pthread_cond_destroy(&ctx->queue_not_empty);
     pthread_mutex_destroy(&ctx->queue_mutex);
@@ -3504,6 +3545,11 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     ctx->has_callback_handler = false;
     ctx->callback_pipe[0] = -1;
     ctx->callback_pipe[1] = -1;
+    ctx->has_current_caller = false;
+    ctx->cb_reply_id = 0;
+    ctx->cb_reply_data = NULL;
+    ctx->cb_reply_len = 0;
+    ctx->cb_reply_ready = false;
     ctx->globals = NULL;
     ctx->locals = NULL;
     ctx->module_cache = NULL;
@@ -4689,6 +4735,49 @@ static ERL_NIF_TERM nif_context_write_callback_response(ErlNifEnv *env, int argc
  * A proper implementation would add PY_CMD_RESUME and dispatch to the
  * dedicated thread.
  */
+/**
+ * nif_context_callback_reply(ContextRef, CallbackId, ResultBinary) -> ok | {error, Reason}
+ *
+ * Delivers the result of an inline callback (see ctx_call_erlang_inline)
+ * to the context thread waiting for it. ResultBinary is the frame
+ * parse_callback_response reads: a status byte then the payload.
+ */
+static ERL_NIF_TERM nif_context_callback_reply(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+    (void)argc;
+    py_context_t *ctx;
+    ErlNifUInt64 callback_id;
+    ErlNifBinary result_bin;
+
+    if (!enif_get_resource(env, argv[0], PY_CONTEXT_RESOURCE_TYPE, (void **)&ctx)) {
+        return make_error(env, "invalid_context");
+    }
+    if (!enif_get_uint64(env, argv[1], &callback_id)) {
+        return make_error(env, "invalid_callback_id");
+    }
+    if (!enif_inspect_binary(env, argv[2], &result_bin)) {
+        return make_error(env, "invalid_result");
+    }
+
+    unsigned char *data = enif_alloc(result_bin.size > 0 ? result_bin.size : 1);
+    if (data == NULL) {
+        return make_error(env, "alloc_failed");
+    }
+    memcpy(data, result_bin.data, result_bin.size);
+
+    pthread_mutex_lock(&ctx->queue_mutex);
+    if (ctx->cb_reply_data != NULL) {
+        enif_free(ctx->cb_reply_data);  /* A reply nobody waited for */
+    }
+    ctx->cb_reply_id = callback_id;
+    ctx->cb_reply_data = data;
+    ctx->cb_reply_len = result_bin.size;
+    ctx->cb_reply_ready = true;
+    pthread_cond_broadcast(&ctx->queue_not_empty);
+    pthread_mutex_unlock(&ctx->queue_mutex);
+
+    return ATOM_OK;
+}
+
 static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
     (void)argc;
     py_context_t *ctx;
@@ -4755,6 +4844,10 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
     suspended_context_state_t *prev_suspended = tl_current_context_suspended;
     tl_current_context_suspended = state;
 
+    /* Replay in the namespace of the original request */
+    py_env_resource_t *prev_local_env = tl_current_local_env;
+    tl_current_local_env = state->penv;
+
     /* Reset callback result index for this replay */
     state->callback_result_index = 0;
 
@@ -4775,17 +4868,8 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
         memcpy(func_name, state->orig_func.data, state->orig_func.size);
         func_name[state->orig_func.size] = '\0';
 
-        /* Get the function */
-        PyObject *func = NULL;
-        PyObject *module = context_get_module(ctx, module_name);
-        if (module == NULL) {
-            enif_free(module_name);
-            enif_free(func_name);
-            result = make_py_error(env);
-            goto cleanup;
-        }
-
-        func = PyObject_GetAttrString(module, func_name);
+        /* Get the function, in the namespace the original request used */
+        PyObject *func = ctx_resolve_call_target(ctx, state->penv, module_name, func_name);
         if (func == NULL) {
             enif_free(module_name);
             enif_free(func_name);
@@ -4848,7 +4932,7 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
                 /* Create new suspended context state for nested callback */
                 suspended_context_state_t *nested = create_suspended_context_state_for_call(
                     env, ctx, &state->orig_module, &state->orig_func,
-                    state->orig_args, state->orig_kwargs);
+                    state->orig_args, state->orig_kwargs, state->penv);
 
                 if (nested == NULL) {
                     tl_pending_callback = false;
@@ -4884,17 +4968,37 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
         memcpy(code, state->orig_code.data, state->orig_code.size);
         code[state->orig_code.size] = '\0';
 
-        /* Update locals if provided */
-        if (enif_is_map(state->orig_env, state->orig_locals)) {
-            PyObject *new_locals = term_to_py(state->orig_env, state->orig_locals);
-            if (new_locals != NULL && PyDict_Check(new_locals)) {
-                PyDict_Update(ctx->locals, new_locals);
-                Py_DECREF(new_locals);
+        PyObject *py_result;
+        if (state->penv != NULL && state->penv->globals != NULL) {
+            /* Process-local env: same namespaces as ctx_execute_eval_with_env */
+            PyObject *eval_locals = PyDict_Copy(state->penv->globals);
+            if (eval_locals == NULL) {
+                enif_free(code);
+                result = make_py_error(env);
+                goto cleanup;
             }
-        }
+            if (enif_is_map(state->orig_env, state->orig_locals)) {
+                PyObject *locals_map = term_to_py(state->orig_env, state->orig_locals);
+                if (locals_map != NULL && PyDict_Check(locals_map)) {
+                    PyDict_Merge(eval_locals, locals_map, 1);
+                }
+                Py_XDECREF(locals_map);
+            }
+            py_result = PyRun_String(code, Py_eval_input, state->penv->globals, eval_locals);
+            Py_DECREF(eval_locals);
+        } else {
+            /* Update locals if provided */
+            if (enif_is_map(state->orig_env, state->orig_locals)) {
+                PyObject *new_locals = term_to_py(state->orig_env, state->orig_locals);
+                if (new_locals != NULL && PyDict_Check(new_locals)) {
+                    PyDict_Update(ctx->locals, new_locals);
+                    Py_DECREF(new_locals);
+                }
+            }
 
-        /* Compile and evaluate (replay with cached result) */
-        PyObject *py_result = PyRun_String(code, Py_eval_input, ctx->globals, ctx->locals);
+            /* Compile and evaluate (replay with cached result) */
+            py_result = PyRun_String(code, Py_eval_input, ctx->globals, ctx->locals);
+        }
         enif_free(code);
 
         if (py_result == NULL) {
@@ -4904,7 +5008,7 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
 
                 /* Create new suspended context state for nested callback */
                 suspended_context_state_t *nested = create_suspended_context_state_for_eval(
-                    env, ctx, &state->orig_code, state->orig_locals);
+                    env, ctx, &state->orig_code, state->orig_locals, state->penv);
 
                 if (nested == NULL) {
                     tl_pending_callback = false;
@@ -4936,6 +5040,7 @@ static ERL_NIF_TERM nif_context_resume(ErlNifEnv *env, int argc, const ERL_NIF_T
 
 cleanup:
     /* Restore thread-local state */
+    tl_current_local_env = prev_local_env;
     tl_current_context_suspended = prev_suspended;
     tl_allow_suspension = prev_allow_suspension;
     tl_current_context = prev_context;
@@ -5939,6 +6044,7 @@ static ErlNifFunc nif_funcs[] = {
     {"context_get_callback_pipe", 1, nif_context_get_callback_pipe, 0},
     {"context_write_callback_response", 2, nif_context_write_callback_response, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"context_resume", 3, nif_context_resume, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"context_callback_reply", 3, nif_context_callback_reply, 0},
     {"context_cancel_resume", 2, nif_context_cancel_resume, 0},
     {"ref_wrap", 2, nif_ref_wrap, 0},
     {"is_ref", 1, nif_is_ref, 0},

@@ -79,7 +79,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
     # Use __slots__ for faster attribute access and reduced memory
     __slots__ = (
-        '_pel', '_loop_capsule', '_uses_global_capsule',
+        '_pel', '_loop_capsule', '_uses_global_capsule', '_owns_capsule',
         '_readers', '_writers',
         '_callbacks_by_cid',  # callback_id -> (callback, args, event_type) for O(1) dispatch
         '_fd_resources',  # fd -> fd_key (shared fd_resource_t per fd)
@@ -96,15 +96,17 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         '_wake_pending',  # coalesced wakeup flag for call_soon_threadsafe
     )
 
-    def __init__(self):
+    def __init__(self, capsule=None):
         """Initialize the Erlang event loop.
 
         The event loop is backed by Erlang's scheduler via the py_event_loop
         C module. This provides direct access to the event loop without
         going through Erlang callbacks.
 
-        Each loop instance has its own isolated capsule for proper timer
-        and FD event routing.
+        Without ``capsule`` the loop attaches to the interpreter's default
+        (global) loop. The event loop pool passes a capsule over one of its
+        own loops so timers, fd events and the pending queue stay on that
+        loop; such a capsule is owned by Erlang and never destroyed here.
         """
         # Detect execution mode for proper behavior
         self._execution_mode = detect_mode()
@@ -130,7 +132,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
         # Without this, Python-created loops would have their own pending queues
         # that never get processed because the worker doesn't know about them.
         self._uses_global_capsule = False
-        if hasattr(self._pel, '_get_global_loop_capsule'):
+        self._owns_capsule = False
+        if capsule is not None:
+            self._loop_capsule = capsule
+        elif hasattr(self._pel, '_get_global_loop_capsule'):
             try:
                 self._loop_capsule = self._pel._get_global_loop_capsule()
                 self._uses_global_capsule = True
@@ -148,8 +153,10 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
                 # Fall back to creating a new loop if global not available
                 self._loop_capsule = self._pel._loop_new()
                 self._uses_global_capsule = False
+                self._owns_capsule = True
         else:
             self._loop_capsule = self._pel._loop_new()
+            self._owns_capsule = True
 
         # Store reference to this Python loop in the C struct
         # This enables process_ready_tasks to access the loop directly
@@ -159,7 +166,7 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
 
         # Also set reference on the global interpreter loop
         # This is needed for py_nif:submit_task which uses the global loop
-        if hasattr(self._pel, '_set_global_loop_ref'):
+        if self._uses_global_capsule and hasattr(self._pel, '_set_global_loop_ref'):
             try:
                 self._pel._set_global_loop_ref(self)
             except RuntimeError:
@@ -367,8 +374,9 @@ class ErlangEventLoop(asyncio.AbstractEventLoop):
             except Exception:
                 pass
 
-        # Destroy loop capsule (but not if using shared global capsule)
-        if not self._uses_global_capsule:
+        # Destroy loop capsule (not a shared one: the global capsule or a
+        # pool loop's, both owned by Erlang)
+        if getattr(self, '_owns_capsule', not self._uses_global_capsule):
             try:
                 self._pel._loop_destroy(self._loop_capsule)
             except Exception:

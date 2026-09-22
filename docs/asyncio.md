@@ -712,10 +712,9 @@ def sync_handler():
 | Context | Mechanism | What blocks |
 |---------|-----------|-------------|
 | Async (`await erlang.sleep()`) | `asyncio.sleep()` via Erlang `send_after` | Yields to the event loop. The worker pthread is free to handle other tasks. |
-| Sync from `py:exec` / `py:eval` | `erlang.call('_py_sleep', secs)` triggers suspension; the dirty scheduler is released and an Erlang `receive ... after` parks the caller | Caller's Erlang process. Dirty scheduler free for other work. |
-| Sync from `py:call` (worker mode) | Falls back to `time.sleep`; replaying the Python frame around a suspension would change time-measurement semantics | The context's worker pthread for the sleep duration. Async NIF dispatch returns immediately so the BEAM dirty scheduler is **not** held; other Erlang processes and other contexts run normally. |
+| Sync (`py:exec`, `py:eval`, `py:call`) | `erlang._call_blocking('_py_sleep', secs)`: the Erlang handler parks in `receive ... after`; the Python frame is not suspended, so nothing is replayed around the sleep | The context's worker pthread for the sleep duration. Async NIF dispatch returned immediately so the BEAM dirty scheduler is **not** held; other Erlang processes and other contexts run normally. |
 
-In every case the BEAM dirty scheduler is freed during the sleep — the difference is which thread blocks (Erlang process, dirty scheduler, or worker pthread).
+In every case the BEAM dirty scheduler is freed during the sleep — the difference is which thread blocks (Erlang process or worker pthread).
 
 #### asyncio.sleep(delay)
 
@@ -996,7 +995,13 @@ def handler():
 
 **Behavior:**
 - Blocks the current Python execution until the Erlang callback completes
-- Code executes exactly once (no replay)
+- From `py:call` (and from any Python thread) the code executes exactly once:
+  the context thread waits for the callback and serves its own context's
+  requests meanwhile, so a callback that calls `py:call` again runs on the
+  same context, at any nesting depth
+- From `py:eval` the request is suspended and the expression is replayed
+  when the callback returns, with earlier callback results taken from a
+  cache: keep side effects out of code that runs before an `erlang.call`
 - The callback can release the dirty scheduler by using Erlang's `receive` (e.g., `erlang.sleep()`, `channel.receive()`)
 - Quick callbacks hold the dirty scheduler; callbacks that wait via `receive` release it
 
