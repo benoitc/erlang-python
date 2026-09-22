@@ -27,6 +27,10 @@ Flow control for buffers goes through Erlang callbacks:
   erlang.call('_py_buffer_wait', id, read_pos)  -> (write_pos, closed)
   erlang.call('_py_buffer_consumed', id, n)     -> ok
   erlang.call('_py_buffer_state', id)           -> (write_pos, closed)
+
+In the embedded interpreter these use erlang._call_blocking: a plain
+erlang.call from a context request suspends the request and replays the
+Python frame on resume, which would take from the ring twice.
 """
 
 import collections
@@ -55,6 +59,13 @@ _cache_lock = threading.Lock()
 def _erlang():
     import erlang
     return erlang
+
+
+def _call(name, *args):
+    """Call an Erlang flow-control callback without suspending the caller."""
+    erlang = _erlang()
+    call = getattr(erlang, '_call_blocking', None) or erlang.call
+    return call(name, *args)
 
 
 def _atom(name):
@@ -168,13 +179,13 @@ class SharedBuffer:
 
     def _wait_for_data(self):
         """Block until write position passes our read position or EOF."""
-        wpos, closed = _erlang().call('_py_buffer_wait', self.id, self._rpos)
+        wpos, closed = _call('_py_buffer_wait', self.id, self._rpos)
         self._wpos = wpos
         self._closed = bool(closed)
 
     def _consumed(self, n):
         if n:
-            _erlang().call('_py_buffer_consumed', self.id, n)
+            _call('_py_buffer_consumed', self.id, n)
 
     def _available(self):
         return self._wpos - self._rpos

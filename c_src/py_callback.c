@@ -365,7 +365,8 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
     ErlNifBinary *module_bin,
     ErlNifBinary *func_bin,
     ERL_NIF_TERM args_term,
-    ERL_NIF_TERM kwargs_term) {
+    ERL_NIF_TERM kwargs_term,
+    py_env_resource_t *penv) {
 
     /* Allocate the suspended context state resource */
     suspended_context_state_t *state = enif_alloc_resource(
@@ -379,6 +380,10 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
 
     state->ctx = ctx;
     enif_keep_resource(ctx);  /* Keep ctx alive while suspended state exists */
+    state->penv = penv;
+    if (penv != NULL) {
+        enif_keep_resource(penv);  /* The replay runs in the request's namespace */
+    }
     state->callback_id = tl_pending_callback_id;
     state->request_type = PY_REQ_CALL;
 
@@ -450,7 +455,8 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
     ErlNifEnv *env,
     py_context_t *ctx,
     ErlNifBinary *code_bin,
-    ERL_NIF_TERM locals_term) {
+    ERL_NIF_TERM locals_term,
+    py_env_resource_t *penv) {
 
     (void)env;
 
@@ -466,6 +472,10 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
 
     state->ctx = ctx;
     enif_keep_resource(ctx);  /* Keep ctx alive while suspended state exists */
+    state->penv = penv;
+    if (penv != NULL) {
+        enif_keep_resource(penv);  /* The replay runs in the request's namespace */
+    }
     state->callback_id = tl_pending_callback_id;
     state->request_type = PY_REQ_EVAL;
 
@@ -1541,6 +1551,79 @@ static PyObject *py_consume_time_slice(PyObject *self, PyObject *args) {
  *
  * This allows the dirty scheduler to be freed while waiting for the callback.
  */
+/**
+ * True when an asyncio loop is running on this thread.
+ *
+ * A suspension unwinds the whole Python stack of the request, which cannot
+ * be done from inside a running loop: erlang._run_loop_forever (the
+ * context worker loop) and asyncio.run() inside a called function keep the
+ * blocking thread path for their erlang.call.
+ */
+static bool asyncio_loop_running_here(void) {
+    PyObject *modules = PyImport_GetModuleDict();
+    if (modules == NULL) {
+        return false;
+    }
+    PyObject *events = PyDict_GetItemString(modules, "asyncio.events");  /* Borrowed */
+    if (events == NULL) {
+        return false;  /* asyncio never imported: no loop can be running */
+    }
+    PyObject *get_running = PyObject_GetAttrString(events, "_get_running_loop");
+    if (get_running == NULL) {
+        PyErr_Clear();
+        return false;
+    }
+    PyObject *loop = PyObject_CallNoArgs(get_running);
+    Py_DECREF(get_running);
+    if (loop == NULL) {
+        PyErr_Clear();
+        return false;
+    }
+    bool running = (loop != Py_None);
+    Py_DECREF(loop);
+    return running;
+}
+
+/**
+ * erlang._call_blocking(name, *args): the thread worker path, always.
+ *
+ * Blocks the calling Python thread on the thread worker pipe until the
+ * Erlang function returns; the Python frame is never suspended or
+ * replayed. For the library's own flow-control callbacks (shared buffer
+ * waits, erlang.sleep), whose callers keep state across the call, and for
+ * any Python thread.
+ */
+static PyObject *erlang_call_blocking_impl(PyObject *self, PyObject *args) {
+    (void)self;
+
+    Py_ssize_t nargs = PyTuple_Size(args);
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
+        return NULL;
+    }
+
+    PyObject *name_obj = PyTuple_GetItem(args, 0);
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+        return NULL;
+    }
+    const char *func_name = PyUnicode_AsUTF8(name_obj);
+    if (func_name == NULL) {
+        return NULL;
+    }
+    size_t func_name_len = strlen(func_name);
+
+    /* Build args list (remaining args) */
+    PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
+    if (call_args == NULL) {
+        return NULL;
+    }
+
+    PyObject *result = thread_worker_call(func_name, func_name_len, call_args);
+    Py_DECREF(call_args);
+    return result;
+}
+
 static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     (void)self;
 
@@ -1560,19 +1643,49 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     /*
      * Check if we have a callback handler available.
      * Priority:
-     * 1. tl_current_context with suspension enabled (new process-per-context API)
-     * 2. tl_current_context with callback_handler (old blocking pipe mode)
-     * 3. thread_worker_call (spawned threads)
+     * 1. tl_current_context with suspension enabled: eval requests and
+     *    resume replays (ctx_execute_eval_with_env, nif_context_resume)
+     * 2. tl_current_context with a request in flight: call requests wait
+     *    inline, serving the context's queue (ctx_call_erlang_inline)
+     * 3. tl_current_context with callback_handler (old blocking pipe mode)
+     * 4. thread_worker_call (spawned threads)
      *
-     * NOTE: In OWN_GIL mode, erlang.call() goes through thread_worker_call()
-     * rather than using suspension/resume. This is because OWN_GIL contexts
-     * bypass the suspension protocol - the dedicated pthread that owns the GIL
-     * cannot be suspended. As a result, the call executes on a different
-     * context/interpreter (the thread worker), not the calling OWN_GIL context.
-     * Re-entrant calls back to the same OWN_GIL context are not supported.
+     * Inside a running asyncio loop the request stack cannot be unwound or
+     * blocked without stalling the loop: those calls take path 4.
      */
-    bool has_context_suspension = (tl_current_context != NULL && tl_allow_suspension);
+    bool loop_running = asyncio_loop_running_here();
+    bool has_context_suspension = (tl_current_context != NULL && tl_allow_suspension &&
+                                   !loop_running);
     bool has_context_handler = (tl_current_context != NULL && tl_current_context->has_callback_handler);
+    bool has_context_inline = (tl_current_context != NULL && !tl_allow_suspension &&
+                               tl_current_context->has_current_caller &&
+                               !has_context_handler && !loop_running);
+
+    if (has_context_inline) {
+        Py_ssize_t nargs = PyTuple_Size(args);
+        if (nargs < 1) {
+            PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
+            return NULL;
+        }
+        PyObject *name_obj = PyTuple_GetItem(args, 0);
+        if (!PyUnicode_Check(name_obj)) {
+            PyErr_SetString(PyExc_TypeError, "Function name must be a string");
+            return NULL;
+        }
+        Py_ssize_t func_name_len = 0;
+        const char *func_name = PyUnicode_AsUTF8AndSize(name_obj, &func_name_len);
+        if (func_name == NULL) {
+            return NULL;
+        }
+        PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
+        if (call_args == NULL) {
+            return NULL;
+        }
+        PyObject *result = ctx_call_erlang_inline(tl_current_context, func_name,
+                                                  (size_t)func_name_len, call_args);
+        Py_DECREF(call_args);
+        return result;
+    }
 
     if (!has_context_suspension && !has_context_handler) {
         /*
@@ -1581,35 +1694,9 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
          * - threading.Thread instances
          * - concurrent.futures.ThreadPoolExecutor workers
          * - Any other Python threads
-         * - OWN_GIL contexts (which don't support suspension)
+         * - code running inside an asyncio loop on a context thread
          */
-        Py_ssize_t nargs = PyTuple_Size(args);
-        if (nargs < 1) {
-            PyErr_SetString(PyExc_TypeError, "erlang.call requires at least a function name");
-            return NULL;
-        }
-
-        PyObject *name_obj = PyTuple_GetItem(args, 0);
-        if (!PyUnicode_Check(name_obj)) {
-            PyErr_SetString(PyExc_TypeError, "Function name must be a string");
-            return NULL;
-        }
-        const char *func_name = PyUnicode_AsUTF8(name_obj);
-        if (func_name == NULL) {
-            return NULL;
-        }
-        size_t func_name_len = strlen(func_name);
-
-        /* Build args list (remaining args) */
-        PyObject *call_args = PyTuple_GetSlice(args, 1, nargs);
-        if (call_args == NULL) {
-            return NULL;
-        }
-
-        /* Use thread worker call */
-        PyObject *result = thread_worker_call(func_name, func_name_len, call_args);
-        Py_DECREF(call_args);
-        return result;
+        return erlang_call_blocking_impl(self, args);
     }
 
     Py_ssize_t nargs = PyTuple_Size(args);
@@ -3189,6 +3276,8 @@ static PyObject *erlang_whereis_impl(PyObject *self, PyObject *args) {
 
 /* Python method definitions for erlang module */
 static PyMethodDef ErlangModuleMethods[] = {
+    {"_call_blocking", erlang_call_blocking_impl, METH_VARARGS,
+     "Call an Erlang function on the blocking thread path (no suspension, no replay)"},
     {"call", erlang_call_impl, METH_VARARGS,
      "Call a registered Erlang function.\n\n"
      "Usage: erlang.call('func_name', arg1, arg2, ...)\n"

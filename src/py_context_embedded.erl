@@ -576,7 +576,7 @@ handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
     case py_nif:context_call_async(Ref, self(), RequestId, Module, Func, Args, Kwargs) of
         {enqueued, RequestId} ->
             %% Async dispatch succeeded - wait for result message
-            wait_for_async_result(Ref, RequestId);
+            wait_for_async_result(Ref, RequestId, undefined);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -589,7 +589,7 @@ handle_eval_with_suspension(Ref, Code, Locals) ->
     case py_nif:context_eval_async(Ref, self(), RequestId, Code, Locals) of
         {enqueued, RequestId} ->
             %% Async dispatch succeeded - wait for result message
-            wait_for_async_result(Ref, RequestId);
+            wait_for_async_result(Ref, RequestId, undefined);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -600,7 +600,7 @@ handle_exec_with_async(Ref, Code) ->
     RequestId = make_ref(),
     case py_nif:context_exec_async(Ref, self(), RequestId, Code) of
         {enqueued, RequestId} ->
-            wait_for_async_result(Ref, RequestId);
+            wait_for_async_result(Ref, RequestId, undefined);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -621,14 +621,36 @@ handle_exec_with_async(Ref, Code) ->
 %% async results and only one wait_for_async_result/2 is in flight at
 %% a time, so the drain cannot consume the result of a concurrent live
 %% request.
-wait_for_async_result(Ref, RequestId) ->
+%%
+%% EnvRef is the process-local env of the request (undefined when it has
+%% none); a callback spawned for it inherits it.
+%%
+%% A call request that reaches erlang.call sends {py_callback, ...} and
+%% waits inline, serving this context's queue meanwhile: the callback runs
+%% here as for a suspension (nested requests are served through
+%% wait_for_callback/2) and its result goes back with
+%% context_callback_reply/3.
+wait_for_async_result(Ref, RequestId, EnvRef) ->
     drain_stale_async_results(RequestId),
     receive
         {py_result, RequestId, Result} ->
-            process_async_result(Ref, Result)
+            process_async_result(Ref, Result, EnvRef);
+        {py_callback, CallbackId, FuncName, CallbackArgs} ->
+            CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs, EnvRef),
+            reply_inline_callback(Ref, CallbackId, CallbackResult),
+            wait_for_async_result(Ref, RequestId, EnvRef)
     after 300000 ->  %% 5 minute timeout
         {error, async_timeout}
     end.
+
+%% @private
+reply_inline_callback(Ref, CallbackId, {ok, ResultBin}) ->
+    _ = py_nif:context_callback_reply(Ref, CallbackId, ResultBin),
+    ok;
+reply_inline_callback(Ref, CallbackId, {error, Reason}) ->
+    ErrMsg = iolist_to_binary(io_lib:format("~p", [Reason])),
+    _ = py_nif:context_callback_reply(Ref, CallbackId, <<1, ErrMsg/binary>>),
+    ok.
 
 %% @private
 drain_stale_async_results(CurrentId) ->
@@ -642,12 +664,12 @@ drain_stale_async_results(CurrentId) ->
 %% @private
 %% Process the result from async dispatch
 %% Handles suspension, schedule markers, and normal results.
-process_async_result(Ref, {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}}) ->
-    CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs),
-    resume_and_continue(Ref, StateRef, CallbackResult);
-process_async_result(Ref, {schedule, CallbackName, CallbackArgs}) ->
+process_async_result(Ref, {suspended, _CallbackId, StateRef, {FuncName, CallbackArgs}}, EnvRef) ->
+    CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs, EnvRef),
+    resume_and_continue(Ref, StateRef, CallbackResult, EnvRef);
+process_async_result(Ref, {schedule, CallbackName, CallbackArgs}, _EnvRef) ->
     handle_schedule(Ref, CallbackName, CallbackArgs);
-process_async_result(_Ref, Result) ->
+process_async_result(_Ref, Result, _EnvRef) ->
     Result.
 
 %% @private
@@ -658,7 +680,7 @@ handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
                                               Module, Func, Args, Kwargs,
                                               EnvRef) of
         {enqueued, RequestId} ->
-            wait_for_async_result(Ref, RequestId);
+            wait_for_async_result(Ref, RequestId, EnvRef);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -671,7 +693,7 @@ handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
     case py_nif:context_eval_with_env_async(Ref, self(), RequestId,
                                               Code, Locals, EnvRef) of
         {enqueued, RequestId} ->
-            wait_for_async_result(Ref, RequestId);
+            wait_for_async_result(Ref, RequestId, EnvRef);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -685,7 +707,7 @@ handle_exec_with_async_and_env(Ref, Code, EnvRef) ->
     case py_nif:context_exec_with_env_async(Ref, self(), RequestId,
                                               Code, EnvRef) of
         {enqueued, RequestId} ->
-            wait_for_async_result(Ref, RequestId);
+            wait_for_async_result(Ref, RequestId, EnvRef);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -732,9 +754,21 @@ handle_schedule(_Ref, CallbackName, CallbackArgs) when is_binary(CallbackName) -
 %% Handle callback, allowing nested py:eval/call to be processed.
 %% We spawn a process to execute the callback so we can stay in a receive loop
 %% for nested calls while the callback runs.
-handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs) ->
+%%
+%% The callback runs on behalf of the suspended caller: its py:call/py:eval
+%% are bound to this context (served by wait_for_callback/2, so nesting is
+%% deadlock free at any depth) and it gets the caller's Python namespace,
+%% so `py:call('__main__', F, Args)' from the callback sees the F the caller
+%% defined with py:exec.
+handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs, EnvRef) ->
     Parent = self(),
+    InterpId = py_nif:context_interp_id(Ref),
     CallbackPid = spawn_link(fun() ->
+        ok = py_context_router:bind_context(Parent),
+        case EnvRef of
+            undefined -> ok;
+            _ -> ok = py:put_local_env(InterpId, EnvRef)
+        end,
         Result = try
             ArgsList = tuple_to_list(CallbackArgs),
             case py_callback:execute(FuncName, ArgsList) of
@@ -824,16 +858,16 @@ wait_for_callback(Ref, CallbackPid) ->
 
 %% @private
 %% Resume suspended state, handle additional suspensions (nested callbacks)
-resume_and_continue(Ref, StateRef, {ok, ResultBin}) ->
+resume_and_continue(Ref, StateRef, {ok, ResultBin}, EnvRef) ->
     case py_nif:context_resume(Ref, StateRef, ResultBin) of
         {suspended, _CallbackId2, StateRef2, {FuncName2, Args2}} ->
             %% Another callback during resume - recursive handling
-            CallbackResult2 = handle_callback_with_nested_receive(Ref, FuncName2, Args2),
-            resume_and_continue(Ref, StateRef2, CallbackResult2);
+            CallbackResult2 = handle_callback_with_nested_receive(Ref, FuncName2, Args2, EnvRef),
+            resume_and_continue(Ref, StateRef2, CallbackResult2, EnvRef);
         FinalResult ->
             FinalResult
     end;
-resume_and_continue(Ref, StateRef, {error, _} = Err) ->
+resume_and_continue(Ref, StateRef, {error, _} = Err, _EnvRef) ->
     _ = py_nif:context_cancel_resume(Ref, StateRef),
     Err.
 

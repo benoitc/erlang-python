@@ -13,6 +13,29 @@
   collided. Each pool loop now drives a Python loop bound to its own
   resource, a timer expiry is dispatched to the loop that set it, and a loop
   with no tasks leaves its pending events to whoever polls it.
+- A Python function called with `py:call` that called `erlang.call`, where
+  the Erlang callback called `py:call` again, hung until the request timeout
+  and then failed with "callback synchronisation lost; retry" or
+  `{error, timeout}`, even one level deep; the same chain started with
+  `py:eval` worked. `erlang.call` blocked the context thread on the thread
+  worker pipe and the nested `py:call` waited on that context. The context
+  thread now serves its own requests while it waits for the callback, so the
+  nested `py:call` runs inline on the same context, at any depth and with
+  several sequential `erlang.call`s in one function; the Python code still
+  runs exactly once. Inside a running asyncio loop (`py_context:start_loop/2`,
+  `asyncio.run` in a called function) the thread path stays.
+- The shared buffer's flow control and the sync `erlang.sleep` call Erlang
+  through a blocking path that never suspends the request, so a `py:eval`
+  that reads a shared buffer or sleeps is not replayed around them.
+- After a callback resumed, a `py:eval` or `py:call` that used a function
+  defined with `py:exec` failed with `NameError: name ... is not defined`:
+  the replay ran in the context globals instead of the caller's namespace.
+  The replay now runs in the namespace of the original request.
+- An Erlang callback could not see the caller's `__main__` functions and
+  was routed to another context: `py:call('__main__', double, [X])` from a
+  callback failed with "module '__main__' has no attribute 'double'". The
+  callback process is now bound to the suspended context and shares the
+  caller's namespace, so the README reentrant example passes as written.
 
 ## 5.0.0 (2026-08-29)
 

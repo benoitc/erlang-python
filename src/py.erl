@@ -85,6 +85,7 @@
     activate_venv/1,
     %% Process-local Python environment
     get_local_env/1,
+    put_local_env/2,
     deactivate_venv/0,
     venv_info/0,
     %% Execution info
@@ -182,6 +183,20 @@ get_local_env(Ctx) when is_pid(Ctx) ->
         Ref ->
             Ref
     end.
+
+%% @private Seed the calling process with an existing local env.
+%%
+%% Used by a context when it spawns the process that runs an Erlang
+%% callback, so the callback shares the suspended caller's Python
+%% namespace instead of starting from an empty one.
+-spec put_local_env(non_neg_integer(), reference()) -> ok.
+put_local_env(InterpId, EnvRef) ->
+    Envs = case get(?LOCAL_ENV_KEY) of
+        M when is_map(M) -> M;
+        _ -> #{}
+    end,
+    put(?LOCAL_ENV_KEY, Envs#{InterpId => EnvRef}),
+    ok.
 
 %%% ============================================================================
 %%% Synchronous API

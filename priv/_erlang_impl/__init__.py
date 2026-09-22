@@ -272,18 +272,15 @@ def sleep(seconds):
     - Async (``await erlang.sleep()``) uses ``asyncio.sleep()``, which
       routes through Erlang's ``send_after`` timer. The coroutine
       yields to the event loop; the worker pthread handles other tasks.
-    - Sync from ``py:exec`` / ``py:eval`` calls
-      ``erlang.call('_py_sleep', seconds)``. The suspension machinery
-      releases the dirty scheduler and parks the caller's Erlang
-      process in a ``receive ... after``.
-    - Sync from ``py:call`` falls back to ``time.sleep`` — the worker
-      pthread blocks for the sleep duration. The BEAM dirty scheduler
-      is *not* held here either: the NIF dispatch returned immediately
-      and the caller is waiting in an Erlang ``receive`` on the
-      context process. Other Erlang processes and other contexts run
-      normally during the sleep. (Replaying a suspended Python frame
-      around ``time.time()`` would change time-measurement semantics,
-      which is why ``py:call`` doesn't take the suspension path.)
+    - Sync (``py:exec``, ``py:eval``, ``py:call``) calls
+      ``erlang._call_blocking('_py_sleep', seconds)``: the Erlang
+      handler parks in a ``receive ... after`` while the context's
+      worker pthread waits on the thread worker pipe. The Python frame
+      is not suspended, so nothing is replayed around the sleep. The
+      BEAM dirty scheduler is not held: the NIF dispatch returned
+      immediately and the caller is waiting in an Erlang ``receive``
+      on the context process, so other Erlang processes and other
+      contexts run normally during the sleep.
 
     Args:
         seconds: Duration to sleep in seconds (float or int).
@@ -306,20 +303,20 @@ def sleep(seconds):
         # Async context - return awaitable that uses Erlang timers
         return asyncio.sleep(seconds)
     except RuntimeError:
-        # Sync context - use erlang.call to truly suspend and free dirty scheduler
+        # Sync context: block on the thread worker path. A plain erlang.call
+        # would suspend the request and replay the Python frame around the
+        # sleep on resume, which changes time-measurement semantics.
+        import erlang
+        blocking = getattr(erlang, '_call_blocking', None)
+        if blocking is not None:
+            blocking('_py_sleep', seconds)
+            return
         try:
-            import erlang
             erlang.call('_py_sleep', seconds)
-        except BaseException as e:
-            # SuspensionRequiredException inherits from BaseException (not Exception).
-            # When suspension is triggered, the NIF would replay the entire Python
-            # function from the beginning after the callback completes. This causes
-            # issues with time measurement since time.time() is called again during
-            # replay. For sync sleep, we fall back to time.sleep() which blocks
-            # correctly from the caller's perspective.
-            # Note: This means the dirty scheduler is NOT freed during sync sleep
-            # when running in context_call mode. For proper dirty scheduler release
-            # in sync contexts, use py:exec/py:eval instead of py:call.
+        except BaseException:
+            # No blocking path (an erlang module without _call_blocking):
+            # SuspensionRequired inherits from BaseException; sleep here
+            # instead of letting the frame be replayed.
             time.sleep(seconds)
 
 

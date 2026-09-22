@@ -790,6 +790,32 @@ struct py_context {
     /** @brief Process-local env pointer for current request */
     void *local_env_ptr;
 
+    /** @brief py_context process that issued the current request (async
+     *  mode); it runs the callbacks of an inline erlang.call */
+    ErlNifPid current_caller;
+
+    /** @brief True when current_caller is valid for the request in flight */
+    bool has_current_caller;
+
+    /* ========== Inline callback reply (queue_mutex) ========== */
+    /* An erlang.call from a call request blocks the context thread, which
+     * serves its own queue meanwhile; py_context delivers the callback's
+     * result here through context_callback_reply and signals
+     * queue_not_empty. One slot: callbacks nest strictly, so the innermost
+     * waiter is the only one waiting. */
+
+    /** @brief Callback id the pending reply belongs to */
+    uint64_t cb_reply_id;
+
+    /** @brief Reply frame (status byte + payload), owned here until consumed */
+    unsigned char *cb_reply_data;
+
+    /** @brief Length of cb_reply_data */
+    size_t cb_reply_len;
+
+    /** @brief True while a reply waits in the slot */
+    bool cb_reply_ready;
+
 #ifdef HAVE_SUBINTERPRETERS
     /* ========== OWN_GIL specific fields ========== */
 
@@ -1075,6 +1101,10 @@ typedef struct {
     /** @brief Context for replay */
     py_context_t *ctx;
 
+    /** @brief Process-local env of the original request, or NULL.
+     *  Kept alive so the replay runs in the caller's namespace. */
+    struct py_env_resource *penv;
+
     /** @brief Unique identifier for this callback */
     uint64_t callback_id;
 
@@ -1254,7 +1284,7 @@ extern ErlNifResourceType *INLINE_CONTINUATION_RESOURCE_TYPE;
  * Erlang GC drops the reference, triggering the destructor which frees
  * the Python dicts.
  */
-typedef struct {
+typedef struct py_env_resource {
     /** @brief Global namespace dictionary */
     PyObject *globals;
     /** @brief Local namespace dictionary (same as globals for module-level execution) */

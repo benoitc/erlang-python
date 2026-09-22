@@ -107,17 +107,24 @@ docstring of `priv/_erlang_impl/_isolated.py`.
 `erlang_call_impl` in `c_src/py_callback.c` chooses one of these paths, in
 this order (the comment above it is the authoritative version):
 
-1. **Suspension** (worker contexts). The Python call raises
+1. **Suspension** (eval requests on worker contexts). The Python call raises
    `SuspensionRequired`; the context thread returns
    `{suspended, CallbackId, State, {Name, Args}}` to `py_context`, which runs
    the registered fun (`execute/2` in `py_callback`), possibly serving nested calls
    meanwhile (`wait_for_callback/2`), and resumes with
-   the `resume_callback` NIF.
-2. **Blocking callback pipe** (owngil contexts). The context thread writes
+   the `resume_callback` NIF, replaying the expression in the request's
+   namespace with the callback results cached.
+2. **Inline** (call requests on worker contexts). The context thread sends
+   `{py_callback, CallbackId, Name, Args}` to `py_context` and keeps serving
+   its own request queue while it waits (`ctx_call_erlang_inline`), so the
+   fun's nested `py:call` runs on the same thread; the fun's result comes back
+   through the `context_callback_reply` NIF. Nothing is replayed. The fun runs
+   in a process bound to the context that shares the caller's local env.
+3. **Blocking callback pipe** (owngil contexts). The context thread writes
    a request on a pipe and blocks; the `py_context` process has a dedicated
    handler (`callback_handler_loop/1`) that runs the fun and writes the
    response frame back with `context_write_callback_response`.
-3. **Thread worker** (`c_src/py_thread_worker.c`): any Python thread that is
+4. **Thread worker** (`c_src/py_thread_worker.c`): any Python thread that is
    not a context thread (`threading.Thread`, executors) asks the
    `py_thread_handler` coordinator for a handler process and talks to it
    over a pipe. There is also an async variant (`erlang.async_call`) using a
