@@ -3799,7 +3799,7 @@ static int create_erlang_module(void) {
         PyDict_SetItemString(log_globals, "__builtins__", builtins);
 
         /* Import erlang module into globals so the code can reference it */
-        PyObject *sys_modules = PySys_GetObject("modules");
+        PyObject *sys_modules = PyImport_GetModuleDict();  /* the interpreter's table, a dict even when sys.modules is replaced */
         if (sys_modules != NULL) {
             PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
             if (erlang_mod != NULL) {
@@ -3901,7 +3901,7 @@ static int create_erlang_module(void) {
         PyDict_SetItemString(ext_globals, "__builtins__", builtins);
 
         /* Import erlang module into globals so the code can reference it */
-        PyObject *sys_modules = PySys_GetObject("modules");
+        PyObject *sys_modules = PyImport_GetModuleDict();  /* the interpreter's table, a dict even when sys.modules is replaced */
         if (sys_modules != NULL) {
             PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
             if (erlang_mod != NULL) {
@@ -3958,7 +3958,7 @@ static int create_erlang_module(void) {
         PyDict_SetItemString(atom_globals, "__builtins__", builtins);
 
         /* Import erlang module into globals so the code can reference it */
-        PyObject *sys_modules = PySys_GetObject("modules");
+        PyObject *sys_modules = PyImport_GetModuleDict();  /* the interpreter's table, a dict even when sys.modules is replaced */
         if (sys_modules != NULL) {
             PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
             if (erlang_mod != NULL) {
@@ -4048,7 +4048,7 @@ static int create_erlang_module(void) {
         PyDict_SetItemString(sd_globals, "__builtins__", builtins);
 
         /* Import erlang module into globals so the code can reference it */
-        PyObject *sys_modules = PySys_GetObject("modules");
+        PyObject *sys_modules = PyImport_GetModuleDict();  /* the interpreter's table, a dict even when sys.modules is replaced */
         if (sys_modules != NULL) {
             PyObject *erlang_mod = PyDict_GetItemString(sys_modules, "erlang");
             if (erlang_mod != NULL) {
