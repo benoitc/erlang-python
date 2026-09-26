@@ -303,7 +303,7 @@ start_zygote(Opts) ->
                 {error, _} = Err ->
                     Err
             end,
-            _ = file:delete(Path),
+            py_child:delete_file(Path),
             case Result of
                 {ok, _} = Ok ->
                     Ok;

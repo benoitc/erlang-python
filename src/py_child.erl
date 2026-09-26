@@ -29,6 +29,9 @@
          priv_dir/0,
          sock_dir/0,
          new_sock_path/1,
+         delete_file/1,
+         make_scratch_dir/1,
+         remove_tree/1,
          listen/1,
          accept/3,
          tune_socket/1,
@@ -45,6 +48,8 @@
          kill_os_pid/1,
          to_bin/1,
          to_list/1]).
+
+-include_lib("kernel/include/file.hrl").
 
 -define(SOCKET_BUF, 1024 * 1024).
 
@@ -100,17 +105,71 @@ priv_dir() ->
     filename:absname(Dir).
 
 %% @doc Private directory for the sockets of this node (mode 0700). Kept
-%% under `$TMPDIR': a Unix socket path is limited to 104 bytes.
+%% under `$TMPDIR': a Unix socket path is limited to 104 bytes. Created once;
+%% the path is cached so opening a child does not go through the file server.
 -spec sock_dir() -> file:filename().
 sock_dir() ->
-    Base = case os:getenv("TMPDIR") of
-        false -> "/tmp";
-        T -> T
-    end,
-    Dir = filename:join(Base, "erlang_python_" ++ os:getpid()),
-    ok = filelib:ensure_dir(filename:join(Dir, "x")),
-    _ = file:change_mode(Dir, 8#700),
-    Dir.
+    case persistent_term:get({?MODULE, sock_dir}, undefined) of
+        undefined ->
+            Base = case os:getenv("TMPDIR") of
+                false -> "/tmp";
+                T -> T
+            end,
+            Dir = filename:join(Base, "erlang_python_" ++ os:getpid()),
+            ok = filelib:ensure_dir(filename:join(Dir, "x")),
+            _ = file:change_mode(Dir, 8#700),
+            persistent_term:put({?MODULE, sock_dir}, Dir),
+            Dir;
+        Dir ->
+            Dir
+    end.
+
+%% Files of a child (socket paths, session directories) are handled with
+%% prim_file, as `raw' file access is: from the calling process, not
+%% through the node's single file server, which would serialise every
+%% session start and close.
+
+%% @doc Delete a file, ignoring errors.
+-spec delete_file(file:filename()) -> ok.
+delete_file(Path) ->
+    _ = prim_file:delete(Path),
+    ok.
+
+%% @doc A new empty directory under sock_dir/0.
+-spec make_scratch_dir(string()) -> {ok, file:filename()} | {error, term()}.
+make_scratch_dir(Prefix) ->
+    Dir = filename:join(sock_dir(), Prefix ++ integer_to_list(erlang:unique_integer([positive]))),
+    case prim_file:make_dir(Dir) of
+        ok ->
+            {ok, Dir};
+        {error, enoent} ->
+            %% the socket directory was removed (a tmp cleaner): make it again
+            persistent_term:erase({?MODULE, sock_dir}),
+            _ = sock_dir(),
+            case prim_file:make_dir(Dir) of
+                ok -> {ok, Dir};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Remove a directory and everything in it, ignoring errors.
+-spec remove_tree(file:filename()) -> ok.
+remove_tree(Path) ->
+    case prim_file:read_link_info(Path) of
+        {ok, #file_info{type = directory}} ->
+            case prim_file:list_dir(Path) of
+                {ok, Names} -> [remove_tree(filename:join(Path, N)) || N <- Names];
+                _ -> ok
+            end,
+            _ = prim_file:del_dir(Path),
+            ok;
+        {ok, _} ->
+            delete_file(Path);
+        {error, _} ->
+            ok
+    end.
 
 -spec new_sock_path(string()) -> file:filename().
 new_sock_path(Prefix) ->
@@ -120,7 +179,7 @@ new_sock_path(Prefix) ->
 %% @doc Listening socket at Path, for one child to connect to.
 -spec listen(file:filename()) -> {ok, socket:socket()} | {error, term()}.
 listen(Path) ->
-    _ = file:delete(Path),
+    delete_file(Path),
     case socket:open(local, stream, default) of
         {ok, L} ->
             case socket:bind(L, #{family => local, path => Path}) of

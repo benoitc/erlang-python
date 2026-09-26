@@ -353,8 +353,8 @@ handle_event(info, {stop, From, MRef}, _State, #data{opts = Opts} = Data) ->
         false -> graceful
     end,
     Data1 = stop_child(Data, How),
-    %% Gone before the caller hears back: a closed session leaves nothing
-    remove_scratch(Data1),
+    %% The scratch directory is removed by terminate/3, right after the
+    %% reply: the caller does not wait for the file system
     From ! {MRef, ok},
     {stop, normal, Data1};
 
@@ -520,9 +520,7 @@ start_child_1(#data{opts = Opts} = St0) ->
 %% A session runs in its own empty directory, created here and removed
 %% when the context stops.
 with_scratch(#data{scratch = undefined, opts = #{session := true}} = St) ->
-    Dir = filename:join(py_child:sock_dir(),
-                        "sess_" ++ integer_to_list(erlang:unique_integer([positive]))),
-    ok = file:make_dir(Dir),
+    {ok, Dir} = py_child:make_scratch_dir("sess_"),
     St#data{scratch = Dir};
 with_scratch(St) ->
     St.
@@ -530,7 +528,7 @@ with_scratch(St) ->
 remove_scratch(#data{scratch = undefined}) ->
     ok;
 remove_scratch(#data{scratch = Dir}) ->
-    _ = file:del_dir_r(Dir),
+    py_child:remove_tree(Dir),
     ok.
 
 %% Ask the session template to fork a child from its zygote; the child
@@ -545,18 +543,18 @@ fork_child(Template, Opts) ->
                 {ok, OsPid} ->
                     case py_child:accept(L, {os_pid, OsPid}, Timeout) of
                         {ok, S} ->
-                            _ = file:delete(Path),
+                            py_child:delete_file(Path),
                             py_child:tune_socket(S),
                             {ok, #child{port = undefined, os_pid = OsPid, listener = L,
                                         sock = S, sock_path = Path}};
                         {error, Reason} ->
-                            _ = file:delete(Path),
+                            py_child:delete_file(Path),
                             socket:close(L),
                             py_child:kill_os_pid(OsPid),
                             {error, Reason}
                     end;
                 {error, Reason} ->
-                    _ = file:delete(Path),
+                    py_child:delete_file(Path),
                     socket:close(L),
                     {error, Reason}
             end;
@@ -583,19 +581,19 @@ spawn_child(Python, Opts) ->
                 Timeout = maps:get(start_timeout, Opts, ?DEFAULT_START_TIMEOUT_MS),
                 case py_child:accept(L, {port, Port}, Timeout) of
                     {ok, S} ->
-                        _ = file:delete(Path),
+                        py_child:delete_file(Path),
                         py_child:tune_socket(S),
                         {ok, #child{port = Port, os_pid = OsPid, listener = L,
                                     sock = S, sock_path = Path}};
                     {error, Reason} ->
-                        _ = file:delete(Path),
+                        py_child:delete_file(Path),
                         socket:close(L),
                         kill_port(Port, OsPid),
                         {error, Reason}
                 end
             catch
                 Class:Err:Stack ->
-                    _ = file:delete(Path),
+                    py_child:delete_file(Path),
                     socket:close(L),
                     {error, {spawn_failed, {Class, Err, Stack}}}
             end;

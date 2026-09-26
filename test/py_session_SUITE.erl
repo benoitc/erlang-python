@@ -313,8 +313,17 @@ test_close_reaps_and_cleans(Config) ->
     true = filelib:is_dir(Cwd),
     ok = py_session:close(S),
     ok = wait_gone(Pid),
-    false = filelib:is_dir(Cwd),
+    ok = wait_no_dir(Cwd, 100),
     ok.
+
+%% removed by the context process right after close/1 returns
+wait_no_dir(Dir, 0) ->
+    ct:fail({still_there, Dir});
+wait_no_dir(Dir, N) ->
+    case filelib:is_dir(Dir) of
+        false -> ok;
+        true -> timer:sleep(20), wait_no_dir(Dir, N - 1)
+    end.
 
 %% A session is linked to the process that created it.
 test_caller_crash_stops_session(Config) ->
