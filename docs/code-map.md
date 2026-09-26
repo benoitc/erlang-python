@@ -16,6 +16,7 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 | `py_context` | The API every mode answers (`call/eval/exec`, `interrupt`, `kill`, loops, `pass_fd`), the reply protocol and the pid to NIF reference table; `init/4` hands the process to `py_context_embedded` or `py_isolated` | live | context-affinity, workers, interrupts | `py_context_SUITE`, `py_context_process_SUITE`, `py_interrupt_SUITE`, `py_worker_loop_SUITE` |
 | `py_context_embedded` | Process body for `worker` and `owngil` mode: the receive loop, callbacks (suspension and pipe), worker loops | live | architecture, state-machines | same |
 | `py_isolated` | `gen_statem` driving a child process over the socket; restart policy | live | isolated | `py_isolated_*_SUITE` |
+| `py_child` | Helpers shared by the processes that drive a Python child: executable lookup, socket listen/accept, frames, port env, rlimit flags | live | isolated | `py_isolated_*_SUITE` |
 | `py_context_router` | Pools and scheduler-affinity routing | live | pools, context-affinity | `py_context_router_SUITE`, `py_pool_SUITE` |
 | `py_context_sup`, `py_context_init` | Supervisor of contexts; starts the default pool at boot | live | pools | (through the above) |
 | `py_nif` | Erlang stubs and docs for every NIF | live | api-reference | all |

@@ -81,7 +81,6 @@
 -define(DEFAULT_RESTART_PERIOD_MS, 10000).
 -define(SHUTDOWN_GRACE_MS, 1000).
 -define(EXIT_STATUS_WAIT_MS, 5000).
--define(SOCKET_BUF, 1024 * 1024).
 
 -record(child, {
     port :: port(),
@@ -198,7 +197,7 @@ handle_event(info, {Port, {data, Out}}, _State, #data{child = #child{port = Port
     log_output(Data, Out),
     keep_state_and_data;
 handle_event(info, {Port, {exit_status, Status}}, State, #data{child = #child{port = Port}} = Data) ->
-    child_exited(exit_reason(Status), State, Data);
+    child_exited(py_child:exit_reason(Status), State, Data);
 handle_event(info, {Port, _}, _State, _Data) when is_port(Port) ->
     keep_state_and_data;
 handle_event(state_timeout, exit_status, {restarting, _} = State, #data{child = Child} = Data) ->
@@ -401,44 +400,11 @@ format_status(#{data := #data{child = #child{} = Child} = Data} = Status) ->
 format_status(Status) ->
     Status.
 
-%% @doc Python executable used for isolated children: the `python' option,
-%% then the `isolated_python' application env, then the interpreter matching
-%% the embedded runtime, then `python3' from PATH.
+%% @doc Python executable used for isolated children; see
+%% py_child:python_executable/1.
 -spec python_executable(map()) -> string() | {error, term()}.
 python_executable(Opts) ->
-    Candidate = case maps:get(python, Opts, undefined) of
-        undefined ->
-            case application:get_env(erlang_python, isolated_python) of
-                {ok, P} -> P;
-                undefined -> default_python()
-            end;
-        P -> P
-    end,
-    resolve_exe(to_list(Candidate)).
-
-default_python() ->
-    case persistent_term:get({?MODULE, python}, undefined) of
-        undefined ->
-            Exe = try py:python_executable() catch _:_ -> "python3" end,
-            persistent_term:put({?MODULE, python}, Exe),
-            Exe;
-        Exe ->
-            Exe
-    end.
-
-resolve_exe(Exe) ->
-    case filename:pathtype(Exe) of
-        absolute ->
-            case filelib:is_file(Exe) of
-                true -> Exe;
-                false -> {error, {python_not_found, Exe}}
-            end;
-        _ ->
-            case os:find_executable(Exe) of
-                false -> {error, {python_not_found, Exe}};
-                Found -> Found
-            end
-    end.
+    py_child:python_executable(Opts).
 
 %% ============================================================================
 %% Child startup
@@ -474,28 +440,24 @@ start_child_1(#data{opts = Opts} = St) ->
     end.
 
 spawn_child(Python, Opts) ->
-    Dir = sock_dir(),
-    Path = filename:join(Dir, "ctx_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".sock"),
-    _ = file:delete(Path),
-    case socket:open(local, stream, default) of
+    Path = py_child:new_sock_path("ctx_"),
+    case py_child:listen(Path) of
         {ok, L} ->
             try
-                ok = socket:bind(L, #{family => local, path => Path}),
-                ok = socket:listen(L),
-                Script = filename:join(priv_dir(), "py_isolated_child.py"),
-                Args = [Script, Path | rlimit_args(Opts) ++ cgroup_args(Opts)],
+                Script = filename:join(py_child:priv_dir(), "py_isolated_child.py"),
+                Args = [Script, Path | py_child:rlimit_args(Opts) ++ py_child:cgroup_args(Opts)],
                 PortOpts = [exit_status, stderr_to_stdout, binary, use_stdio,
-                            {args, Args}, {env, env_opt(Opts)}],
+                            {args, Args}, {env, py_child:port_env(Opts)}],
                 Port = open_port({spawn_executable, Python}, PortOpts),
                 OsPid = case erlang:port_info(Port, os_pid) of
                     {os_pid, Pid} -> Pid;
                     _ -> 0
                 end,
                 Timeout = maps:get(start_timeout, Opts, ?DEFAULT_START_TIMEOUT_MS),
-                case accept_child(L, Port, Timeout) of
+                case py_child:accept(L, {port, Port}, Timeout) of
                     {ok, S} ->
                         _ = file:delete(Path),
-                        tune_socket(S),
+                        py_child:tune_socket(S),
                         {ok, #child{port = Port, os_pid = OsPid, listener = L,
                                     sock = S, sock_path = Path}};
                     {error, Reason} ->
@@ -510,56 +472,10 @@ spawn_child(Python, Opts) ->
                     socket:close(L),
                     {error, {spawn_failed, {Class, Err, Stack}}}
             end;
+        {error, {socket_open_failed, _}} = Err ->
+            Err;
         {error, Reason} ->
-            {error, {socket_open_failed, Reason}}
-    end.
-
-%% Accept while also watching the port: a child that dies before connecting
-%% (bad interpreter, missing script) is reported with its output.
-accept_child(L, Port, Timeout) ->
-    Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    accept_child(L, Port, Deadline, []).
-
-accept_child(L, Port, Deadline, Out) ->
-    case socket:accept(L, nowait) of
-        {ok, S} ->
-            %% Output printed before connecting is still worth logging
-            [self() ! {Port, {data, D}} || D <- lists:reverse(Out)],
-            {ok, S};
-        {select, {select_info, _, Handle}} ->
-            Left = max(0, Deadline - erlang:monotonic_time(millisecond)),
-            receive
-                {'$socket', L, select, Handle} ->
-                    accept_child(L, Port, Deadline, Out);
-                {Port, {exit_status, Status}} ->
-                    _ = socket:cancel(L, {select_info, accept, Handle}),
-                    {error, {child_exited_at_start, exit_reason(Status),
-                             drain_port_output(Port, Out)}};
-                {Port, {data, D}} ->
-                    %% Keep it here, not in the mailbox: re-sending it would
-                    %% make this receive return at once and never time out
-                    accept_child(L, Port, Deadline, [D | Out])
-            after Left ->
-                _ = socket:cancel(L, {select_info, accept, Handle}),
-                {error, {start_timeout, drain_port_output(Port, Out)}}
-            end;
-        {error, Reason} ->
-            {error, {accept_failed, Reason}}
-    end.
-
-%% Default Unix socket buffers are small (8 KB on macOS); large payloads
-%% would cross in hundreds of wakeups. Best effort: the kernel clamps.
-tune_socket(S) ->
-    _ = socket:setopt(S, {otp, rcvbuf}, ?SOCKET_BUF),
-    _ = socket:setopt(S, {socket, rcvbuf}, ?SOCKET_BUF),
-    _ = socket:setopt(S, {socket, sndbuf}, ?SOCKET_BUF),
-    ok.
-
-drain_port_output(Port, Acc) ->
-    receive
-        {Port, {data, D}} -> drain_port_output(Port, [D | Acc])
-    after 50 ->
-        iolist_to_binary(lists:reverse(Acc))
+            {error, {spawn_failed, Reason}}
     end.
 
 %% Blocking handshake: ready event, init request, then the preload exec.
@@ -569,10 +485,10 @@ handshake(#data{child = Child, opts = Opts} = St0) ->
     case recv_frame_sync(Child, Timeout) of
         {ok, {0, ?STATUS_EVENT, {ready, Info}}, Child1} ->
             St1 = St#data{child = Child1#child{info = Info}},
-            Paths = [to_bin(P) || P <- py_import:all_paths()] ++ extra_paths(Opts),
+            Paths = [py_child:to_bin(P) || P <- py_import:all_paths()] ++ extra_paths(Opts),
             %% Registered imports are pre-cached in sys.modules, as
             %% interp_apply_imports does for the embedded modes
-            Imports = lists:usort([to_bin(M) || {M, _} <- py_import:all_imports()]),
+            Imports = lists:usort([py_child:to_bin(M) || {M, _} <- py_import:all_imports()]),
             case sync_request(St1, {init, self(), Paths, Imports}, Timeout) of
                 {{ok, _}, St2} ->
                     run_preload(St2, Timeout);
@@ -624,7 +540,7 @@ py_preload_code() ->
     end.
 
 extra_paths(Opts) ->
-    [to_bin(P) || P <- maps:get(paths, Opts, [])].
+    [py_child:to_bin(P) || P <- maps:get(paths, Opts, [])].
 
 %% Send a request and wait for its reply, ignoring nothing: callbacks made
 %% by the child during startup are served too.
@@ -673,7 +589,7 @@ sync_wait(#data{child = Child} = St, Id, Timeout) ->
     end.
 
 recv_frame_sync(#child{buf = Buf} = Child, Timeout) ->
-    case parse_frame(Buf) of
+    case py_child:parse_frame(Buf) of
         {ok, Frame, Rest} ->
             {ok, Frame, Child#child{buf = Rest}};
         more ->
@@ -739,7 +655,7 @@ pass_fd(_From, _MRef, _Fd, {restarting, _}, _Data) ->
     {keep_state_and_data, [postpone]};
 pass_fd(From, MRef, Fd, _State, #data{child = Child, next_id = Id, pending = Pending} = Data)
         when is_integer(Fd), Fd >= 0 ->
-    Frame = frame(Id, ?STATUS_REQUEST, term_to_binary(pass_fd)),
+    Frame = py_child:frame(Id, ?STATUS_REQUEST, term_to_binary(pass_fd)),
     Msg = #{iov => [Frame],
             ctrl => [#{level => socket, type => rights, data => <<Fd:32/native>>}]},
     case socket:sendmsg(Child#child.sock, Msg) of
@@ -789,7 +705,7 @@ drain_socket(State, #data{child = #child{sock = S, buf = Buf} = Child} = Data, A
 process_frames({restarting, _} = State, Data, Actions) ->
     {State, Data, Actions};
 process_frames(State, #data{child = #child{buf = Buf} = Child} = Data, Actions) ->
-    case parse_frame(Buf) of
+    case py_child:parse_frame(Buf) of
         {ok, Frame, Rest} ->
             Data1 = Data#data{child = Child#child{buf = Rest}},
             {State1, Data2, Actions1} = handle_frame(Frame, State, Data1, Actions),
@@ -799,24 +715,6 @@ process_frames(State, #data{child = #child{buf = Buf} = Child} = Data, Actions) 
         {error, Reason} ->
             socket_broken({malformed_frame, Reason}, State, Data, Actions)
     end.
-
-parse_frame(<<Id:64/native, Len:32/native, Body:Len/binary, Rest/binary>>) ->
-    case Body of
-        <<Status:8, Payload/binary>> ->
-            try
-                Term = case Payload of
-                    <<>> -> undefined;
-                    _ -> binary_to_term(Payload)
-                end,
-                {ok, {Id, Status, Term}, Rest}
-            catch
-                error:badarg -> {error, bad_etf}
-            end;
-        <<>> ->
-            {error, empty_body}
-    end;
-parse_frame(_) ->
-    more.
 
 
 handle_frame({Id, Status, Term}, State, #data{pending = Pending} = Data, Actions)
@@ -904,7 +802,7 @@ run_callback({call, Name, Args}) ->
         T when is_tuple(T) -> tuple_to_list(T);
         _ -> [Args]
     end,
-    try py_callback:execute(to_bin(Name), ArgsList) of
+    try py_callback:execute(py_child:to_bin(Name), ArgsList) of
         {ok, Result} ->
             {?STATUS_OK, Result};
         {error, {not_found, N}} ->
@@ -980,8 +878,8 @@ kill(_Reason, _State, _Data) ->
     keep_state_and_data.
 
 kill_port(Port, OsPid) ->
-    case OsPid > 0 andalso erlang:port_info(Port) =/= undefined of
-        true -> _ = py_nif:os_kill(OsPid, 9), ok;
+    case erlang:port_info(Port) =/= undefined of
+        true -> py_child:kill_os_pid(OsPid);
         false -> ok
     end.
 
@@ -1007,9 +905,6 @@ enter_restarting(Reason, _State, Data, Actions) ->
     %% Timers of the old child are meaningless now
     {{restarting, Reason}, Data#data{kill_target = undefined},
      [{{timeout, kill}, cancel} | Actions]}.
-
-exit_reason(Status) when Status > 128 -> {signal, Status - 128};
-exit_reason(Status) -> {exit_status, Status}.
 
 %% The port reported the child's exit: fail what was in flight, then
 %% restart within the budget or stop.
@@ -1134,16 +1029,8 @@ loop_exited(_Result, Data) ->
 %% Wire helpers
 %% ---------------------------------------------------------------------------
 
-frame(Id, Status, Payload) ->
-    Body = <<Status:8, Payload/binary>>,
-    <<Id:64/native, (byte_size(Body)):32/native, Body/binary>>.
-
 send_frame(#child{sock = S}, Id, Status, Term) ->
-    case socket:send(S, frame(Id, Status, term_to_binary(Term))) of
-        ok -> ok;
-        {error, {Reason, _Rest}} -> {error, Reason};
-        {error, Reason} -> {error, Reason}
-    end.
+    py_child:send_frame(S, Id, Status, Term).
 
 log_output(#data{id = Id, child = #child{os_pid = OsPid}}, Data) ->
     Lines = binary:split(Data, <<"\n">>, [global, trim_all]),
@@ -1155,45 +1042,3 @@ log_event(#data{id = Id}, Level, Msg) ->
         error -> error; warning -> warning; debug -> debug; _ -> info
     end,
     logger:log(Lvl, "py_context ~p (isolated): ~s", [Id, Msg]).
-
-sock_dir() ->
-    Base = case os:getenv("TMPDIR") of
-        false -> "/tmp";
-        T -> T
-    end,
-    Dir = filename:join(Base, "erlang_python_" ++ os:getpid()),
-    ok = filelib:ensure_dir(filename:join(Dir, "x")),
-    _ = file:change_mode(Dir, 8#700),
-    Dir.
-
-priv_dir() ->
-    case code:priv_dir(erlang_python) of
-        {error, bad_name} ->
-            filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
-        Dir ->
-            Dir
-    end.
-
-rlimit_args(Opts) ->
-    Limits = maps:get(rlimits, Opts, #{}),
-    lists:append([case maps:get(K, Limits, undefined) of
-                      undefined -> [];
-                      V when is_integer(V), V >= 0 -> ["--rlimit-" ++ atom_to_list(K), integer_to_list(V)]
-                  end || K <- [as, cpu, nofile]]).
-
-cgroup_args(Opts) ->
-    case maps:get(cgroup, Opts, undefined) of
-        undefined -> [];
-        Dir -> ["--cgroup", to_list(Dir)]
-    end.
-
-env_opt(Opts) ->
-    [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(maps:get(env, Opts, #{}))].
-
-to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
-to_bin(L) when is_list(L) -> unicode:characters_to_binary(L);
-to_bin(B) when is_binary(B) -> B.
-
-to_list(A) when is_atom(A) -> atom_to_list(A);
-to_list(B) when is_binary(B) -> unicode:characters_to_list(B);
-to_list(L) when is_list(L) -> L.
