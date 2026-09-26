@@ -50,6 +50,8 @@ Options of `py_context:new/1` specific to this mode:
 | `rlimits` | `#{}` | `#{as => Bytes, cpu => Seconds, nofile => N}`, applied with `setrlimit` before any user code |
 | `cgroup` | none | Path of a cgroup v2 directory the child joins (limits written by you: `memory.max`, `cpu.max`, `pids.max`) |
 | `env` | `#{}` | Extra environment variables for the child |
+| `clear_env` | `false` | When `true` the child inherits nothing from the VM's environment: it sees only `env` |
+| `hash_seed` | `random` | `PYTHONHASHSEED` for the child (0 to 4294967295): the same seed gives the same `set` and `dict`-of-`str` iteration order in every child |
 | `paths` | `[]` | Extra `sys.path` entries (registered `py_import` paths and imports are applied too) |
 | `preload` | none | Code run once in the child before anything else |
 | `kill_after` | `1000` | Milliseconds between a soft interrupt and `SIGKILL` |

@@ -33,6 +33,7 @@
          accept/3,
          tune_socket/1,
          port_env/1,
+         check_env_opts/1,
          rlimit_args/1,
          cgroup_args/1,
          frame/3,
@@ -184,11 +185,43 @@ tune_socket(S) ->
     _ = socket:setopt(S, {socket, sndbuf}, ?SOCKET_BUF),
     ok.
 
-%% @doc The `{env, ...}' port option for a child: `env' adds variables to
-%% what the child inherits from the VM.
+%% @doc The `{env, ...}' port option for a child.
+%%
+%% `env' adds variables to what the child inherits from the VM. With
+%% `clear_env => true' nothing is inherited: every variable of the VM not
+%% named in `env' is unset. `hash_seed' sets PYTHONHASHSEED; `random' (the
+%% default) leaves the choice to Python.
 -spec port_env(map()) -> [{string(), string() | false}].
 port_env(Opts) ->
-    [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(maps:get(env, Opts, #{}))].
+    Env = [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(maps:get(env, Opts, #{}))],
+    Seed = case maps:get(hash_seed, Opts, random) of
+        random -> [];
+        N -> [{"PYTHONHASHSEED", integer_to_list(N)}]
+    end,
+    Set = Env ++ Seed,
+    Clear = case maps:get(clear_env, Opts, false) of
+        true ->
+            Keep = [K || {K, _} <- Set],
+            lists:usort([{K, false} || KV <- os:getenv(),
+                                       K <- [hd(string:split(KV, "="))],
+                                       K =/= "", not lists:member(K, Keep)]);
+        false ->
+            []
+    end,
+    Clear ++ Set.
+
+%% @doc Check the options port_env/1 reads.
+-spec check_env_opts(map()) -> ok | {error, term()}.
+check_env_opts(Opts) ->
+    case {maps:get(hash_seed, Opts, random), maps:get(clear_env, Opts, false)} of
+        {Seed, _} when Seed =/= random,
+                       not (is_integer(Seed) andalso Seed >= 0 andalso Seed =< 4294967295) ->
+            {error, {badarg, {hash_seed, Seed}}};
+        {_, Clear} when not is_boolean(Clear) ->
+            {error, {badarg, {clear_env, Clear}}};
+        _ ->
+            ok
+    end.
 
 -spec rlimit_args(map()) -> [string()].
 rlimit_args(Opts) ->

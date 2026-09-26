@@ -412,8 +412,13 @@ python_executable(Opts) ->
 
 start_child(#data{opts = Opts} = St) ->
     case check_platform_opts(Opts) of
-        ok -> start_child_1(St);
-        {error, _} = Err -> Err
+        ok ->
+            case py_child:check_env_opts(Opts) of
+                ok -> start_child_1(St);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% cgroups exist only on Linux; rlimits are POSIX and apply everywhere.
