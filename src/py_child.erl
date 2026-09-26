@@ -40,6 +40,8 @@
          send_frame/4,
          parse_frame/1,
          exit_reason/1,
+         code_reason/1,
+         os_pid_alive/1,
          kill_os_pid/1,
          to_bin/1,
          to_list/1]).
@@ -131,10 +133,12 @@ listen(Path) ->
             {error, {socket_open_failed, Reason}}
     end.
 
-%% @doc Accept the child's connection while watching its port, so a child
-%% that dies before connecting (bad interpreter, missing script) is reported
-%% with its output instead of timing out.
--spec accept(socket:socket(), {port, port()}, timeout()) ->
+%% @doc Accept the child's connection while watching for its death, so a
+%% child that dies before connecting (bad interpreter, missing script) is
+%% reported instead of timing out. `{port, Port}' watches a spawned child and
+%% keeps its output for the error; `{os_pid, Pid}' watches a forked one
+%% through the `{py_session_exited, Pid, Code}' message its template sends.
+-spec accept(socket:socket(), {port, port()} | {os_pid, pos_integer()}, timeout()) ->
     {ok, socket:socket()} | {error, term()}.
 accept(L, Watch, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
@@ -144,8 +148,7 @@ accept(L, Watch, Deadline, Out) ->
     case socket:accept(L, nowait) of
         {ok, S} ->
             %% Output printed before connecting is still worth logging
-            {port, Port} = Watch,
-            [self() ! {Port, {data, D}} || D <- lists:reverse(Out)],
+            [self() ! {Port, {data, D}} || {port, Port} <- [Watch], D <- lists:reverse(Out)],
             {ok, S};
         {select, {select_info, _, Handle}} ->
             Left = max(0, Deadline - erlang:monotonic_time(millisecond)),
@@ -159,11 +162,17 @@ accept(L, Watch, Deadline, Out) ->
                 {Port, {data, D}} when Watch =:= {port, Port} ->
                     %% Keep it here, not in the mailbox: re-sending it would
                     %% make this receive return at once and never time out
-                    accept(L, Watch, Deadline, [D | Out])
+                    accept(L, Watch, Deadline, [D | Out]);
+                {py_session_exited, Pid, Code} when Watch =:= {os_pid, Pid} ->
+                    _ = socket:cancel(L, {select_info, accept, Handle}),
+                    {error, {child_exited_at_start, code_reason(Code), <<>>}}
             after Left ->
-                {port, Port} = Watch,
                 _ = socket:cancel(L, {select_info, accept, Handle}),
-                {error, {start_timeout, drain_port_output(Port, Out)}}
+                Output = case Watch of
+                    {port, Port} -> drain_port_output(Port, Out);
+                    _ -> <<>>
+                end,
+                {error, {start_timeout, Output}}
             end;
         {error, Reason} ->
             {error, {accept_failed, Reason}}
@@ -276,12 +285,25 @@ parse_frame(_) ->
 exit_reason(Status) when Status > 128 -> {signal, Status - 128};
 exit_reason(Status) -> {exit_status, Status}.
 
+%% @doc Exit reason from an `os.waitstatus_to_exitcode' value (-N is
+%% signal N), as the zygote reports it.
+-spec code_reason(integer()) -> {signal, pos_integer()} | {exit_status, integer()}.
+code_reason(Code) when Code < 0 -> {signal, -Code};
+code_reason(Code) -> {exit_status, Code}.
+
 -spec kill_os_pid(integer()) -> ok.
 kill_os_pid(OsPid) when is_integer(OsPid), OsPid > 0 ->
     _ = py_nif:os_kill(OsPid, 9),
     ok;
 kill_os_pid(_) ->
     ok.
+
+%% @doc Whether a process still exists (a zombie counts until reaped).
+-spec os_pid_alive(integer()) -> boolean().
+os_pid_alive(OsPid) when is_integer(OsPid), OsPid > 0 ->
+    py_nif:os_kill(OsPid, 0) =/= {error, esrch};
+os_pid_alive(_) ->
+    false.
 
 to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
 to_bin(L) when is_list(L) -> unicode:characters_to_binary(L);

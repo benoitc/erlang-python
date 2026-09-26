@@ -44,7 +44,19 @@
 %%%   <li>`{restarting, Reason}' - the child is gone or being killed;
 %%%       requests are postponed until the new child is up. In-flight
 %%%       requests fail with `{error, Reason}'.</li>
+%%%   <li>`{exited, Reason}' - a session's child is gone. Sessions are never
+%%%       restarted: every request answers `{error, Reason}' until the
+%%%       context is stopped.</li>
 %%% </ul>
+%%%
+%%% == Sessions ==
+%%%
+%%% `py_session' starts contexts with `session => true' and an `origin'.
+%%% `{fork, Template}' asks a `py_session_template' to fork the child from
+%%% its zygote: there is no port, the template reports the exit with
+%%% `{py_session_exited, OsPid, Code}', and the child already holds the
+%%% template's imports and preload. `spawn' starts one as usual. Either way
+%%% the child runs in a fresh scratch directory removed when it stops.
 %%%
 %%% The message protocol with py_context is unchanged: requests are plain
 %%% messages `{call, From, MRef, ...}' answered with `From ! {MRef, Reply}'.
@@ -81,9 +93,11 @@
 -define(DEFAULT_RESTART_PERIOD_MS, 10000).
 -define(SHUTDOWN_GRACE_MS, 1000).
 -define(EXIT_STATUS_WAIT_MS, 5000).
+-define(EXIT_PROBE_MS, 100).
 
 -record(child, {
-    port :: port(),
+    %% undefined for a child forked by a session template
+    port :: port() | undefined,
     os_pid :: pos_integer(),
     listener :: socket:socket() | undefined,
     sock :: socket:socket(),
@@ -118,14 +132,16 @@
     %% Request id (or `loop') the armed kill backstop is bound to
     kill_target :: pos_integer() | loop | undefined,
     %% Callers of kill/1 answered once the new child is up
-    kill_waiters = [] :: [{pid(), reference()}]
+    kill_waiters = [] :: [{pid(), reference()}],
+    %% Session scratch directory (the child's cwd), removed on stop
+    scratch :: file:filename() | undefined
 }).
 
 -define(IS_MAIN(K), (K =:= call orelse K =:= eval orelse K =:= exec orelse
                      (is_tuple(K) andalso element(1, K) =:= start_loop))).
 
 -type state() :: idle | {busy, pos_integer()} | looping | stopping_loop
-               | {restarting, term()}.
+               | {restarting, term()} | {exited, term()}.
 -export_type([state/0]).
 
 %% ============================================================================
@@ -176,6 +192,10 @@ init(_Args) ->
 handle_event(enter, _Old, idle, #data{kill_waiters = Waiters} = Data) ->
     [W ! {M, ok} || {W, M} <- Waiters],
     {keep_state, Data#data{kill_waiters = []}};
+handle_event(enter, _Old, {restarting, _}, #data{child = #child{port = undefined}}) ->
+    %% A forked child's exit comes from its template, which may be gone:
+    %% check the pid too
+    {keep_state_and_data, [{state_timeout, ?EXIT_PROBE_MS, {probe_exit, 0}}]};
 handle_event(enter, _Old, {restarting, _}, _Data) ->
     %% SIGKILL was sent (or the child is exiting): the port reports it
     %% within milliseconds; this is the safety net
@@ -200,6 +220,22 @@ handle_event(info, {Port, {exit_status, Status}}, State, #data{child = #child{po
     child_exited(py_child:exit_reason(Status), State, Data);
 handle_event(info, {Port, _}, _State, _Data) when is_port(Port) ->
     keep_state_and_data;
+handle_event(info, {py_session_exited, OsPid, Code}, State,
+             #data{child = #child{port = undefined, os_pid = OsPid}} = Data) ->
+    child_exited(py_child:code_reason(Code), State, Data);
+handle_event(info, {py_session_exited, _, _}, _State, _Data) ->
+    keep_state_and_data;
+handle_event(state_timeout, {probe_exit, Waited}, {restarting, _} = State,
+             #data{child = #child{os_pid = OsPid}} = Data) ->
+    case py_child:os_pid_alive(OsPid) of
+        false ->
+            child_exited({signal, 9}, State, Data);
+        true when Waited >= ?EXIT_STATUS_WAIT_MS ->
+            handle_event(state_timeout, exit_status, State, Data);
+        true ->
+            {keep_state_and_data,
+             [{state_timeout, ?EXIT_PROBE_MS, {probe_exit, Waited + ?EXIT_PROBE_MS}}]}
+    end;
 handle_event(state_timeout, exit_status, {restarting, _} = State, #data{child = Child} = Data) ->
     logger:error("py_context ~p (isolated): child ~p did not exit after SIGKILL",
                  [Data#data.id, Child#child.os_pid]),
@@ -298,6 +334,9 @@ handle_event({timeout, kill}, Target, State, #data{pending = Pending} = Data) ->
         false ->
             {keep_state, Data#data{kill_target = undefined}}
     end;
+handle_event(info, {kill, From, MRef}, {exited, _}, _Data) ->
+    From ! {MRef, ok},
+    keep_state_and_data;
 handle_event(info, {kill, From, MRef}, State, Data) ->
     case State of
         {restarting, _} ->
@@ -306,10 +345,25 @@ handle_event(info, {kill, From, MRef}, State, Data) ->
         _ ->
             kill(killed, State, Data#data{kill_waiters = [{From, MRef} | Data#data.kill_waiters]})
     end;
-handle_event(info, {stop, From, MRef}, _State, Data) ->
-    Data1 = stop_child(Data, graceful),
+handle_event(info, {stop, From, MRef}, _State, #data{opts = Opts} = Data) ->
+    How = case maps:get(session, Opts, false) of
+        true -> kill;
+        false -> graceful
+    end,
+    Data1 = stop_child(Data, How),
     From ! {MRef, ok},
     {stop, normal, Data1};
+
+%% A session started ahead of time by its template is handed to the process
+%% that asked for it: that process becomes the parent (linked, its crash
+%% stops the session) and the template lets go.
+handle_event(info, {set_parent, From, MRef, NewParent}, _State, #data{parent = Old} = Data) ->
+    link(NewParent),
+    _ = Old =/= NewParent andalso unlink(Old),
+    %% An EXIT from the old parent may already be queued: forget it
+    receive {'EXIT', Old, _} -> ok after 0 -> ok end,
+    From ! {MRef, ok},
+    {keep_state, Data#data{parent = NewParent}};
 
 %% ---- worker loop -----------------------------------------------------------
 
@@ -385,9 +439,14 @@ handle_event(info, _Other, _State, _Data) ->
 terminate(Reason, _State, #data{child = Child} = Data) ->
     _ = case Child of
         undefined -> Data;
-        _ when Reason =:= normal; Reason =:= shutdown -> stop_child(Data, graceful);
+        _ when Reason =:= normal; Reason =:= shutdown ->
+            case maps:get(session, Data#data.opts, false) of
+                true -> stop_child(Data, kill);
+                false -> stop_child(Data, graceful)
+            end;
         _ -> stop_child(Data, kill)
     end,
+    remove_scratch(Data),
     ets:delete(?REF_TAB, self()),
     ok.
 
@@ -431,17 +490,74 @@ check_platform_opts(Opts) ->
         {_, {unix, Os}} -> {error, {cgroup_unsupported, Os}}
     end.
 
-start_child_1(#data{opts = Opts} = St) ->
-    case python_executable(Opts) of
-        {error, _} = Err ->
-            Err;
-        Python ->
-            case spawn_child(Python, Opts) of
-                {ok, Child} ->
-                    handshake(St#data{child = Child});
-                {error, _} = Err ->
-                    Err
+start_child_1(#data{opts = Opts} = St0) ->
+    St = with_scratch(St0),
+    ChildOpts = case St#data.scratch of
+        undefined -> Opts;
+        Dir -> Opts#{cd => Dir}
+    end,
+    Started = case maps:get(origin, Opts, spawn) of
+        {fork, Template} ->
+            fork_child(Template, ChildOpts);
+        spawn ->
+            case python_executable(Opts) of
+                {error, _} = NoPython -> NoPython;
+                Python -> spawn_child(Python, ChildOpts)
             end
+    end,
+    case Started of
+        {ok, Child} ->
+            handshake(St#data{child = Child});
+        {error, _} = Failed ->
+            remove_scratch(St),
+            Failed
+    end.
+
+%% A session runs in its own empty directory, created here and removed
+%% when the context stops.
+with_scratch(#data{scratch = undefined, opts = #{session := true}} = St) ->
+    Dir = filename:join(py_child:sock_dir(),
+                        "sess_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    ok = file:make_dir(Dir),
+    St#data{scratch = Dir};
+with_scratch(St) ->
+    St.
+
+remove_scratch(#data{scratch = undefined}) ->
+    ok;
+remove_scratch(#data{scratch = Dir}) ->
+    _ = file:del_dir_r(Dir),
+    ok.
+
+%% Ask the session template to fork a child from its zygote; the child
+%% connects to our socket like a spawned one.
+fork_child(Template, Opts) ->
+    Path = py_child:new_sock_path("sess_"),
+    case py_child:listen(Path) of
+        {ok, L} ->
+            Timeout = maps:get(start_timeout, Opts, ?DEFAULT_START_TIMEOUT_MS),
+            ForkOpts = maps:with([rlimits, cgroup, cd], Opts),
+            case py_session_template:fork(Template, Path, ForkOpts, Timeout) of
+                {ok, OsPid} ->
+                    case py_child:accept(L, {os_pid, OsPid}, Timeout) of
+                        {ok, S} ->
+                            _ = file:delete(Path),
+                            py_child:tune_socket(S),
+                            {ok, #child{port = undefined, os_pid = OsPid, listener = L,
+                                        sock = S, sock_path = Path}};
+                        {error, Reason} ->
+                            _ = file:delete(Path),
+                            socket:close(L),
+                            py_child:kill_os_pid(OsPid),
+                            {error, Reason}
+                    end;
+                {error, Reason} ->
+                    _ = file:delete(Path),
+                    socket:close(L),
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, {spawn_failed, Reason}}
     end.
 
 spawn_child(Python, Opts) ->
@@ -452,7 +568,9 @@ spawn_child(Python, Opts) ->
                 Script = filename:join(py_child:priv_dir(), "py_isolated_child.py"),
                 Args = [Script, Path | py_child:rlimit_args(Opts) ++ py_child:cgroup_args(Opts)],
                 PortOpts = [exit_status, stderr_to_stdout, binary, use_stdio,
-                            {args, Args}, {env, py_child:port_env(Opts)}],
+                            {args, Args}, {env, py_child:port_env(Opts)}]
+                           ++ [{cd, Dir} || Dir <- [maps:get(cd, Opts, undefined)],
+                                            Dir =/= undefined],
                 Port = open_port({spawn_executable, Python}, PortOpts),
                 OsPid = case erlang:port_info(Port, os_pid) of
                     {os_pid, Pid} -> Pid;
@@ -488,6 +606,10 @@ handshake(#data{child = Child, opts = Opts} = St0) ->
     St = St0#data{},
     Timeout = maps:get(start_timeout, Opts, ?DEFAULT_START_TIMEOUT_MS),
     case recv_frame_sync(Child, Timeout) of
+        {ok, {0, ?STATUS_EVENT, {ready, Info}}, Child1} when Child1#child.port =:= undefined ->
+            %% Forked: imports and preload ran in the zygote, and the child
+            %% learnt our pid from the fork request
+            {ok, St#data{child = Child1#child{info = Info}}};
         {ok, {0, ?STATUS_EVENT, {ready, Info}}, Child1} ->
             St1 = St#data{child = Child1#child{info = Info}},
             Paths = [py_child:to_bin(P) || P <- py_import:all_paths()] ++ extra_paths(Opts),
@@ -624,6 +746,9 @@ request(From, MRef, {start_loop, _}, _Term, State, _Data)
 request(From, MRef, Kind, _Term, looping, _Data) when ?IS_MAIN(Kind) ->
     From ! {MRef, {error, loop_running}},
     keep_state_and_data;
+request(From, MRef, _Kind, _Term, {exited, Reason}, _Data) ->
+    From ! {MRef, {error, Reason}},
+    keep_state_and_data;
 request(_From, _MRef, _Kind, _Term, {restarting, _}, _Data) ->
     {keep_state_and_data, [postpone]};
 request(_From, _MRef, Kind, _Term, stopping_loop, _Data) when ?IS_MAIN(Kind) ->
@@ -656,6 +781,9 @@ dispatch(From, MRef, Kind, Term, State, #data{child = Child, next_id = Id, pendi
             socket_broken(Reason, State, Data, [])
     end.
 
+pass_fd(From, MRef, _Fd, {exited, Reason}, _Data) ->
+    From ! {MRef, {error, Reason}},
+    keep_state_and_data;
 pass_fd(_From, _MRef, _Fd, {restarting, _}, _Data) ->
     {keep_state_and_data, [postpone]};
 pass_fd(From, MRef, Fd, _State, #data{child = Child, next_id = Id, pending = Pending} = Data)
@@ -882,6 +1010,8 @@ kill(Reason, State, #data{child = #child{port = Port, os_pid = OsPid}} = Data) -
 kill(_Reason, _State, _Data) ->
     keep_state_and_data.
 
+kill_port(undefined, OsPid) ->
+    py_child:kill_os_pid(OsPid);
 kill_port(Port, OsPid) ->
     case erlang:port_info(Port) =/= undefined of
         true -> py_child:kill_os_pid(OsPid);
@@ -934,6 +1064,12 @@ child_exited(Reason, State, #data{child = Child, opts = Opts} = Data0) ->
             logger:warning("py_context ~p (isolated): child exited: ~p",
                            [Data0#data.id, FailReason])
     end,
+    case maps:get(session, Opts, false) of
+        true -> {next_state, {exited, FailReason}, Data1};
+        false -> restart_or_stop(Reason, Data0, Data1)
+    end.
+
+restart_or_stop(Reason, Data0, #data{opts = Opts} = Data1) ->
     case maps:get(restart, Opts, true) andalso restart_allowed(Data1) of
         true ->
             Now = erlang:monotonic_time(millisecond),
@@ -983,30 +1119,48 @@ stop_child(#data{child = #child{port = Port, os_pid = OsPid} = Child} = Data, Ho
     case How of
         graceful ->
             _ = send_frame(Child, 0, ?STATUS_REQUEST, shutdown),
-            receive
-                {Port, {exit_status, _}} -> ok
-            after ?SHUTDOWN_GRACE_MS ->
-                kill_port(Port, OsPid),
-                wait_exit(Port)
+            case wait_exit(Child, ?SHUTDOWN_GRACE_MS) of
+                ok -> ok;
+                timeout -> kill_port(Port, OsPid), wait_exit(Child, 2000)
             end;
         _ ->
             kill_port(Port, OsPid),
-            wait_exit(Port)
+            wait_exit(Child, 2000)
     end,
     close_child(Child),
     Data1 = fail_pending({child_exited, stopped}, Data),
     Data1#data{child = undefined}.
 
-wait_exit(Port) ->
+wait_exit(#child{port = undefined, os_pid = OsPid}, Timeout) ->
+    wait_forked_exit(OsPid, Timeout);
+wait_exit(#child{port = Port}, Timeout) ->
     receive
         {Port, {exit_status, _}} -> ok
-    after 2000 ->
-        ok
+    after Timeout ->
+        timeout
+    end.
+
+%% The template reports a forked child's exit; if it is gone, the pid is
+%% enough
+wait_forked_exit(OsPid, Timeout) ->
+    receive
+        {py_session_exited, OsPid, _} -> ok
+    after min(Timeout, ?EXIT_PROBE_MS) ->
+        case py_child:os_pid_alive(OsPid) of
+            false -> ok;
+            true when Timeout =< ?EXIT_PROBE_MS -> timeout;
+            true -> wait_forked_exit(OsPid, Timeout - ?EXIT_PROBE_MS)
+        end
     end.
 
 close_child(#child{port = Port, sock = S, listener = L}) ->
     _ = socket:close(S),
     _ = socket:close(L),
+    close_port(Port).
+
+close_port(undefined) ->
+    ok;
+close_port(Port) ->
     try port_close(Port) catch error:badarg -> ok end,
     ok.
 
