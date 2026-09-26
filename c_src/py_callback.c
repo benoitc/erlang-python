@@ -1657,9 +1657,14 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
     bool has_context_suspension = (tl_current_context != NULL && tl_allow_suspension &&
                                    !loop_running);
     bool has_context_handler = (tl_current_context != NULL && tl_current_context->has_callback_handler);
+    /* An owngil context also has a callback handler (for its other
+     * threads), but a request with a caller must wait inline too: on the
+     * handler pipe a callback calling back into this context would queue
+     * behind the request that waits for it. */
     bool has_context_inline = (tl_current_context != NULL && !tl_allow_suspension &&
                                tl_current_context->has_current_caller &&
-                               !has_context_handler && !loop_running);
+                               (!has_context_handler || tl_current_context->is_subinterp) &&
+                               !loop_running);
 
     if (has_context_inline) {
         Py_ssize_t nargs = PyTuple_Size(args);

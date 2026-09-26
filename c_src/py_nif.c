@@ -3166,6 +3166,13 @@ static void *ctx_thread_main_owngil(void *arg) {
         ctx->request_term = req->request_data;
         ctx->reactor_buffer_ptr = req->reactor_buffer_ptr;
         ctx->local_env_ptr = req->local_env_ptr;
+        /* The caller serves erlang.call made by this request: the call
+         * waits inline and serves nested requests (ctx_call_erlang_inline),
+         * as on a worker context thread */
+        ctx->has_current_caller = req->async_mode;
+        if (req->async_mode) {
+            ctx->current_caller = req->caller_pid;
+        }
         ctx->response_ok = false;
         ctx->response_term = 0;
 
@@ -3195,6 +3202,7 @@ static void *ctx_thread_main_owngil(void *arg) {
         ctx->request_term = 0;
         ctx->reactor_buffer_ptr = NULL;
         ctx->local_env_ptr = NULL;
+        ctx->has_current_caller = false;
 
         /* Deliver result - async (message to caller) or blocking (condvar) */
         if (req->async_mode) {

@@ -23,6 +23,14 @@
   only the variables named in `env`, and every child built with the same
   seed hashes strings and orders sets the same way.
 
+### Fixed
+
+- On an owngil context, a Python function that called `erlang.call`, where
+  the Erlang callback called the same context again, hung until the request
+  timeout. The context thread waited for the callback on its pipe while the
+  nested call sat in its queue. It now waits inline and serves the nested
+  call, as worker contexts do since 5.0.1.
+
 
 
 ### Fixed

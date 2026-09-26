@@ -31,7 +31,9 @@
     test_call_reentrant_depths/1,
     test_call_reentrant_repeated/1,
     test_call_sequential_callbacks/1,
-    test_readme_reentrant_example/1
+    test_readme_reentrant_example/1,
+    test_owngil_call_reentrant_depths/1,
+    test_owngil_concurrent_reentrant/1
 ]).
 
 all() ->
@@ -52,7 +54,9 @@ all() ->
         test_call_reentrant_depths,
         test_call_reentrant_repeated,
         test_call_sequential_callbacks,
-        test_readme_reentrant_example
+        test_readme_reentrant_example,
+        test_owngil_call_reentrant_depths,
+        test_owngil_concurrent_reentrant
     ].
 
 init_per_suite(Config) ->
@@ -83,6 +87,7 @@ end_per_testcase(_TestCase, _Config) ->
     try py:unregister_function(etf_probe_novel) catch _:_ -> ok end,
     try py:unregister_function(rs_double) catch _:_ -> ok end,
     try py:unregister_function(nest_step) catch _:_ -> ok end,
+    try py:unregister_function(owngil_nest) catch _:_ -> ok end,
     ok.
 
 %%% ============================================================================
@@ -114,6 +119,65 @@ test_call_reentrant_depths(_Config) ->
     end, [1, 2, 3, 5]),
     py:unregister_function(nest_step),
     ok.
+
+%%% owngil: the context thread used to block on the callback pipe, so a
+%%% callback calling back into the same owngil context queued behind the
+%%% request waiting for it and the chain hung until the timeout.
+
+-define(OWNGIL_DOWN, <<"
+import erlang
+def odown(ctx, n, d):
+    if d == 0:
+        return n
+    return erlang.call('owngil_nest', ctx, n, d)
+">>).
+
+owngil_ctx() ->
+    {ok, C} = py_context:new(#{mode => owngil}),
+    ok = py_context:exec(C, ?OWNGIL_DOWN),
+    C.
+
+register_owngil_nest() ->
+    py:register_function(owngil_nest, fun([Ctx, N, D]) ->
+        {ok, R} = py_context:call(Ctx, '__main__', odown, [Ctx, N + 1, D - 1], #{}, 10000),
+        R
+    end).
+
+%% @doc py_context:call on an owngil context -> erlang.call -> the same
+%% context, 1 to 5 deep, then repeated.
+test_owngil_call_reentrant_depths(_Config) ->
+    case py_nif:owngil_supported() of
+        false ->
+            {skip, "OWN_GIL requires Python 3.14+"};
+        true ->
+            register_owngil_nest(),
+            C = owngil_ctx(),
+            [{ok, D} = py_context:call(C, '__main__', odown, [C, 0, D], #{}, 10000)
+             || D <- [1, 2, 3, 5]],
+            [{ok, 2} = py_context:call(C, '__main__', odown, [C, 0, 2], #{}, 10000)
+             || _ <- lists:seq(1, 20)],
+            py_context:stop(C)
+    end.
+
+%% @doc Several owngil contexts nesting at once, each into itself.
+test_owngil_concurrent_reentrant(_Config) ->
+    case py_nif:owngil_supported() of
+        false ->
+            {skip, "OWN_GIL requires Python 3.14+"};
+        true ->
+            register_owngil_nest(),
+            Ctxs = [owngil_ctx() || _ <- lists:seq(1, 4)],
+            Self = self(),
+            Pids = [spawn_link(fun() ->
+                        C = lists:nth(I rem 4 + 1, Ctxs),
+                        Self ! {done, [py_context:call(C, '__main__', odown, [C, 0, 3], #{}, 10000)
+                                       || _ <- lists:seq(1, 25)]}
+                    end) || I <- lists:seq(1, 8)],
+            [receive {done, R} -> R = lists:duplicate(25, {ok, 3}) after 60000 -> ct:fail(timeout) end
+             || _ <- Pids],
+            [py_context:stop(C) || C <- Ctxs],
+            ok
+    end.
 
 %% @doc One depth, many times: the nested py:call must not depend on which
 %% context the scheduler picks.
