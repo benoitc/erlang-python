@@ -347,10 +347,14 @@ handle_event(info, {kill, From, MRef}, State, Data) ->
     end;
 handle_event(info, {stop, From, MRef}, _State, #data{opts = Opts} = Data) ->
     How = case maps:get(session, Opts, false) of
-        true -> kill;
+        %% The zygote (or the VM, for a spawned one) reaps the child:
+        %% nothing to wait for once it has SIGKILL
+        true -> kill_nowait;
         false -> graceful
     end,
     Data1 = stop_child(Data, How),
+    %% Gone before the caller hears back: a closed session leaves nothing
+    remove_scratch(Data1),
     From ! {MRef, ok},
     {stop, normal, Data1};
 
@@ -1065,8 +1069,12 @@ child_exited(Reason, State, #data{child = Child, opts = Opts} = Data0) ->
                            [Data0#data.id, FailReason])
     end,
     case maps:get(session, Opts, false) of
-        true -> {next_state, {exited, FailReason}, Data1};
-        false -> restart_or_stop(Reason, Data0, Data1)
+        true ->
+            %% No new child will come: kill/1 callers are answered now
+            [W ! {M, ok} || {W, M} <- Data1#data.kill_waiters],
+            {next_state, {exited, FailReason}, Data1#data{kill_waiters = []}};
+        false ->
+            restart_or_stop(Reason, Data0, Data1)
     end.
 
 restart_or_stop(Reason, Data0, #data{opts = Opts} = Data1) ->
@@ -1123,6 +1131,8 @@ stop_child(#data{child = #child{port = Port, os_pid = OsPid} = Child} = Data, Ho
                 ok -> ok;
                 timeout -> kill_port(Port, OsPid), wait_exit(Child, 2000)
             end;
+        kill_nowait ->
+            kill_port(Port, OsPid);
         _ ->
             kill_port(Port, OsPid),
             wait_exit(Child, 2000)

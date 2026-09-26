@@ -87,14 +87,17 @@ resolve_exe(Exe) ->
             end
     end.
 
+%% @doc Absolute: a session child starts in its own directory, so a path
+%% relative to the VM's cwd (code added with -pa _build/...) would not resolve.
 -spec priv_dir() -> file:filename().
 priv_dir() ->
-    case code:priv_dir(erlang_python) of
+    Dir = case code:priv_dir(erlang_python) of
         {error, bad_name} ->
             filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
-        Dir ->
-            Dir
-    end.
+        D ->
+            D
+    end,
+    filename:absname(Dir).
 
 %% @doc Private directory for the sockets of this node (mode 0700). Kept
 %% under `$TMPDIR': a Unix socket path is limited to 104 bytes.
