@@ -24,6 +24,9 @@ memory bound. The public API is the one you already use with `worker` and
 | Startup | microseconds | milliseconds | ~40 ms |
 | Zero-copy `py_buffer`, channels, `erlang.schedule`, object refs | yes | yes | no (see Limits) |
 
+To give every request or job its own fresh child, started from prepared
+imports in a few milliseconds, use [Isolated Sessions](sessions.md).
+
 ## Start a context
 
 ```erlang

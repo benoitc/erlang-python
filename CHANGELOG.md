@@ -1,6 +1,29 @@
 # Changelog
 
-## 5.0.1 (2026-09-22)
+## 5.1.0 (unreleased)
+
+### Added
+
+- **Isolated sessions** - `py_session:template/1` prepares a Python
+  environment once (interpreter, `paths`, `imports`, `preload`, `env`,
+  `hash_seed`, `rlimits`) and `py_session:new/1` gives a fresh child process
+  per session that starts from it and shares no state with any other
+  session: module globals, `sys.modules`, environment, threads, working
+  directory. By default a session is forked from a zygote that already ran
+  the imports and preload, so it is ready in a few milliseconds instead of
+  the ~50 ms of a new interpreter plus its imports; `start => spawn` starts
+  a new interpreter per session (optionally from a `warm` pool) for code
+  that cannot be forked. A session is an isolated context: calls, callbacks,
+  calls back into the same session, interrupts, loops and `pass_fd` work
+  unchanged. `close/1` kills it; a session whose process dies answers with
+  the reason until closed and is never restarted. `run/5` runs one call in a
+  new session; `refresh/1` rebuilds the template after a deploy; `info/1`
+  reports zygotes, live sessions and forks. See `docs/sessions.md`.
+- `clear_env` and `hash_seed` options for isolated contexts: the child sees
+  only the variables named in `env`, and every child built with the same
+  seed hashes strings and orders sets the same way.
+
+
 
 ### Fixed
 
