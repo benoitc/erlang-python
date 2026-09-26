@@ -94,6 +94,7 @@
 -define(SHUTDOWN_GRACE_MS, 1000).
 -define(EXIT_STATUS_WAIT_MS, 5000).
 -define(EXIT_PROBE_MS, 100).
+-define(EXIT_REPORT_GRACE_MS, 2000).
 
 -record(child, {
     %% undefined for a child forked by a session template
@@ -226,10 +227,23 @@ handle_event(info, {py_session_exited, OsPid, Code}, State,
 handle_event(info, {py_session_exited, _, _}, _State, _Data) ->
     keep_state_and_data;
 handle_event(state_timeout, {probe_exit, Waited}, {restarting, _} = State,
-             #data{child = #child{os_pid = OsPid}} = Data) ->
+             #data{child = #child{os_pid = OsPid}, opts = Opts} = Data) ->
     case py_child:os_pid_alive(OsPid) of
         false ->
-            child_exited({signal, 9}, State, Data);
+            %% Reaped. Its template reports how it died, a little later
+            %% than the pid disappears when the machine is busy: wait for
+            %% that report unless nobody is left to send it.
+            ReportExpected = case maps:get(origin, Opts, spawn) of
+                {fork, T} -> is_process_alive(T) andalso Waited < ?EXIT_REPORT_GRACE_MS;
+                _ -> false
+            end,
+            case ReportExpected of
+                true ->
+                    {keep_state_and_data,
+                     [{state_timeout, ?EXIT_PROBE_MS, {probe_exit, Waited + ?EXIT_PROBE_MS}}]};
+                false ->
+                    child_exited({signal, 9}, State, Data)
+            end;
         true when Waited >= ?EXIT_STATUS_WAIT_MS ->
             handle_event(state_timeout, exit_status, State, Data);
         true ->

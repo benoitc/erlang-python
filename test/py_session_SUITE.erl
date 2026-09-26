@@ -37,6 +37,7 @@
     test_thread_at_import_refused/1,
     test_erlang_call_during_preload/1,
     test_info_counts_forks/1,
+    test_late_exit_report/1,
     test_warm_pool/1,
     test_thread_at_import_spawned/1,
     test_reimport_runs_are_isolated/1,
@@ -94,7 +95,8 @@ groups() ->
      {fork_only, [], [test_zygote_crash_rebuilds,
                       test_thread_at_import_refused,
                       test_erlang_call_during_preload,
-                      test_info_counts_forks]},
+                      test_info_counts_forks,
+                      test_late_exit_report]},
      {spawn_only, [], [test_warm_pool,
                        test_thread_at_import_spawned]},
      {reimport_worker, [], Reimport},
@@ -497,6 +499,17 @@ test_erlang_call_during_preload(Config) ->
     {ok, S} = py_session:new(T),
     {ok, Msg} = py_context:eval(S, <<"PRELOAD_CALL">>),
     {match, _} = re:run(Msg, <<"not connected">>),
+    py_session:close(S).
+
+%% The template reports how a child died after the pid is gone; on a busy
+%% machine that can take a while. The session must wait for the report
+%% rather than guess "killed" from the pid.
+test_late_exit_report(Config) ->
+    T = template(Config),
+    {ok, S} = py_session:new(T),
+    ok = sys:suspend(T),
+    spawn(fun() -> timer:sleep(700), sys:resume(T) end),
+    {error, {child_exited, {signal, 6}}} = py_context:call(S, ?MOD, abort, []),
     py_session:close(S).
 
 test_info_counts_forks(Config) ->
