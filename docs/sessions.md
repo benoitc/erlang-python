@@ -182,29 +182,36 @@ started with.
 
 ## What it costs
 
-Measured with `examples/bench_sessions.erl`, new + first call + close,
-p50. Run it on your machine for your own figures: the cost of a fork grows
-with the size of the prepared process.
+Measured with `examples/bench_sessions.erl` on Apple silicon (macOS 27,
+Python 3.14, 14 cores), p50 of new + first call + close. Run it on your
+machine for your own figures: the cost of a fork grows with the size of
+the prepared process.
 
-| How the session starts | macOS 27, Python 3.14 | Linux (container), Python 3.11 |
-|---|---|---|
-| `reimport` (one run, worker or owngil context) | ~1 ms | |
-| `fork` | ~4 ms | ~4 ms |
-| `spawn` with a `warm` pool that keeps up | ~2 ms | ~2 ms |
-| `spawn` | ~60 ms | ~45 ms |
-| a plain isolated context, for reference | ~60 ms | ~40 ms |
+| How the session starts | Time to a used and closed session |
+|---|---|
+| `reimport` (one run, worker or owngil context) | 0.25 ms |
+| `spawn` with a `warm` pool that keeps up | 0.6 ms |
+| `fork` | 3.5 ms |
+| `spawn` | 65 ms |
+| a plain isolated context, for reference | 60 ms |
 
-Re-import runs on worker contexts share one GIL; on owngil contexts they
-run in parallel (about 3,500 runs a second with 8 callers on four
-contexts, against about 900 on worker contexts). One zygote forks one
-session at a time. On Linux it served about 1,000
-sessions a second with 8 or more callers; add `zygotes` when sessions are
-opened faster than one zygote forks them.
+| Throughput, 8 callers | |
+|---|---|
+| `fork`, one zygote | about 650 sessions a second (Linux: about 1,000) |
+| `reimport` on four owngil contexts | about 13,500 runs a second |
+| `reimport` on four worker contexts (one GIL) | about 3,500 runs a second |
 
-A call inside a session costs what it costs in any isolated context, since
-it crosses the same socket. `examples/bench_sessions_sdks.py` measures the
-isolation step of Temporal's workflow sandbox and Restate's SDK on the same
-workflow module.
+One zygote forks one session at a time; add `zygotes` when sessions are
+opened faster than one zygote forks them. A call inside a session costs
+what it costs in any isolated context (30 us p50, 70 us for a call that
+calls back into the session), since it crosses the same socket. A call in
+a re-import run stays in the process.
+
+`examples/bench_sessions_sdks.py` measures the isolation step of Temporal's
+workflow sandbox (0.5 ms for a standard-library workflow, 4.6 ms when it
+defines a pydantic model, since the module is imported again each run) and
+of Restate's SDK (under a microsecond: it does not isolate invocations) on
+the same workflow module.
 
 ## Limits
 
