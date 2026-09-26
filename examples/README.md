@@ -127,6 +127,16 @@ Reactor buffer performance.
 escript examples/bench_reactor_buffer.erl
 ```
 
+### bench_sessions.erl
+Isolated sessions: a fresh session (fork, spawn, warm pool) against a plain
+isolated context, sessions per second, calls inside a session.
+`bench_sessions_sdks.py` measures the isolation step of Temporal's and
+Restate's Python SDKs on the same workflow module.
+```bash
+escript examples/bench_sessions.erl
+python3 examples/bench_sessions_sdks.py   # needs temporalio, restate-sdk, pydantic
+```
+
 ### bench_resource_pool.erl
 Resource pool benchmark.
 ```bash

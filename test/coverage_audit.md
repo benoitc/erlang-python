@@ -19,6 +19,10 @@ suite is visible. `scripts/check_code_map.sh` requires a row per module.
 | `py_venv` | `py_venv_SUITE` |
 | `py_shared_dict` | `py_SUITE` |
 | `py_isolated` | `py_isolated_*_SUITE` |
+| `py_child` | `py_isolated_*_SUITE`, `py_session_SUITE` |
+| `py_session` | `py_session_SUITE`, `py_session_stress_SUITE`, `py_session_soak_SUITE` |
+| `py_session_template` | `py_session_SUITE`, `py_session_stress_SUITE`, `py_session_soak_SUITE` |
+| `py_session_sup` | (through `py_session_SUITE`) |
 | `py_context_router` | `py_context_router_SUITE`, `py_pool_SUITE` |
 | `py_context_sup` | (through the above) |
 | `py_context_init` | (through the above) |
