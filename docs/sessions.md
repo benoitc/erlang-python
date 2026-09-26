@@ -54,6 +54,7 @@ fails.
 |---|---|---|
 | `fork` (default) | forked from the template's zygote: imports and preload are already done | the template can be forked |
 | `spawn` | a new interpreter runs the imports and preload | a module starts a thread when imported, or loads Objective-C on macOS |
+| `reimport` | no new process: the function's module is imported again in a fresh module dictionary, in a worker or owngil context | you only need fresh module state per run, and each run is one call (see below) |
 
 A fork copies only the thread that calls it, so a template whose imports
 start a thread is refused:
@@ -72,6 +73,54 @@ not wait for an interpreter:
 
 With `start => fork`, `zygotes => N` runs N zygotes that fork in turn when
 one is not enough.
+
+## Re-import runs in a worker or owngil context
+
+When a fresh module state per run is enough, and you do not need a process
+boundary, run in an embedded context instead. This is how Temporal's Python
+SDK isolates a workflow run:
+
+```erlang
+{ok, T} = py_session:template(#{
+    start => reimport,
+    mode => worker,                 %% or owngil
+    contexts => 4,                  %% runs are spread over these
+    paths => ["/srv/app"],
+    imports => [orders_models],     %% imported once, shared by every run
+    passthrough => [pydantic]       %% shared too, imported when first used
+}),
+{ok, Result} = py_session:run(T, orders, handle, [Event, State]).
+```
+
+Each `run/5` imports `orders` again in a new module dictionary, so its
+globals start fresh and nothing a run leaves in them reaches the next one.
+The standard library, `erlang`, `imports` and `passthrough` modules are
+shared with the context. A run is one call: `py_session:new/1` answers
+`{error, {not_supported, reimport}}`. Calls back into the same context from
+a callback work.
+
+| | `fork` / `spawn` | `reimport` |
+|---|---|---|
+| Module globals of the function's module and what it imports | fresh | fresh |
+| Standard library, `imports`, `passthrough` | fresh (`fork`: as prepared) | shared, their state persists |
+| C extension state, environment, working directory, threads, hash seed | fresh (hash seed per template) | shared with the context |
+| A call stuck in C | killed | runs on; interrupts land at the next bytecode |
+| A segfault in a C extension | kills the session | kills the node |
+| Memory and CPU limits | yes | no |
+| Cost per run | a fork, or a warm child | an import of the function's module |
+| Cost per call inside the run | a local socket round trip | none |
+
+Two things to know about re-import runs:
+
+- `sys.modules` in that interpreter becomes a mapping that shows each thread
+  its run's modules, and `builtins.__import__` is replaced, from the first
+  re-import template on. Code that checks `type(sys.modules) is dict` sees
+  the difference.
+- C code that looks modules up in the interpreter's own table does not see a
+  run's modules. The C `pickle` is one: pickling an instance of a class
+  defined in a re-imported module fails (`KeyError` or `PicklingError`,
+  depending on the Python version). Put such classes in
+  a module listed in `imports`, or use `start => fork`.
 
 ## What a session sees
 
@@ -139,12 +188,16 @@ with the size of the prepared process.
 
 | How the session starts | macOS 27, Python 3.14 | Linux (container), Python 3.11 |
 |---|---|---|
+| `reimport` (one run, worker or owngil context) | ~1 ms | |
 | `fork` | ~4 ms | ~4 ms |
 | `spawn` with a `warm` pool that keeps up | ~2 ms | ~2 ms |
 | `spawn` | ~60 ms | ~45 ms |
 | a plain isolated context, for reference | ~60 ms | ~40 ms |
 
-One zygote forks one session at a time. On Linux it served about 1,000
+Re-import runs on worker contexts share one GIL; on owngil contexts they
+run in parallel (about 3,500 runs a second with 8 callers on four
+contexts, against about 900 on worker contexts). One zygote forks one
+session at a time. On Linux it served about 1,000
 sessions a second with 8 or more callers; add `zygotes` when sessions are
 opened faster than one zygote forks them.
 

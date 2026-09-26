@@ -23,6 +23,11 @@
 %%% `start => spawn' starts each session as a new isolated child and can keep
 %%% `warm' of them started ahead of time; each is handed out once.
 %%%
+%%% `start => reimport' keeps `contexts' worker or owngil contexts; each
+%%% py_session:run/5 runs in a fresh module dictionary on one of them
+%%% (priv/_erlang_impl/_reimport.py), in the way of Temporal's workflow
+%%% sandbox. There is no session process: new/1 is not available.
+%%%
 %%% A crashed zygote is rebuilt; the sessions it forked are separate
 %%% processes and keep running.
 %%%
@@ -62,7 +67,10 @@
 
 -record(st, {
     opts :: map(),
-    start :: fork | spawn,
+    start :: fork | spawn | reimport,
+    %% start => reimport: the contexts runs go to, and what they share
+    contexts = [] :: [pid()],
+    passthrough = [] :: [binary()],
     zygotes = [] :: [#zygote{}],
     next = 0 :: non_neg_integer(),
     next_id = 1 :: pos_integer(),
@@ -98,7 +106,8 @@ fork(T, SockPath, ForkOpts, Timeout) ->
 
 %% @doc A context started ahead of time (`{ok, Ctx}', linked to the
 %% template until handed over), or the options to start one.
--spec checkout(pid(), timeout()) -> {ok, pid()} | {start, map()} | {error, term()}.
+-spec checkout(pid(), timeout()) ->
+    {ok, pid()} | {start, map()} | {reimport, pid(), [binary()]} | {error, term()}.
 checkout(T, Timeout) ->
     try gen_server:call(T, checkout, Timeout)
     catch
@@ -146,6 +155,9 @@ handle_call({fork, Path, ForkOpts}, {Pid, _} = From, St) ->
         {error, Reason} ->
             {reply, {error, {zygote_unreachable, Reason}}, St}
     end;
+handle_call(checkout, _From, #st{start = reimport, contexts = Cs, next = N,
+                                 passthrough = PT} = St) ->
+    {reply, {reimport, lists:nth(N rem length(Cs) + 1, Cs), PT}, St#st{next = N + 1}};
 handle_call(checkout, _From, #st{start = fork} = St) ->
     {reply, {start, context_opts(St)}, St};
 handle_call(checkout, _From, #st{warm = [Ctx | Rest]} = St) ->
@@ -161,6 +173,14 @@ handle_call(refresh, _From, #st{start = fork, zygotes = Old} = St) ->
             %% sessions they forked keep running and are watched by pid
             [retire(Z) || Z <- Old],
             {reply, ok, St1#st{owners = #{}}};
+        {error, Reason} ->
+            {reply, {error, Reason}, St}
+    end;
+handle_call(refresh, _From, #st{start = reimport, contexts = Old} = St) ->
+    case build(St#st{contexts = []}) of
+        {ok, St1} ->
+            [begin unlink(C), py_context:stop(C) end || C <- Old],
+            {reply, ok, St1};
         {error, Reason} ->
             {reply, {error, Reason}, St}
     end;
@@ -211,15 +231,30 @@ handle_info(fill_warm, #st{start = spawn, warm = Warm, opts = Opts} = St) ->
     end;
 handle_info(fill_warm, St) ->
     {noreply, St};
+handle_info({'EXIT', Pid, Reason}, #st{start = reimport, contexts = Cs} = St) ->
+    case lists:member(Pid, Cs) of
+        true ->
+            %% A context of the template stopped: put a new one in its place
+            logger:warning("py_session template ~p: context ~p exited: ~p",
+                           [self(), Pid, Reason]),
+            case start_context(St#st.opts) of
+                {ok, C} ->
+                    {noreply, St#st{contexts = [C | lists:delete(Pid, Cs)]}};
+                {error, Why} ->
+                    {stop, {context_restart_failed, Why}, St}
+            end;
+        false ->
+            {noreply, St}
+    end;
 handle_info({'EXIT', Pid, _Reason}, #st{warm = Warm} = St) ->
     %% A warm session died before anyone took it
     {noreply, St#st{warm = lists:delete(Pid, Warm)}};
 handle_info(_Msg, St) ->
     {noreply, St}.
 
-terminate(_Reason, #st{zygotes = Zs, warm = Warm}) ->
+terminate(_Reason, #st{zygotes = Zs, warm = Warm, contexts = Cs}) ->
     [retire(Z) || Z <- Zs],
-    [py_context:stop(C) || C <- Warm],
+    [py_context:stop(C) || C <- Warm ++ Cs],
     ok.
 
 %% ============================================================================
@@ -229,8 +264,17 @@ terminate(_Reason, #st{zygotes = Zs, warm = Warm}) ->
 check_opts(Opts) ->
     Checks = [
         fun() -> case maps:get(start, Opts, fork) of
-                     S when S =:= fork; S =:= spawn -> ok;
+                     S when S =:= fork; S =:= spawn; S =:= reimport -> ok;
                      S -> {error, {badarg, {start, S}}}
+                 end end,
+        fun() -> case {maps:get(start, Opts, fork), maps:get(mode, Opts, worker)} of
+                     {reimport, M} when M =:= worker; M =:= owngil -> ok;
+                     {reimport, M} -> {error, {badarg, {mode, M}}};
+                     _ -> ok
+                 end end,
+        fun() -> case maps:get(contexts, Opts, 1) of
+                     N when is_integer(N), N >= 1 -> ok;
+                     N -> {error, {badarg, {contexts, N}}}
                  end end,
         fun() -> case maps:get(zygotes, Opts, 1) of
                      N when is_integer(N), N >= 1 -> ok;
@@ -260,6 +304,19 @@ env_opts(Opts) ->
 build(#st{start = spawn} = St) ->
     self() ! fill_warm,
     {ok, St};
+build(#st{start = reimport, opts = Opts} = St) ->
+    T0 = erlang:monotonic_time(millisecond),
+    Started = [start_context(Opts) || _ <- lists:seq(1, maps:get(contexts, Opts, 1))],
+    case [E || {error, _} = E <- Started] of
+        [] ->
+            PT = lists:usort([py_child:to_bin(M) || M <- maps:get(imports, Opts, [])
+                                                    ++ maps:get(passthrough, Opts, [])]),
+            {ok, St#st{contexts = [C || {ok, C} <- Started], passthrough = PT,
+                       build_ms = erlang:monotonic_time(millisecond) - T0}};
+        [Err | _] ->
+            [py_context:stop(C) || {ok, C} <- Started],
+            Err
+    end;
 build(#st{opts = Opts} = St) ->
     T0 = erlang:monotonic_time(millisecond),
     case build_zygotes(maps:get(zygotes, Opts, 1), St#st.opts, []) of
@@ -312,6 +369,37 @@ start_zygote(Opts) ->
                     py_child:kill_os_pid(OsPid),
                     close_port(Port),
                     {error, {template_failed, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {template_failed, Reason}}
+    end.
+
+%% A context for re-import runs: the paths, the imports (shared by every
+%% run) and the preload are applied once.
+start_context(Opts) ->
+    CtxOpts = maps:merge(#{mode => maps:get(mode, Opts, worker)},
+                         maps:with([preload], Opts)),
+    case py_context:new(CtxOpts) of
+        {ok, C} ->
+            Paths = [py_child:to_list(P) || P <- maps:get(paths, Opts, [])],
+            Setup = iolist_to_binary(io_lib:format(
+                "import sys, importlib
+"
+                "for _p in reversed(~p):
+"
+                "    if _p not in sys.path: sys.path.insert(0, _p)
+"
+                "for _m in ~p: importlib.import_module(_m)
+"
+                "import _erlang_impl._reimport
+",
+                [Paths, [py_child:to_list(M) || M <- maps:get(imports, Opts, [])]])),
+            case py_context:exec(C, Setup) of
+                ok ->
+                    {ok, C};
+                {error, Reason} ->
+                    py_context:stop(C),
+                    {error, {template_failed, {init_failed, Reason}}}
             end;
         {error, Reason} ->
             {error, {template_failed, Reason}}
@@ -494,8 +582,9 @@ fork_opts(ForkOpts) ->
               end, #{}, ForkOpts).
 
 info_map(#st{start = Start, zygotes = Zs, owners = Owners, forks = Forks,
-             build_ms = BuildMs, warm = Warm, opts = Opts}) ->
+             build_ms = BuildMs, warm = Warm, opts = Opts, contexts = Cs}) ->
     #{start => Start,
+      contexts => Cs,
       zygotes => [Info#{os_pid => P} || #zygote{os_pid = P, info = Info} <- Zs],
       sessions => map_size(Owners),
       forks => Forks,

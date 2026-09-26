@@ -17,7 +17,7 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 | `py_context_embedded` | Process body for `worker` and `owngil` mode: the receive loop, callbacks (suspension and pipe), worker loops | live | architecture, state-machines | same |
 | `py_isolated` | `gen_statem` driving a child process over the socket; restart policy | live | isolated | `py_isolated_*_SUITE` |
 | `py_child` | Helpers shared by the processes that drive a Python child: executable lookup, socket listen/accept, frames, port env, rlimit flags | live | isolated | `py_isolated_*_SUITE` |
-| `py_session` | Isolated sessions: a fresh child per session from a template (`template/1`, `new/1`, `close/1`, `run/4`, `refresh/1`) | live | sessions | `py_session_SUITE` |
+| `py_session` | Isolated sessions: a fresh child per session from a template (`template/1`, `new/1`, `close/1`, `run/4`, `refresh/1`), or a fresh module dictionary per run (`start => reimport`) | live | sessions | `py_session_SUITE` |
 | `py_session_template`, `py_session_sup` | A template: zygotes that fork sessions (`priv/py_zygote.py`) or warm spawned sessions; exit reports to the session contexts | live | sessions | `py_session_SUITE` |
 | `py_context_router` | Pools and scheduler-affinity routing | live | pools, context-affinity | `py_context_router_SUITE`, `py_pool_SUITE` |
 | `py_context_sup`, `py_context_init` | Supervisor of contexts; starts the default pool at boot | live | pools | (through the above) |
@@ -82,6 +82,7 @@ loop, channels and servers.
 | `_erlang_impl/_mode.py` | Detects how Python is running (embedded, free-threaded, child) | all |
 | `_erlang_impl/_etf.py` | Pure-Python ETF codec with the `py_convert.c` mapping | isolated child |
 | `_erlang_impl/_isolated.py` | Child runtime: socket frames, reader thread, re-entrant main loop, interrupt signal, asyncio loop, the `erlang` shim | isolated child |
+| `_erlang_impl/_reimport.py` | Re-import runs for `py_session` templates with `start => reimport`: a fresh module dictionary per run, swapped per thread | embedded (worker, owngil) |
 | `_erlang_impl/_shm.py` | `SharedMemory` and `SharedBuffer` wrappers over mmap | all |
 | `py_isolated_child.py` | Child launcher: rlimits, parent-death signal, cgroup join, connect | isolated child |
 | `py_zygote.py` | Session template zygote: imports and preload once, forks one child per session, reports exits | session zygote |

@@ -31,11 +31,15 @@ request with the reason until it is closed. It runs in its own scratch
 directory, its stdio is detached from the zygote's port, and it sees only
 the template's environment.
 
+`start => reimport` is the light variant for worker and owngil contexts:
+no process per session, the function's module imported again in a fresh
+module dictionary per run, swapped per thread as Temporal's workflow
+sandbox does. It isolates module state only and is offered as that.
+
 Not chosen: a subinterpreter per session (about 13 ms, shares the process
 environment, working directory, hash seed and C-extension state, and PyO3
-extensions refuse to load), Temporal-style re-import in one process (state
-leaks through passthrough and C modules), CRIU (Linux only, needs
-privileges and PID namespaces), and Wasm images (no native C extensions).
+extensions refuse to load), CRIU (Linux only, needs privileges and PID
+namespaces), and Wasm images (no native C extensions).
 
 ## Consequences
 
@@ -50,3 +54,8 @@ privileges and PID namespaces), and Wasm images (no native C extensions).
   until a session exists.
 - A zygote that dies is rebuilt; its orphaned sessions are watched by pid
   (`py_isolated` probes `kill(pid, 0)`), since nobody reports their exit.
+- A re-import template replaces `sys.modules` and `builtins.__import__` in
+  its interpreter with per-thread stand-ins. C code that reads the
+  interpreter's own module table (the C `pickle`) does not see a run's
+  modules; the NIF's own lookups use `PyImport_GetModuleDict()` for that
+  reason.

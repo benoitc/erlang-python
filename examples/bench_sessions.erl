@@ -9,6 +9,7 @@
 %%%      template, spawn template with a warm pool, plain isolated context
 %%%   2. sessions per second with 1, 8 and 64 callers
 %%%   3. a call and a re-entrant call (Python -> Erlang -> same session)
+%%%   4. a re-import run (start => reimport) on worker and owngil contexts
 %%%
 %%% examples/bench_sessions_sdks.py measures what Temporal's workflow
 %%% sandbox and Restate's per-invocation state cost on the same module, to
@@ -68,7 +69,40 @@ main(_) ->
     row("re-entrant call", [us(fun() -> {ok, 1} = py_context:call(S, bench_sessions_wf, reenter, [1]) end)
                             || _ <- lists:seq(1, 1000)]),
     py_session:close(S),
+    io:format("~n== re-import runs (no process per run) ==~n"),
+    %% the same workflow as a module file: a re-import run imports it anew
+    Dir = filename:join(py_child:sock_dir(), "bench_reimport"),
+    ok = filelib:ensure_dir(filename:join(Dir, "x")),
+    ok = file:write_file(filename:join(Dir, "bench_reimport_wf.py"), reimport_module()),
+    [begin
+         {ok, R} = py_session:template(#{start => reimport, mode => M, contexts => 4,
+                                         paths => [Dir]}),
+         row(atom_to_list(M) ++ ", one run",
+             [us(fun() -> {ok, _} = py_session:run(R, bench_reimport_wf, handle, [[], #{}]) end)
+              || _ <- lists:seq(1, 500)]),
+         L = reimport_throughput(R, 8, 3),
+         io:format("  ~-18s ~7.1f runs/s with 8 callers~n", [M, length(L) / 3])
+     end || M <- [worker] ++ [owngil || py_nif:owngil_supported()]],
     ok.
+
+reimport_module() ->
+    <<"from dataclasses import dataclass\nimport json, decimal, datetime\n\n"
+      "@dataclass\nclass Step:\n    n: int\n\n"
+      "def handle(event, state):\n"
+      "    n = state.get('n', 0) + 1\n"
+      "    return {'commands': [['activity', 'charge', {'n': n}]], 'state': {'n': Step(n).n}}\n">>.
+
+reimport_throughput(T, Callers, Secs) ->
+    Self = self(),
+    Deadline = erlang:monotonic_time(millisecond) + Secs * 1000,
+    Loop = fun L(Acc) ->
+        case erlang:monotonic_time(millisecond) < Deadline of
+            true -> L([us(fun() -> {ok, _} = py_session:run(T, bench_reimport_wf, handle, [[], #{}]) end) | Acc]);
+            false -> Acc
+        end
+    end,
+    Pids = [spawn_link(fun() -> Self ! {done, self(), Loop([])} end) || _ <- lists:seq(1, Callers)],
+    lists:append([receive {done, P, L} -> L end || P <- Pids]).
 
 template(Opts) ->
     {ok, T} = py_session:template(Opts#{preload => ?PY}),

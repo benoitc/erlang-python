@@ -37,7 +37,12 @@
 %%%   <li>`start' - `fork' (default): sessions are forked from a zygote that
 %%%       already ran the imports and preload. `spawn': each session starts
 %%%       a new interpreter; use it when the template cannot be forked
-%%%       (threads started at import, Objective-C on macOS).</li>
+%%%       (threads started at import, Objective-C on macOS). `reimport':
+%%%       no process per session; run/5 imports the function's module
+%%%       again in a fresh module dictionary on one of the template's
+%%%       `contexts' (`mode => worker | owngil'), as Temporal's workflow
+%%%       sandbox does. Modules in `imports' and `passthrough', and the
+%%%       standard library, are shared by every run.</li>
 %%%   <li>`python', `paths', `imports', `preload' - the prepared state.</li>
 %%%   <li>`env' - the environment of every session. Nothing is inherited
 %%%       from the VM unless `clear_env => false'.</li>
@@ -100,6 +105,9 @@ new(T, Opts) ->
             end;
         {start, CtxOpts} ->
             py_context:new(maps:merge(CtxOpts, maps:with([start_timeout], Opts)));
+        {reimport, _, _} ->
+            %% a re-import run is not a process: use run/5
+            {error, {not_supported, reimport}};
         {error, _} = Err ->
             Err
     end.
@@ -120,6 +128,36 @@ run(T, Module, Func, Args) ->
 -spec run(template(), atom() | binary(), atom() | binary(), list(), map()) ->
     {ok, term()} | {error, term()}.
 run(T, Module, Func, Args, Opts) ->
+    case py_session_template:checkout(T, maps:get(timeout, Opts, 15000)) of
+        {reimport, Ctx, Passthrough} ->
+            py_context:call(Ctx, '_erlang_impl._reimport', run,
+                            [Passthrough, py_child:to_bin(Module), py_child:to_bin(Func),
+                             Args, maps:get(kwargs, Opts, #{})],
+                            #{}, maps:get(timeout, Opts, infinity));
+        {ok, Ctx} ->
+            %% taken from the warm pool, handed over as new/2 does
+            run_in(T, Ctx, Module, Func, Args, Opts);
+        _ ->
+            run_new(T, Module, Func, Args, Opts)
+    end.
+
+run_in(T, Ctx, Module, Func, Args, Opts) ->
+    MRef = erlang:monitor(process, Ctx),
+    Ctx ! {set_parent, self(), MRef, self()},
+    receive
+        {MRef, ok} ->
+            erlang:demonitor(MRef, [flush]),
+            try
+                py_context:call(Ctx, Module, Func, Args, maps:get(kwargs, Opts, #{}),
+                                maps:get(timeout, Opts, infinity))
+            after
+                close(Ctx)
+            end;
+        {'DOWN', MRef, process, Ctx, _} ->
+            run(T, Module, Func, Args, Opts)
+    end.
+
+run_new(T, Module, Func, Args, Opts) ->
     case new(T, Opts) of
         {ok, S} ->
             try

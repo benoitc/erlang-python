@@ -38,13 +38,23 @@
     test_erlang_call_during_preload/1,
     test_info_counts_forks/1,
     test_warm_pool/1,
-    test_thread_at_import_spawned/1
+    test_thread_at_import_spawned/1,
+    test_reimport_runs_are_isolated/1,
+    test_reimport_shares_stdlib_and_imports/1,
+    test_reimport_concurrent_runs/1,
+    test_reimport_reentrance/1,
+    test_reimport_typing_and_pickle/1,
+    test_reimport_errors/1,
+    test_reimport_no_session_process/1,
+    test_reimport_refresh/1,
+    test_reimport_bad_options/1
 ]).
 
 -define(MOD, py_test_session).
 
 all() ->
-    [{group, fork}, {group, spawn}, {group, fork_only}, {group, spawn_only}].
+    [{group, fork}, {group, spawn}, {group, fork_only}, {group, spawn_only},
+     {group, reimport_worker}, {group, reimport_owngil}].
 
 groups() ->
     Common = [
@@ -68,6 +78,17 @@ groups() ->
         test_refresh_picks_new_code,
         test_bad_template_options
     ],
+    Reimport = [
+        test_reimport_runs_are_isolated,
+        test_reimport_shares_stdlib_and_imports,
+        test_reimport_concurrent_runs,
+        test_reimport_reentrance,
+        test_reimport_typing_and_pickle,
+        test_reimport_errors,
+        test_reimport_no_session_process,
+        test_reimport_refresh,
+        test_reimport_bad_options
+    ],
     [{fork, [], Common},
      {spawn, [], Common},
      {fork_only, [], [test_zygote_crash_rebuilds,
@@ -75,7 +96,9 @@ groups() ->
                       test_erlang_call_during_preload,
                       test_info_counts_forks]},
      {spawn_only, [], [test_warm_pool,
-                       test_thread_at_import_spawned]}].
+                       test_thread_at_import_spawned]},
+     {reimport_worker, [], Reimport},
+     {reimport_owngil, [], Reimport}].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -96,6 +119,13 @@ end_per_suite(_Config) ->
 
 init_per_group(G, Config) when G =:= fork; G =:= fork_only ->
     [{start, fork} | Config];
+init_per_group(reimport_worker, Config) ->
+    [{start, reimport}, {mode, worker} | Config];
+init_per_group(reimport_owngil, Config) ->
+    case py_nif:owngil_supported() of
+        true -> [{start, reimport}, {mode, owngil} | Config];
+        false -> {skip, "OWN_GIL requires Python 3.14+"}
+    end;
 init_per_group(_G, Config) ->
     [{start, spawn} | Config].
 
@@ -291,8 +321,10 @@ test_session_crash(Config) ->
     {ok, 1} = py_context:eval(B, <<"1">>),
     {ok, C} = py_session:new(T),
     {ok, 1} = py_context:eval(C, <<"1">>),
+    MA = erlang:monitor(process, A),
     [py_session:close(X) || X <- [A, B, C]],
-    false = is_process_alive(A),
+    %% close/1 replies first, then the context removes its directory and exits
+    receive {'DOWN', MA, process, A, _} -> ok after 5000 -> ct:fail(session_not_stopped) end,
     ok.
 
 test_kill_session(Config) ->
@@ -498,6 +530,109 @@ test_thread_at_import_spawned(Config) ->
     {ok, S} = py_session:new(T),
     {ok, 2} = py_context:call(S, ?MOD, thread_count, []),
     py_session:close(S).
+
+%%% ============================================================================
+%%% reimport
+%%% ============================================================================
+
+-define(RMOD, py_test_reimport).
+
+%% Each run imports the module again: its globals start fresh every time,
+%% and the interpreter's own copy is never touched.
+test_reimport_runs_are_isolated(Config) ->
+    T = rtemplate(Config),
+    [{ok, 1} = py_session:run(T, ?RMOD, bump, []) || _ <- lists:seq(1, 20)],
+    {ok, <<"py_test_reimport">>} = py_session:run(T, ?RMOD, whoami, []),
+    %% the context itself never imported it
+    #{contexts := [C | _]} = py_session:info(T),
+    {ok, false} = py_context:eval(C, <<"'py_test_reimport' in __import__('sys').modules">>),
+    ok.
+
+%% What is shared on purpose: the standard library and `imports'.
+test_reimport_shares_stdlib_and_imports(Config) ->
+    T = rtemplate(Config, #{contexts => 1, imports => [py_test_reimport_shared]}),
+    {ok, 1} = py_session:run(T, ?RMOD, bump_shared, []),
+    {ok, 2} = py_session:run(T, ?RMOD, bump_shared, []),
+    {ok, <<"m">>} = py_session:run(T, ?RMOD, mark_stdlib, [<<"m">>]),
+    {ok, <<"m">>} = py_session:run(T, ?RMOD, read_stdlib_mark, []),
+    {ok, 1} = py_session:run(T, ?RMOD, bump, []),
+    ok.
+
+%% Contexts run sandboxes at the same time without seeing each other's.
+test_reimport_concurrent_runs(Config) ->
+    T = rtemplate(Config, #{contexts => 4}),
+    Self = self(),
+    Pids = [spawn_link(fun() ->
+                Self ! {done, [py_session:run(T, ?RMOD, bump, []) || _ <- lists:seq(1, 50)]}
+            end) || _ <- lists:seq(1, 8)],
+    [receive {done, R} -> R = lists:duplicate(50, {ok, 1}) after 60000 -> ct:fail(timeout) end
+     || _ <- Pids],
+    ok.
+
+%% A run calls Erlang, whose callback runs another re-import run on the
+%% same template (one context: the nested run lands on the waiting one).
+test_reimport_reentrance(Config) ->
+    T = rtemplate(Config, #{contexts => 1}),
+    py:register_function(reimport_nested, fun([N]) ->
+        {ok, R} = py_session:run(T, ?RMOD, bump, [], #{timeout => 10000}),
+        N + R
+    end),
+    try
+        [{ok, 11} = py_session:run(T, ?RMOD, call_back, [10], #{timeout => 10000})
+         || _ <- lists:seq(1, 10)],
+        {ok, 1} = py_session:run(T, ?RMOD, bump, [])
+    after
+        py:unregister_function(reimport_nested)
+    end.
+
+%% Python code that reads sys.modules (typing) finds the run's module. C
+%% code that reads the interpreter's own table (the C pickle) does not:
+%% a class to pickle belongs in a shared module.
+test_reimport_typing_and_pickle(Config) ->
+    T = rtemplate(Config, #{imports => [py_test_reimport_shared]}),
+    {ok, [<<"x">>, <<"y">>]} = py_session:run(T, ?RMOD, typed, []),
+    {ok, 3} = py_session:run(T, ?RMOD, pickle_shared, []),
+    %% KeyError on 3.14, PicklingError on 3.11: either way it fails
+    {ok, Err} = py_session:run(T, ?RMOD, pickle_reimported, []),
+    true = lists:member(Err, [<<"KeyError">>, <<"PicklingError">>]),
+    ok.
+
+test_reimport_errors(Config) ->
+    T = rtemplate(Config),
+    {error, {'ValueError', _}} = py_session:run(T, ?RMOD, fail, [<<"boom">>]),
+    {error, _} = py_session:run(T, no_such_module_xyz, f, []),
+    {ok, 1} = py_session:run(T, ?RMOD, bump, []),
+    ok.
+
+test_reimport_no_session_process(Config) ->
+    T = rtemplate(Config),
+    {error, {not_supported, reimport}} = py_session:new(T),
+    ok.
+
+test_reimport_refresh(Config) ->
+    T = rtemplate(Config, #{contexts => 2}),
+    #{contexts := Old} = py_session:info(T),
+    ok = py_session:refresh(T),
+    #{contexts := New} = py_session:info(T),
+    [] = [C || C <- New, lists:member(C, Old)],
+    {ok, 1} = py_session:run(T, ?RMOD, bump, []),
+    ok.
+
+test_reimport_bad_options(Config) ->
+    {error, {badarg, {mode, isolated}}} =
+        py_session:template(#{start => reimport, mode => isolated}),
+    {error, {badarg, {contexts, 0}}} =
+        py_session:template(#{start => reimport, mode => ?config(mode, Config), contexts => 0}),
+    ok.
+
+rtemplate(Config) ->
+    rtemplate(Config, #{}).
+
+rtemplate(Config, Extra) ->
+    {ok, T} = py_session:template(maps:merge(#{start => reimport, mode => ?config(mode, Config),
+                                               contexts => 2,
+                                               paths => [?config(test_dir, Config)]}, Extra)),
+    T.
 
 %%% ============================================================================
 %%% Helpers

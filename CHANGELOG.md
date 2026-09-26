@@ -18,7 +18,11 @@
   unchanged. `close/1` kills it; a session whose process dies answers with
   the reason until closed and is never restarted. `run/5` runs one call in a
   new session; `refresh/1` rebuilds the template after a deploy; `info/1`
-  reports zygotes, live sessions and forks. See `docs/sessions.md`.
+  reports zygotes, live sessions and forks. `start => reimport` runs each
+  call in a fresh module dictionary on a worker or owngil context instead,
+  the way Temporal's Python SDK isolates a workflow run: the function's
+  module is imported again per run, and the standard library, `imports` and
+  `passthrough` modules are shared. See `docs/sessions.md`.
 - `clear_env` and `hash_seed` options for isolated contexts: the child sees
   only the variables named in `env`, and every child built with the same
   seed hashes strings and orders sets the same way.
