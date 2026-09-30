@@ -59,3 +59,7 @@ namespaces), and Wasm images (no native C extensions).
   interpreter's own module table (the C `pickle`) does not see a run's
   modules; the NIF's own lookups use `PyImport_GetModuleDict()` for that
   reason.
+- A re-import session over several calls is a process that answers like a
+  context and relays calls to a context shared with other sessions. An
+  embedded interrupt cannot target one session's call, so its timeouts do
+  not interrupt: the call finishes and the late reply is dropped.

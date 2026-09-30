@@ -95,9 +95,37 @@ SDK isolates a workflow run:
 Each `run/5` imports `orders` again in a new module dictionary, so its
 globals start fresh and nothing a run leaves in them reaches the next one.
 The standard library, `erlang`, `imports` and `passthrough` modules are
-shared with the context. A run is one call: `py_session:new/1` answers
-`{error, {not_supported, reimport}}`. Calls back into the same context from
-a callback work.
+shared with the context. Calls back into the same context from a callback
+work.
+
+When the fresh state must last over several calls, open a session:
+
+```erlang
+{ok, S} = py_session:new(T),
+{ok, _} = py_context:call(S, orders, open, [OrderId]),
+{ok, _} = py_context:call(S, orders, apply, [Event1]),
+{ok, _} = py_context:call(S, orders, apply, [Event2]),
+{ok, Total} = py_context:call(S, orders, total, []),
+ok = py_session:close(S).
+```
+
+`orders` is imported fresh on the first call and kept for the next ones;
+another session has its own copy. `py_context:exec/eval` use the session's
+own `__main__`, and `py:call(S, ...)` works too. A callback can call back
+into the same session. The modules are freed on `close/1`, when the
+process that opened the session crashes, or if the session process is
+killed.
+
+The session runs on one of the template's contexts, shared with other
+sessions, so two things differ from a fork session:
+
+- A timeout does not interrupt the call: an interrupt would stop whatever
+  the context runs, maybe another session's call. You get
+  `{error, timeout}`, the call finishes on its own and its late reply is
+  dropped. `py_context:interrupt(S)` still interrupts the context's running
+  call; `py_context:kill(S)` answers `{error, not_supported}`.
+- If the context goes away, the session answers
+  `{error, {context_died, Reason}}` until you close it.
 
 | | `fork` / `spawn` | `reimport` |
 |---|---|---|
@@ -105,12 +133,16 @@ a callback work.
 | Standard library, `imports`, `passthrough` | fresh (`fork`: as prepared) | shared, their state persists |
 | C extension state, environment, working directory, threads, hash seed | fresh (hash seed per template) | shared with the context |
 | A call stuck in C | killed | runs on; interrupts land at the next bytecode |
+| A timed-out call | interrupted, then killed after `kill_after` | finishes on its own; the caller stops waiting |
 | A segfault in a C extension | kills the session | kills the node |
 | Memory and CPU limits | yes | no |
-| Cost per run | a fork, or a warm child | an import of the function's module |
-| Cost per call inside the run | a local socket round trip | none |
+| Cost per run or session | a fork, or a warm child | an import of the function's module |
+| Cost per call inside the session | a local socket round trip | two Erlang messages |
 
-Two things to know about re-import runs:
+Three things to know about re-import runs and sessions:
+
+- Threads a session starts itself (and executor workers) see the context's
+  modules, not the session's: the module dictionary is swapped per thread.
 
 - `sys.modules` in that interpreter becomes a mapping that shows each thread
   its run's modules, and `builtins.__import__` is replaced, from the first
@@ -205,7 +237,8 @@ One zygote forks one session at a time; add `zygotes` when sessions are
 opened faster than one zygote forks them. A call inside a session costs
 what it costs in any isolated context (30 us p50, 70 us for a call that
 calls back into the session), since it crosses the same socket. A call in
-a re-import run stays in the process.
+a re-import session stays in the process and costs about 20 us, the two
+Erlang messages through the session process included.
 
 `examples/bench_sessions_sdks.py` measures the isolation step of Temporal's
 workflow sandbox (0.5 ms for a standard-library workflow, 4.6 ms when it

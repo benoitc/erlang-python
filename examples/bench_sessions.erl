@@ -81,7 +81,13 @@ main(_) ->
              [us(fun() -> {ok, _} = py_session:run(R, bench_reimport_wf, handle, [[], #{}]) end)
               || _ <- lists:seq(1, 500)]),
          L = reimport_throughput(R, 8, 3),
-         io:format("  ~-18s ~7.1f runs/s with 8 callers~n", [M, length(L) / 3])
+         io:format("  ~-18s ~7.1f runs/s with 8 callers~n", [M, length(L) / 3]),
+         {ok, RS} = py_session:new(R),
+         {ok, _} = py_context:call(RS, bench_reimport_wf, handle, [[], #{}]),
+         row(atom_to_list(M) ++ " session call",
+             [us(fun() -> {ok, _} = py_context:call(RS, bench_reimport_wf, handle, [[], #{}]) end)
+              || _ <- lists:seq(1, 2000)]),
+         py_session:close(RS)
      end || M <- [worker] ++ [owngil || py_nif:owngil_supported()]],
     ok.
 

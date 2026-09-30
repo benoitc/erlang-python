@@ -22,7 +22,11 @@
   call in a fresh module dictionary on a worker or owngil context instead,
   the way Temporal's Python SDK isolates a workflow run: the function's
   module is imported again per run, and the standard library, `imports` and
-  `passthrough` modules are shared. See `docs/sessions.md`.
+  `passthrough` modules are shared. On such a template `new/1` gives a
+  session that keeps its fresh modules and `__main__` over several calls,
+  used like any context (`py_context:call/eval/exec`, `py:call`). A timeout
+  there does not interrupt, since the context is shared with other
+  sessions. See `docs/sessions.md`.
 - `clear_env` and `hash_seed` options for isolated contexts: the child sees
   only the variables named in `env`, and every child built with the same
   seed hashes strings and orders sets the same way.
