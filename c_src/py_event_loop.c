@@ -700,6 +700,28 @@ void timer_resource_destructor(ErlNifEnv *env, void *obj) {
  * ============================================================================ */
 
 /**
+ * @brief Unlink the pid-to-env mapping of an exited process.
+ *
+ * Call with namespaces_mutex held; release the returned env (if any) with
+ * enif_release_resource after dropping it, since the env destructor may
+ * take the GIL (GIL before namespaces_mutex).
+ */
+static void *take_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid) {
+    pid_env_mapping_t **pp = &loop->pid_env_head;
+    while (*pp != NULL) {
+        if (enif_compare_pids(&(*pp)->pid, pid) == 0) {
+            pid_env_mapping_t *m = *pp;
+            void *env_res = m->env;
+            *pp = m->next;
+            enif_free(m);
+            return env_res;
+        }
+        pp = &(*pp)->next;
+    }
+    return NULL;
+}
+
+/**
  * @brief Down callback for event loop resources (process monitor)
  *
  * Called when a monitored process dies. Cleans up the process's namespace.
@@ -723,6 +745,7 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
     if (!runtime_is_running() || loop->interp_id != 0) {
         process_namespace_t *main_ns = NULL;
         pthread_mutex_lock(&loop->namespaces_mutex);
+        void *dead_env = take_pid_env(loop, pid);
 
         process_namespace_t **pp = &loop->namespaces_head;
         while (*pp != NULL) {
@@ -756,6 +779,9 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
             PyGILState_Release(gstate);
             enif_free(main_ns);
         }
+        if (dead_env != NULL) {
+            enif_release_resource(dead_env);
+        }
         return;
     }
 
@@ -766,6 +792,8 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
      */
     PyGILState_STATE gstate = PyGILState_Ensure();
     pthread_mutex_lock(&loop->namespaces_mutex);
+
+    void *dead_env = take_pid_env(loop, pid);
 
     /* Find and remove namespace for this pid */
     process_namespace_t **pp = &loop->namespaces_head;
@@ -785,6 +813,10 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
     }
 
     pthread_mutex_unlock(&loop->namespaces_mutex);
+    if (dead_env != NULL) {
+        /* The env destructor takes the GIL again: re-entrant here */
+        enif_release_resource(dead_env);
+    }
     PyGILState_Release(gstate);
 }
 
@@ -2670,8 +2702,8 @@ ERL_NIF_TERM nif_submit_task(ErlNifEnv *env, int argc,
  * @param env_res Environment resource (will be kept via enif_keep_resource)
  * @return true on success, false on allocation failure
  */
-static bool register_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid,
-                              void *env_res) {
+static bool register_pid_env(ErlNifEnv *caller_env, erlang_event_loop_t *loop,
+                              const ErlNifPid *pid, void *env_res) {
     pthread_mutex_lock(&loop->namespaces_mutex);
 
     /* Check if mapping already exists */
@@ -2696,6 +2728,14 @@ static bool register_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid,
     mapping->pid = *pid;
     mapping->env = env_res;
     mapping->refcount = 1;
+
+    /* Dropped with its env when the process exits (event_loop_down). A
+     * process already gone gets no mapping. */
+    if (enif_monitor_process(caller_env, loop, pid, &mapping->monitor) != 0) {
+        enif_free(mapping);
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+        return false;
+    }
     mapping->next = loop->pid_env_head;
     loop->pid_env_head = mapping;
 
@@ -2709,6 +2749,9 @@ static bool register_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid,
 /**
  * @brief Look up env for a PID
  *
+ * The env is returned with a reference of its own (the process may exit
+ * and drop the mapping meanwhile): release it with enif_release_resource.
+ *
  * @param loop Event loop containing the mapping registry
  * @param pid PID to look up
  * @return Environment resource or NULL if not found
@@ -2720,6 +2763,7 @@ static void *lookup_pid_env(erlang_event_loop_t *loop, const ErlNifPid *pid) {
     while (mapping != NULL) {
         if (enif_compare_pids(&mapping->pid, pid) == 0) {
             void *env_res = mapping->env;
+            enif_keep_resource(env_res);
             pthread_mutex_unlock(&loop->namespaces_mutex);
             return env_res;
         }
@@ -2767,7 +2811,7 @@ ERL_NIF_TERM nif_submit_task_with_env(ErlNifEnv *env, int argc,
     }
 
     /* Register the env for this PID (increments refcount if exists) */
-    if (!register_pid_env(loop, &caller_pid, env_res)) {
+    if (!register_pid_env(env, loop, &caller_pid, env_res)) {
         return make_error(env, "env_registration_failed");
     }
 
@@ -3343,9 +3387,6 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
             continue;
         }
 
-        /* Look up env by PID (registered via submit_task_with_env) */
-        py_env_resource_t *task_env = (py_env_resource_t *)lookup_pid_env(loop, &caller_pid);
-
         /* Convert module/func to C strings (stack buffers to avoid alloc overhead) */
         char module_name[CALLABLE_NAME_MAX];
         char func_name[CALLABLE_NAME_MAX];
@@ -3364,6 +3405,9 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
         /* Look up function - check task_env first, then process namespace, then import */
         PyObject *func = NULL;
 
+        /* Env registered via submit_task_with_env, held for this lookup only */
+        py_env_resource_t *task_env = (py_env_resource_t *)lookup_pid_env(loop, &caller_pid);
+
         /* First, check the passed env's globals (from py:exec) */
         if (task_env != NULL && task_env->globals != NULL) {
             if (strcmp(module_name, "__main__") == 0 ||
@@ -3373,6 +3417,11 @@ ERL_NIF_TERM nif_process_ready_tasks(ErlNifEnv *env, int argc,
                     Py_INCREF(func);
                 }
             }
+        }
+
+        if (task_env != NULL) {
+            enif_release_resource(task_env);
+            task_env = NULL;
         }
 
         /* Fallback to process namespace and cache/import */

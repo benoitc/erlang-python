@@ -40,6 +40,11 @@
   and is released before the context's next request. The per-process
   namespaces of an owngil context's event loop (`py_event_loop:exec/eval`)
   were not released either; they now are.
+- A process that ran an event loop task with its process-local environment
+  (`py_event_loop:create_task` after `py:exec`, in any mode) left that
+  environment registered on the loop for the loop's lifetime. The
+  registration is now dropped, and the environment released, when the
+  process exits.
 - On an owngil context, a Python function that called `erlang.call`, where
   the Erlang callback called the same context again, hung until the request
   timeout. The context thread waited for the callback on its pipe while the

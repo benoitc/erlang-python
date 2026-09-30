@@ -22,6 +22,7 @@
 
 -export([
     loop_namespace_freed_after_process_exit_owngil/1,
+    loop_task_env_freed_after_process_exit/1,
     env_freed_after_process_exit_worker/1,
     env_freed_after_process_exit_owngil/1,
     env_outlives_owngil_context/1,
@@ -36,7 +37,8 @@ all() ->
         env_freed_after_process_exit_worker,
         env_freed_after_process_exit_owngil,
         env_outlives_owngil_context,
-        loop_namespace_freed_after_process_exit_owngil
+        loop_namespace_freed_after_process_exit_owngil,
+        loop_task_env_freed_after_process_exit
     ].
 
 init_per_suite(Config) ->
@@ -82,6 +84,9 @@ env_call_does_not_dispatch_timeout(_Config) ->
 %% A process-local env holds its objects until the process exits; then they
 %% are released. Each env registers an object in a WeakSet kept on `sys'
 %% (shared by all envs of the interpreter): it empties once they are freed.
+%% The class is defined in the context, not in the envs: on free-threaded
+%% builds a class created in an env keeps its globals until CPython reclaims
+%% the class on its own schedule, which is not what is tested here.
 env_freed_after_process_exit_worker(_Config) ->
     envs_freed(worker).
 
@@ -96,15 +101,16 @@ env_freed_after_process_exit_owngil(_Config) ->
 
 envs_freed(Mode) ->
     {ok, C} = py_context:new(#{mode => Mode}),
-    ok = py_context:exec(C, <<"import sys, weakref\nsys._env_probe = weakref.WeakSet()">>),
+    ok = py_context:exec(C, <<"import sys, weakref\nsys._env_probe = weakref.WeakSet()\n"
+                              "class Held: pass\nsys._EnvHeld = Held">>),
     [begin
          {P, M} = spawn_monitor(fun() ->
-             ok = py:exec(C, <<"import sys\nclass Held: pass\nheld = Held()\nsys._env_probe.add(held)">>),
+             ok = py:exec(C, <<"import sys\nheld = sys._EnvHeld()\nsys._env_probe.add(held)">>),
              {ok, true} = py:eval(C, <<"held in sys._env_probe">>)
          end),
          receive {'DOWN', M, process, P, normal} -> ok end
      end || _ <- lists:seq(1, 50)],
-    ok = wait_probe_empty(C, 100),
+    ok = wait_probe_empty(C, 250),
     py_context:stop(C).
 
 wait_probe_empty(C, 0) ->
@@ -112,7 +118,7 @@ wait_probe_empty(C, 0) ->
 wait_probe_empty(C, N) ->
     erlang:garbage_collect(),
     %% the next request on the context releases what the dead envs held
-    case py_context:eval(C, <<"len(__import__('sys')._env_probe)">>) of
+    case py_context:eval(C, <<"(__import__('gc').collect(), len(__import__('sys')._env_probe))[1]">>) of
         {ok, 0} -> ok;
         _ -> timer:sleep(20), wait_probe_empty(C, N - 1)
     end.
@@ -156,14 +162,15 @@ loop_namespace_freed_after_process_exit_owngil(_Config) ->
         true ->
             {ok, C} = py_context:new(#{mode => owngil}),
             {ok, Loop} = py_context:loop_ref(C),
-            ok = py_event_loop:exec(Loop, <<"import sys, weakref\nsys._loop_probe = weakref.WeakSet()">>),
+            ok = py_event_loop:exec(Loop, <<"import sys, weakref\nsys._loop_probe = weakref.WeakSet()\n"
+                                            "class Held: pass\nsys._LoopHeld = Held">>),
             [begin
                  {P, M} = spawn_monitor(fun() ->
-                     ok = py_event_loop:exec(Loop, <<"import sys\nclass Held: pass\nheld = Held()\nsys._loop_probe.add(held)">>)
+                     ok = py_event_loop:exec(Loop, <<"import sys\nheld = sys._LoopHeld()\nsys._loop_probe.add(held)">>)
                  end),
                  receive {'DOWN', M, process, P, normal} -> ok end
              end || _ <- lists:seq(1, 30)],
-            ok = wait_loop_probe_empty(Loop, 100),
+            ok = wait_loop_probe_empty(Loop, 250),
             py_context:stop(C)
     end.
 
@@ -172,7 +179,37 @@ wait_loop_probe_empty(Loop, 0) ->
              py_event_loop:eval(Loop, <<"len(__import__('sys')._loop_probe)">>)});
 wait_loop_probe_empty(Loop, N) ->
     erlang:garbage_collect(),
-    case py_event_loop:eval(Loop, <<"len(__import__('sys')._loop_probe)">>) of
+    case py_event_loop:eval(Loop, <<"(__import__('gc').collect(), len(__import__('sys')._loop_probe))[1]">>) of
         {ok, 0} -> ok;
         _ -> timer:sleep(20), wait_loop_probe_empty(Loop, N - 1)
+    end.
+
+
+%% A task submitted to the event loop from a process that has a local env
+%% (py_event_loop:create_task after py:exec) registers that env for the
+%% process. The registration used to keep the env for the loop's lifetime;
+%% it is dropped when the process exits.
+loop_task_env_freed_after_process_exit(_Config) ->
+    ok = py:exec(<<"import sys, weakref\nsys._task_env_probe = weakref.WeakSet()\n"
+                   "class Held: pass\nsys._TaskHeld = Held">>),
+    [begin
+         {P, M} = spawn_monitor(fun() ->
+             ok = py:exec(<<"import sys\nheld = sys._TaskHeld()\nsys._task_env_probe.add(held)">>),
+             %% the process has an env, so the task registers it; the task
+             %% itself calls a library coroutine (no function defined in the
+             %% env, see envs_freed/1 about free-threaded builds)
+             Ref = py_event_loop:create_task(asyncio, sleep, [0]),
+             {ok, none} = py_event_loop:await(Ref, 5000)
+         end),
+         receive {'DOWN', M, process, P, normal} -> ok after 10000 -> ct:fail(task_hung) end
+     end || _ <- lists:seq(1, 20)],
+    ok = wait_task_probe_empty(250).
+
+wait_task_probe_empty(0) ->
+    ct:fail({task_envs_not_freed, py:eval(<<"len(__import__('sys')._task_env_probe)">>)});
+wait_task_probe_empty(N) ->
+    erlang:garbage_collect(),
+    case py:eval(<<"(__import__('gc').collect(), len(__import__('sys')._task_env_probe))[1]">>) of
+        {ok, 0} -> ok;
+        _ -> timer:sleep(20), wait_task_probe_empty(N - 1)
     end.

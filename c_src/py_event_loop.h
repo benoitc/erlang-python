@@ -150,6 +150,10 @@ typedef struct pid_env_mapping {
     /** @brief Reference count for this mapping (multiple tasks may use it) */
     int refcount;
 
+    /** @brief Monitor on the owning process: the mapping and its env are
+     * dropped when it exits (event_loop_down) */
+    ErlNifMonitor monitor;
+
     /** @brief Next mapping in linked list */
     struct pid_env_mapping *next;
 } pid_env_mapping_t;
