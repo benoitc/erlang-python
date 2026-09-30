@@ -101,6 +101,8 @@ shows the current one and `sys:trace/2` prints transitions.
    +-- child exit / kill / socket error --> {restarting, Reason} --new child--> idle
                                                      |
                                                      +-- budget exhausted --> stop
+                                                     |
+                                                     +-- session => true --> {exited, Reason}
 ```
 
 Per state:
@@ -111,7 +113,8 @@ Per state:
 | `{busy, Id}` | postponed, unless from a process running a callback for this context (nested, dispatched) | dispatched | `{timeout, kill}` bound to `Id` once an interrupt was sent |
 | `looping` | `{error, loop_running}` | dispatched (`submit`, `pass_fd`, ...) | none |
 | `stopping_loop` | postponed | dispatched | `state_timeout` for the interrupt, then `{timeout, kill}` bound to `loop` |
-| `{restarting, R}` | postponed | postponed | `state_timeout` waiting for the port's `exit_status` |
+| `{restarting, R}` | postponed | postponed | `state_timeout` waiting for the port's `exit_status`; for a forked session child, a probe of its pid every 100 ms |
+| `{exited, R}` | `{error, R}` | `{error, R}` | none |
 
 Transitions and their triggers:
 
@@ -126,6 +129,12 @@ Transitions and their triggers:
   passed the handshake. `restart_allowed/1` counts restarts in
   `restart_period`; over `max_restarts` (or with `restart => false`) the
   process stops with `{child_exited, Reason}`.
+- `{restarting, _}` to `{exited, Reason}`: a session (`session => true`,
+  started by `py_session`) is never restarted. Its child's exit comes from
+  the port, or for a child forked by a template from the template's
+  `{py_session_exited, OsPid, Code}`, or from the pid probe when the
+  template is gone. The session answers every request with `Reason` and
+  `kill/1` callers are answered at once; `stop` ends it.
 - `looping` to `stopping_loop`: `stop_loop/2` or the owner's `DOWN`.
   `stopping_loop` to `idle`: the `{loop_exit, R}` event. The interrupt
   `state_timeout` and the kill backstop escalate if the loop does not exit.

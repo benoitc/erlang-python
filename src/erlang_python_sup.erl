@@ -128,6 +128,16 @@ init([]) ->
         modules => [py_context_sup]
     },
 
+    %% Session templates (py_session)
+    SessionSupSpec = #{
+        id => py_session_sup,
+        start => {py_session_sup, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [py_session_sup]
+    },
+
     %% Context router initialization (starts contexts under py_context_sup)
     ContextRouterInitSpec = #{
         id => py_context_init,
@@ -179,7 +189,7 @@ init([]) ->
     },
 
     Children = [CallbackSpec, ShmSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                ContextSupSpec, ContextRouterInitSpec,
+                ContextSupSpec, SessionSupSpec, ContextRouterInitSpec,
                 WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec,
                 EventLoopPoolSpec],
 

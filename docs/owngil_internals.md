@@ -290,11 +290,12 @@ while (!shutdown_requested) {
 
 ```c
 py_env_resource_dtor(env, res) {
-    if (res->pool_slot >= 0) {
-        // Shared-GIL subinterpreter: DECREF with pool GIL
-    } else if (res->interp_id != 0) {
-        // OWN_GIL subinterpreter: skip DECREF
-        // Py_EndInterpreter cleans up all objects
+    if (res->owner_ctx != NULL) {
+        // OWN_GIL env: push the dicts on the context's lock-free list;
+        // the context thread releases them before its next request
+        // (env_gc_drain), and before Py_EndInterpreter
+        env_gc_push(res->owner_ctx, res->globals, res->locals, NULL);
+        enif_release_resource(res->owner_ctx);
     } else {
         // Worker mode: DECREF with main GIL
     }
@@ -556,7 +557,7 @@ pthread_mutex_unlock(&loop->namespaces_mutex);
 PyGILState_Release(gstate);
 ```
 
-For subinterpreters (where `PyGILState_Ensure` cannot be used), cleanup skips `Py_DECREF` - the objects will be freed when the interpreter is destroyed.
+For a subinterpreter loop, a dead process's namespace is released by the interpreter that created it: under the main GIL for namespaces made by `event_loop_exec/eval` (they run on the main interpreter), by the owngil context thread (`env_gc_push`) for those made in the subinterpreter. The loop destructor releases the main-interpreter ones; the others go with the interpreter.
 
 ### Callback Re-entry Limitation
 

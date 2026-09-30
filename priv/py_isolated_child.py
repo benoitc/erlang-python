@@ -183,13 +183,21 @@ def main(argv):
         _die('cannot connect to %s: %s' % (opts['socket'], exc))
 
     from _erlang_impl import _isolated
-    from _erlang_impl._etf import Atom
 
     runtime = _isolated.Runtime(sock)
     _isolated.install_erlang_module(runtime)
+    serve(runtime, opts['rlimits'], rlimit_errors, cgroup_error)
+
+
+def serve(runtime, limits, rlimit_errors, cgroup_error):
+    """Start a connected runtime, report ready (or the start-up problems) and
+    serve Erlang until it closes the socket. Shared by the spawned child and
+    the sessions forked by py_zygote.py. Never returns."""
+    from _erlang_impl._etf import Atom
+
     runtime.start()
-    if _AS_VIA_WATCHDOG and 'as' in opts['rlimits']:
-        _start_memory_watchdog(opts['rlimits']['as'], runtime)
+    if _AS_VIA_WATCHDOG and 'as' in limits:
+        _start_memory_watchdog(limits['as'], runtime)
 
     if rlimit_errors or cgroup_error:
         problems = [(Atom('rlimit'), Atom(k), msg) for k, msg in rlimit_errors]
@@ -212,11 +220,10 @@ def main(argv):
         runtime.serve_forever()
     finally:
         try:
-            sock.close()
+            runtime.sock.close()
         except OSError:
             pass
     os._exit(0)
-
 
 if __name__ == '__main__':
     main(sys.argv)
