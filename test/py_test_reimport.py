@@ -67,3 +67,27 @@ def fail(msg):
 
 def whoami():
     return __name__
+
+
+def sleep(seconds):
+    import time
+    time.sleep(seconds)
+    return 'slept'
+
+
+def bump_via_callback(session):
+    """Calls Erlang, whose callback calls back into this same session."""
+    from_callback = erlang.call('rsess_cb', session)
+    return (from_callback, COUNT['n'])
+
+
+def thread_sees():
+    """The module swap is per thread: a thread started here sees the
+    context's modules, where this module was never imported."""
+    import sys
+    import threading
+    seen = {}
+    t = threading.Thread(target=lambda: seen.update(thread='py_test_reimport' in sys.modules))
+    t.start()
+    t.join()
+    return ('py_test_reimport' in sys.modules, seen['thread'])

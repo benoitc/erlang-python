@@ -42,7 +42,8 @@
 %%%       again in a fresh module dictionary on one of the template's
 %%%       `contexts' (`mode => worker | owngil'), as Temporal's workflow
 %%%       sandbox does. Modules in `imports' and `passthrough', and the
-%%%       standard library, are shared by every run.</li>
+%%%       standard library, are shared by every run. new/1 gives a session
+%%%       over several calls that keeps its fresh modules between them.</li>
 %%%   <li>`python', `paths', `imports', `preload' - the prepared state.</li>
 %%%   <li>`env' - the environment of every session. Nothing is inherited
 %%%       from the VM unless `clear_env => false'.</li>
@@ -105,9 +106,11 @@ new(T, Opts) ->
             end;
         {start, CtxOpts} ->
             py_context:new(maps:merge(CtxOpts, maps:with([start_timeout], Opts)));
-        {reimport, _, _} ->
-            %% a re-import run is not a process: use run/5
-            {error, {not_supported, reimport}};
+        {reimport, Ctx, Passthrough} ->
+            %% A session over several calls: its own module dictionary in
+            %% that context, behind a process that answers like a context
+            py_reimport_session:start_link(T, Ctx, Passthrough,
+                                           py_session_template:mode(T));
         {error, _} = Err ->
             Err
     end.

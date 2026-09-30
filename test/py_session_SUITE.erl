@@ -46,7 +46,17 @@
     test_reimport_reentrance/1,
     test_reimport_typing_and_pickle/1,
     test_reimport_errors/1,
-    test_reimport_no_session_process/1,
+    test_rsession_state_across_calls/1,
+    test_rsession_exec_eval/1,
+    test_rsession_py_call/1,
+    test_rsession_reentrance/1,
+    test_rsession_concurrent/1,
+    test_rsession_cleanup/1,
+    test_rsession_timeout/1,
+    test_rsession_context_died/1,
+    test_rsession_unsupported/1,
+    test_rsession_threads_see_context/1,
+    test_rsession_template_stop_frees/1,
     test_reimport_refresh/1,
     test_reimport_bad_options/1
 ]).
@@ -86,7 +96,17 @@ groups() ->
         test_reimport_reentrance,
         test_reimport_typing_and_pickle,
         test_reimport_errors,
-        test_reimport_no_session_process,
+        test_rsession_state_across_calls,
+        test_rsession_exec_eval,
+        test_rsession_py_call,
+        test_rsession_reentrance,
+        test_rsession_concurrent,
+        test_rsession_cleanup,
+        test_rsession_timeout,
+        test_rsession_context_died,
+        test_rsession_unsupported,
+        test_rsession_threads_see_context,
+        test_rsession_template_stop_frees,
         test_reimport_refresh,
         test_reimport_bad_options
     ],
@@ -617,10 +637,207 @@ test_reimport_errors(Config) ->
     {ok, 1} = py_session:run(T, ?RMOD, bump, []),
     ok.
 
-test_reimport_no_session_process(Config) ->
+%% A session keeps its fresh module state between calls; another session
+%% and run/5 start from scratch.
+test_rsession_state_across_calls(Config) ->
     T = rtemplate(Config),
-    {error, {not_supported, reimport}} = py_session:new(T),
+    {ok, S} = py_session:new(T),
+    [{ok, N} = py_context:call(S, ?RMOD, bump, []) || N <- [1, 2, 3]],
+    {ok, S2} = py_session:new(T),
+    {ok, 1} = py_context:call(S2, ?RMOD, bump, []),
+    {ok, 1} = py_session:run(T, ?RMOD, bump, []),
+    {ok, 4} = py_context:call(S, ?RMOD, bump, []),
+    py_session:close(S),
+    py_session:close(S2).
+
+%% exec and eval use the session's own __main__.
+test_rsession_exec_eval(Config) ->
+    T = rtemplate(Config),
+    {ok, A} = py_session:new(T),
+    {ok, B} = py_session:new(T),
+    ok = py_context:exec(A, <<"x = 21\ndef twice(v): return v * 2">>),
+    {ok, 42} = py_context:eval(A, <<"x * 2">>),
+    {ok, 10} = py_context:call(A, '__main__', twice, [5]),
+    {ok, 7} = py_context:eval(A, <<"x - y">>, #{y => 14}),
+    {error, {'NameError', _}} = py_context:eval(B, <<"x">>),
+    py_session:close(A),
+    py_session:close(B).
+
+%% py:call/eval on a session go through the process-local env path.
+test_rsession_py_call(Config) ->
+    T = rtemplate(Config),
+    {ok, S} = py_session:new(T),
+    {ok, 1} = py:call(S, ?RMOD, bump, []),
+    {ok, 2} = py:call(S, ?RMOD, bump, []),
+    py_session:close(S).
+
+%% A callback calls back into the same session and sees the same module
+%% state; a callback of session A calls into session B.
+test_rsession_reentrance(Config) ->
+    T = rtemplate(Config, #{contexts => 1}),
+    py:register_function(rsess_cb, fun([S]) ->
+        {ok, N} = py_context:call(S, ?RMOD, bump, [], #{}, 10000),
+        N
+    end),
+    try
+        {ok, A} = py_session:new(T),
+        {ok, B} = py_session:new(T),
+        {ok, 1} = py_context:call(A, ?RMOD, bump, []),
+        %% the nested bump runs in A: 2, and the outer call then sees 2
+        {ok, {2, 2}} = py_context:call(A, ?RMOD, bump_via_callback, [A], #{}, 10000),
+        %% A's callback bumps B: B's count moves, A's does not
+        {ok, {1, 2}} = py_context:call(A, ?RMOD, bump_via_callback, [B], #{}, 10000),
+        {ok, 2} = py_context:call(B, ?RMOD, bump, []),
+        py_session:close(A),
+        py_session:close(B)
+    after
+        py:unregister_function(rsess_cb)
+    end.
+
+test_rsession_concurrent(Config) ->
+    T = rtemplate(Config, #{contexts => 2}),
+    Self = self(),
+    Pids = [spawn_link(fun() ->
+                {ok, S} = py_session:new(T),
+                R = [py_context:call(S, ?RMOD, bump, []) || _ <- lists:seq(1, 20)],
+                py_session:close(S),
+                Self ! {done, R}
+            end) || _ <- lists:seq(1, 16)],
+    Want = [{ok, N} || N <- lists:seq(1, 20)],
+    [receive {done, R} -> R = Want after 60000 -> ct:fail(timeout) end || _ <- Pids],
+    0 = wait_rsessions(T, 0, 100),
     ok.
+
+%% The session's modules are freed on close, when the owner crashes, and
+%% when the session process is killed (the template's monitor).
+test_rsession_cleanup(Config) ->
+    T = rtemplate(Config, #{contexts => 1}),
+    #{contexts := [Ctx]} = py_session:info(T),
+    Count = fun() -> {ok, N} = py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_count, []), N end,
+    0 = Count(),
+    {ok, S} = py_session:new(T),
+    1 = Count(),
+    ok = py_session:close(S),
+    0 = Count(),
+    Self = self(),
+    {Owner, OMon} = spawn_monitor(fun() ->
+        {ok, S1} = py_session:new(T),
+        Self ! {session, S1},
+        receive never -> ok end
+    end),
+    S1 = receive {session, X} -> X after 10000 -> ct:fail(no_session) end,
+    SMon = erlang:monitor(process, S1),
+    exit(Owner, crash),
+    receive {'DOWN', OMon, process, Owner, _} -> ok end,
+    receive {'DOWN', SMon, process, S1, _} -> ok after 5000 -> ct:fail(session_survived) end,
+    ok = wait_count(Count, 0, 100),
+    {ok, S2} = py_session:new(T),
+    unlink(S2),
+    exit(S2, kill),
+    ok = wait_count(Count, 0, 100),
+    0 = wait_rsessions(T, 0, 100),
+    ok.
+
+%% A timeout does not interrupt (it could hit another session sharing the
+%% context): the caller stops waiting, the call finishes, its late reply is
+%% dropped, and the session goes on.
+test_rsession_timeout(Config) ->
+    T = rtemplate(Config, #{contexts => 1}),
+    {ok, S} = py_session:new(T),
+    {ok, Other} = py_session:new(T),
+    {ok, 1} = py_context:call(S, ?RMOD, bump, []),
+    {error, timeout} = py_context:call(S, ?RMOD, sleep, [1], #{}, 200),
+    %% queued behind the sleep, and not interrupted by the timeout
+    {ok, 1} = py_context:call(Other, ?RMOD, bump, [], #{}, 5000),
+    {ok, 2} = py_context:call(S, ?RMOD, bump, []),
+    %% no late reply left in the caller's mailbox
+    receive {_, {ok, <<"slept">>}} -> ct:fail(late_reply_delivered) after 200 -> ok end,
+    py_session:close(S),
+    py_session:close(Other).
+
+%% The context under a session goes: the session answers with that until
+%% closed, and does not take its linked owner down.
+test_rsession_context_died(Config) ->
+    T = rtemplate(Config, #{contexts => 1}),
+    #{contexts := [Ctx]} = py_session:info(T),
+    Before = session_count(Ctx),
+    {ok, S} = py_session:new(T),
+    {ok, 1} = py_context:call(S, ?RMOD, bump, []),
+    ok = py_context:stop(Ctx),
+    {error, {context_died, _}} = wait_context_died(S, 50),
+    {error, {context_died, _}} = py_context:exec(S, <<"x = 1">>),
+    true = is_process_alive(S),
+    ok = py_session:close(S),
+    false = is_process_alive(S),
+    %% its modules are freed: through the replacing context on worker (the
+    %% main interpreter outlives the context), with the interpreter on owngil
+    #{contexts := [New]} = py_session:info(T),
+    Expected = case ?config(mode, Config) of worker -> Before; owngil -> 0 end,
+    ok = wait_count(fun() -> session_count(New) end, Expected, 100),
+    ok.
+
+%% Stopping a template frees the modules of its sessions still open.
+test_rsession_template_stop_frees(Config) ->
+    case ?config(mode, Config) of
+        owngil ->
+            {skip, "owngil sessions go with their interpreter"};
+        worker ->
+            {ok, Probe} = py_context:new(#{mode => worker}),
+            Before = session_count(Probe),
+            T = rtemplate(Config),
+            {ok, S} = py_session:new(T),
+            unlink(S),
+            {ok, 1} = py_context:call(S, ?RMOD, bump, []),
+            Before1 = Before + 1,
+            Before1 = session_count(Probe),
+            py_session:stop_template(T),
+            ok = wait_count(fun() -> session_count(Probe) end, Before, 100),
+            py_context:stop(Probe)
+    end.
+
+session_count(Ctx) ->
+    {ok, N} = py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_count, []),
+    N.
+
+test_rsession_unsupported(Config) ->
+    T = rtemplate(Config),
+    {ok, S} = py_session:new(T),
+    {error, not_supported} = py_context:kill(S),
+    {error, not_supported_in_reimport} = py_context:pass_fd(S, 0),
+    {error, not_supported_in_reimport} = py_context:start_loop(S),
+    {ok, #{session := _, context := _}} = py_context:child_info(S),
+    py_session:close(S).
+
+%% Threads started in a session see the context's modules (documented).
+test_rsession_threads_see_context(Config) ->
+    T = rtemplate(Config),
+    {ok, S} = py_session:new(T),
+    {ok, {true, false}} = py_context:call(S, ?RMOD, thread_sees, []),
+    py_session:close(S).
+
+wait_context_died(S, 0) ->
+    py_context:call(S, ?RMOD, bump, []);
+wait_context_died(S, N) ->
+    case py_context:call(S, ?RMOD, bump, []) of
+        {error, {context_died, _}} = E -> E;
+        _ -> timer:sleep(20), wait_context_died(S, N - 1)
+    end.
+
+wait_count(_Count, _Want, 0) ->
+    ct:fail(session_not_freed);
+wait_count(Count, Want, N) ->
+    case Count() of
+        Want -> ok;
+        _ -> timer:sleep(20), wait_count(Count, Want, N - 1)
+    end.
+
+wait_rsessions(T, Want, 0) ->
+    maps:get(reimport_sessions, py_session:info(T), Want);
+wait_rsessions(T, Want, N) ->
+    case py_session:info(T) of
+        #{reimport_sessions := Want} -> Want;
+        _ -> timer:sleep(20), wait_rsessions(T, Want, N - 1)
+    end.
 
 test_reimport_refresh(Config) ->
     T = rtemplate(Config, #{contexts => 2}),

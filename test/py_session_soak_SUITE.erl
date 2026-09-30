@@ -39,6 +39,8 @@ test_session_churn_no_leak(Config) ->
                                        imports => [?MOD]}),
     {ok, Spawn} = py_session:template(#{start => spawn, warm => 2, paths => [TestDir],
                                         imports => [?MOD]}),
+    {ok, Reimport} = py_session:template(#{start => reimport, mode => worker, contexts => 2,
+                                           paths => [TestDir]}),
     timer:sleep(1000),
     Base = counters(),
     ct:print("baseline: ~p", [Base]),
@@ -46,8 +48,11 @@ test_session_churn_no_leak(Config) ->
     Self = self(),
     Workers = [spawn_link(fun() ->
                    rand:seed(exsss, {I, I * 7, I * 13}),
-                   T = case I rem 4 of 0 -> Spawn; _ -> Fork end,
-                   Self ! {done, self(), churn(T, Deadline, 0, [])}
+                   Self ! {done, self(), case I rem 4 of
+                       0 -> churn(Spawn, Deadline, 0, []);
+                       1 -> rchurn(Reimport, Deadline, 0, []);
+                       _ -> churn(Fork, Deadline, 0, [])
+                   end}
                end) || I <- lists:seq(1, 12)],
     Results = [receive {done, W, R} -> R after (Seconds + 120) * 1000 -> ct:fail(worker_hung) end
                || W <- Workers],
@@ -58,6 +63,10 @@ test_session_churn_no_leak(Config) ->
     [] = Errs,
     true = Ops > 0,
     #{sessions := 0} = wait_idle(Fork, 100),
+    %% every re-import session freed its modules in its context
+    #{contexts := RCtxs} = py_session:info(Reimport),
+    [0 = wait_freed(C, 100) || C <- RCtxs],
+    py_session:stop_template(Reimport),
     py_session:stop_template(Fork),
     py_session:stop_template(Spawn),
     timer:sleep(1000),
@@ -75,6 +84,49 @@ churn(T, Deadline, N, Errs) ->
             Got = use(rand:uniform(8), S),
             ok = py_session:close(S),
             churn(T, Deadline, N + 1, case Got of ok -> Errs; Bad -> [Bad | Errs] end)
+    end.
+
+%% A re-import session: several calls on one fresh state, then closed,
+%% timed out, or abandoned by an owner that crashes
+rchurn(T, Deadline, N, Errs) ->
+    case erlang:monotonic_time(millisecond) < Deadline of
+        false ->
+            {N, Errs};
+        true ->
+            Got = case rand:uniform(3) of
+                1 ->
+                    {ok, S} = py_session:new(T),
+                    R = [py_context:call(S, py_test_reimport, bump, []) || _ <- lists:seq(1, 3)],
+                    ok = py_session:close(S),
+                    expect([{ok, 1}, {ok, 2}, {ok, 3}], R);
+                2 ->
+                    {ok, S} = py_session:new(T),
+                    R = py_context:call(S, py_test_reimport, sleep, [0.2], #{}, 50),
+                    {ok, 1} = py_context:call(S, py_test_reimport, bump, []),
+                    ok = py_session:close(S),
+                    expect({error, timeout}, R);
+                3 ->
+                    Self = self(),
+                    {Owner, Mon} = spawn_monitor(fun() ->
+                        {ok, S} = py_session:new(T),
+                        {ok, 1} = py_context:call(S, py_test_reimport, bump, []),
+                        Self ! {owner_ready, self()},
+                        exit(crash)
+                    end),
+                    receive {owner_ready, Owner} -> ok after 10000 -> ok end,
+                    receive {'DOWN', Mon, process, Owner, _} -> ok end,
+                    ok
+            end,
+            rchurn(T, Deadline, N + 1, case Got of ok -> Errs; Bad -> [Bad | Errs] end)
+    end.
+
+wait_freed(Ctx, 0) ->
+    {ok, N} = py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_count, []),
+    N;
+wait_freed(Ctx, Tries) ->
+    case py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_count, []) of
+        {ok, 0} -> 0;
+        _ -> timer:sleep(50), wait_freed(Ctx, Tries - 1)
     end.
 
 use(1, S) -> expect({ok, 3}, py_context:call(S, ?MOD, reenter, [3]));

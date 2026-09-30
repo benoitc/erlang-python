@@ -34,6 +34,7 @@ them there.
 """
 
 import builtins
+import contextlib
 import importlib
 import sys
 import threading
@@ -141,27 +142,115 @@ class Sandbox:
             if key.startswith(prefix) and key not in mods:
                 mods[key] = mod
 
+    def new_modules(self):
+        """A module dictionary holding only what this sandbox shares."""
+        return {k: m for k, m in list(_real_modules.items()) if self.shared(k)}
+
     def run(self, module, func, args=(), kwargs=None):
-        prev = (getattr(_tls, 'modules', None), getattr(_tls, 'sandbox', None))
-        _tls.sandbox = self
-        _tls.modules = {k: m for k, m in list(_real_modules.items()) if self.shared(k)}
-        try:
+        with _active(self, self.new_modules()):
             fn = getattr(importlib.import_module(module), func)
             return fn(*args, **(kwargs or {}))
-        finally:
-            _tls.modules, _tls.sandbox = prev
+
+
+@contextlib.contextmanager
+def _active(sandbox, modules):
+    """Make `modules` this thread's sys.modules for the duration; nested
+    uses (a callback calling back in) restore the outer one."""
+    prev = (getattr(_tls, 'modules', None), getattr(_tls, 'sandbox', None))
+    _tls.sandbox = sandbox
+    _tls.modules = modules
+    try:
+        yield
+    finally:
+        _tls.modules, _tls.sandbox = prev
 
 
 _sandboxes = {}
 
 
-def run(passthrough, module, func, args, kwargs):
-    """Entry point called by py_session:run/5 on a reimport template."""
+def _sandbox(passthrough):
     key = tuple(sorted(_as_text(p) for p in passthrough))
     sandbox = _sandboxes.get(key)
     if sandbox is None:
         sandbox = _sandboxes[key] = Sandbox(key)
-    return sandbox.run(_as_text(module), _as_text(func), list(args), dict(kwargs or {}))
+    return sandbox
+
+
+def run(passthrough, module, func, args, kwargs):
+    """Entry point called by py_session:run/5 on a reimport template."""
+    return _sandbox(passthrough).run(_as_text(module), _as_text(func),
+                                     list(args), dict(kwargs or {}))
+
+
+# ---------------------------------------------------------------------------
+# Sessions spanning several calls (py_session:new/1 on a reimport template).
+# Each keeps its module dictionary and its __main__ namespace between calls,
+# by session id, until session_close.
+# ---------------------------------------------------------------------------
+
+class _Session:
+    __slots__ = ('sandbox', 'modules', 'globals')
+
+    def __init__(self, sandbox):
+        self.sandbox = sandbox
+        self.modules = sandbox.new_modules()
+        self.globals = {'__name__': '__main__', '__builtins__': builtins}
+
+
+_sessions = {}
+
+
+def _session(sid):
+    try:
+        return _sessions[sid]
+    except KeyError:
+        raise RuntimeError('reimport session %r is closed' % (sid,)) from None
+
+
+def session_open(sid, passthrough):
+    _sessions[sid] = _Session(_sandbox(passthrough))
+    return True
+
+
+def session_call(sid, module, func, args, kwargs):
+    s = _session(sid)
+    module, func = _as_text(module), _as_text(func)
+    with _active(s.sandbox, s.modules):
+        if module in ('__main__', ''):
+            try:
+                fn = s.globals[func]
+            except KeyError:
+                raise AttributeError("name '%s' is not defined in the session" % func) from None
+        else:
+            fn = getattr(importlib.import_module(module), func)
+        return fn(*list(args), **dict(kwargs or {}))
+
+
+def session_eval(sid, code, local_vars):
+    """Evaluated in the session's namespace; like a context's eval,
+    assignments made by the expression are not kept."""
+    s = _session(sid)
+    scope = dict(s.globals)
+    scope.update({_as_text(k): v for k, v in dict(local_vars or {}).items()})
+    with _active(s.sandbox, s.modules):
+        return eval(compile(_as_text(code), '<session>', 'eval'), s.globals, scope)
+
+
+def session_exec(sid, code):
+    s = _session(sid)
+    with _active(s.sandbox, s.modules):
+        exec(compile(_as_text(code), '<session>', 'exec'), s.globals)
+    return True
+
+
+def session_close(sid):
+    """Idempotent: the session process and the template may both close."""
+    _sessions.pop(sid, None)
+    return True
+
+
+def session_count():
+    return len(_sessions)
 
 
 def _as_text(v):

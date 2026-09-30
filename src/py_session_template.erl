@@ -44,7 +44,8 @@
          fork/4,
          checkout/2,
          refresh/1,
-         info/1]).
+         info/1,
+         mode/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -71,6 +72,8 @@
     %% start => reimport: the contexts runs go to, and what they share
     contexts = [] :: [pid()],
     passthrough = [] :: [binary()],
+    %% start => reimport: live multi-call sessions, Monitor => {Pid, Ctx, Sid}
+    rsessions = #{} :: #{reference() => {pid(), pid(), pos_integer()}},
     zygotes = [] :: [#zygote{}],
     next = 0 :: non_neg_integer(),
     next_id = 1 :: pos_integer(),
@@ -122,6 +125,11 @@ refresh(T) ->
 -spec info(pid()) -> map().
 info(T) ->
     gen_server:call(T, info).
+
+%% @doc `worker' or `owngil' for a reimport template.
+-spec mode(pid()) -> worker | owngil.
+mode(T) ->
+    gen_server:call(T, mode).
 
 %% ============================================================================
 %% gen_server callbacks
@@ -178,8 +186,9 @@ handle_call(refresh, _From, #st{start = fork, zygotes = Old} = St) ->
     end;
 handle_call(refresh, _From, #st{start = reimport, contexts = Old} = St) ->
     case build(St#st{contexts = []}) of
-        {ok, St1} ->
+        {ok, #st{contexts = [New | _]} = St1} ->
             [begin unlink(C), py_context:stop(C) end || C <- Old],
+            close_orphans(Old, New, St1),
             {reply, ok, St1};
         {error, Reason} ->
             {reply, {error, Reason}, St}
@@ -188,6 +197,8 @@ handle_call(refresh, _From, #st{start = spawn, warm = Warm} = St) ->
     [begin unlink(C), py_context:stop(C) end || C <- Warm],
     self() ! fill_warm,
     {reply, ok, St#st{warm = []}};
+handle_call(mode, _From, #st{opts = Opts} = St) ->
+    {reply, maps:get(mode, Opts, worker), St};
 handle_call(info, _From, St) ->
     {reply, info_map(St), St};
 handle_call(_Other, _From, St) ->
@@ -196,6 +207,17 @@ handle_call(_Other, _From, St) ->
 handle_cast(_Msg, St) ->
     {noreply, St}.
 
+handle_info({register_session, Pid, Ctx, Sid}, #st{rsessions = RS} = St) ->
+    %% Watched so a session process killed without closing still frees
+    %% its modules in the context
+    {noreply, St#st{rsessions = RS#{erlang:monitor(process, Pid) => {Pid, Ctx, Sid}}}};
+handle_info({'DOWN', Mon, process, _Pid, _Reason}, #st{rsessions = RS} = St)
+        when is_map_key(Mon, RS) ->
+    {{_, Ctx, Sid}, Rest} = maps:take(Mon, RS),
+    _ = spawn(fun() ->
+        py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_close, [Sid], #{}, 5000)
+    end),
+    {noreply, St#st{rsessions = Rest}};
 handle_info({'$socket', S, select, _}, St) ->
     case lists:keyfind(S, #zygote.sock, St#st.zygotes) of
         false -> {noreply, St};
@@ -239,6 +261,7 @@ handle_info({'EXIT', Pid, Reason}, #st{start = reimport, contexts = Cs} = St) ->
                            [self(), Pid, Reason]),
             case start_context(St#st.opts) of
                 {ok, C} ->
+                    close_orphans([Pid], C, St),
                     {noreply, St#st{contexts = [C | lists:delete(Pid, Cs)]}};
                 {error, Why} ->
                     {stop, {context_restart_failed, Why}, St}
@@ -252,7 +275,11 @@ handle_info({'EXIT', Pid, _Reason}, #st{warm = Warm} = St) ->
 handle_info(_Msg, St) ->
     {noreply, St}.
 
-terminate(_Reason, #st{zygotes = Zs, warm = Warm, contexts = Cs}) ->
+terminate(_Reason, #st{zygotes = Zs, warm = Warm, contexts = Cs, rsessions = RS}) ->
+    %% Worker contexts share the main interpreter, which outlives them:
+    %% free the modules of sessions still open before the contexts go
+    [py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_close, [Sid], #{}, 5000)
+     || {_, Ctx, Sid} <- maps:values(RS), is_process_alive(Ctx)],
     [retire(Z) || Z <- Zs],
     [py_context:stop(C) || C <- Warm ++ Cs],
     ok.
@@ -372,6 +399,23 @@ start_zygote(Opts) ->
             end;
         {error, Reason} ->
             {error, {template_failed, Reason}}
+    end.
+
+%% The sessions of contexts that are gone. On worker contexts their modules
+%% live in the main interpreter, which is still there: free them through
+%% another context. On owngil they went with the interpreter.
+close_orphans(Dead, Via, #st{opts = Opts, rsessions = RS}) ->
+    case maps:get(mode, Opts, worker) of
+        worker ->
+            Sids = [Sid || {_, Ctx, Sid} <- maps:values(RS), lists:member(Ctx, Dead)],
+            _ = Sids =/= [] andalso
+                spawn(fun() ->
+                    [py_context:call(Via, <<"_erlang_impl._reimport">>, session_close,
+                                     [Sid], #{}, 5000) || Sid <- Sids]
+                end),
+            ok;
+        owngil ->
+            ok
     end.
 
 %% A context for re-import runs: the paths, the imports (shared by every
@@ -582,9 +626,11 @@ fork_opts(ForkOpts) ->
               end, #{}, ForkOpts).
 
 info_map(#st{start = Start, zygotes = Zs, owners = Owners, forks = Forks,
-             build_ms = BuildMs, warm = Warm, opts = Opts, contexts = Cs}) ->
+             build_ms = BuildMs, warm = Warm, opts = Opts, contexts = Cs,
+             rsessions = RS}) ->
     #{start => Start,
       contexts => Cs,
+      reimport_sessions => map_size(RS),
       zygotes => [Info#{os_pid => P} || #zygote{os_pid = P, info = Info} <- Zs],
       sessions => map_size(Owners),
       forks => Forks,

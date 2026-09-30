@@ -19,6 +19,7 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 | `py_child` | Helpers shared by the processes that drive a Python child: executable lookup, socket listen/accept, frames, port env, rlimit flags | live | isolated | `py_isolated_*_SUITE` |
 | `py_session` | Isolated sessions: a fresh child per session from a template (`template/1`, `new/1`, `close/1`, `run/4`, `refresh/1`), or a fresh module dictionary per run (`start => reimport`) | live | sessions | `py_session_SUITE` |
 | `py_session_template`, `py_session_sup` | A template: zygotes that fork sessions (`priv/py_zygote.py`) or warm spawned sessions; exit reports to the session contexts | live | sessions | `py_session_SUITE` |
+| `py_reimport_session` | A multi-call session of a re-import template: a process answering like a context, relaying calls to its context under the session's module dictionary | live | sessions | `py_session_SUITE` |
 | `py_context_router` | Pools and scheduler-affinity routing | live | pools, context-affinity | `py_context_router_SUITE`, `py_pool_SUITE` |
 | `py_context_sup`, `py_context_init` | Supervisor of contexts; starts the default pool at boot | live | pools | (through the above) |
 | `py_nif` | Erlang stubs and docs for every NIF | live | api-reference | all |
