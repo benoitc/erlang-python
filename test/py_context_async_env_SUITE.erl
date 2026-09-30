@@ -116,7 +116,7 @@ envs_freed(Mode) ->
 wait_probe_empty(C, 0) ->
     ct:fail({envs_not_freed, py_context:eval(C, <<"len(__import__('sys')._env_probe)">>)});
 wait_probe_empty(C, N) ->
-    erlang:garbage_collect(),
+    gc_all(),
     %% the next request on the context releases what the dead envs held
     case py_context:eval(C, <<"(__import__('gc').collect(), len(__import__('sys')._env_probe))[1]">>) of
         {ok, 0} -> ok;
@@ -143,7 +143,7 @@ env_outlives_owngil_context(_Config) ->
             [H ! go || H <- Holders],
             [receive {'DOWN', M, process, _, normal} -> ok after 5000 -> ct:fail(holder_stuck) end
              || M <- Mons],
-            erlang:garbage_collect(),
+            gc_all(),
             %% the node is fine and new owngil contexts work
             {ok, C2} = py_context:new(#{mode => owngil}),
             {ok, 2} = py_context:eval(C2, <<"1 + 1">>),
@@ -178,7 +178,7 @@ wait_loop_probe_empty(Loop, 0) ->
     ct:fail({loop_namespaces_not_freed,
              py_event_loop:eval(Loop, <<"len(__import__('sys')._loop_probe)">>)});
 wait_loop_probe_empty(Loop, N) ->
-    erlang:garbage_collect(),
+    gc_all(),
     case py_event_loop:eval(Loop, <<"(__import__('gc').collect(), len(__import__('sys')._loop_probe))[1]">>) of
         {ok, 0} -> ok;
         _ -> timer:sleep(20), wait_loop_probe_empty(Loop, N - 1)
@@ -208,8 +208,15 @@ loop_task_env_freed_after_process_exit(_Config) ->
 wait_task_probe_empty(0) ->
     ct:fail({task_envs_not_freed, py:eval(<<"len(__import__('sys')._task_env_probe)">>)});
 wait_task_probe_empty(N) ->
-    erlang:garbage_collect(),
+    gc_all(),
     case py:eval(<<"(__import__('gc').collect(), len(__import__('sys')._task_env_probe))[1]">>) of
         {ok, 0} -> ok;
         _ -> timer:sleep(20), wait_task_probe_empty(N - 1)
     end.
+
+%% An env reference sent to a context process (py_context:exec(Ctx, Code,
+%% EnvRef)) stays on that process's heap until it collects, and keeps the env
+%% alive until then: collect every process before counting.
+gc_all() ->
+    [erlang:garbage_collect(P) || P <- erlang:processes()],
+    ok.
