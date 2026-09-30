@@ -424,7 +424,7 @@ get_nif_ref(Ctx) when is_pid(Ctx) ->
 -spec interrupt(context()) -> ok | not_running.
 interrupt(Ctx) when is_pid(Ctx) ->
     case lookup_nif_ref(Ctx) of
-        {ok, isolated} ->
+        {ok, Marker} when is_atom(Marker) ->
             %% The context process is never blocked in a NIF: ask it. It
             %% signals the child and arms the SIGKILL backstop.
             MRef = erlang:monitor(process, Ctx),
@@ -457,7 +457,7 @@ interrupt(Ctx) when is_pid(Ctx) ->
 -spec kill(context()) -> ok | {error, not_isolated}.
 kill(Ctx) when is_pid(Ctx) ->
     case lookup_nif_ref(Ctx) of
-        {ok, isolated} ->
+        {ok, Marker} when is_atom(Marker) ->
             MRef = erlang:monitor(process, Ctx),
             Ctx ! {kill, self(), MRef},
             await_ctrl_reply(Ctx, MRef, 5000);
@@ -477,7 +477,7 @@ kill(Ctx) when is_pid(Ctx) ->
 -spec pass_fd(context(), non_neg_integer()) -> {ok, non_neg_integer()} | {error, term()}.
 pass_fd(Ctx, Fd) when is_pid(Ctx), is_integer(Fd) ->
     case lookup_nif_ref(Ctx) of
-        {ok, isolated} ->
+        {ok, Marker} when is_atom(Marker) ->
             MRef = erlang:monitor(process, Ctx),
             Ctx ! {pass_fd, self(), MRef, Fd},
             await_ctrl_reply(Ctx, MRef, 5000);
@@ -490,7 +490,7 @@ pass_fd(Ctx, Fd) when is_pid(Ctx), is_integer(Fd) ->
 -spec child_info(context()) -> {ok, map()} | {error, term()}.
 child_info(Ctx) when is_pid(Ctx) ->
     case lookup_nif_ref(Ctx) of
-        {ok, isolated} ->
+        {ok, Marker} when is_atom(Marker) ->
             MRef = erlang:monitor(process, Ctx),
             Ctx ! {child_info, self(), MRef},
             await_ctrl_reply(Ctx, MRef, 5000);
@@ -504,7 +504,7 @@ child_info(Ctx) when is_pid(Ctx) ->
 %% only interrupt whatever runs.
 interrupt_request(Ctx, ReqMRef) ->
     case lookup_nif_ref(Ctx) of
-        {ok, isolated} ->
+        {ok, Marker} when is_atom(Marker) ->
             Ctx ! {interrupt_request, ReqMRef},
             ok;
         _ ->
@@ -597,7 +597,7 @@ submit(Ctx, Module, Func, Args) ->
     {ok, reference()} | {error, term()}.
 submit(Ctx, Module, Func, Args, Kwargs) when is_pid(Ctx), is_list(Args), is_map(Kwargs) ->
     case lookup_nif_ref(Ctx) of
-        {ok, isolated} ->
+        {ok, Marker} when is_atom(Marker) ->
             TaskRef = make_ref(),
             MRef = erlang:monitor(process, Ctx),
             Ctx ! {submit, self(), MRef, TaskRef, to_binary(Module), to_binary(Func), Args, Kwargs},
@@ -688,7 +688,10 @@ await_ctrl_reply(Ctx, MRef, Timeout) ->
         {error, timeout}
     end.
 
-%% @private
+%% @private A context process registers either its NIF reference or an
+%% atom (`isolated', `reimport_session'): an atom means "not a NIF
+%% context, send it a message" for interrupt, kill, pass_fd, child_info and
+%% submit.
 register_nif_ref(Ref) ->
     try
         true = ets:insert(?REF_TAB, {self(), Ref}),
