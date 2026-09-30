@@ -529,17 +529,37 @@ cleanup_native:
         pthread_mutex_unlock(&loop->namespaces_mutex);
         PyGILState_Release(gstate);
     } else {
-        /* Subinterpreter or runtime not running: just free structs */
+        /* Subinterpreter or runtime not running. Namespaces created in the
+         * subinterpreter went (or go) with it; those created in the main
+         * interpreter (event_loop_exec/eval) are released under the main
+         * GIL, taken after the lock is dropped. */
         pthread_mutex_lock(&loop->namespaces_mutex);
+        process_namespace_t *ns_list = loop->namespaces_head;
+        loop->namespaces_head = NULL;
+        pthread_mutex_unlock(&loop->namespaces_mutex);
 
-        process_namespace_t *ns = loop->namespaces_head;
+        bool main_gil = runtime_is_running() &&
+                        PyGILState_GetThisThreadState() == NULL && !PyGILState_Check();
+        PyGILState_STATE gstate = PyGILState_UNLOCKED;
+        if (main_gil) {
+            gstate = PyGILState_Ensure();
+        }
+        process_namespace_t *ns = ns_list;
         while (ns != NULL) {
             process_namespace_t *next = ns->next;
-            /* Skip Py_XDECREF - can't safely acquire GIL */
+            if (main_gil && ns->interp_id == 0) {
+                Py_XDECREF(ns->globals);
+                Py_XDECREF(ns->locals);
+                Py_XDECREF(ns->module_cache);
+            }
             enif_free(ns);
             ns = next;
         }
-        loop->namespaces_head = NULL;
+        if (main_gil) {
+            PyGILState_Release(gstate);
+        }
+
+        pthread_mutex_lock(&loop->namespaces_mutex);
 
         /* Clean up PID-to-env mappings */
         pid_env_mapping_t *mapping = loop->pid_env_head;
@@ -693,11 +713,15 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
     erlang_event_loop_t *loop = (erlang_event_loop_t *)obj;
 
     /*
-     * For subinterpreters (interp_id != 0), we can't use PyGILState_Ensure.
-     * Just remove from the list without Py_DECREF - the Python objects will
-     * be cleaned up when the interpreter is destroyed.
+     * Subinterpreter loop. Its namespaces are not all its own: event_loop_exec
+     * and event_loop_eval create theirs in the main interpreter. Unlink under
+     * the lock; hand subinterpreter dicts to the OWN_GIL context thread while
+     * the lock guarantees that context is still serving; release
+     * main-interpreter dicts under the main GIL once the lock is dropped
+     * (GIL before namespaces_mutex, as everywhere else).
      */
     if (!runtime_is_running() || loop->interp_id != 0) {
+        process_namespace_t *main_ns = NULL;
         pthread_mutex_lock(&loop->namespaces_mutex);
 
         process_namespace_t **pp = &loop->namespaces_head;
@@ -705,14 +729,33 @@ void event_loop_down(ErlNifEnv *env, void *obj, ErlNifPid *pid,
             if (enif_compare_pids(&(*pp)->owner_pid, pid) == 0) {
                 process_namespace_t *to_free = *pp;
                 *pp = to_free->next;
-                /* Skip Py_XDECREF - can't safely acquire GIL for subinterp */
-                enif_free(to_free);
+                if (!runtime_is_running()) {
+                    enif_free(to_free);
+                } else if (to_free->interp_id == 0) {
+                    main_ns = to_free;
+                } else {
+                    if (loop->gc_ctx != NULL) {
+                        env_gc_push(loop->gc_ctx, to_free->globals, to_free->locals,
+                                    to_free->module_cache);
+                    }
+                    /* else: they go with the interpreter */
+                    enif_free(to_free);
+                }
                 break;
             }
             pp = &(*pp)->next;
         }
 
         pthread_mutex_unlock(&loop->namespaces_mutex);
+
+        if (main_ns != NULL) {
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Py_XDECREF(main_ns->globals);
+            Py_XDECREF(main_ns->locals);
+            Py_XDECREF(main_ns->module_cache);
+            PyGILState_Release(gstate);
+            enif_free(main_ns);
+        }
         return;
     }
 
@@ -812,6 +855,10 @@ static process_namespace_t *ensure_process_namespace(
     }
 
     ns->owner_pid = *pid;
+    {
+        PyInterpreterState *creator = PyInterpreterState_Get();
+        ns->interp_id = creator != NULL ? PyInterpreterState_GetID(creator) : 0;
+    }
     ns->globals = PyDict_New();
     ns->locals = PyDict_New();
     ns->module_cache = PyDict_New();

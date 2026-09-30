@@ -105,34 +105,82 @@ static void py_env_resource_dtor(ErlNifEnv *env, void *obj) {
     (void)env;
     py_env_resource_t *res = (py_env_resource_t *)obj;
 
-    if (!runtime_is_running()) {
+    if (res->owner_ctx != NULL) {
+        /* OWN_GIL env: its dicts belong to the context's interpreter, whose
+         * GIL this thread cannot take. Hand them to the context thread,
+         * which releases them before its next request (env_gc_drain). */
+        py_context_t *ctx = res->owner_ctx;
+        res->owner_ctx = NULL;
+        env_gc_push(ctx, res->globals, res->locals, NULL);
+        res->globals = NULL;
+        res->locals = NULL;
+        enif_release_resource(ctx);
+        return;
+    }
+
+    if (!runtime_is_running() || res->interp_id != 0) {
+        /* Runtime gone, or a subinterpreter env without an owner context:
+         * nothing can release it here */
         res->globals = NULL;
         res->locals = NULL;
         return;
     }
 
+    /* Main interpreter */
     PyGILState_STATE gstate = PyGILState_Ensure();
-
-#ifdef HAVE_SUBINTERPRETERS
-    if (res->interp_id != 0) {
-        /* OWN_GIL subinterpreter: interp_id != 0
-         * These dicts were created in an OWN_GIL interpreter. We cannot safely
-         * DECREF them here because:
-         * 1. The interpreter might already be destroyed
-         * 2. We cannot switch to its thread state from this thread
-         * When the OWN_GIL context is destroyed, Py_EndInterpreter cleans up
-         * all objects, so we skip DECREF to avoid double-free or invalid access. */
-    } else
-#endif
-    {
-        /* Main interpreter */
-        Py_XDECREF(res->globals);
-        Py_XDECREF(res->locals);
-    }
-
+    Py_XDECREF(res->globals);
+    Py_XDECREF(res->locals);
     PyGILState_Release(gstate);
     res->globals = NULL;
     res->locals = NULL;
+}
+
+void env_gc_push(py_context_t *ctx, PyObject *globals, PyObject *locals, PyObject *extra) {
+    if (globals == NULL && locals == NULL && extra == NULL) {
+        return;
+    }
+    env_gc_node_t *node = enif_alloc(sizeof(env_gc_node_t));
+    if (node == NULL) {
+        return;   /* the objects go with the interpreter */
+    }
+    node->globals = globals;
+    node->locals = locals;
+    node->extra = extra;
+    node->next = atomic_load(&ctx->env_gc_head);
+    while (!atomic_compare_exchange_weak(&ctx->env_gc_head, &node->next, node)) {
+        /* node->next was reloaded: retry */
+    }
+}
+
+/**
+ * @brief Release the dicts of dead process-local envs of an OWN_GIL context.
+ *
+ * Runs on the context thread with its GIL held. Takes the whole pending list
+ * at once; the env destructor only ever pushes, so no lock is needed.
+ */
+static void env_gc_drain(py_context_t *ctx) {
+    env_gc_node_t *node = atomic_exchange(&ctx->env_gc_head, NULL);
+    while (node != NULL) {
+        env_gc_node_t *next = node->next;
+        Py_XDECREF(node->globals);
+        Py_XDECREF(node->locals);
+        Py_XDECREF(node->extra);
+        enif_free(node);
+        node = next;
+    }
+}
+
+/**
+ * @brief Free the nodes left after the interpreter ended, without touching
+ * their objects (they went with the interpreter). Context destructor only.
+ */
+static void env_gc_discard(py_context_t *ctx) {
+    env_gc_node_t *node = atomic_exchange(&ctx->env_gc_head, NULL);
+    while (node != NULL) {
+        env_gc_node_t *next = node->next;
+        enif_free(node);
+        node = next;
+    }
 }
 
 /* Invariant counters for debugging and leak detection */
@@ -330,6 +378,9 @@ static void context_destructor(ErlNifEnv *env, void *obj) {
 
     /* Close callback pipes if open */
     close_pipe_pair(ctx->callback_pipe);
+
+    /* Envs released after the interpreter ended: their objects are gone */
+    env_gc_discard(ctx);
 
     /* Refcount is zero here, so no interrupt can be in flight. Contexts that
      * leaked an unresponsive thread keep a reference and never reach this. */
@@ -2127,6 +2178,12 @@ static void ctx_execute_create_local_env(py_context_t *ctx) {
 
     /* Copy globals from context to inherit preloaded code */
     res->globals = PyDict_Copy(ctx->globals);
+    if (res->globals != NULL && ctx->uses_own_gil && res->owner_ctx == NULL) {
+        /* Only this context's thread can release these dicts: the env
+         * keeps the context alive and hands them back when it dies */
+        enif_keep_resource(ctx);
+        res->owner_ctx = ctx;
+    }
     if (res->globals == NULL) {
         ctx->response_term = enif_make_tuple2(ctx->shared_env,
             enif_make_atom(ctx->shared_env, "error"),
@@ -3071,6 +3128,11 @@ static void *ctx_thread_main_owngil(void *arg) {
     ctx->event_loop = get_current_interpreter_event_loop();
     if (ctx->event_loop != NULL) {
         enif_keep_resource(ctx->event_loop);
+        /* Namespaces of processes that die go to this thread for release */
+        erlang_event_loop_t *loop = (erlang_event_loop_t *)ctx->event_loop;
+        pthread_mutex_lock(&loop->namespaces_mutex);
+        loop->gc_ctx = ctx;
+        pthread_mutex_unlock(&loop->namespaces_mutex);
     }
 
     /* Create namespace dictionaries */
@@ -3181,6 +3243,7 @@ static void *ctx_thread_main_owngil(void *arg) {
          * invariant on py_context::interrupt_mutex). */
         py_context_exec_enter(ctx);
         PyEval_RestoreThread(ctx->own_gil_tstate);
+        env_gc_drain(ctx);
         ctx_execute_request(ctx);
         PyEval_SaveThread();
         py_context_exec_leave(ctx);
@@ -3233,8 +3296,18 @@ static void *ctx_thread_main_owngil(void *arg) {
         event_loop_detach_interpreter((erlang_event_loop_t *)ctx->event_loop);
     }
 
+    /* No more namespaces handed to us once we stop serving; what was
+     * handed before is released just below */
+    if (ctx->event_loop != NULL) {
+        erlang_event_loop_t *loop = (erlang_event_loop_t *)ctx->event_loop;
+        pthread_mutex_lock(&loop->namespaces_mutex);
+        loop->gc_ctx = NULL;
+        pthread_mutex_unlock(&loop->namespaces_mutex);
+    }
+
     /* Cleanup: acquire our OWN_GIL and destroy interpreter */
     PyEval_RestoreThread(ctx->own_gil_tstate);
+    env_gc_drain(ctx);
     Py_XDECREF(ctx->module_cache);
     Py_XDECREF(ctx->globals);
     Py_XDECREF(ctx->locals);
@@ -3546,6 +3619,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
 
     /* Initialize fields */
     ctx->interp_id = atomic_fetch_add(&g_context_id_counter, 1);
+    atomic_init(&ctx->env_gc_head, NULL);
     ctx->is_subinterp = use_owngil;
     atomic_store(&ctx->destroyed, false);
     atomic_store(&ctx->leaked, false);
@@ -4268,6 +4342,7 @@ static ERL_NIF_TERM nif_create_local_env(ErlNifEnv *env, int argc, const ERL_NIF
     res->globals = NULL;
     res->locals = NULL;
     res->interp_id = 0;
+    res->owner_ctx = NULL;
 
     if (!ctx_uses_async_thread(ctx)) {
         enif_release_resource(res);

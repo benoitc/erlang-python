@@ -33,6 +33,13 @@
 
 ### Fixed
 
+- On an owngil context, the process-local environment of an Erlang process
+  (`py:call/eval/exec` on the context) was kept until the context stopped:
+  300 short-lived processes each leaving 1 MB grew the node by 300 MB. The
+  environment now goes back to its context thread when the process exits
+  and is released before the context's next request. The per-process
+  namespaces of an owngil context's event loop (`py_event_loop:exec/eval`)
+  were not released either; they now are.
 - On an owngil context, a Python function that called `erlang.call`, where
   the Erlang callback called the same context again, hung until the request
   timeout. The context thread waited for the callback on its pipe while the

@@ -121,6 +121,11 @@ typedef struct process_namespace {
     /** @brief Module import cache for this process */
     PyObject *module_cache;
 
+    /** @brief Interpreter the dicts were created in (0 = main). Not always
+     * the loop's: event_loop_exec/eval run on the main interpreter even for
+     * a subinterpreter loop. */
+    int64_t interp_id;
+
     /** @brief Monitor for detecting process death */
     ErlNifMonitor monitor;
 
@@ -469,6 +474,11 @@ typedef struct erlang_event_loop {
 
     /** @brief Mutex protecting namespace registry */
     pthread_mutex_t namespaces_mutex;
+
+    /** @brief OWN_GIL context whose thread releases the namespaces of dead
+     * processes (NULL for the main interpreter, and once the context stops
+     * serving). Protected by namespaces_mutex. */
+    struct py_context *gc_ctx;
 
     /* ========== PID-to-Env Mapping Registry ========== */
     /* Protected by namespaces_mutex (shared with namespace registry) */
