@@ -50,8 +50,10 @@
   timeout. The context thread waited for the callback on its pipe while the
   nested call sat in its queue. It now waits inline and serves the nested
   call, as worker contexts do since 5.0.1.
+- Native `Channel.async_receive()` no longer drops a queued `None` or a
+  delivery whose receiver is cancelled after notification.
 
-
+## 5.0.1 (2026-09-22)
 
 ### Fixed
 
