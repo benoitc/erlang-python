@@ -97,7 +97,7 @@ suite is visible. `scripts/check_code_map.sh` requires a row per module.
 | `erlang.spawn_task()` | asyncio.md | `py_async_task_SUITE` |
 | `erlang.sleep()` | asyncio.md | `py_erlang_sleep_SUITE` |
 | `erlang.SharedDict` | shared-dict.md | `py_SUITE` (`test_shared_dict_*`) |
-| `erlang.Channel`, `erlang.ByteChannel` | channel.md, buffer.md | `py_channel_SUITE`, `py_byte_channel_SUITE` |
+| `erlang.Channel`, `erlang.ByteChannel` | channel.md, buffer.md | `py_channel_SUITE` (including native None payloads, readiness cancellation and isolated rejection), `py_byte_channel_SUITE` |
 | `erlang.reactor.Protocol` and friends | reactor.md | `py_reactor_SUITE` |
 | `erlang.state_set / state_get / state_delete / state_keys / state_incr / state_decr` (registered callbacks) | README, getting-started.md | `py_SUITE` (`test_shared_state`) |
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Native `Channel.async_receive()` no longer drops a queued `None` or a
+  delivery whose receiver is cancelled after notification.
+
 ## 5.0.1 (2026-09-22)
 
 ### Fixed

@@ -2995,12 +2995,6 @@ static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
 
     pthread_mutex_lock(&channel->mutex);
 
-    /* Check if closed */
-    if (channel->closed) {
-        pthread_mutex_unlock(&channel->mutex);
-        return Py_BuildValue("(ss)", "error", "closed");
-    }
-
     /* Check if waiter already exists */
     if (channel->has_waiter || channel->has_sync_waiter) {
         pthread_mutex_unlock(&channel->mutex);
@@ -3056,6 +3050,11 @@ static PyObject *erlang_channel_wait_impl(PyObject *self, PyObject *args) {
             Py_DECREF(py_obj);
             return result_tuple;
         }
+    }
+
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->mutex);
+        return Py_BuildValue("(ss)", "error", "closed");
     }
 
     /* No data - register waiter */

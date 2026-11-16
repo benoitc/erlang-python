@@ -27,6 +27,9 @@
     python_try_receive_test/1,
     python_iterate_test/1,
     async_receive_immediate_test/1,
+    native_none_payload_test/1,
+    native_cancel_ready_test/1,
+    isolated_channel_rejected_test/1,
     async_receive_wait_test/1,
     async_iteration_test/1,
     async_closed_channel_test/1,
@@ -63,6 +66,9 @@ all() -> [
     python_try_receive_test,
     python_iterate_test,
     async_receive_immediate_test,
+    native_none_payload_test,
+    native_cancel_ready_test,
+    isolated_channel_rejected_test,
     async_receive_wait_test,
     async_iteration_test,
     async_closed_channel_test,
@@ -98,6 +104,81 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     Config.
+
+native_none_payload_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    ok = py_channel:send(Ch, none),
+    ok = py:register_function(channel_regression_none, fun([]) ->
+        py_channel:send(Ch, none)
+    end),
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import erlang
+async def receive_none(ref):
+    value = await asyncio.wait_for(erlang.Channel(ref).async_receive(), 0.2)
+    assert value is None
+    receiver = asyncio.create_task(erlang.Channel(ref).async_receive())
+    await asyncio.sleep(0)
+    erlang.call('channel_regression_none')
+    assert await asyncio.wait_for(receiver, 0.2) is None
+    return True
+def run_receive_none(ref):
+    return erlang.run(receive_none(ref))
+">>),
+    try
+        {ok, true} = py:call(Ctx, '__main__', run_receive_none, [Ch])
+    after
+        py:unregister_function(channel_regression_none),
+        py_channel:close(Ch)
+    end.
+
+native_cancel_ready_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    ok = py:register_function(channel_regression_send, fun([]) ->
+        py_channel:send(Ch, 42)
+    end),
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import erlang
+async def cancel_ready(ref):
+    loop = asyncio.get_running_loop()
+    channel = erlang.Channel(ref)
+    before = set(loop._timers)
+    receiver = asyncio.create_task(channel.async_receive())
+    await asyncio.sleep(0)
+    callbacks = set(loop._timers) - before
+    assert len(callbacks) == 1
+    ready = loop._timers[callbacks.pop()]
+    erlang.call('channel_regression_send')
+    ready._run()
+    receiver.cancel()
+    try:
+        await receiver
+    except asyncio.CancelledError:
+        pass
+    assert channel.try_receive() == 42
+    return True
+def run_cancel_ready(ref):
+    return erlang.run(cancel_ready(ref))
+">>),
+    try
+        {ok, true} = py:call(Ctx, '__main__', run_cancel_ready, [Ch])
+    after
+        py:unregister_function(channel_regression_send),
+        py_channel:close(Ch)
+    end.
+
+isolated_channel_rejected_test(_Config) ->
+    {ok, Ctx} = py_context:new(#{mode => isolated}),
+    try
+        {ok, true} = py_context:eval(Ctx, <<"
+exec('import erlang\\ntry:\\n erlang.Channel(None)\\nexcept RuntimeError:\\n rejected = True\\nelse:\\n rejected = False') or rejected
+">>)
+    after
+        py_context:destroy(Ctx)
+    end.
 
 end_per_testcase(_TestCase, _Config) ->
     ok.
