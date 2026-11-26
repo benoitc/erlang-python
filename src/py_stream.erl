@@ -37,7 +37,7 @@ stream(Module, Func, Args) ->
 
 %% @doc Stream results from a Python generator with kwargs.
 -spec stream(py:py_module(), py:py_func(), py:py_args(), py:py_kwargs()) -> py:py_result().
-stream(Module, Func, Args, Kwargs) when map_size(Kwargs) == 0 ->
+stream(Module, Func, Args, Kwargs) when map_size(Kwargs) =:= 0 ->
     %% No kwargs - use stream_start and collect results
     {ok, Ref} = stream_start(Module, Func, Args),
     collect_stream(Ref, []);
@@ -91,7 +91,7 @@ format_arg(_) ->
     <<"None">>.
 
 %% @private Format kwargs for Python code
-format_kwargs(Kwargs) when map_size(Kwargs) == 0 -> <<>>;
+format_kwargs(Kwargs) when map_size(Kwargs) =:= 0 -> <<>>;
 format_kwargs(Kwargs) ->
     KwList = maps:fold(
         fun(K, V, Acc) ->

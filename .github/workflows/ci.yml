@@ -320,6 +320,9 @@ jobs:
       - name: Check formatting
         run: rebar3 fmt --check
 
+      - name: Run elvis lint
+        run: rebar3 lint
+
       - name: Compile
         run: rebar3 compile
 

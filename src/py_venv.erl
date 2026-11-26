@@ -131,7 +131,17 @@ get_python_executable() ->
     %% Searches for pythonX.Y, python3, python in sys.prefix/bin (Unix)
     %% or python.exe in sys.prefix (Windows)
     Expr =
-        <<"(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if __import__('sys').platform == 'win32' and __import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, 'python.exe')) else next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3')))()">>,
+        <<
+            "(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if "
+            "__import__('sys').platform == 'win32' and "
+            "__import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, "
+            "'python.exe')) else next((p for p in "
+            "[__import__('os').path.join(__import__('sys').prefix, 'bin', "
+            "f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), "
+            "__import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), "
+            "__import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if "
+            "__import__('os').path.isfile(p)), 'python3')))()"
+        >>,
     case py:eval(Expr) of
         {ok, Path} when is_binary(Path) -> binary_to_list(Path);
         _ -> "python3"
@@ -282,7 +292,14 @@ activate_venv(VenvPath) ->
     %% Find site-packages directory dynamically (venv may use different Python version)
     %% Uses a single expression to avoid multiline code issues
     FindSitePackages =
-        <<"(lambda vp: __import__('os').path.join(vp, 'Lib', 'site-packages') if __import__('os').path.exists(__import__('os').path.join(vp, 'Lib', 'site-packages')) else next((sp for name in (__import__('os').listdir(__import__('os').path.join(vp, 'lib')) if __import__('os').path.isdir(__import__('os').path.join(vp, 'lib')) else []) if name.startswith('python') for sp in [__import__('os').path.join(vp, 'lib', name, 'site-packages')] if __import__('os').path.isdir(sp)), None))(_venv_path)">>,
+        <<
+            "(lambda vp: __import__('os').path.join(vp, 'Lib', 'site-packages') if "
+            "__import__('os').path.exists(__import__('os').path.join(vp, 'Lib', 'site-packages')) else "
+            "next((sp for name in (__import__('os').listdir(__import__('os').path.join(vp, 'lib')) if "
+            "__import__('os').path.isdir(__import__('os').path.join(vp, 'lib')) else []) if "
+            "name.startswith('python') for sp in [__import__('os').path.join(vp, 'lib', name, "
+            "'site-packages')] if __import__('os').path.isdir(sp)), None))(_venv_path)"
+        >>,
     case py:eval(FindSitePackages, #{<<"_venv_path">> => VenvBin}) of
         {ok, SitePackages} when SitePackages =/= none, SitePackages =/= null ->
             activate_venv_with_site_packages(VenvBin, SitePackages);
@@ -299,7 +316,10 @@ activate_venv_with_site_packages(VenvBin, SitePackages) ->
         {ok, true} ->
             %% Save original path if not already saved
             {ok, _} = py:eval(
-                <<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>
+                <<
+                    "setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not "
+                    "hasattr(__import__('sys'), '_original_path') else None"
+                >>
             ),
             %% Set venv info
             {ok, _} = py:eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
@@ -355,7 +375,10 @@ deactivate_venv() ->
                 <<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>
             ),
             {ok, _} = py:eval(
-                <<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>
+                <<
+                    "delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), "
+                    "'_venv_site_packages') else None"
+                >>
             ),
             ok;
         {ok, false} ->
@@ -370,5 +393,10 @@ deactivate_venv() ->
 venv_info() ->
     %% Check both attributes exist to handle partial activation/deactivation state
     Code =
-        <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if (hasattr(__import__('sys'), '_active_venv') and hasattr(__import__('sys'), '_venv_site_packages')) else {'active': False})">>,
+        <<
+            "({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': "
+            "__import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if "
+            "(hasattr(__import__('sys'), '_active_venv') and hasattr(__import__('sys'), "
+            "'_venv_site_packages')) else {'active': False})"
+        >>,
     py:eval(Code).
