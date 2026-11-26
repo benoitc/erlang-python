@@ -17,3 +17,4 @@ what was decided, what it costs, and where the code is.
 | [0007](0007-remove-legacy-execution-paths.md) | One execution path per mode; the legacy API is removed | 5.0.0 |
 | [0008](0008-pipe-io-rules.md) | Pipe I/O is non-blocking, deadlined and waited with poll | 3.1.0, 5.0.0 |
 | [0009](0009-isolated-sessions.md) | Sessions fork from a prepared zygote | 5.1.0 |
+| [0010](0010-supported-otp-releases.md) | The two latest OTP releases are supported | 5.1.0 |

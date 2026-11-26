@@ -37,7 +37,7 @@ Key features:
 
 ## Requirements
 
-- Erlang/OTP 27+ (tested on OTP 27, 28, and 29)
+- Erlang/OTP 28 or later (tested on OTP 28 and 29)
 - Python 3.12+ (3.13+ for free-threading)
 - C compiler (gcc, clang)
 

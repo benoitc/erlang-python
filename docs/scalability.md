@@ -620,8 +620,12 @@ OTP releases still help for free:
 - **Consistent map iteration order** is now guaranteed across map operations in
   OTP 29. The router and state modules do not depend on iteration order, so this
   changes nothing here, but it removes a class of subtle bugs if you build on top.
-- **Building the NIF stays the same** across OTP 28/29 (NIF API 2.18); no version
-  guards are needed in `c_src`.
+- **Building the NIF stays the same** on OTP 28 and 29: the NIF uses NIF
+  API 2.17, which OTP 28 provides; OTP 29's 2.18 only adds calls the code
+  does not use, so `c_src` needs no version guards.
+- **Cheaper FD re-arming** on OTP 28 and later: a descriptor the event loop
+  re-arms for reading after each event stays in a dedicated pollset, so the
+  reselect path does not re-insert it each time.
 
 For doc-example testing, OTP 29 ships `ct_doctest`. This project keeps its own
 `scripts/lint_doc_snippets.escript` because that linter also validates the Python

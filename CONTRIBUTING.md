@@ -75,7 +75,7 @@ name.
 
 ## Build
 
-You need OTP 27 or later, Python 3.12 or later with headers, CMake and a C
+You need OTP 28 or later, Python 3.12 or later with headers, CMake and a C
 compiler.
 
 ```sh
@@ -196,11 +196,11 @@ rules were adopted are listed in that rule's `ignore`; a new module follows
 every rule, and a module comes off a list when it is reworked, never onto
 one to make a change pass.
 
-CI runs the matrix in `.github/workflows/ci.yml`: OTP 27 to 29 with Python
-3.12 to 3.14 on Ubuntu and macOS, FreeBSD 14 through `vmactions/freebsd-vm`,
-free-threaded 3.13t, ASan, the lint job (formatting, Elvis, xref, dialyzer,
-code map) and the documentation build. A pull request is merged when all of
-them are green.
+CI runs the matrix in `.github/workflows/ci.yml`: OTP 28 and 29 with Python
+3.12 to 3.14 on Ubuntu and macOS, FreeBSD 14 on OTP 28 and 29 through
+`vmactions/freebsd-vm`, free-threaded 3.13t, ASan, the lint job (formatting,
+Elvis, xref, dialyzer, code map) and the documentation build. A pull request
+is merged when all of them are green.
 
 ## Recipes
 
