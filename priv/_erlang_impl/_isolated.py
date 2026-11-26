@@ -142,7 +142,8 @@ def _callback_error(reason):
 
 
 class Runtime:
-    """One per child process."""
+    """One per child process. A session template's zygote builds it with
+    sock=None; each forked session sets sock before start()."""
 
     def __init__(self, sock, context_pid=None):
         self.sock = sock
@@ -198,7 +199,14 @@ class Runtime:
 
     # -- writing -----------------------------------------------------------
 
+    def _check_connected(self):
+        if self.sock is None:
+            # Built by a session template's zygote, not connected yet
+            raise RuntimeError('erlang is not connected: this code runs while a '
+                               'session template is prepared, before any session')
+
     def _write_frame(self, frame_id, status, payload):
+        self._check_connected()
         body = bytes([status]) + payload
         data = _HEADER.pack(frame_id, len(body)) + body
         # A signal landing inside sendall would tear the frame and
@@ -242,6 +250,7 @@ class Runtime:
 
         On the main thread the wait also serves requests coming from Erlang,
         so nested calls work. Returns (status, value)."""
+        self._check_connected()
         if self.broken:
             raise PipeBroken(self.broken_reason)
         on_main = threading.current_thread() is self.main_thread
@@ -265,6 +274,7 @@ class Runtime:
 
     def request_async(self, term):
         """Send a status-3 request; returns an asyncio Future for the reply."""
+        self._check_connected()
         if self.broken:
             raise PipeBroken(self.broken_reason)
         loop = asyncio.get_running_loop()

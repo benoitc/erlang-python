@@ -158,7 +158,9 @@ child process:
 ```
 
 A crash kills only the child, `py_context:kill/1` is total, and rlimits or
-cgroups bound resources. See [Isolated Contexts](isolated.md).
+cgroups bound resources. See [Isolated Contexts](isolated.md). When each
+request must also start from a clean state, with nothing left by the
+previous one, give it its own session: see [Isolated Sessions](sessions.md).
 
 That is a boundary against Python *failing*, not against Python *reaching*.
 The child runs as the same user as the node, so it can read and write

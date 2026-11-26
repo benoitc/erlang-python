@@ -64,6 +64,9 @@
     test_startup_error_reported/1,
     test_cgroup_option_platform/1,
     test_env_option/1,
+    test_clear_env_option/1,
+    test_hash_seed_option/1,
+    test_bad_env_options/1,
     test_preload_option/1
 ]).
 
@@ -119,6 +122,9 @@ groups() ->
         test_startup_error_reported,
         test_cgroup_option_platform,
         test_env_option,
+        test_clear_env_option,
+        test_hash_seed_option,
+        test_bad_env_options,
         test_preload_option
     ],
     [{worker, [], RoundTrip},
@@ -785,6 +791,51 @@ test_env_option(Config) ->
     C = new_ctx(Config, #{env => #{"PY_ISOLATED_PROBE" => "yes"}}),
     {ok, <<"yes">>} = py_context:eval(C, <<"__import__('os').environ.get('PY_ISOLATED_PROBE')">>),
     stop(C).
+
+%% The VM's environment reaches the child unless clear_env is set; with it
+%% the child sees only what `env' names.
+test_clear_env_option(Config) ->
+    true = os:putenv("PY_ISOLATED_LEAK", "from-the-vm"),
+    try
+        Probe = <<"(os.environ.get('PY_ISOLATED_LEAK'), os.environ.get('PY_ISOLATED_KEEP'))">>,
+        Inherit = new_ctx(Config, #{env => #{"PY_ISOLATED_KEEP" => "1"}}),
+        ok = py_context:exec(Inherit, <<"import os">>),
+        {ok, {<<"from-the-vm">>, <<"1">>}} = py_context:eval(Inherit, Probe),
+        stop(Inherit),
+        Clean = new_ctx(Config, #{clear_env => true, env => #{"PY_ISOLATED_KEEP" => "1"}}),
+        ok = py_context:exec(Clean, <<"import os">>),
+        {ok, {none, <<"1">>}} = py_context:eval(Clean, Probe),
+        {ok, Names} = py_context:eval(Clean, <<"sorted(os.environ)">>),
+        %% Python itself may add a few (e.g. __CF_USER_TEXT_ENCODING on macOS)
+        false = lists:member(<<"HOME">>, Names),
+        false = lists:member(<<"PATH">>, Names),
+        stop(Clean)
+    after
+        os:unsetenv("PY_ISOLATED_LEAK")
+    end.
+
+%% Same seed, same str hashes and set order in two separate children; another
+%% seed changes them.
+test_hash_seed_option(Config) ->
+    Probe = <<"(hash('erlang-python'), repr(list({'a','b','c','d','e','f','g','h'})))">>,
+    Run = fun(Seed) ->
+        C = new_ctx(Config, #{hash_seed => Seed}),
+        {ok, R} = py_context:eval(C, Probe),
+        {ok, Env} = py_context:eval(C, <<"__import__('os').environ.get('PYTHONHASHSEED')">>),
+        stop(C),
+        {R, Env}
+    end,
+    {A, <<"7">>} = Run(7),
+    {A, <<"7">>} = Run(7),
+    {B, <<"8">>} = Run(8),
+    true = A =/= B,
+    ok.
+
+test_bad_env_options(_Config) ->
+    {error, {badarg, {hash_seed, -1}}} = py_context:new(#{mode => isolated, hash_seed => -1}),
+    {error, {badarg, {hash_seed, 1 bsl 32}}} = py_context:new(#{mode => isolated, hash_seed => 1 bsl 32}),
+    {error, {badarg, {clear_env, yes}}} = py_context:new(#{mode => isolated, clear_env => yes}),
+    ok.
 
 test_preload_option(Config) ->
     C = new_ctx(Config, #{preload => <<"preloaded = 'yes'">>}),

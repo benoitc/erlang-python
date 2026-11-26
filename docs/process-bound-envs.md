@@ -451,11 +451,17 @@ This prevents:
 
 For the main interpreter (`interp_id == 0`), the destructor acquires the GIL and decrefs the Python dicts normally.
 
-For subinterpreters, the destructor skips `Py_DECREF` because:
-1. `PyGILState_Ensure` cannot safely acquire a subinterpreter's GIL
-2. The Python objects will be freed when the subinterpreter is destroyed via `Py_EndInterpreter`
+For an owngil context, the destructor cannot release the dicts itself: it
+runs on whatever thread collects the resource, and `PyGILState_Ensure`
+cannot take a subinterpreter's GIL. The env keeps its context referenced
+and hands the dicts back to it; the context thread releases them before
+its next request, and before its interpreter ends. Dicts handed back after
+that went with the interpreter and are not touched.
 
-This design prioritizes safety over avoiding minor memory leaks during edge cases.
+The per-process namespaces of an event loop (`py_event_loop:exec/eval`)
+follow the same rule when their process exits: those created in the main
+interpreter are released under the main GIL, those created in an owngil
+interpreter are handed to its context thread.
 
 ## See Also
 

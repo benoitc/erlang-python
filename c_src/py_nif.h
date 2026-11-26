@@ -356,6 +356,17 @@ typedef struct {
 typedef struct py_context py_context_t;
 
 /**
+ * @brief Dicts of a dead process-local env, waiting to be released on the
+ * OWN_GIL context thread that created them (see env_gc_head).
+ */
+typedef struct env_gc_node {
+    PyObject *globals;
+    PyObject *locals;
+    PyObject *extra;
+    struct env_gc_node *next;
+} env_gc_node_t;
+
+/**
  * @enum py_request_type_t
  * @brief Kinds of Python work a context can run
  */
@@ -828,6 +839,14 @@ struct py_context {
     /** @brief Interpreter state for OWN_GIL subinterpreter */
     PyInterpreterState *own_gil_interp;
 
+    /** @brief Dicts of dead process-local envs of this OWN_GIL context.
+     * The env destructor runs on any thread and cannot take this
+     * interpreter's GIL: it pushes here (lock-free), and the context thread
+     * releases them before its next request and before the interpreter
+     * ends. Nodes pushed after that are freed by the context destructor,
+     * their objects having gone with the interpreter. */
+    _Atomic(env_gc_node_t *) env_gc_head;
+
     /** @brief Default ErlangEventLoop of the subinterpreter (kept resource,
      *  set by the context thread, read by nif_context_get_event_loop) */
     void *event_loop;
@@ -1291,7 +1310,17 @@ typedef struct py_env_resource {
     PyObject *locals;
     /** @brief Interpreter ID that owns these dicts (0 = main interpreter) */
     int64_t interp_id;
+    /** @brief OWN_GIL context that created the dicts (kept referenced), so
+     * the destructor can hand them back to its thread; NULL otherwise */
+    py_context_t *owner_ctx;
 } py_env_resource_t;
+
+/**
+ * @brief Hand objects of an OWN_GIL context's interpreter to its thread for
+ * release (env_gc_head). Lock-free; callable from any thread without the
+ * GIL. NULL objects are allowed.
+ */
+void env_gc_push(py_context_t *ctx, PyObject *globals, PyObject *locals, PyObject *extra);
 
 /** @brief Resource type for py_env_resource_t (process-local Python environment) */
 extern ErlNifResourceType *PY_ENV_RESOURCE_TYPE;
