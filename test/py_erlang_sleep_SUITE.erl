@@ -40,137 +40,145 @@ end_per_suite(_Config) ->
 
 %% Test that erlang.sleep is available
 test_erlang_sleep_available(_Config) ->
-    ok = py:exec(<<"
-import erlang
-result = hasattr(erlang, 'sleep')
-assert result, 'erlang.sleep not found'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "result = hasattr(erlang, 'sleep')\n"
+        "assert result, 'erlang.sleep not found'\n"
+    >>),
     ct:pal("erlang.sleep is available"),
     ok.
 
 %% Test basic sleep functionality (sync context via callback)
 test_erlang_sleep_basic(_Config) ->
-    ok = py:exec(<<"
-import erlang
-# Test basic sleep in sync context - should not raise
-erlang.sleep(0.01)  # 10ms
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "# Test basic sleep in sync context - should not raise\n"
+        "erlang.sleep(0.01)  # 10ms\n"
+    >>),
     ct:pal("Basic sleep completed"),
     ok.
 
 %% Test zero/negative delay returns immediately
 test_erlang_sleep_zero(_Config) ->
-    ok = py:exec(<<"
-import erlang
-import time
-
-start = time.time()
-erlang.sleep(0)
-elapsed = (time.time() - start) * 1000
-# Should return immediately (< 10ms accounting for Python overhead)
-assert elapsed < 10, f'Zero sleep was slow: {elapsed}ms'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import time\n"
+        "\n"
+        "start = time.time()\n"
+        "erlang.sleep(0)\n"
+        "elapsed = (time.time() - start) * 1000\n"
+        "# Should return immediately (< 10ms accounting for Python overhead)\n"
+        "assert elapsed < 10, f'Zero sleep was slow: {elapsed}ms'\n"
+    >>),
     ct:pal("Zero sleep returned fast"),
     ok.
 
 %% Test sleep accuracy
 test_erlang_sleep_accuracy(_Config) ->
-    ok = py:exec(<<"
-import erlang
-import time
-
-delays = [0.01, 0.05, 0.1]  # seconds
-for delay in delays:
-    start = time.time()
-    erlang.sleep(delay)
-    elapsed = time.time() - start
-    # Allow wide tolerance for CI runners (can be slow/unpredictable)
-    assert delay * 0.5 <= elapsed <= delay * 10.0, \\
-        f'{delay}s sleep took {elapsed:.3f}s'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import time\n"
+        "\n"
+        "delays = [0.01, 0.05, 0.1]  # seconds\n"
+        "for delay in delays:\n"
+        "    start = time.time()\n"
+        "    erlang.sleep(delay)\n"
+        "    elapsed = time.time() - start\n"
+        "    # Allow wide tolerance for CI runners (can be slow/unpredictable)\n"
+        "    assert delay * 0.5 <= elapsed <= delay * 10.0, \\\n"
+        "        f'{delay}s sleep took {elapsed:.3f}s'\n"
+    >>),
     ct:pal("Sleep accuracy within tolerance"),
     ok.
 
 %% Test erlang.run() with asyncio
 test_erlang_run_module(_Config) ->
-    ok = py:exec(<<"
-import erlang
-import asyncio
-
-# Test erlang module has expected functions for event loop integration
-funcs = ['run', 'new_event_loop', 'EventLoopPolicy', 'sleep']
-for f in funcs:
-    assert hasattr(erlang, f), f'erlang missing {f}'
-
-# Test run() with asyncio.sleep
-async def test_sleep():
-    await asyncio.sleep(0.01)  # 10ms
-    return 'done'
-
-result = erlang.run(test_sleep())
-assert result == 'done', f'Expected done, got {result}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import asyncio\n"
+        "\n"
+        "# Test erlang module has expected functions for event loop integration\n"
+        "funcs = ['run', 'new_event_loop', 'EventLoopPolicy', 'sleep']\n"
+        "for f in funcs:\n"
+        "    assert hasattr(erlang, f), f'erlang missing {f}'\n"
+        "\n"
+        "# Test run() with asyncio.sleep\n"
+        "async def test_sleep():\n"
+        "    await asyncio.sleep(0.01)  # 10ms\n"
+        "    return 'done'\n"
+        "\n"
+        "result = erlang.run(test_sleep())\n"
+        "assert result == 'done', f'Expected done, got {result}'\n"
+    >>),
     ct:pal("erlang.run() with asyncio works"),
     ok.
 
 %% Test asyncio.gather with erlang.run()
 test_erlang_asyncio_gather(_Config) ->
-    ok = py:exec(<<"
-import erlang
-import asyncio
-
-async def task(n):
-    await asyncio.sleep(0.01)
-    return n * 2
-
-async def main():
-    results = await asyncio.gather(task(1), task(2), task(3))
-    assert results == [2, 4, 6], f'Expected [2, 4, 6], got {results}'
-
-erlang.run(main())
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import asyncio\n"
+        "\n"
+        "async def task(n):\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return n * 2\n"
+        "\n"
+        "async def main():\n"
+        "    results = await asyncio.gather(task(1), task(2), task(3))\n"
+        "    assert results == [2, 4, 6], f'Expected [2, 4, 6], got {results}'\n"
+        "\n"
+        "erlang.run(main())\n"
+    >>),
     ct:pal("asyncio.gather with erlang.run() works"),
     ok.
 
 %% Test asyncio.wait_for with timeout
 test_erlang_asyncio_wait_for(_Config) ->
-    ok = py:exec(<<"
-import erlang
-import asyncio
-
-async def fast_task():
-    await asyncio.sleep(0.01)
-    return 'fast'
-
-async def main():
-    # Should complete before timeout
-    result = await asyncio.wait_for(fast_task(), timeout=1.0)
-    assert result == 'fast', f'Expected fast, got {result}'
-
-erlang.run(main())
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import asyncio\n"
+        "\n"
+        "async def fast_task():\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return 'fast'\n"
+        "\n"
+        "async def main():\n"
+        "    # Should complete before timeout\n"
+        "    result = await asyncio.wait_for(fast_task(), timeout=1.0)\n"
+        "    assert result == 'fast', f'Expected fast, got {result}'\n"
+        "\n"
+        "erlang.run(main())\n"
+    >>),
     ct:pal("asyncio.wait_for with erlang.run() works"),
     ok.
 
 %% Test asyncio.create_task with erlang.run()
 test_erlang_asyncio_create_task(_Config) ->
-    ok = py:exec(<<"
-import erlang
-import asyncio
-
-async def background():
-    await asyncio.sleep(0.01)
-    return 'background_done'
-
-async def main():
-    task = asyncio.create_task(background())
-    # Do some other work
-    await asyncio.sleep(0.005)
-    # Wait for task
-    result = await task
-    assert result == 'background_done', f'Expected background_done, got {result}'
-
-erlang.run(main())
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import asyncio\n"
+        "\n"
+        "async def background():\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return 'background_done'\n"
+        "\n"
+        "async def main():\n"
+        "    task = asyncio.create_task(background())\n"
+        "    # Do some other work\n"
+        "    await asyncio.sleep(0.005)\n"
+        "    # Wait for task\n"
+        "    result = await task\n"
+        "    assert result == 'background_done', f'Expected background_done, got {result}'\n"
+        "\n"
+        "erlang.run(main())\n"
+    >>),
     ct:pal("asyncio.create_task with erlang.run() works"),
     ok.

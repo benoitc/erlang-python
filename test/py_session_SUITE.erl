@@ -7,8 +7,15 @@
 
 -include_lib("common_test/include/ct.hrl").
 
--export([all/0, groups/0, init_per_suite/1, end_per_suite/1,
-         init_per_group/2, end_per_group/2, end_per_testcase/2]).
+-export([
+    all/0,
+    groups/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_group/2,
+    end_per_group/2,
+    end_per_testcase/2
+]).
 
 %% logger handler used by test_print_is_logged
 -export([log/2]).
@@ -64,8 +71,14 @@
 -define(MOD, py_test_session).
 
 all() ->
-    [{group, fork}, {group, spawn}, {group, fork_only}, {group, spawn_only},
-     {group, reimport_worker}, {group, reimport_owngil}].
+    [
+        {group, fork},
+        {group, spawn},
+        {group, fork_only},
+        {group, spawn_only},
+        {group, reimport_worker},
+        {group, reimport_owngil}
+    ].
 
 groups() ->
     Common = [
@@ -110,17 +123,23 @@ groups() ->
         test_reimport_refresh,
         test_reimport_bad_options
     ],
-    [{fork, [], Common},
-     {spawn, [], Common},
-     {fork_only, [], [test_zygote_crash_rebuilds,
-                      test_thread_at_import_refused,
-                      test_erlang_call_during_preload,
-                      test_info_counts_forks,
-                      test_late_exit_report]},
-     {spawn_only, [], [test_warm_pool,
-                       test_thread_at_import_spawned]},
-     {reimport_worker, [], Reimport},
-     {reimport_owngil, [], Reimport}].
+    [
+        {fork, [], Common},
+        {spawn, [], Common},
+        {fork_only, [], [
+            test_zygote_crash_rebuilds,
+            test_thread_at_import_refused,
+            test_erlang_call_during_preload,
+            test_info_counts_forks,
+            test_late_exit_report
+        ]},
+        {spawn_only, [], [
+            test_warm_pool,
+            test_thread_at_import_spawned
+        ]},
+        {reimport_worker, [], Reimport},
+        {reimport_owngil, [], Reimport}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -166,14 +185,18 @@ end_per_testcase(_Case, _Config) ->
 %% sys.modules, os.environ, threads, files in its directory.
 test_sessions_are_isolated(Config) ->
     T = template(Config),
-    Prev = lists:foldl(fun(I, Prev) ->
-        {ok, S} = py_session:new(T),
-        Mark = integer_to_binary(I),
-        {ok, Prev} = py_context:call(S, ?MOD, peek, []),
-        {ok, Mark} = py_context:call(S, ?MOD, mark, [Mark]),
-        py_session:close(S),
-        none
-    end, none, lists:seq(1, 100)),
+    Prev = lists:foldl(
+        fun(I, Prev) ->
+            {ok, S} = py_session:new(T),
+            Mark = integer_to_binary(I),
+            {ok, Prev} = py_context:call(S, ?MOD, peek, []),
+            {ok, Mark} = py_context:call(S, ?MOD, mark, [Mark]),
+            py_session:close(S),
+            none
+        end,
+        none,
+        lists:seq(1, 100)
+    ),
     none = Prev,
     {ok, A} = py_session:new(T),
     {ok, true} = py_context:call(A, ?MOD, put_module, [<<"sess_marker">>]),
@@ -248,12 +271,15 @@ test_hash_seed(Config) ->
 %% A forked session does not inherit the zygote's random state as is.
 test_random_differs(Config) ->
     T = template(Config),
-    Values = [begin
-                  {ok, S} = py_session:new(T),
-                  {ok, V} = py_context:call(S, ?MOD, random_value, []),
-                  py_session:close(S),
-                  V
-              end || _ <- lists:seq(1, 5)],
+    Values = [
+        begin
+            {ok, S} = py_session:new(T),
+            {ok, V} = py_context:call(S, ?MOD, random_value, []),
+            py_session:close(S),
+            V
+        end
+     || _ <- lists:seq(1, 5)
+    ],
     5 = length(lists:usort(Values)),
     ok.
 
@@ -291,14 +317,22 @@ test_reentrance_depth(Config) ->
 test_concurrent_reentrance(Config) ->
     T = template(Config),
     Self = self(),
-    Pids = [spawn_link(fun() ->
-                {ok, S} = py_session:new(T),
-                R = [py_context:call(S, ?MOD, reenter, [5]) || _ <- lists:seq(1, 10)],
-                py_session:close(S),
-                Self ! {self(), R}
-            end) || _ <- lists:seq(1, 16)],
-    [receive {P, R} -> R = lists:duplicate(10, {ok, 5}) after 30000 -> ct:fail(timeout) end
-     || P <- Pids],
+    Pids = [
+        spawn_link(fun() ->
+            {ok, S} = py_session:new(T),
+            R = [py_context:call(S, ?MOD, reenter, [5]) || _ <- lists:seq(1, 10)],
+            py_session:close(S),
+            Self ! {self(), R}
+        end)
+     || _ <- lists:seq(1, 16)
+    ],
+    [
+        receive
+            {P, R} -> R = lists:duplicate(10, {ok, 5})
+        after 30000 -> ct:fail(timeout)
+        end
+     || P <- Pids
+    ],
     ok.
 
 %% A callback of session A calls into session B.
@@ -346,7 +380,10 @@ test_session_crash(Config) ->
     MA = erlang:monitor(process, A),
     [py_session:close(X) || X <- [A, B, C]],
     %% close/1 replies first, then the context removes its directory and exits
-    receive {'DOWN', MA, process, A, _} -> ok after 5000 -> ct:fail(session_not_stopped) end,
+    receive
+        {'DOWN', MA, process, A, _} -> ok
+    after 5000 -> ct:fail(session_not_stopped)
+    end,
     ok.
 
 test_kill_session(Config) ->
@@ -375,8 +412,11 @@ wait_no_dir(Dir, 0) ->
     ct:fail({still_there, Dir});
 wait_no_dir(Dir, N) ->
     case filelib:is_dir(Dir) of
-        false -> ok;
-        true -> timer:sleep(20), wait_no_dir(Dir, N - 1)
+        false ->
+            ok;
+        true ->
+            timer:sleep(20),
+            wait_no_dir(Dir, N - 1)
     end.
 
 %% A session is linked to the process that created it.
@@ -387,13 +427,24 @@ test_caller_crash_stops_session(Config) ->
         {ok, S} = py_session:new(T),
         {ok, Pid} = py_context:call(S, ?MOD, pid, []),
         Self ! {session, S, Pid},
-        receive never -> ok end
+        receive
+            never -> ok
+        end
     end),
-    {S, Pid} = receive {session, S0, P0} -> {S0, P0} after 10000 -> ct:fail(no_session) end,
+    {S, Pid} =
+        receive
+            {session, S0, P0} -> {S0, P0}
+        after 10000 -> ct:fail(no_session)
+        end,
     SMon = erlang:monitor(process, S),
     exit(Owner, crash),
-    receive {'DOWN', Mon, process, Owner, crash} -> ok end,
-    receive {'DOWN', SMon, process, S, _} -> ok after 5000 -> ct:fail(session_survived) end,
+    receive
+        {'DOWN', Mon, process, Owner, crash} -> ok
+    end,
+    receive
+        {'DOWN', SMon, process, S, _} -> ok
+    after 5000 -> ct:fail(session_survived)
+    end,
     ok = wait_gone(Pid).
 
 test_run_helper(Config) ->
@@ -423,11 +474,12 @@ test_print_is_logged(Config) ->
     end.
 
 log(#{msg := Msg}, #{config := #{pid := Pid}}) ->
-    Text = case Msg of
-        {string, S} -> S;
-        {report, R} -> io_lib:format("~p", [R]);
-        {Format, Args} -> io_lib:format(Format, Args)
-    end,
+    Text =
+        case Msg of
+            {string, S} -> S;
+            {report, R} -> io_lib:format("~p", [R]);
+            {Format, Args} -> io_lib:format(Format, Args)
+        end,
     Pid ! {logged, unicode:characters_to_binary(Text)},
     ok.
 
@@ -447,7 +499,9 @@ wait_logged(Needle, N) ->
 test_rlimits_apply(Config) ->
     T = template(Config, #{rlimits => #{nofile => 64}}),
     {ok, S} = py_session:new(T),
-    {ok, 64} = py_context:eval(S, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_NOFILE)[0]">>),
+    {ok, 64} = py_context:eval(
+        S, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_NOFILE)[0]">>
+    ),
     py_session:close(S).
 
 %% refresh/1 prepares the template again: new sessions see the new code,
@@ -473,7 +527,9 @@ test_bad_template_options(Config) ->
     Start = ?config(start, Config),
     {error, {badarg, {start, nope}}} = py_session:template(#{start => nope}),
     {error, {badarg, {hash_seed, -1}}} = py_session:template(#{start => Start, hash_seed => -1}),
-    {error, {python_not_found, _}} = py_session:template(#{start => Start, python => "/no/such/python"}),
+    {error, {python_not_found, _}} = py_session:template(#{
+        start => Start, python => "/no/such/python"
+    }),
     case Start of
         fork ->
             {error, {template_failed, {init_failed, {'ModuleNotFoundError', _}}}} =
@@ -507,15 +563,20 @@ test_zygote_crash_rebuilds(Config) ->
 %% A thread started at import would be lost in every fork: refused.
 test_thread_at_import_refused(Config) ->
     {error, {template_failed, {init_failed, {threads, [<<"import-time-thread">>]}}}} =
-        py_session:template(#{start => fork, paths => [?config(test_dir, Config)],
-                              imports => [py_test_session_thread]}),
+        py_session:template(#{
+            start => fork,
+            paths => [?config(test_dir, Config)],
+            imports => [py_test_session_thread]
+        }),
     ok.
 
 %% `erlang' can be imported by template code, but not called before a
 %% session exists.
 test_erlang_call_during_preload(Config) ->
-    T = template(Config, #{preload =>
-        <<"import py_test_session\nPRELOAD_CALL = py_test_session.call_during_preload()">>}),
+    T = template(Config, #{
+        preload =>
+            <<"import py_test_session\nPRELOAD_CALL = py_test_session.call_during_preload()">>
+    }),
     {ok, S} = py_session:new(T),
     {ok, Msg} = py_context:eval(S, <<"PRELOAD_CALL">>),
     {match, _} = re:run(Msg, <<"not connected">>),
@@ -528,14 +589,23 @@ test_late_exit_report(Config) ->
     T = template(Config),
     {ok, S} = py_session:new(T),
     ok = sys:suspend(T),
-    spawn(fun() -> timer:sleep(700), sys:resume(T) end),
+    spawn(fun() ->
+        timer:sleep(700),
+        sys:resume(T)
+    end),
     {error, {child_exited, {signal, 6}}} = py_context:call(S, ?MOD, abort, []),
     py_session:close(S).
 
 test_info_counts_forks(Config) ->
     T = template(Config, #{zygotes => 2}),
     #{start := fork, zygotes := [_, _], forks := 0} = py_session:info(T),
-    Ss = [begin {ok, S} = py_session:new(T), S end || _ <- lists:seq(1, 4)],
+    Ss = [
+        begin
+            {ok, S} = py_session:new(T),
+            S
+        end
+     || _ <- lists:seq(1, 4)
+    ],
     #{forks := 4, sessions := 4} = py_session:info(T),
     [py_session:close(S) || S <- Ss],
     #{sessions := 0} = wait_sessions(T, 0),
@@ -595,11 +665,19 @@ test_reimport_shares_stdlib_and_imports(Config) ->
 test_reimport_concurrent_runs(Config) ->
     T = rtemplate(Config, #{contexts => 4}),
     Self = self(),
-    Pids = [spawn_link(fun() ->
-                Self ! {done, [py_session:run(T, ?RMOD, bump, []) || _ <- lists:seq(1, 50)]}
-            end) || _ <- lists:seq(1, 8)],
-    [receive {done, R} -> R = lists:duplicate(50, {ok, 1}) after 60000 -> ct:fail(timeout) end
-     || _ <- Pids],
+    Pids = [
+        spawn_link(fun() ->
+            Self ! {done, [py_session:run(T, ?RMOD, bump, []) || _ <- lists:seq(1, 50)]}
+        end)
+     || _ <- lists:seq(1, 8)
+    ],
+    [
+        receive
+            {done, R} -> R = lists:duplicate(50, {ok, 1})
+        after 60000 -> ct:fail(timeout)
+        end
+     || _ <- Pids
+    ],
     ok.
 
 %% A run calls Erlang, whose callback runs another re-import run on the
@@ -611,8 +689,10 @@ test_reimport_reentrance(Config) ->
         N + R
     end),
     try
-        [{ok, 11} = py_session:run(T, ?RMOD, call_back, [10], #{timeout => 10000})
-         || _ <- lists:seq(1, 10)],
+        [
+            {ok, 11} = py_session:run(T, ?RMOD, call_back, [10], #{timeout => 10000})
+         || _ <- lists:seq(1, 10)
+        ],
         {ok, 1} = py_session:run(T, ?RMOD, bump, [])
     after
         py:unregister_function(reimport_nested)
@@ -697,14 +777,23 @@ test_rsession_reentrance(Config) ->
 test_rsession_concurrent(Config) ->
     T = rtemplate(Config, #{contexts => 2}),
     Self = self(),
-    Pids = [spawn_link(fun() ->
-                {ok, S} = py_session:new(T),
-                R = [py_context:call(S, ?RMOD, bump, []) || _ <- lists:seq(1, 20)],
-                py_session:close(S),
-                Self ! {done, R}
-            end) || _ <- lists:seq(1, 16)],
+    Pids = [
+        spawn_link(fun() ->
+            {ok, S} = py_session:new(T),
+            R = [py_context:call(S, ?RMOD, bump, []) || _ <- lists:seq(1, 20)],
+            py_session:close(S),
+            Self ! {done, R}
+        end)
+     || _ <- lists:seq(1, 16)
+    ],
     Want = [{ok, N} || N <- lists:seq(1, 20)],
-    [receive {done, R} -> R = Want after 60000 -> ct:fail(timeout) end || _ <- Pids],
+    [
+        receive
+            {done, R} -> R = Want
+        after 60000 -> ct:fail(timeout)
+        end
+     || _ <- Pids
+    ],
     0 = wait_rsessions(T, 0, 100),
     ok.
 
@@ -713,7 +802,10 @@ test_rsession_concurrent(Config) ->
 test_rsession_cleanup(Config) ->
     T = rtemplate(Config, #{contexts => 1}),
     #{contexts := [Ctx]} = py_session:info(T),
-    Count = fun() -> {ok, N} = py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_count, []), N end,
+    Count = fun() ->
+        {ok, N} = py_context:call(Ctx, <<"_erlang_impl._reimport">>, session_count, []),
+        N
+    end,
     0 = Count(),
     {ok, S} = py_session:new(T),
     1 = Count(),
@@ -723,13 +815,24 @@ test_rsession_cleanup(Config) ->
     {Owner, OMon} = spawn_monitor(fun() ->
         {ok, S1} = py_session:new(T),
         Self ! {session, S1},
-        receive never -> ok end
+        receive
+            never -> ok
+        end
     end),
-    S1 = receive {session, X} -> X after 10000 -> ct:fail(no_session) end,
+    S1 =
+        receive
+            {session, X} -> X
+        after 10000 -> ct:fail(no_session)
+        end,
     SMon = erlang:monitor(process, S1),
     exit(Owner, crash),
-    receive {'DOWN', OMon, process, Owner, _} -> ok end,
-    receive {'DOWN', SMon, process, S1, _} -> ok after 5000 -> ct:fail(session_survived) end,
+    receive
+        {'DOWN', OMon, process, Owner, _} -> ok
+    end,
+    receive
+        {'DOWN', SMon, process, S1, _} -> ok
+    after 5000 -> ct:fail(session_survived)
+    end,
     ok = wait_count(Count, 0, 100),
     {ok, S2} = py_session:new(T),
     unlink(S2),
@@ -751,7 +854,10 @@ test_rsession_timeout(Config) ->
     {ok, 1} = py_context:call(Other, ?RMOD, bump, [], #{}, 5000),
     {ok, 2} = py_context:call(S, ?RMOD, bump, []),
     %% no late reply left in the caller's mailbox
-    receive {_, {ok, <<"slept">>}} -> ct:fail(late_reply_delivered) after 200 -> ok end,
+    receive
+        {_, {ok, <<"slept">>}} -> ct:fail(late_reply_delivered)
+    after 200 -> ok
+    end,
     py_session:close(S),
     py_session:close(Other).
 
@@ -772,7 +878,11 @@ test_rsession_context_died(Config) ->
     %% its modules are freed: through the replacing context on worker (the
     %% main interpreter outlives the context), with the interpreter on owngil
     #{contexts := [New]} = py_session:info(T),
-    Expected = case ?config(mode, Config) of worker -> Before; owngil -> 0 end,
+    Expected =
+        case ?config(mode, Config) of
+            worker -> Before;
+            owngil -> 0
+        end,
     ok = wait_count(fun() -> session_count(New) end, Expected, 100),
     ok.
 
@@ -819,24 +929,33 @@ wait_context_died(S, 0) ->
     py_context:call(S, ?RMOD, bump, []);
 wait_context_died(S, N) ->
     case py_context:call(S, ?RMOD, bump, []) of
-        {error, {context_died, _}} = E -> E;
-        _ -> timer:sleep(20), wait_context_died(S, N - 1)
+        {error, {context_died, _}} = E ->
+            E;
+        _ ->
+            timer:sleep(20),
+            wait_context_died(S, N - 1)
     end.
 
 wait_count(_Count, _Want, 0) ->
     ct:fail(session_not_freed);
 wait_count(Count, Want, N) ->
     case Count() of
-        Want -> ok;
-        _ -> timer:sleep(20), wait_count(Count, Want, N - 1)
+        Want ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            wait_count(Count, Want, N - 1)
     end.
 
 wait_rsessions(T, Want, 0) ->
     maps:get(reimport_sessions, py_session:info(T), Want);
 wait_rsessions(T, Want, N) ->
     case py_session:info(T) of
-        #{reimport_sessions := Want} -> Want;
-        _ -> timer:sleep(20), wait_rsessions(T, Want, N - 1)
+        #{reimport_sessions := Want} ->
+            Want;
+        _ ->
+            timer:sleep(20),
+            wait_rsessions(T, Want, N - 1)
     end.
 
 test_reimport_refresh(Config) ->
@@ -859,9 +978,17 @@ rtemplate(Config) ->
     rtemplate(Config, #{}).
 
 rtemplate(Config, Extra) ->
-    {ok, T} = py_session:template(maps:merge(#{start => reimport, mode => ?config(mode, Config),
-                                               contexts => 2,
-                                               paths => [?config(test_dir, Config)]}, Extra)),
+    {ok, T} = py_session:template(
+        maps:merge(
+            #{
+                start => reimport,
+                mode => ?config(mode, Config),
+                contexts => 2,
+                paths => [?config(test_dir, Config)]
+            },
+            Extra
+        )
+    ),
     T.
 
 %%% ============================================================================
@@ -875,8 +1002,10 @@ template(Config, Extra) ->
     TestDir = ?config(test_dir, Config),
     Paths = [TestDir | maps:get(paths, Extra, [])],
     Imports = [?MOD | maps:get(imports, Extra, [])],
-    Opts = maps:merge(#{start => ?config(start, Config)},
-                      Extra#{paths => Paths, imports => Imports}),
+    Opts = maps:merge(
+        #{start => ?config(start, Config)},
+        Extra#{paths => Paths, imports => Imports}
+    ),
     {ok, T} = py_session:template(Opts),
     T.
 
@@ -887,8 +1016,11 @@ wait_gone(Pid, 0) ->
     ct:fail({still_alive, Pid});
 wait_gone(Pid, N) ->
     case py_child:os_pid_alive(Pid) of
-        false -> ok;
-        true -> timer:sleep(20), wait_gone(Pid, N - 1)
+        false ->
+            ok;
+        true ->
+            timer:sleep(20),
+            wait_gone(Pid, N - 1)
     end.
 
 wait_new_zygote(T, Old, 0) ->
@@ -896,7 +1028,9 @@ wait_new_zygote(T, Old, 0) ->
 wait_new_zygote(T, Old, N) ->
     case py_session:info(T) of
         #{zygotes := [#{os_pid := P}]} when P =/= Old -> P;
-        _ -> timer:sleep(50), wait_new_zygote(T, Old, N - 1)
+        _ ->
+            timer:sleep(50),
+            wait_new_zygote(T, Old, N - 1)
     end.
 
 wait_sessions(T, Want) ->
@@ -906,14 +1040,20 @@ wait_sessions(T, _Want, 0) ->
     py_session:info(T);
 wait_sessions(T, Want, N) ->
     case py_session:info(T) of
-        #{sessions := Want} = I -> I;
-        _ -> timer:sleep(20), wait_sessions(T, Want, N - 1)
+        #{sessions := Want} = I ->
+            I;
+        _ ->
+            timer:sleep(20),
+            wait_sessions(T, Want, N - 1)
     end.
 
 wait_warm(T, _Want, 0) ->
     py_session:info(T);
 wait_warm(T, Want, N) ->
     case py_session:info(T) of
-        #{warm := Want} = I -> I;
-        _ -> timer:sleep(50), wait_warm(T, Want, N - 1)
+        #{warm := Want} = I ->
+            I;
+        _ ->
+            timer:sleep(50),
+            wait_warm(T, Want, N - 1)
     end.

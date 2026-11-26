@@ -86,17 +86,25 @@ init_it(Parent, Template, Ctx, Passthrough, Mode) ->
     process_flag(trap_exit, true),
     %% Outlive a creator that exits normally, as other contexts do; its
     %% crash stops the session (EXIT clause below)
-    put('$ancestors', [self() | case get('$ancestors') of
-                                    L when is_list(L) -> L;
-                                    _ -> []
-                                end]),
+    put('$ancestors', [
+        self()
+        | case get('$ancestors') of
+            L when is_list(L) -> L;
+            _ -> []
+        end
+    ]),
     Sid = erlang:unique_integer([positive]),
     case py_context:call(Ctx, ?IMPL, session_open, [Sid, Passthrough]) of
         {ok, true} ->
             ets:insert(?REF_TAB, {self(), reimport_session}),
             Template ! {register_session, self(), Ctx, Sid},
-            St = #st{ctx = Ctx, ctx_mon = erlang:monitor(process, Ctx), sid = Sid,
-                     mode = Mode, parent = Parent},
+            St = #st{
+                ctx = Ctx,
+                ctx_mon = erlang:monitor(process, Ctx),
+                sid = Sid,
+                mode = Mode,
+                parent = Parent
+            },
             Parent ! {self(), started},
             gen_server:enter_loop(?MODULE, [], St);
         {error, Reason} ->
@@ -131,7 +139,6 @@ handle_info({Tag, Reply}, #st{pending = Pending} = St) when is_map_key(Tag, Pend
     {{From, MRef, Kind}, Rest} = maps:take(Tag, Pending),
     From ! {MRef, reply(Kind, Reply)},
     {noreply, St#st{pending = Rest}};
-
 %% ---- introspection ---------------------------------------------------------
 
 handle_info({get_interp_id, From, MRef}, #st{sid = Sid} = St) ->
@@ -148,7 +155,6 @@ handle_info({create_local_env, From, MRef}, St) ->
 handle_info({child_info, From, MRef}, #st{ctx = Ctx, sid = Sid, mode = Mode} = St) ->
     From ! {MRef, {ok, #{context => Ctx, session => Sid, mode => Mode}}},
     {noreply, St};
-
 %% ---- controls --------------------------------------------------------------
 
 handle_info({interrupt, From, MRef}, #st{exited = undefined, ctx = Ctx} = St) ->
@@ -166,8 +172,9 @@ handle_info({interrupt_request, ReqMRef}, #st{pending = Pending} = St) ->
 handle_info({kill, From, MRef}, St) ->
     From ! {MRef, {error, not_supported}},
     {noreply, St};
-handle_info({Op, From, MRef, _}, St)
-        when Op =:= pass_fd; Op =:= start_loop ->
+handle_info({Op, From, MRef, _}, St) when
+    Op =:= pass_fd; Op =:= start_loop
+->
     From ! {MRef, {error, not_supported_in_reimport}},
     {noreply, St};
 handle_info({stop_loop, From, MRef, _GraceMs}, St) ->
@@ -184,7 +191,6 @@ handle_info({submit, From, MRef, _TaskRef, _M, _F, _A, _K}, St) ->
     {noreply, St};
 handle_info({cancel_ctrl, _MRef}, St) ->
     {noreply, St};
-
 %% ---- lifecycle -------------------------------------------------------------
 
 handle_info({stop, From, MRef}, St) ->
@@ -199,15 +205,20 @@ handle_info({'DOWN', Mon, process, _Ctx, Reason}, #st{ctx_mon = Mon, pending = P
     {noreply, St#st{exited = Exited, pending = #{}}};
 handle_info({'EXIT', Parent, Reason}, #st{parent = Parent} = St) when Reason =/= normal ->
     {stop, Reason, St};
-handle_info({'EXIT', _Pid, Reason}, St)
-        when Reason =:= shutdown; Reason =:= kill ->
+handle_info({'EXIT', _Pid, Reason}, St) when
+    Reason =:= shutdown; Reason =:= kill
+->
     {stop, Reason, St};
 handle_info(_Other, St) ->
     {noreply, St}.
 
 terminate(_Reason, St) ->
     close_session(St),
-    try ets:delete(?REF_TAB, self()) catch error:badarg -> ok end,
+    try
+        ets:delete(?REF_TAB, self())
+    catch
+        error:badarg -> ok
+    end,
     ok.
 
 %% ============================================================================
@@ -222,7 +233,11 @@ forward(From, MRef, Fun, Args, #st{ctx = Ctx, sid = Sid, pending = Pending} = St
     %% wait for it
     Tag = make_ref(),
     Ctx ! {call, self(), Tag, ?IMPL, atom_to_binary(Fun), [Sid | Args], #{}},
-    Kind = case Fun of session_exec -> exec; _ -> call end,
+    Kind =
+        case Fun of
+            session_exec -> exec;
+            _ -> call
+        end,
     {noreply, St#st{pending = Pending#{Tag => {From, MRef, Kind}}}}.
 
 %% py_context:exec/2 returns ok, not {ok, _}

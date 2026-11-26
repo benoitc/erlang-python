@@ -40,16 +40,22 @@ to_binary(Bin) when is_binary(Bin) ->
 %% @doc Escape a binary for use inside a single-quoted Python string literal.
 -spec escape_py_literal(binary()) -> binary().
 escape_py_literal(Bin) when is_binary(Bin) ->
-    << <<(escape_py_byte(B))/binary>> || <<B>> <= Bin >>.
+    <<<<(escape_py_byte(B))/binary>> || <<B>> <= Bin>>.
 
-escape_py_byte($') -> <<"\\'">>;
-escape_py_byte($\\) -> <<"\\\\">>;
-escape_py_byte($\n) -> <<"\\n">>;
-escape_py_byte($\r) -> <<"\\r">>;
-escape_py_byte($\t) -> <<"\\t">>;
+escape_py_byte($') ->
+    <<"\\'">>;
+escape_py_byte($\\) ->
+    <<"\\\\">>;
+escape_py_byte($\n) ->
+    <<"\\n">>;
+escape_py_byte($\r) ->
+    <<"\\r">>;
+escape_py_byte($\t) ->
+    <<"\\t">>;
 escape_py_byte(B) when B < 16#20; B =:= 16#7f ->
     list_to_binary(io_lib:format("\\x~2.16.0b", [B]));
-escape_py_byte(B) -> <<B>>.
+escape_py_byte(B) ->
+    <<B>>.
 
 %% @private Validate a dotted Python module path (each segment an identifier).
 valid_py_module(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
@@ -59,16 +65,24 @@ valid_py_module(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
 valid_py_module(Other) ->
     error({invalid_python_identifier, Other}).
 
-ident_ok(<<>>, first) -> false;   %% empty segment (leading/trailing/double dot)
-ident_ok(<<>>, rest) -> true;
-ident_ok(<<C, Rest/binary>>, first)
-  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z); C =:= $_ ->
+%% empty segment (leading/trailing/double dot)
+ident_ok(<<>>, first) ->
+    false;
+ident_ok(<<>>, rest) ->
+    true;
+ident_ok(<<C, Rest/binary>>, first) when
+    (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z); C =:= $_
+->
     ident_ok(Rest, rest);
-ident_ok(<<C, Rest/binary>>, rest)
-  when (C >= $A andalso C =< $Z); (C >= $a andalso C =< $z);
-       (C >= $0 andalso C =< $9); C =:= $_ ->
+ident_ok(<<C, Rest/binary>>, rest) when
+    (C >= $A andalso C =< $Z);
+    (C >= $a andalso C =< $z);
+    (C >= $0 andalso C =< $9);
+    C =:= $_
+->
     ident_ok(Rest, rest);
-ident_ok(_, _) -> false.
+ident_ok(_, _) ->
+    false.
 
 %% @private Validate a Python identifier ([A-Za-z_][A-Za-z0-9_]*). Crashes on a
 %% non-conforming value so an attacker-controlled module/func/kwarg name can't

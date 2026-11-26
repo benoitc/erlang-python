@@ -90,7 +90,8 @@ unregister(Name) ->
     ok.
 
 %% @doc Lookup a registered function.
--spec lookup(Name :: binary()) -> {ok, fun((list()) -> term()) | {atom(), atom()}} | {error, not_found}.
+-spec lookup(Name :: binary()) ->
+    {ok, fun((list()) -> term()) | {atom(), atom()}} | {error, not_found}.
 lookup(Name) ->
     NameBin = to_binary(Name),
     case ets:lookup(?TABLE, NameBin) of

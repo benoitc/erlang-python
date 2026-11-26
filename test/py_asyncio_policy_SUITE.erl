@@ -80,8 +80,10 @@ policy_install_skipped_on_3_14_plus(_Config) ->
         true ->
             Name = policy_class_name(),
             true = Name =/= <<"ErlangEventLoopPolicy">>,
-            ct:pal("Policy on 3.14+ is ~p (not ErlangEventLoopPolicy, as expected)",
-                   [Name]),
+            ct:pal(
+                "Policy on 3.14+ is ~p (not ErlangEventLoopPolicy, as expected)",
+                [Name]
+            ),
             ok
     end.
 
@@ -129,8 +131,9 @@ install_raises_on_3_14_plus(_Config) ->
             {ok, ErrMsg} = py:eval(<<"_install_err">>),
             true = is_binary(ErrMsg),
             true = byte_size(ErrMsg) > 0,
-            true = binary:match(ErrMsg, <<"3.14+">>) =/= nomatch
-                orelse binary:match(ErrMsg, <<"loop_factory">>) =/= nomatch,
+            true =
+                binary:match(ErrMsg, <<"3.14+">>) =/= nomatch orelse
+                    binary:match(ErrMsg, <<"loop_factory">>) =/= nomatch,
             ok
     end.
 

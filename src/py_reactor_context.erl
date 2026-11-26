@@ -196,25 +196,32 @@ init(Parent, Id, Mode, Opts) ->
             %% Execute setup code if specified (e.g., set protocol factory)
             SetupCode = maps:get(setup_code, Opts, undefined),
             case SetupCode of
-                undefined -> ok;
+                undefined ->
+                    ok;
                 _ when is_binary(SetupCode) ->
                     case py_nif:context_exec(Ref, SetupCode) of
-                        ok -> ok;
+                        ok ->
+                            ok;
                         {error, Reason} ->
                             error_logger:error_msg(
-                                "py_reactor_context setup_code failed: ~p~n", [Reason])
+                                "py_reactor_context setup_code failed: ~p~n", [Reason]
+                            )
                     end
             end,
 
             %% Initialize app in Python context if specified
             case AppModule of
-                undefined -> ok;
+                undefined ->
+                    ok;
                 _ ->
                     Code = io_lib:format(
                         "import sys; sys.path.insert(0, '.'); "
                         "from ~s import ~s as _reactor_app",
-                        [binary_to_list(AppModule),
-                         binary_to_list(AppCallable)]),
+                        [
+                            binary_to_list(AppModule),
+                            binary_to_list(AppCallable)
+                        ]
+                    ),
                     py_nif:context_exec(Ref, iolist_to_binary(Code))
             end,
 
@@ -232,7 +239,6 @@ init(Parent, Id, Mode, Opts) ->
 
             Parent ! {self(), started},
             loop(State);
-
         {error, Reason} ->
             Parent ! {self(), {error, Reason}}
     end.
@@ -243,28 +249,22 @@ loop(State) ->
         %% FD handoff from acceptor
         {fd_handoff, Fd, ClientInfo} ->
             handle_fd_handoff(Fd, ClientInfo, State);
-
         %% Select events from BEAM scheduler
         {select, FdRes, _Ref, ready_input} ->
             handle_read_ready(FdRes, State);
-
         {select, FdRes, _Ref, ready_output} ->
             handle_write_ready(FdRes, State);
-
         %% Async completion signal from Python
         %% Sent when an async task (e.g., ASGI app) completes and response is ready
         %% Accept both atom and binary forms since Python sends binaries
         {write_ready, Fd} ->
             handle_async_write_ready(Fd, State);
-
         {<<"write_ready">>, Fd} ->
             handle_async_write_ready(Fd, State);
-
         %% Control messages
         {stop, From, MRef} ->
             cleanup(State),
             From ! {MRef, ok};
-
         {stats, From, MRef} ->
             Stats = #{
                 id => State#state.id,
@@ -275,12 +275,10 @@ loop(State) ->
             },
             From ! {MRef, Stats},
             loop(State);
-
         %% Handle EXIT signals
         {'EXIT', _Pid, Reason} ->
             cleanup(State),
             exit(Reason);
-
         _Other ->
             loop(State)
     end.
@@ -303,7 +301,6 @@ handle_fd_handoff(Fd, ClientInfo, State) ->
             %% Close the FD directly (it's just an integer here)
             %% The acceptor will close the socket
             loop(State);
-
         false ->
             %% Duplicate the fd before registering to avoid conflicts with
             %% the tcp_inet driver on platforms like FreeBSD where kqueue
@@ -347,13 +344,11 @@ register_fd(Fd, ClientInfo, State) ->
                         total_connections = TotalConns + 1
                     },
                     loop(NewState);
-
                 {error, _Reason} ->
                     %% Failed to init connection, close
                     py_nif:reactor_close_fd(Ref, FdRef),
                     loop(State)
             end;
-
         {error, _Reason} ->
             %% Failed to register FD
             loop(State)
@@ -376,7 +371,6 @@ handle_read_ready(FdRes, State) ->
                     %% More data expected, re-register for read
                     py_nif:reactor_reselect_read(FdRes),
                     loop(State);
-
                 {ok, Action} when Action =:= <<"write_pending">>; Action =:= write_pending ->
                     %% Response ready, switch to write mode
                     py_nif:reactor_select_write(FdRes),
@@ -384,7 +378,6 @@ handle_read_ready(FdRes, State) ->
                         total_requests = State#state.total_requests + 1
                     },
                     loop(NewState);
-
                 {ok, Action} when Action =:= <<"async_pending">>; Action =:= async_pending ->
                     %% Async task submitted (e.g., ASGI app running as task)
                     %% Don't reselect - wait for {write_ready, Fd} signal from Python
@@ -393,16 +386,13 @@ handle_read_ready(FdRes, State) ->
                         total_requests = State#state.total_requests + 1
                     },
                     loop(NewState);
-
                 {ok, Action} when Action =:= <<"close">>; Action =:= close ->
                     %% Close connection
                     close_connection(Fd, FdRes, State);
-
                 {error, _Reason} ->
                     %% Error, close connection
                     close_connection(Fd, FdRes, State)
             end;
-
         {error, _} ->
             %% FD resource invalid
             loop(State)
@@ -425,21 +415,17 @@ handle_write_ready(FdRes, State) ->
                     %% More data to write, re-register for write
                     py_nif:reactor_select_write(FdRes),
                     loop(State);
-
                 {ok, Action} when Action =:= <<"read_pending">>; Action =:= read_pending ->
                     %% Keep-alive, switch back to read mode
                     py_nif:reactor_reselect_read(FdRes),
                     loop(State);
-
                 {ok, Action} when Action =:= <<"close">>; Action =:= close ->
                     %% Close connection
                     close_connection(Fd, FdRes, State);
-
                 {error, _Reason} ->
                     %% Error, close connection
                     close_connection(Fd, FdRes, State)
             end;
-
         {error, _} ->
             %% FD resource invalid
             loop(State)
@@ -495,9 +481,12 @@ cleanup(State) ->
     #state{ref = Ref, connections = Conns} = State,
 
     %% Close all connections
-    maps:foreach(fun(_Fd, #{fd_ref := FdRef}) ->
-        py_nif:reactor_close_fd(Ref, FdRef)
-    end, Conns),
+    maps:foreach(
+        fun(_Fd, #{fd_ref := FdRef}) ->
+            py_nif:reactor_close_fd(Ref, FdRef)
+        end,
+        Conns
+    ),
 
     %% Destroy Python context
     py_nif:context_destroy(Ref),

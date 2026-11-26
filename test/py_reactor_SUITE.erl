@@ -27,17 +27,18 @@
     reactor_context_worker_isolation_test/1
 ]).
 
-all() -> [
-    reactor_module_exists_test,
-    protocol_class_exists_test,
-    set_protocol_factory_test,
-    echo_protocol_test,
-    multiple_connections_test,
-    protocol_close_test,
-    async_pending_test,
-    reactor_buffer_test,
-    reactor_context_worker_isolation_test
-].
+all() ->
+    [
+        reactor_module_exists_test,
+        protocol_class_exists_test,
+        set_protocol_factory_test,
+        echo_protocol_test,
+        multiple_connections_test,
+        protocol_close_test,
+        async_pending_test,
+        reactor_buffer_test,
+        reactor_context_worker_isolation_test
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -70,146 +71,150 @@ protocol_class_exists_test(_Config) ->
 %% @doc Test set_protocol_factory works
 set_protocol_factory_test(_Config) ->
     %% Define a simple protocol
-    ok = py:exec(<<"
-import erlang.reactor as reactor
-
-class TestProtocol(reactor.Protocol):
-    def data_received(self, data):
-        return 'continue'
-    def write_ready(self):
-        return 'close'
-
-reactor.set_protocol_factory(TestProtocol)
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class TestProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        return 'continue'\n"
+        "    def write_ready(self):\n"
+        "        return 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(TestProtocol)\n"
+    >>),
     ok.
 
 %% @doc Test echo protocol with socketpair
 echo_protocol_test(_Config) ->
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import socket
-import erlang.reactor as reactor
-
-class EchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'read_pending'
-
-def run_echo_test():
-    s1, s2 = socket.socketpair()
-    s1.setblocking(False)
-    s2.setblocking(False)
-
-    reactor.set_protocol_factory(EchoProtocol)
-    reactor.init_connection(s1.fileno(), {'type': 'test'})
-
-    s2.send(b'hello')
-
-    action = reactor.on_read_ready(s1.fileno())
-    proto = reactor.get_protocol(s1.fileno())
-    result = bytes(proto.write_buffer)
-
-    reactor.close_connection(s1.fileno())
-    s1.close()
-    s2.close()
-
-    return result
-
-_echo_test_result = run_echo_test()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import socket\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class EchoProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'read_pending'\n"
+        "\n"
+        "def run_echo_test():\n"
+        "    s1, s2 = socket.socketpair()\n"
+        "    s1.setblocking(False)\n"
+        "    s2.setblocking(False)\n"
+        "\n"
+        "    reactor.set_protocol_factory(EchoProtocol)\n"
+        "    reactor.init_connection(s1.fileno(), {'type': 'test'})\n"
+        "\n"
+        "    s2.send(b'hello')\n"
+        "\n"
+        "    action = reactor.on_read_ready(s1.fileno())\n"
+        "    proto = reactor.get_protocol(s1.fileno())\n"
+        "    result = bytes(proto.write_buffer)\n"
+        "\n"
+        "    reactor.close_connection(s1.fileno())\n"
+        "    s1.close()\n"
+        "    s2.close()\n"
+        "\n"
+        "    return result\n"
+        "\n"
+        "_echo_test_result = run_echo_test()\n"
+    >>),
     {ok, <<"hello">>} = py:eval(Ctx, <<"_echo_test_result">>).
 
 %% @doc Test multiple connections
 multiple_connections_test(_Config) ->
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import socket
-import erlang.reactor as reactor
-
-class CounterProtocol(reactor.Protocol):
-    counter = 0
-
-    def connection_made(self, fd, client_info):
-        super().connection_made(fd, client_info)
-        CounterProtocol.counter += 1
-        self.my_id = CounterProtocol.counter
-
-    def data_received(self, data):
-        return 'close'
-
-    def write_ready(self):
-        return 'close'
-
-def run_multi_conn_test():
-    CounterProtocol.counter = 0
-    reactor.set_protocol_factory(CounterProtocol)
-
-    pairs = [socket.socketpair() for _ in range(3)]
-    for s1, s2 in pairs:
-        s1.setblocking(False)
-        reactor.init_connection(s1.fileno(), {})
-
-    ids = [reactor.get_protocol(s1.fileno()).my_id for s1, s2 in pairs]
-
-    for s1, s2 in pairs:
-        reactor.close_connection(s1.fileno())
-        s1.close()
-        s2.close()
-
-    return ids
-
-_multi_conn_result = run_multi_conn_test()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import socket\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class CounterProtocol(reactor.Protocol):\n"
+        "    counter = 0\n"
+        "\n"
+        "    def connection_made(self, fd, client_info):\n"
+        "        super().connection_made(fd, client_info)\n"
+        "        CounterProtocol.counter += 1\n"
+        "        self.my_id = CounterProtocol.counter\n"
+        "\n"
+        "    def data_received(self, data):\n"
+        "        return 'close'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        return 'close'\n"
+        "\n"
+        "def run_multi_conn_test():\n"
+        "    CounterProtocol.counter = 0\n"
+        "    reactor.set_protocol_factory(CounterProtocol)\n"
+        "\n"
+        "    pairs = [socket.socketpair() for _ in range(3)]\n"
+        "    for s1, s2 in pairs:\n"
+        "        s1.setblocking(False)\n"
+        "        reactor.init_connection(s1.fileno(), {})\n"
+        "\n"
+        "    ids = [reactor.get_protocol(s1.fileno()).my_id for s1, s2 in pairs]\n"
+        "\n"
+        "    for s1, s2 in pairs:\n"
+        "        reactor.close_connection(s1.fileno())\n"
+        "        s1.close()\n"
+        "        s2.close()\n"
+        "\n"
+        "    return ids\n"
+        "\n"
+        "_multi_conn_result = run_multi_conn_test()\n"
+    >>),
     {ok, [1, 2, 3]} = py:eval(Ctx, <<"_multi_conn_result">>).
 
 %% @doc Test protocol close callback
 protocol_close_test(_Config) ->
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import socket
-import erlang.reactor as reactor
-
-_closed_fds = []
-
-class CloseTrackProtocol(reactor.Protocol):
-    def data_received(self, data):
-        return 'close'
-
-    def write_ready(self):
-        return 'close'
-
-    def connection_lost(self):
-        _closed_fds.append(self.fd)
-
-def run_close_test():
-    global _closed_fds
-    _closed_fds = []
-
-    reactor.set_protocol_factory(CloseTrackProtocol)
-
-    s1, s2 = socket.socketpair()
-    s1.setblocking(False)
-    fd = s1.fileno()
-
-    reactor.init_connection(fd, {})
-    reactor.close_connection(fd)
-
-    result = fd in _closed_fds
-
-    s1.close()
-    s2.close()
-
-    return result
-
-_close_test_result = run_close_test()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import socket\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "_closed_fds = []\n"
+        "\n"
+        "class CloseTrackProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        return 'close'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        return 'close'\n"
+        "\n"
+        "    def connection_lost(self):\n"
+        "        _closed_fds.append(self.fd)\n"
+        "\n"
+        "def run_close_test():\n"
+        "    global _closed_fds\n"
+        "    _closed_fds = []\n"
+        "\n"
+        "    reactor.set_protocol_factory(CloseTrackProtocol)\n"
+        "\n"
+        "    s1, s2 = socket.socketpair()\n"
+        "    s1.setblocking(False)\n"
+        "    fd = s1.fileno()\n"
+        "\n"
+        "    reactor.init_connection(fd, {})\n"
+        "    reactor.close_connection(fd)\n"
+        "\n"
+        "    result = fd in _closed_fds\n"
+        "\n"
+        "    s1.close()\n"
+        "    s2.close()\n"
+        "\n"
+        "    return result\n"
+        "\n"
+        "_close_test_result = run_close_test()\n"
+    >>),
     {ok, true} = py:eval(Ctx, <<"_close_test_result">>).
 
 %% @doc Test async_pending action for task-based async operations.
@@ -219,32 +224,33 @@ _close_test_result = run_close_test()
 %% 3. Reactor then triggers write selection
 async_pending_test(_Config) ->
     %% Protocol factory code to run in reactor context
-    SetupCode = <<"
-import erlang.reactor as reactor
-
-class AsyncPendingProtocol(reactor.Protocol):
-    '''Protocol that returns async_pending and signals completion.'''
-
-    def __init__(self):
-        super().__init__()
-        self.pending_response = b''
-
-    def data_received(self, data):
-        self.pending_response = b'ASYNC:' + data
-        # Immediately complete the task and signal reactor
-        self.write_buffer.extend(self.pending_response)
-        reactor.signal_write_ready(self.fd)
-        return 'async_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(AsyncPendingProtocol)
-">>,
+    SetupCode = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class AsyncPendingProtocol(reactor.Protocol):\n"
+        "    '''Protocol that returns async_pending and signals completion.'''\n"
+        "\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "        self.pending_response = b''\n"
+        "\n"
+        "    def data_received(self, data):\n"
+        "        self.pending_response = b'ASYNC:' + data\n"
+        "        # Immediately complete the task and signal reactor\n"
+        "        self.write_buffer.extend(self.pending_response)\n"
+        "        reactor.signal_write_ready(self.fd)\n"
+        "        return 'async_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(AsyncPendingProtocol)\n"
+    >>,
 
     %% Start reactor context with protocol factory setup
     {ok, ReactorCtx} = py_reactor_context:start_link(1, worker, #{
@@ -253,47 +259,48 @@ reactor.set_protocol_factory(AsyncPendingProtocol)
 
     %% Use py:context(1) for test helpers (socket management)
     PyCtx = py:context(1),
-    ok = py:exec(PyCtx, <<"
-import socket
-
-_async_test_state = {}
-
-def setup_socketpair():
-    global _async_test_state
-    s1, s2 = socket.socketpair()
-    s1.setblocking(False)
-    s2.setblocking(False)
-    _async_test_state = {'s1': s1, 's2': s2, 'fd': s1.fileno()}
-    return s1.fileno()
-
-def send_test_data():
-    s2 = _async_test_state['s2']
-    s2.send(b'hello')
-    return True
-
-def read_response():
-    s2 = _async_test_state['s2']
-    s2.setblocking(True)
-    s2.settimeout(2.0)
-    try:
-        return s2.recv(1024)
-    except socket.timeout:
-        return b'TIMEOUT'
-
-def cleanup():
-    s1 = _async_test_state.get('s1')
-    s2 = _async_test_state.get('s2')
-    try:
-        if s1: s1.close()
-    except:
-        pass
-    try:
-        if s2: s2.close()
-    except:
-        pass
-    _async_test_state.clear()
-    return True
-">>),
+    ok = py:exec(PyCtx, <<
+        "\n"
+        "import socket\n"
+        "\n"
+        "_async_test_state = {}\n"
+        "\n"
+        "def setup_socketpair():\n"
+        "    global _async_test_state\n"
+        "    s1, s2 = socket.socketpair()\n"
+        "    s1.setblocking(False)\n"
+        "    s2.setblocking(False)\n"
+        "    _async_test_state = {'s1': s1, 's2': s2, 'fd': s1.fileno()}\n"
+        "    return s1.fileno()\n"
+        "\n"
+        "def send_test_data():\n"
+        "    s2 = _async_test_state['s2']\n"
+        "    s2.send(b'hello')\n"
+        "    return True\n"
+        "\n"
+        "def read_response():\n"
+        "    s2 = _async_test_state['s2']\n"
+        "    s2.setblocking(True)\n"
+        "    s2.settimeout(2.0)\n"
+        "    try:\n"
+        "        return s2.recv(1024)\n"
+        "    except socket.timeout:\n"
+        "        return b'TIMEOUT'\n"
+        "\n"
+        "def cleanup():\n"
+        "    s1 = _async_test_state.get('s1')\n"
+        "    s2 = _async_test_state.get('s2')\n"
+        "    try:\n"
+        "        if s1: s1.close()\n"
+        "    except:\n"
+        "        pass\n"
+        "    try:\n"
+        "        if s2: s2.close()\n"
+        "    except:\n"
+        "        pass\n"
+        "    _async_test_state.clear()\n"
+        "    return True\n"
+    >>),
 
     %% Step 1: Create socketpair
     {ok, Fd} = py:eval(PyCtx, <<"setup_socketpair()">>),
@@ -333,61 +340,62 @@ reactor_buffer_test(_Config) ->
 
     %% Test bytes-like operations - use exec for all assertions
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-
-# Test _test_create works
-buf_simple = erlang.ReactorBuffer._test_create(b'hello')
-assert len(buf_simple) == 5, f'simple len mismatch: {len(buf_simple)}'
-
-test_data = b'GET / HTTP/1.1' + bytes([13, 10])  # Use bytes for \\r\\n
-buf = erlang.ReactorBuffer._test_create(test_data)
-
-# Test len()
-assert len(buf) == 16, f'len mismatch: {len(buf)}'  # 14 chars + 2 for \\r\\n
-
-# Test startswith()
-assert buf.startswith(b'GET'), 'startswith failed'
-assert not buf.startswith(b'POST'), 'startswith should fail for POST'
-
-# Test endswith()
-assert buf.endswith(bytes([13, 10])), 'endswith failed'
-
-# Test indexing
-assert buf[0] == ord('G'), f'index 0 mismatch: {buf[0]}'
-assert buf[-1] == 10, f'index -1 mismatch'
-
-# Test slicing
-assert buf[0:3] == b'GET', f'slice mismatch: {buf[0:3]}'
-
-# Test bytes() conversion
-assert bytes(buf) == test_data, 'bytes conversion failed'
-
-# Test memoryview
-mv = memoryview(buf)
-assert bytes(mv) == test_data, 'memoryview failed'
-
-# Test find()
-assert buf.find(b'HTTP') == 6, f'find mismatch: {buf.find(b\"HTTP\")}'
-assert buf.find(b'HTTPS') == -1, 'find should return -1'
-
-# Test count()
-assert buf.count(b'/') == 2, f'count mismatch: {buf.count(b\"/\")}'  # '/' in path and '1.1'
-
-# Test 'in' operator
-assert b'HTTP' in buf, 'in operator failed'
-assert b'HTTPS' not in buf, 'not in operator failed'
-
-# Test decode()
-decoded = buf.decode('utf-8')
-assert decoded == 'GET / HTTP/1.1' + chr(13) + chr(10), f'decode mismatch: {decoded}'
-
-# Test comparison
-assert buf == test_data, 'equality comparison failed'
-assert buf != b'other', 'inequality comparison failed'
-
-_reactor_buffer_test_passed = True
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "\n"
+        "# Test _test_create works\n"
+        "buf_simple = erlang.ReactorBuffer._test_create(b'hello')\n"
+        "assert len(buf_simple) == 5, f'simple len mismatch: {len(buf_simple)}'\n"
+        "\n"
+        "test_data = b'GET / HTTP/1.1' + bytes([13, 10])  # Use bytes for \\r\\n\n"
+        "buf = erlang.ReactorBuffer._test_create(test_data)\n"
+        "\n"
+        "# Test len()\n"
+        "assert len(buf) == 16, f'len mismatch: {len(buf)}'  # 14 chars + 2 for \\r\\n\n"
+        "\n"
+        "# Test startswith()\n"
+        "assert buf.startswith(b'GET'), 'startswith failed'\n"
+        "assert not buf.startswith(b'POST'), 'startswith should fail for POST'\n"
+        "\n"
+        "# Test endswith()\n"
+        "assert buf.endswith(bytes([13, 10])), 'endswith failed'\n"
+        "\n"
+        "# Test indexing\n"
+        "assert buf[0] == ord('G'), f'index 0 mismatch: {buf[0]}'\n"
+        "assert buf[-1] == 10, f'index -1 mismatch'\n"
+        "\n"
+        "# Test slicing\n"
+        "assert buf[0:3] == b'GET', f'slice mismatch: {buf[0:3]}'\n"
+        "\n"
+        "# Test bytes() conversion\n"
+        "assert bytes(buf) == test_data, 'bytes conversion failed'\n"
+        "\n"
+        "# Test memoryview\n"
+        "mv = memoryview(buf)\n"
+        "assert bytes(mv) == test_data, 'memoryview failed'\n"
+        "\n"
+        "# Test find()\n"
+        "assert buf.find(b'HTTP') == 6, f'find mismatch: {buf.find(b\"HTTP\")}'\n"
+        "assert buf.find(b'HTTPS') == -1, 'find should return -1'\n"
+        "\n"
+        "# Test count()\n"
+        "assert buf.count(b'/') == 2, f'count mismatch: {buf.count(b\"/\")}'  # '/' in path and '1.1'\n"
+        "\n"
+        "# Test 'in' operator\n"
+        "assert b'HTTP' in buf, 'in operator failed'\n"
+        "assert b'HTTPS' not in buf, 'not in operator failed'\n"
+        "\n"
+        "# Test decode()\n"
+        "decoded = buf.decode('utf-8')\n"
+        "assert decoded == 'GET / HTTP/1.1' + chr(13) + chr(10), f'decode mismatch: {decoded}'\n"
+        "\n"
+        "# Test comparison\n"
+        "assert buf == test_data, 'equality comparison failed'\n"
+        "assert buf != b'other', 'inequality comparison failed'\n"
+        "\n"
+        "_reactor_buffer_test_passed = True\n"
+    >>),
     {ok, true} = py:eval(Ctx, <<"_reactor_buffer_test_passed">>).
 
 %%% ============================================================================
@@ -412,46 +420,48 @@ _reactor_buffer_test_passed = True
 %% don't properly isolate module globals (e.g., some FreeBSD configurations).
 reactor_context_worker_isolation_test(_Config) ->
     %% Context 1 with EchoProtocol - echoes data unchanged
-    EchoSetup = <<"
-import erlang.reactor as reactor
-
-class EchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(EchoProtocol)
-">>,
+    EchoSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class EchoProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(EchoProtocol)\n"
+    >>,
 
     {ok, Ctx1} = py_reactor_context:start_link(101, worker, #{
         setup_code => EchoSetup
     }),
 
     %% Context 2 with UpperProtocol - echoes data uppercased
-    UpperSetup = <<"
-import erlang.reactor as reactor
-
-class UpperProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(bytes(data).upper())
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(UpperProtocol)
-">>,
+    UpperSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class UpperProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(bytes(data).upper())\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(UpperProtocol)\n"
+    >>,
 
     {ok, Ctx2} = py_reactor_context:start_link(102, worker, #{
         setup_code => UpperSetup

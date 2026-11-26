@@ -73,21 +73,81 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
     %% Cleanup any registered functions
-    try py:unregister_function(double_via_python) catch _:_ -> ok end,
-    try py:unregister_function(triple) catch _:_ -> ok end,
-    try py:unregister_function(call_level) catch _:_ -> ok end,
-    try py:unregister_function(may_fail) catch _:_ -> ok end,
-    try py:unregister_function(transform) catch _:_ -> ok end,
-    try py:unregister_function(add_ten) catch _:_ -> ok end,
-    try py:unregister_function(multiply_by_two) catch _:_ -> ok end,
-    try py:unregister_function(subtract_five) catch _:_ -> ok end,
-    try py:unregister_function(async_multiply) catch _:_ -> ok end,
-    try py:unregister_function(test_registry_func) catch _:_ -> ok end,
-    try py:unregister_function(etf_probe_ok) catch _:_ -> ok end,
-    try py:unregister_function(etf_probe_novel) catch _:_ -> ok end,
-    try py:unregister_function(rs_double) catch _:_ -> ok end,
-    try py:unregister_function(nest_step) catch _:_ -> ok end,
-    try py:unregister_function(owngil_nest) catch _:_ -> ok end,
+    try
+        py:unregister_function(double_via_python)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(triple)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(call_level)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(may_fail)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(transform)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(add_ten)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(multiply_by_two)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(subtract_five)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(async_multiply)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(test_registry_func)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(etf_probe_ok)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(etf_probe_novel)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(rs_double)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(nest_step)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(owngil_nest)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%% ============================================================================
@@ -101,8 +161,13 @@ end_per_testcase(_TestCase, _Config) ->
 
 reentrant_test_dir() ->
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))).
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ).
 
 register_nest_step() ->
     py:register_function(nest_step, fun([N, D]) ->
@@ -114,9 +179,12 @@ register_nest_step() ->
 test_call_reentrant_depths(_Config) ->
     reentrant_test_dir(),
     register_nest_step(),
-    lists:foreach(fun(Depth) ->
-        {ok, Depth} = py:call(py_test_reentrant, down, [0, Depth], #{}, 10000)
-    end, [1, 2, 3, 5]),
+    lists:foreach(
+        fun(Depth) ->
+            {ok, Depth} = py:call(py_test_reentrant, down, [0, Depth], #{}, 10000)
+        end,
+        [1, 2, 3, 5]
+    ),
     py:unregister_function(nest_step),
     ok.
 
@@ -124,13 +192,14 @@ test_call_reentrant_depths(_Config) ->
 %%% callback calling back into the same owngil context queued behind the
 %%% request waiting for it and the chain hung until the timeout.
 
--define(OWNGIL_DOWN, <<"
-import erlang
-def odown(ctx, n, d):
-    if d == 0:
-        return n
-    return erlang.call('owngil_nest', ctx, n, d)
-">>).
+-define(OWNGIL_DOWN, <<
+    "\n"
+    "import erlang\n"
+    "def odown(ctx, n, d):\n"
+    "    if d == 0:\n"
+    "        return n\n"
+    "    return erlang.call('owngil_nest', ctx, n, d)\n"
+>>).
 
 owngil_ctx() ->
     {ok, C} = py_context:new(#{mode => owngil}),
@@ -152,10 +221,14 @@ test_owngil_call_reentrant_depths(_Config) ->
         true ->
             register_owngil_nest(),
             C = owngil_ctx(),
-            [{ok, D} = py_context:call(C, '__main__', odown, [C, 0, D], #{}, 10000)
-             || D <- [1, 2, 3, 5]],
-            [{ok, 2} = py_context:call(C, '__main__', odown, [C, 0, 2], #{}, 10000)
-             || _ <- lists:seq(1, 20)],
+            [
+                {ok, D} = py_context:call(C, '__main__', odown, [C, 0, D], #{}, 10000)
+             || D <- [1, 2, 3, 5]
+            ],
+            [
+                {ok, 2} = py_context:call(C, '__main__', odown, [C, 0, 2], #{}, 10000)
+             || _ <- lists:seq(1, 20)
+            ],
             py_context:stop(C)
     end.
 
@@ -168,13 +241,24 @@ test_owngil_concurrent_reentrant(_Config) ->
             register_owngil_nest(),
             Ctxs = [owngil_ctx() || _ <- lists:seq(1, 4)],
             Self = self(),
-            Pids = [spawn_link(fun() ->
-                        C = lists:nth(I rem 4 + 1, Ctxs),
-                        Self ! {done, [py_context:call(C, '__main__', odown, [C, 0, 3], #{}, 10000)
-                                       || _ <- lists:seq(1, 25)]}
-                    end) || I <- lists:seq(1, 8)],
-            [receive {done, R} -> R = lists:duplicate(25, {ok, 3}) after 60000 -> ct:fail(timeout) end
-             || _ <- Pids],
+            Pids = [
+                spawn_link(fun() ->
+                    C = lists:nth(I rem 4 + 1, Ctxs),
+                    Self !
+                        {done, [
+                            py_context:call(C, '__main__', odown, [C, 0, 3], #{}, 10000)
+                         || _ <- lists:seq(1, 25)
+                        ]}
+                end)
+             || I <- lists:seq(1, 8)
+            ],
+            [
+                receive
+                    {done, R} -> R = lists:duplicate(25, {ok, 3})
+                after 60000 -> ct:fail(timeout)
+                end
+             || _ <- Pids
+            ],
             [py_context:stop(C) || C <- Ctxs],
             ok
     end.
@@ -184,9 +268,12 @@ test_owngil_concurrent_reentrant(_Config) ->
 test_call_reentrant_repeated(_Config) ->
     reentrant_test_dir(),
     register_nest_step(),
-    lists:foreach(fun(I) ->
-        {ok, I} = py:call(py_test_reentrant, down, [I - 1, 1], #{}, 10000)
-    end, lists:seq(1, 20)),
+    lists:foreach(
+        fun(I) ->
+            {ok, I} = py:call(py_test_reentrant, down, [I - 1, 1], #{}, 10000)
+        end,
+        lists:seq(1, 20)
+    ),
     py:unregister_function(nest_step),
     ok.
 
@@ -202,11 +289,14 @@ test_call_sequential_callbacks(_Config) ->
         {ok, R} = py:call(py_test_reentrant, minus, [X, 5], #{}, 10000),
         R
     end),
-    lists:foreach(fun(I) ->
-        %% ((I + 10) * 2) - 5
-        Expected = ((I + 10) * 2) - 5,
-        {ok, Expected} = py:call(py_test_reentrant, chain, [I], #{}, 10000)
-    end, lists:seq(1, 5)),
+    lists:foreach(
+        fun(I) ->
+            %% ((I + 10) * 2) - 5
+            Expected = ((I + 10) * 2) - 5,
+            {ok, Expected} = py:call(py_test_reentrant, chain, [I], #{}, 10000)
+        end,
+        lists:seq(1, 5)
+    ),
     ok.
 
 %% @doc The README "Reentrant Callbacks" example, as written there: the
@@ -220,16 +310,17 @@ test_readme_reentrant_example(_Config) ->
     end),
 
     %% Define Python functions
-    ok = py:exec(<<"
-def double(x):
-    return x * 2
-
-def process(x):
-    from erlang import call
-    # This calls Erlang, which calls Python's double()
-    doubled = call('double_via_python', x)
-    return doubled + 1
-">>),
+    ok = py:exec(<<
+        "\n"
+        "def double(x):\n"
+        "    return x * 2\n"
+        "\n"
+        "def process(x):\n"
+        "    from erlang import call\n"
+        "    # This calls Erlang, which calls Python's double()\n"
+        "    doubled = call('double_via_python', x)\n"
+        "    return doubled + 1\n"
+    >>),
 
     %% Test the full round-trip
     {ok, 21} = py:call('__main__', process, [10]),
@@ -254,7 +345,8 @@ test_basic_reentrant(_Config) ->
     %% Test using py:eval: Python calls Erlang which calls Python
     %% The expression: call Erlang's double_via_python(10), then add 1
     {ok, Result} = py:eval(<<"__import__('erlang').call('double_via_python', 10) + 1">>),
-    21 = Result,  %% 10 * 2 + 1 = 21
+    %% 10 * 2 + 1 = 21
+    21 = Result,
 
     ok.
 
@@ -267,12 +359,16 @@ test_reentrant_resume_stress(_Config) ->
         {ok, R} = py:eval(iolist_to_binary(io_lib:format("~p * 2", [X]))),
         R
     end),
-    Got = [begin
-        Code = iolist_to_binary(
-            io_lib:format("__import__('erlang').call('rs_double', ~p) + 1", [N])),
-        {ok, V} = py:eval(Code),
-        V
-    end || N <- lists:seq(1, 100)],
+    Got = [
+        begin
+            Code = iolist_to_binary(
+                io_lib:format("__import__('erlang').call('rs_double', ~p) + 1", [N])
+            ),
+            {ok, V} = py:eval(Code),
+            V
+        end
+     || N <- lists:seq(1, 100)
+    ],
     Got = [N * 2 + 1 || N <- lists:seq(1, 100)],
     py:unregister_function(rs_double),
     ok.
@@ -309,7 +405,8 @@ test_etf_decode_safe(_Config) ->
             Marker = etf_marker(novel_atom_etf(Name)),
             py:register_function(etf_probe_novel, fun(_) -> Marker end),
             {ok, Got} = py:eval(<<"__import__('erlang').call('etf_probe_novel', [])">>),
-            Marker = Got,   %% passed through as data, never decoded to the atom
+            %% passed through as data, never decoded to the atom
+            Marker = Got,
             assert_atom_absent(Name)
         end,
         lists:seq(1, N)
@@ -335,7 +432,9 @@ novel_atom_etf(Name) ->
 assert_atom_absent(Name) ->
     try list_to_existing_atom(Name) of
         _ -> error({atom_created, Name})
-    catch error:badarg -> ok end.
+    catch
+        error:badarg -> ok
+    end.
 
 %% @doc Test deeply nested callbacks (3+ levels).
 %% Tests Erlang→Python→Erlang→Python... nesting
@@ -345,12 +444,16 @@ test_nested_callbacks(_Config) ->
     py:register_function(call_level, fun([Level, N]) ->
         case Level >= N of
             true ->
-                Level;  % Base case
+                % Base case
+                Level;
             false ->
                 %% Call back into Python which will call us again
-                Code = iolist_to_binary(io_lib:format(
-                    "__import__('erlang').call('call_level', ~p, ~p)",
-                    [Level + 1, N])),
+                Code = iolist_to_binary(
+                    io_lib:format(
+                        "__import__('erlang').call('call_level', ~p, ~p)",
+                        [Level + 1, N]
+                    )
+                ),
                 {ok, Result} = py:eval(Code),
                 Result
         end
@@ -399,29 +502,41 @@ test_concurrent_reentrant(_Config) ->
     %% Spawn multiple processes that do reentrant calls
     %% Each uses py:eval with inline function definition to ensure it works
     %% regardless of which worker handles the request
-    _Pids = [spawn_link(fun() ->
-        Input = N * 10,
-        %% Use eval to call the erlang function directly
-        {ok, Result} = py:eval(iolist_to_binary(
-            io_lib:format("__import__('erlang').call('triple', ~p)", [Input]))),
-        Expected = Input * 3,
-        Self ! {done, N, Result, Expected}
-    end) || N <- lists:seq(1, NumProcesses)],
+    _Pids = [
+        spawn_link(fun() ->
+            Input = N * 10,
+            %% Use eval to call the erlang function directly
+            {ok, Result} = py:eval(
+                iolist_to_binary(
+                    io_lib:format("__import__('erlang').call('triple', ~p)", [Input])
+                )
+            ),
+            Expected = Input * 3,
+            Self ! {done, N, Result, Expected}
+        end)
+     || N <- lists:seq(1, NumProcesses)
+    ],
 
     %% Wait for all processes to complete
-    Results = [receive
-        {done, N, Result, Expected} -> {N, Result, Expected}
-    after 10000 ->
-        ct:fail({timeout, N})
-    end || N <- lists:seq(1, NumProcesses)],
+    Results = [
+        receive
+            {done, N, Result, Expected} -> {N, Result, Expected}
+        after 10000 ->
+            ct:fail({timeout, N})
+        end
+     || N <- lists:seq(1, NumProcesses)
+    ],
 
     %% Verify all results
-    lists:foreach(fun({N, Result, Expected}) ->
-        case Result of
-            Expected -> ok;
-            _ -> ct:fail({mismatch, N, expected, Expected, got, Result})
-        end
-    end, Results),
+    lists:foreach(
+        fun({N, Result, Expected}) ->
+            case Result of
+                Expected -> ok;
+                _ -> ct:fail({mismatch, N, expected, Expected, got, Result})
+            end
+        end,
+        Results
+    ),
 
     %% Verify all processes completed
     NumProcesses = length(Results),
@@ -446,7 +561,9 @@ test_callback_with_complex_types(_Config) ->
     end),
 
     %% Test using py:eval with inline dict
-    {ok, Result} = py:eval(<<"__import__('erlang').call('transform', {'items': [1, 2, 3], 'count': 5})">>),
+    {ok, Result} = py:eval(
+        <<"__import__('erlang').call('transform', {'items': [1, 2, 3], 'count': 5})">>
+    ),
 
     %% Verify result (map with reversed items and doubled count)
     #{
@@ -474,17 +591,20 @@ test_multiple_sequential_callbacks(_Config) ->
     %% This is a single expression that makes 3 sequential callbacks.
 
     %% Test with x=5: ((5 + 10) * 2) - 5 = 25
-    Code1 = <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 5))))(__import__('erlang'))">>,
+    Code1 =
+        <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 5))))(__import__('erlang'))">>,
     {ok, Result1} = py:eval(Code1),
     25 = Result1,
 
     %% Test with x=10: ((10 + 10) * 2) - 5 = 35
-    Code2 = <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 10))))(__import__('erlang'))">>,
+    Code2 =
+        <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 10))))(__import__('erlang'))">>,
     {ok, Result2} = py:eval(Code2),
     35 = Result2,
 
     %% Test with x=0: ((0 + 10) * 2) - 5 = 15
-    Code3 = <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 0))))(__import__('erlang'))">>,
+    Code3 =
+        <<"(lambda erl: erl.call('subtract_five', erl.call('multiply_by_two', erl.call('add_ten', 0))))(__import__('erlang'))">>,
     {ok, Result3} = py:eval(Code3),
     15 = Result3,
 
@@ -499,7 +619,8 @@ test_call_from_non_worker_thread(_Config) ->
 
     %% Use an inline lambda to test calling from a thread
     %% With ThreadPoolExecutor support, this should now succeed
-    Code = <<"(lambda cf, erlang: (lambda executor: (lambda future: ('success', future.result()) if not future.exception() else ('error', str(future.exception())))(executor.submit(lambda: erlang.call('simple_add', 1, 2))))(cf.ThreadPoolExecutor(max_workers=1).__enter__()))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    Code =
+        <<"(lambda cf, erlang: (lambda executor: (lambda future: ('success', future.result()) if not future.exception() else ('error', str(future.exception())))(executor.submit(lambda: erlang.call('simple_add', 1, 2))))(cf.ThreadPoolExecutor(max_workers=1).__enter__()))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
     {ok, Result} = py:eval(Code),
 
     %% With ThreadPoolExecutor support, the call should succeed
@@ -523,8 +644,13 @@ test_call_from_non_worker_thread(_Config) ->
 test_thread_callback_fd_above_fd_setsize(_Config) ->
     py:register_function(high_fd_add, fun([A, B]) -> A + B end),
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
     try
         case py:call(py_test_high_fds, prepare, [1200]) of
             {ok, Last} when Last >= 1200 ->
@@ -563,8 +689,13 @@ test_callback_with_try_except(_Config) ->
 
     %% Add test directory to Python path so we can import the test module
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Test 1: Try/except that catches Exception and re-raises
     {ok, Result1} = py:call(py_test_middleware, call_with_try_except, [<<"a">>]),
@@ -599,8 +730,13 @@ test_async_call(_Config) ->
 
     %% Add test directory to Python path
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Test single async_call
     {ok, Result} = py:call(py_test_async, run_single_test, []),

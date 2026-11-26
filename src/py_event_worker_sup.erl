@@ -12,7 +12,8 @@ start_worker(WorkerId, LoopRef) ->
         {ok, Pid} ->
             ok = py_event_worker_registry:register(WorkerId, Pid, LoopRef),
             {ok, Pid};
-        {error, _} = Error -> Error
+        {error, _} = Error ->
+            Error
     end.
 
 stop_worker(WorkerPid) ->

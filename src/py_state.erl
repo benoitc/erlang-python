@@ -117,7 +117,8 @@ register_callbacks() ->
 
 %% @doc Fetch a value from the shared state.
 -spec fetch(Key :: term()) -> {ok, term()} | {error, not_found}.
-fetch(?SIZE_KEY) -> {error, not_found};
+fetch(?SIZE_KEY) ->
+    {error, not_found};
 fetch(Key) ->
     case ets:lookup(?TABLE, Key) of
         [{_, Value}] -> {ok, Value};
@@ -178,9 +179,14 @@ remove(Key) ->
 %% @doc Get all keys in the shared state.
 -spec keys() -> [term()].
 keys() ->
-    ets:foldl(fun({?SIZE_KEY, _}, Acc) -> Acc;
-                 ({K, _}, Acc) -> [K | Acc]
-              end, [], ?TABLE).
+    ets:foldl(
+        fun
+            ({?SIZE_KEY, _}, Acc) -> Acc;
+            ({K, _}, Acc) -> [K | Acc]
+        end,
+        [],
+        ?TABLE
+    ).
 
 %% @doc Clear all entries from the shared state.
 -spec clear() -> ok.
@@ -306,12 +312,13 @@ stream_send_callback([RefHash, EventType, Value]) ->
         {ok, Owner} ->
             case fetch({<<"stream_ref">>, RefHash}) of
                 {ok, Ref} ->
-                    Event = case normalize_event_type(EventType) of
-                        done -> done;
-                        data -> {data, Value};
-                        error -> {error, Value};
-                        Other -> {error, {unknown_event, Other, Value}}
-                    end,
+                    Event =
+                        case normalize_event_type(EventType) of
+                            done -> done;
+                            data -> {data, Value};
+                            error -> {error, Value};
+                            Other -> {error, {unknown_event, Other, Value}}
+                        end,
                     Owner ! {py_stream, Ref, Event},
                     ok;
                 {error, not_found} ->

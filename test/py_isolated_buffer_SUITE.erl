@@ -54,9 +54,11 @@ groups() ->
         test_read_with_nested_callback,
         test_write_after_close
     ],
-    [{worker, [], Both},
-     {isolated, [], Both},
-     {isolated_only, [], [test_restart_mid_body, test_native_buffer_refused_in_isolated]}].
+    [
+        {worker, [], Both},
+        {isolated, [], Both},
+        {isolated_only, [], [test_restart_mid_body, test_native_buffer_refused_in_isolated]}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -128,9 +130,15 @@ test_read_blocks_until_write(Config) ->
     {ok, Buf} = py_buffer:new(#{shared => true}),
     Self = self(),
     spawn_link(fun() -> Self ! {got, py_context:call(C, ?MOD, buf_read_n, [Buf, 5], #{}, 10000)} end),
-    receive {got, _} -> ct:fail(read_returned_without_data) after 300 -> ok end,
+    receive
+        {got, _} -> ct:fail(read_returned_without_data)
+    after 300 -> ok
+    end,
     ok = py_buffer:write(Buf, <<"data!">>),
-    receive {got, {ok, <<"data!">>}} -> ok after 5000 -> ct:fail(read_did_not_wake) end,
+    receive
+        {got, {ok, <<"data!">>}} -> ok
+    after 5000 -> ct:fail(read_did_not_wake)
+    end,
     ok = py_buffer:close(Buf),
     stop(C).
 
@@ -162,10 +170,13 @@ test_backpressure(Config) ->
     T0 = erlang:monotonic_time(millisecond),
     [ok = py_buffer:write(Buf, Ch) || Ch <- Chunks ++ [Last]],
     ok = py_buffer:close(Buf),
-    ct:log("wrote ~p bytes through a ~p ring in ~p ms",
-           [Total, Ring, erlang:monotonic_time(millisecond) - T0]),
+    ct:log(
+        "wrote ~p bytes through a ~p ring in ~p ms",
+        [Total, Ring, erlang:monotonic_time(millisecond) - T0]
+    ),
     Expected = {Total, checksum(All)},
-    receive {read, {ok, {Got, Sum}}} -> Expected = {Got, Sum}
+    receive
+        {read, {ok, {Got, Sum}}} -> Expected = {Got, Sum}
     after 60000 -> ct:fail(reader_hung)
     end,
     stop(C).
@@ -178,10 +189,15 @@ test_write_timeout(Config) ->
     {error, timeout} = py_buffer:write(Buf, <<"more">>, 300),
     %% Reading frees the ring and later writes succeed
     Self = self(),
-    spawn_link(fun() -> Self ! {n, py_context:call(C, ?MOD, buf_consume_len, [Buf, 4096], #{}, 10000)} end),
+    spawn_link(fun() ->
+        Self ! {n, py_context:call(C, ?MOD, buf_consume_len, [Buf, 4096], #{}, 10000)}
+    end),
     ok = py_buffer:write(Buf, <<"more">>, 5000),
     ok = py_buffer:close(Buf),
-    receive {n, {ok, 4100}} -> ok after 10000 -> ct:fail(reader_hung) end,
+    receive
+        {n, {ok, 4100}} -> ok
+    after 10000 -> ct:fail(reader_hung)
+    end,
     stop(C).
 
 test_large_body_throughput(Config) ->
@@ -196,10 +212,15 @@ test_large_body_throughput(Config) ->
     T0 = erlang:monotonic_time(microsecond),
     [ok = py_buffer:write(Buf, Chunk) || <<Chunk:?MB/binary>> <= Body],
     ok = py_buffer:close(Buf),
-    receive {read, {ok, Size}} -> ok after 120000 -> ct:fail(reader_hung) end,
+    receive
+        {read, {ok, Size}} -> ok
+    after 120000 -> ct:fail(reader_hung)
+    end,
     Us = erlang:monotonic_time(microsecond) - T0,
-    ct:log("64 MB through a shared buffer (~p): ~.1f ms, ~.1f MB/s",
-           [?config(mode, Config), Us / 1000, Size / ?MB / (Us / 1.0e6)]),
+    ct:log(
+        "64 MB through a shared buffer (~p): ~.1f ms, ~.1f MB/s",
+        [?config(mode, Config), Us / 1000, Size / ?MB / (Us / 1.0e6)]
+    ),
     ct:print("shared buffer 64 MB (~p): ~.1f ms", [?config(mode, Config), Us / 1000]),
     stop(C).
 
@@ -210,7 +231,10 @@ test_close_while_reading(Config) ->
     spawn_link(fun() -> Self ! {got, py_context:call(C, ?MOD, buf_read_all, [Buf], #{}, 10000)} end),
     timer:sleep(200),
     ok = py_buffer:close(Buf),
-    receive {got, {ok, <<>>}} -> ok after 5000 -> ct:fail(read_did_not_return_on_close) end,
+    receive
+        {got, {ok, <<>>}} -> ok
+    after 5000 -> ct:fail(read_did_not_return_on_close)
+    end,
     stop(C).
 
 test_wsgi_input_in_environ(Config) ->
@@ -229,7 +253,9 @@ test_read_with_nested_callback(Config) ->
     {ok, Buf} = py_buffer:new(#{shared => true}),
     ok = py_buffer:write(Buf, <<"headrest of the body">>),
     ok = py_buffer:close(Buf),
-    {ok, {<<"head">>, 42, 16}} = py_context:call(C, ?MOD, buf_read_with_callback, [Buf, <<"shm_double">>]),
+    {ok, {<<"head">>, 42, 16}} = py_context:call(C, ?MOD, buf_read_with_callback, [
+        Buf, <<"shm_double">>
+    ]),
     py_callback:unregister(<<"shm_double">>),
     stop(C).
 
@@ -275,9 +301,18 @@ new_ctx(Config) ->
     {ok, C} = py_context:new(#{mode => Mode, paths => [TestDir]}),
     case Mode of
         worker ->
-            ok = py_context:exec(C, iolist_to_binary(io_lib:format(
-                "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')", [TestDir, TestDir])));
-        _ -> ok
+            ok = py_context:exec(
+                C,
+                iolist_to_binary(
+                    io_lib:format(
+                        "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')", [
+                            TestDir, TestDir
+                        ]
+                    )
+                )
+            );
+        _ ->
+            ok
     end,
     C.
 

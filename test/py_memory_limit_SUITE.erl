@@ -29,15 +29,16 @@
 
 -define(CAP, (64 * 1024 * 1024)).
 
-all() -> [
-    test_cap_raises_memory_error,
-    test_context_survives_cap,
-    test_cap_rearms_after_release,
-    test_usage_is_reported,
-    test_no_cap_is_unlimited,
-    test_worker_mode_rejected,
-    test_invalid_limit_rejected
-].
+all() ->
+    [
+        test_cap_raises_memory_error,
+        test_context_survives_cap,
+        test_cap_rearms_after_release,
+        test_usage_is_reported,
+        test_no_cap_is_unlimited,
+        test_worker_mode_rejected,
+        test_invalid_limit_rejected
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),

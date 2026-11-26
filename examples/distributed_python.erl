@@ -101,12 +101,15 @@ demo_distributed(Workers) ->
 
     %% Setup Python on all workers
     io:format("Setting up Python environments on workers...~n"),
-    lists:foreach(fun(Node) ->
-        case setup_remote_node(Node) of
-            ok -> io:format("  ~p: ready~n", [Node]);
-            {error, Reason} -> io:format("  ~p: failed (~p)~n", [Node, Reason])
-        end
-    end, Workers),
+    lists:foreach(
+        fun(Node) ->
+            case setup_remote_node(Node) of
+                ok -> io:format("  ~p: ready~n", [Node]);
+                {error, Reason} -> io:format("  ~p: failed (~p)~n", [Node, Reason])
+            end
+        end,
+        Workers
+    ),
 
     %% Demo 1: Distribute computation across nodes
     demo_distributed_compute(Workers),
@@ -120,9 +123,12 @@ demo_distributed(Workers) ->
     %% Demo 4: Cluster status
     io:format("~nCluster Status:~n"),
     Status = cluster_status(),
-    lists:foreach(fun({Node, S}) ->
-        io:format("  ~p: ~p~n", [Node, S])
-    end, Status),
+    lists:foreach(
+        fun({Node, S}) ->
+            io:format("  ~p: ~p~n", [Node, S])
+        end,
+        Status
+    ),
 
     ok.
 
@@ -164,18 +170,26 @@ demo_parallel_map() ->
 
     %% Sequential for comparison
     SeqStart = erlang:monotonic_time(millisecond),
-    SeqResults = [begin
-        timer:sleep(50),  %% Simulate work
-        N * N
-    end || N <- Numbers],
+    SeqResults = [
+        begin
+            %% Simulate work
+            timer:sleep(50),
+            N * N
+        end
+     || N <- Numbers
+    ],
     SeqTime = erlang:monotonic_time(millisecond) - SeqStart,
 
     %% Parallel using multiple Erlang processes
     ParStart = erlang:monotonic_time(millisecond),
-    ParResults = parallel_map_local(fun(N) ->
-        timer:sleep(50),  %% Simulate work
-        N * N
-    end, Numbers),
+    ParResults = parallel_map_local(
+        fun(N) ->
+            %% Simulate work
+            timer:sleep(50),
+            N * N
+        end,
+        Numbers
+    ),
     ParTime = erlang:monotonic_time(millisecond) - ParStart,
 
     io:format("   Input: ~p~n", [Numbers]),
@@ -192,7 +206,7 @@ demo_async_tasks() ->
 
     Tasks = [
         {math, pow, [2, I]}
-        || I <- lists:seq(1, 5)
+     || I <- lists:seq(1, 5)
     ],
 
     Start = erlang:monotonic_time(millisecond),
@@ -200,7 +214,7 @@ demo_async_tasks() ->
     %% Create tasks (non-blocking)
     Refs = [
         py_event_loop:create_task(M, F, A)
-        || {M, F, A} <- Tasks
+     || {M, F, A} <- Tasks
     ],
 
     %% Await all results
@@ -249,9 +263,14 @@ parallel_map_numpy(Nodes, Items) ->
 
     %% Submit work to each node asynchronously using numpy
     Keys = [
-        {Node, Batch, rpc:async_call(Node, py, eval,
-            [<<"list(__import__('numpy').sqrt(data))">>, #{data => Batch}])}
-        || {Node, Batch} <- NodePartitions, Batch =/= []
+        {Node, Batch,
+            rpc:async_call(
+                Node,
+                py,
+                eval,
+                [<<"list(__import__('numpy').sqrt(data))">>, #{data => Batch}]
+            )}
+     || {Node, Batch} <- NodePartitions, Batch =/= []
     ],
 
     %% Collect results
@@ -260,7 +279,7 @@ parallel_map_numpy(Nodes, Items) ->
             {ok, R} when is_list(R) -> R;
             _ -> []
         end
-        || {_Node, _Batch, Key} <- Keys
+     || {_Node, _Batch, Key} <- Keys
     ]).
 
 demo_distributed_inference(Workers) ->
@@ -270,7 +289,7 @@ demo_distributed_inference(Workers) ->
     %% Simulated input data (batch of feature vectors)
     Inputs = [
         [rand:uniform() || _ <- lists:seq(1, 10)]
-        || _ <- lists:seq(1, 20)
+     || _ <- lists:seq(1, 20)
     ],
 
     Start = erlang:monotonic_time(millisecond),
@@ -291,7 +310,10 @@ demo_distributed_pipeline(Workers) ->
     %% Define pipeline stages using numpy (each runs on a different node)
     Stages = [
         {lists:nth(1, Workers), <<"list(__import__('numpy').sqrt(data))">>},
-        {lists:nth((2 rem length(Workers)) + 1, Workers), <<"list(__import__('numpy').floor(data))">>}
+        {
+            lists:nth((2 rem length(Workers)) + 1, Workers),
+            <<"list(__import__('numpy').floor(data))">>
+        }
     ],
 
     Start = erlang:monotonic_time(millisecond),
@@ -353,17 +375,20 @@ parallel_map(Nodes, Module, Func, Items) ->
     %% Submit work to each node asynchronously
     Keys = [
         {Node, Batch, rpc:async_call(Node, py, call, [Module, Func, [Batch]])}
-        || {Node, Batch} <- NodePartitions, Batch =/= []
+     || {Node, Batch} <- NodePartitions, Batch =/= []
     ],
 
     %% Collect results in order
-    Results = lists:flatmap(fun({_Node, Batch, Key}) ->
-        case rpc:yield(Key) of
-            {ok, R} when is_list(R) -> R;
-            {ok, R} -> [R || _ <- Batch];
-            {badrpc, _} -> [{error, failed} || _ <- Batch]
-        end
-    end, Keys),
+    Results = lists:flatmap(
+        fun({_Node, Batch, Key}) ->
+            case rpc:yield(Key) of
+                {ok, R} when is_list(R) -> R;
+                {ok, R} -> [R || _ <- Batch];
+                {badrpc, _} -> [{error, failed} || _ <- Batch]
+            end
+        end,
+        Keys
+    ),
 
     Results.
 
@@ -376,16 +401,20 @@ distributed_inference(Nodes, Inputs) ->
     %% Assign each input to a node
     Assignments = [
         {lists:nth(((I - 1) rem NodeCount) + 1, Nodes), Input}
-        || {I, Input} <- IndexedInputs
+     || {I, Input} <- IndexedInputs
     ],
 
     %% Submit all inference requests
     Refs = [
-        {rpc:async_call(Node, py, eval, [
-            <<"sum(x) / len(x)">>,  %% Simple "inference" - compute mean
-            #{x => Input}
-        ]), Node}
-        || {Node, Input} <- Assignments
+        {
+            rpc:async_call(Node, py, eval, [
+                %% Simple "inference" - compute mean
+                <<"sum(x) / len(x)">>,
+                #{x => Input}
+            ]),
+            Node
+        }
+     || {Node, Input} <- Assignments
     ],
 
     %% Collect results with timeout handling
@@ -394,7 +423,7 @@ distributed_inference(Nodes, Inputs) ->
             {value, Result} -> Result;
             timeout -> {error, timeout}
         end
-        || {Key, _Node} <- Refs
+     || {Key, _Node} <- Refs
     ].
 
 %% @doc Get cluster status
@@ -425,14 +454,18 @@ local_status() ->
 
 %% @doc Run data through a pipeline of stages across nodes
 pipeline(Data, Stages) ->
-    lists:foldl(fun({Node, Expr}, Acc) ->
-        case rpc:call(Node, py, eval, [Expr, #{data => Acc}], 30000) of
-            {ok, Result} when is_list(Result) -> Result;
-            {ok, Result} -> [Result];
-            {badrpc, _} -> Acc;
-            {error, _} -> Acc
-        end
-    end, Data, Stages).
+    lists:foldl(
+        fun({Node, Expr}, Acc) ->
+            case rpc:call(Node, py, eval, [Expr, #{data => Acc}], 30000) of
+                {ok, Result} when is_list(Result) -> Result;
+                {ok, Result} -> [Result];
+                {badrpc, _} -> Acc;
+                {error, _} -> Acc
+            end
+        end,
+        Data,
+        Stages
+    ).
 
 %%% ============================================================================
 %%% Helper Functions
@@ -462,7 +495,12 @@ parallel_map_local(Fun, Items) ->
             end),
             Ref
         end
-        || Item <- Items
+     || Item <- Items
     ],
-    [receive {Ref, Result} -> Result after 5000 -> {error, timeout} end
-     || Ref <- Refs].
+    [
+        receive
+            {Ref, Result} -> Result
+        after 5000 -> {error, timeout}
+        end
+     || Ref <- Refs
+    ].

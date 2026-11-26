@@ -58,30 +58,32 @@ all() ->
     [{group, owngil}, {group, worker}].
 
 groups() ->
-    [{owngil, [], [
-        test_loop_ref_per_context,
-        test_start_stop_loop,
-        test_start_twice,
-        test_stop_idle,
-        test_calls_rejected_while_running,
-        test_submit_idle_and_running,
-        test_submit_errors_reported,
-        test_submit_ordering,
-        test_tcp_serve_on_dup_fd,
-        test_udp_serve_on_dup_fd,
-        test_adopt_accepted_fd,
-        test_three_workers_one_listen_fd,
-        test_channel_awaited_in_loop,
-        test_owner_death_stops_loop,
-        test_stop_context_while_looping,
-        test_interrupt_ends_loop,
-        test_long_call_no_30s_cap,
-        test_main_pool_unaffected,
-        test_churn_no_poll_reports,
-        test_preload_option,
-        test_bad_fd_rejected
-     ]},
-     {worker, [], [test_worker_mode_single_loop]}].
+    [
+        {owngil, [], [
+            test_loop_ref_per_context,
+            test_start_stop_loop,
+            test_start_twice,
+            test_stop_idle,
+            test_calls_rejected_while_running,
+            test_submit_idle_and_running,
+            test_submit_errors_reported,
+            test_submit_ordering,
+            test_tcp_serve_on_dup_fd,
+            test_udp_serve_on_dup_fd,
+            test_adopt_accepted_fd,
+            test_three_workers_one_listen_fd,
+            test_channel_awaited_in_loop,
+            test_owner_death_stops_loop,
+            test_stop_context_while_looping,
+            test_interrupt_ends_loop,
+            test_long_call_no_30s_cap,
+            test_main_pool_unaffected,
+            test_churn_no_poll_reports,
+            test_preload_option,
+            test_bad_fd_rejected
+        ]},
+        {worker, [], [test_worker_mode_single_loop]}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -125,7 +127,8 @@ test_loop_ref_per_context(Config) ->
     true = L1 =/= L2,
     true = L1 =/= LMain,
     true = L2 =/= LMain,
-    stop_ctx(C1), stop_ctx(C2),
+    stop_ctx(C1),
+    stop_ctx(C2),
     ok.
 
 %% @doc start_loop returns once running; stop_loop returns once exited and
@@ -135,7 +138,8 @@ test_start_stop_loop(Config) ->
     ok = py_context:start_loop(C),
     {ok, 3} = py_context:submit_await(C, py_test_workerloop, add, [1, 2]),
     ok = py_context:stop_loop(C),
-    receive {py_loop_exit, C, {ok, <<"stopped">>}} -> ok
+    receive
+        {py_loop_exit, C, {ok, <<"stopped">>}} -> ok
     after 2000 -> ct:fail(no_loop_exit)
     end,
     {ok, 4} = py_context:eval(C, <<"2+2">>, #{}, 5000),
@@ -215,28 +219,44 @@ test_submit_ordering(Config) ->
     C = new_ctx(Config),
     ok = py_context:start_loop(C),
     {ok, LoopRef} = py_context:loop_ref(C),
-    Refs = [begin
-        R = make_ref(),
-        ok = py_nif:submit_task(LoopRef, self(), R, <<"py_test_workerloop">>, <<"add_traced">>, [I, 0], #{}),
-        {I, R}
-    end || I <- lists:seq(1, 500)],
+    Refs = [
+        begin
+            R = make_ref(),
+            ok = py_nif:submit_task(
+                LoopRef, self(), R, <<"py_test_workerloop">>, <<"add_traced">>, [I, 0], #{}
+            ),
+            {I, R}
+        end
+     || I <- lists:seq(1, 500)
+    ],
     %% Collect within one overall deadline so a strand shows up as a count,
     %% not as a timetrap
     Deadline = erlang:monotonic_time(millisecond) + 30000,
     Results = collect_results(Refs, Deadline, #{}),
-    Bad = [{I, maps:get(R, Results, missing)} || {I, R} <- Refs,
-                                                  maps:get(R, Results, missing) =/= {ok, I}],
+    Bad = [
+        {I, maps:get(R, Results, missing)}
+     || {I, R} <- Refs,
+        maps:get(R, Results, missing) =/= {ok, I}
+    ],
     case Bad of
-        [] -> ok;
-        _ -> ct:log("~p of 500 tasks did not complete: ~p", [length(Bad), lists:sublist(Bad, 10)]),
-             ct:log("loop alive (sync): ~p", [py_context:submit_await(C, py_test_workerloop, sync_add, [1, 1])]),
-             ct:log("loop alive (coro): ~p", [py_context:submit_await(C, py_test_workerloop, add, [1, 1])]),
-             ct:log("mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
-             Alive = py_context:submit_await(C, py_test_workerloop, add, [1, 1]),
-             LoopState = py_context:submit_await(C, py_test_workerloop, loop_state, []),
-             ct:fail({tasks_incomplete, length(Bad), lists:sublist(Bad, 6),
-                      {first_bad_index, element(1, hd(Bad))}, {loop_alive, Alive},
-                      {loop_state, LoopState}})
+        [] ->
+            ok;
+        _ ->
+            ct:log("~p of 500 tasks did not complete: ~p", [length(Bad), lists:sublist(Bad, 10)]),
+            ct:log("loop alive (sync): ~p", [
+                py_context:submit_await(C, py_test_workerloop, sync_add, [1, 1])
+            ]),
+            ct:log("loop alive (coro): ~p", [
+                py_context:submit_await(C, py_test_workerloop, add, [1, 1])
+            ]),
+            ct:log("mailbox: ~p", [erlang:process_info(self(), message_queue_len)]),
+            Alive = py_context:submit_await(C, py_test_workerloop, add, [1, 1]),
+            LoopState = py_context:submit_await(C, py_test_workerloop, loop_state, []),
+            ct:fail(
+                {tasks_incomplete, length(Bad), lists:sublist(Bad, 6),
+                    {first_bad_index, element(1, hd(Bad))}, {loop_alive, Alive},
+                    {loop_state, LoopState}}
+            )
     end,
     ok = py_context:stop_loop(C),
     stop_ctx(C),
@@ -296,7 +316,8 @@ test_adopt_accepted_fd(Config) ->
     {ok, <<"adopted">>} = py_context:submit_await(C, py_test_workerloop, adopt, [Dup]),
     %% Erlang gives up its copy; Python owns the dup
     gen_tcp:close(Conn),
-    receive {client, {ok, <<"ok:adopted?">>}} -> ok
+    receive
+        {client, {ok, <<"ok:adopted?">>}} -> ok
     after 3000 -> ct:fail(no_reply_through_adopted_fd)
     end,
     gen_tcp:close(LSock),
@@ -310,12 +331,15 @@ test_three_workers_one_listen_fd(Config) ->
     {ok, LSock} = gen_tcp:listen(0, [binary, {ip, ?HOST}, {active, false}, {backlog, 512}]),
     {ok, Port} = inet:port(LSock),
     {ok, LFd} = inet:getfd(LSock),
-    lists:foreach(fun({I, C}) ->
-        ok = py_context:start_loop(C),
-        {ok, Dup} = py:dup_fd(LFd),
-        Tag = list_to_binary("w" ++ integer_to_list(I) ++ ":"),
-        {ok, <<"serving">>} = py_context:submit_await(C, py_test_workerloop, serve, [Dup, Tag])
-    end, lists:zip(lists:seq(1, 3), Ctxs)),
+    lists:foreach(
+        fun({I, C}) ->
+            ok = py_context:start_loop(C),
+            {ok, Dup} = py:dup_fd(LFd),
+            Tag = list_to_binary("w" ++ integer_to_list(I) ++ ":"),
+            {ok, <<"serving">>} = py_context:submit_await(C, py_test_workerloop, serve, [Dup, Tag])
+        end,
+        lists:zip(lists:seq(1, 3), Ctxs)
+    ),
     Replies = [roundtrip(Port, <<"x">>) || _ <- lists:seq(1, 300)],
     300 = length([R || R <- Replies, binary:part(R, byte_size(R) - 4, 4) =:= <<"ok:x">>]),
     Tags = lists:usort([binary:part(R, 0, 3) || R <- Replies]),
@@ -351,7 +375,11 @@ test_channel_awaited_in_loop(Config) ->
 
 test_owner_death_stops_loop(Config) ->
     C = new_ctx(Config),
-    Owner = spawn(fun() -> receive never -> ok end end),
+    Owner = spawn(fun() ->
+        receive
+            never -> ok
+        end
+    end),
     ok = py_context:start_loop(C, #{owner => Owner}),
     {ok, 3} = py_context:submit_await(C, py_test_workerloop, add, [1, 2]),
     exit(Owner, kill),
@@ -369,7 +397,8 @@ test_stop_context_while_looping(Config) ->
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     ct:log("stop while looping took ~p ms", [Elapsed]),
     true = Elapsed < 10000,
-    receive {py_loop_exit, C, {error, interrupted}} -> ok
+    receive
+        {py_loop_exit, C, {error, interrupted}} -> ok
     after 1000 -> ct:fail(no_interrupted_exit)
     end,
     false = is_process_alive(C),
@@ -379,7 +408,8 @@ test_interrupt_ends_loop(Config) ->
     C = new_ctx(Config),
     ok = py_context:start_loop(C),
     ok = py_context:interrupt(C),
-    receive {py_loop_exit, C, {error, interrupted}} -> ok
+    receive
+        {py_loop_exit, C, {error, interrupted}} -> ok
     after 3000 -> ct:fail(no_interrupted_exit)
     end,
     {ok, 4} = py_context:eval(C, <<"2+2">>, #{}, 5000),
@@ -399,10 +429,12 @@ test_long_call_no_30s_cap(Config) ->
     T0 = erlang:monotonic_time(millisecond),
     {ok, 2} = py_context:eval(Other, <<"1+1">>, #{}, 5000),
     true = erlang:monotonic_time(millisecond) - T0 < 1000,
-    receive {long, {ok, 7}} -> ok
+    receive
+        {long, {ok, 7}} -> ok
     after 40000 -> ct:fail(long_call_did_not_return)
     end,
-    stop_ctx(C), stop_ctx(Other),
+    stop_ctx(C),
+    stop_ctx(Other),
     ok.
 
 %% @doc Starting and stopping owngil contexts must not touch the main loop's
@@ -426,13 +458,24 @@ test_churn_no_poll_reports(Config) ->
     N = 2000,
     Self = self(),
     Workers = 20,
-    [spawn_link(fun() ->
-        Fails = length([bad || _ <- lists:seq(1, N div Workers),
-                               roundtrip(Port, <<"x">>) =/= <<"ok:x">>]),
-        Self ! {churn_done, Fails}
-     end) || _ <- lists:seq(1, Workers)],
-    Fails = lists:sum([receive {churn_done, F} -> F after 60000 -> N end
-                       || _ <- lists:seq(1, Workers)]),
+    [
+        spawn_link(fun() ->
+            Fails = length([
+                bad
+             || _ <- lists:seq(1, N div Workers),
+                roundtrip(Port, <<"x">>) =/= <<"ok:x">>
+            ]),
+            Self ! {churn_done, Fails}
+        end)
+     || _ <- lists:seq(1, Workers)
+    ],
+    Fails = lists:sum([
+        receive
+            {churn_done, F} -> F
+        after 60000 -> N
+        end
+     || _ <- lists:seq(1, Workers)
+    ]),
     0 = Fails,
     timer:sleep(300),
     ok = py_context:stop_loop(C),
@@ -445,12 +488,14 @@ test_churn_no_poll_reports(Config) ->
     ok.
 
 test_preload_option(Config) ->
-    Pre = <<"import sys, types\n"
-            "_m = types.ModuleType('preloaded_mod')\n"
-            "async def hello():\n"
-            "    return 'hi'\n"
-            "_m.hello = hello\n"
-            "sys.modules['preloaded_mod'] = _m\n">>,
+    Pre = <<
+        "import sys, types\n"
+        "_m = types.ModuleType('preloaded_mod')\n"
+        "async def hello():\n"
+        "    return 'hi'\n"
+        "_m.hello = hello\n"
+        "sys.modules['preloaded_mod'] = _m\n"
+    >>,
     {ok, C} = py_context:new(#{mode => ?config(mode, Config), preload => Pre}),
     ok = py_context:start_loop(C),
     {ok, <<"hi">>} = py_context:submit_await(C, preloaded_mod, hello, []),
@@ -484,7 +529,8 @@ test_worker_mode_single_loop(Config) ->
     {ok, 3} = py_context:submit_await(W1, py_test_workerloop, add, [1, 2]),
     {error, _} = py_context:start_loop(W2),
     ok = py_context:stop_loop(W1),
-    stop_ctx(W1), stop_ctx(W2),
+    stop_ctx(W1),
+    stop_ctx(W2),
     ok.
 
 %%% ============================================================================
@@ -492,11 +538,12 @@ test_worker_mode_single_loop(Config) ->
 %%% ============================================================================
 
 log(#{msg := Msg}, #{config := Pid}) ->
-    Text = case Msg of
-        {string, S} -> unicode:characters_to_binary(S);
-        {report, R} -> unicode:characters_to_binary(io_lib:format("~p", [R]));
-        {Fmt, Args} -> unicode:characters_to_binary(io_lib:format(Fmt, Args))
-    end,
+    Text =
+        case Msg of
+            {string, S} -> unicode:characters_to_binary(S);
+            {report, R} -> unicode:characters_to_binary(io_lib:format("~p", [R]));
+            {Fmt, Args} -> unicode:characters_to_binary(io_lib:format(Fmt, Args))
+        end,
     case binary:match(Text, [<<"erts_poll">>, <<"stealing control">>]) of
         nomatch -> ok;
         _ -> Pid ! {poll_report, Text}
@@ -504,7 +551,8 @@ log(#{msg := Msg}, #{config := Pid}) ->
     ok.
 
 collect_reports() ->
-    receive {poll_report, T} -> [T | collect_reports()]
+    receive
+        {poll_report, T} -> [T | collect_reports()]
     after 200 -> []
     end.
 
@@ -515,14 +563,22 @@ collect_reports() ->
 new_ctx(Config) ->
     {ok, C} = py_context:new(#{mode => ?config(mode, Config)}),
     TestDir = ?config(test_dir, Config),
-    Code = iolist_to_binary(io_lib:format(
-        "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n"
-        "import py_test_workerloop\n", [TestDir, TestDir])),
+    Code = iolist_to_binary(
+        io_lib:format(
+            "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n"
+            "import py_test_workerloop\n",
+            [TestDir, TestDir]
+        )
+    ),
     ok = py_context:exec(C, Code),
     C.
 
 stop_ctx(C) ->
-    try py_context:stop(C) catch _:_ -> ok end,
+    try
+        py_context:stop(C)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 listen_dup() ->
@@ -535,10 +591,11 @@ listen_dup() ->
 roundtrip(Port, Data) ->
     {ok, S} = gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000),
     ok = gen_tcp:send(S, Data),
-    R = case gen_tcp:recv(S, 0, 5000) of
-        {ok, Bin} -> Bin;
-        Other -> Other
-    end,
+    R =
+        case gen_tcp:recv(S, 0, 5000) of
+            {ok, Bin} -> Bin;
+            Other -> Other
+        end,
     gen_tcp:close(S),
     R.
 
@@ -562,13 +619,20 @@ wait_until(Fun, TimeoutMs) ->
 
 wait_until_loop(Fun, Deadline) ->
     case Fun() of
-        true -> ok;
+        true ->
+            ok;
         false ->
             case erlang:monotonic_time(millisecond) > Deadline of
-                true -> {error, timeout};
-                false -> timer:sleep(50), wait_until_loop(Fun, Deadline)
+                true ->
+                    {error, timeout};
+                false ->
+                    timer:sleep(50),
+                    wait_until_loop(Fun, Deadline)
             end
     end.
 
 flush() ->
-    receive _ -> flush() after 0 -> ok end.
+    receive
+        _ -> flush()
+    after 0 -> ok
+    end.

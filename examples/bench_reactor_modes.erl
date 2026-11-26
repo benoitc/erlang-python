@@ -31,17 +31,20 @@ main(_Args) ->
     {WkPersistent, WkLifecycle} = run_reactor_worker_bench(),
 
     %% OWN_GIL mode benchmarks (if supported)
-    {OgPersistent, OgLifecycle} = case py_nif:owngil_supported() of
-        true ->
-            io:format("~n--- Reactor (OWN_GIL Mode) ---~n"),
-            run_reactor_owngil_bench();
-        false ->
-            io:format("~n[Skipping OWN_GIL benchmarks - Python < 3.14]~n"),
-            {[], []}
-    end,
+    {OgPersistent, OgLifecycle} =
+        case py_nif:owngil_supported() of
+            true ->
+                io:format("~n--- Reactor (OWN_GIL Mode) ---~n"),
+                run_reactor_owngil_bench();
+            false ->
+                io:format("~n[Skipping OWN_GIL benchmarks - Python < 3.14]~n"),
+                {[], []}
+        end,
 
     %% Print comparison summary
-    print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, OgPersistent, OgLifecycle),
+    print_comparison(
+        ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, OgPersistent, OgLifecycle
+    ),
 
     halt(0).
 
@@ -65,62 +68,81 @@ run_channel_bench() ->
 
     %% First: Messages on persistent channel (no creation overhead)
     io:format("  A) Messages on persistent channel (1000 msgs):~n"),
-    PersistentResults = lists:map(fun(Size) ->
-        {ok, Ch} = py_channel:new(),
-        Data = binary:copy(<<$X>>, Size),
-        Iterations = 1000,
+    PersistentResults = lists:map(
+        fun(Size) ->
+            {ok, Ch} = py_channel:new(),
+            Data = binary:copy(<<$X>>, Size),
+            Iterations = 1000,
 
-        %% Warm up
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data),
-            {ok, _} = py_nif:channel_try_receive(Ch)
-        end, lists:seq(1, 100)),
+            %% Warm up
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data),
+                    {ok, _} = py_nif:channel_try_receive(Ch)
+                end,
+                lists:seq(1, 100)
+            ),
 
-        %% Benchmark messages on persistent channel
-        Start = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data),
-            {ok, _} = py_nif:channel_try_receive(Ch)
-        end, lists:seq(1, Iterations)),
-        End = erlang:monotonic_time(microsecond),
+            %% Benchmark messages on persistent channel
+            Start = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data),
+                    {ok, _} = py_nif:channel_try_receive(Ch)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        py_channel:close(Ch),
+            py_channel:close(Ch),
 
-        TimeMs = (End - Start) / 1000,
-        OpsPerSec = round(Iterations / (TimeMs / 1000)),
-        LatencyUs = (End - Start) / Iterations,
+            TimeMs = (End - Start) / 1000,
+            OpsPerSec = round(Iterations / (TimeMs / 1000)),
+            LatencyUs = (End - Start) / Iterations,
 
-        io:format("    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
-                  [Size, LatencyUs, OpsPerSec]),
+            io:format(
+                "    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
+                [Size, LatencyUs, OpsPerSec]
+            ),
 
-        {Size, LatencyUs, OpsPerSec}
-    end, Sizes),
+            {Size, LatencyUs, OpsPerSec}
+        end,
+        Sizes
+    ),
 
     %% Second: Full lifecycle (create + send + receive + close)
     io:format("~n  B) Full lifecycle per op (create+send+recv+close, 200 ops):~n"),
-    LifecycleResults = lists:map(fun(Size) ->
-        Data = binary:copy(<<$X>>, Size),
-        Iterations = 200,
+    LifecycleResults = lists:map(
+        fun(Size) ->
+            Data = binary:copy(<<$X>>, Size),
+            Iterations = 200,
 
-        %% Benchmark full lifecycle
-        Start = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            {ok, Ch} = py_channel:new(),
-            ok = py_channel:send(Ch, Data),
-            {ok, _} = py_nif:channel_try_receive(Ch),
-            py_channel:close(Ch)
-        end, lists:seq(1, Iterations)),
-        End = erlang:monotonic_time(microsecond),
+            %% Benchmark full lifecycle
+            Start = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    {ok, Ch} = py_channel:new(),
+                    ok = py_channel:send(Ch, Data),
+                    {ok, _} = py_nif:channel_try_receive(Ch),
+                    py_channel:close(Ch)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        TimeMs = (End - Start) / 1000,
-        OpsPerSec = round(Iterations / (TimeMs / 1000)),
-        LatencyUs = (End - Start) / Iterations,
+            TimeMs = (End - Start) / 1000,
+            OpsPerSec = round(Iterations / (TimeMs / 1000)),
+            LatencyUs = (End - Start) / Iterations,
 
-        io:format("    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
-                  [Size, LatencyUs, OpsPerSec]),
+            io:format(
+                "    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
+                [Size, LatencyUs, OpsPerSec]
+            ),
 
-        {Size, LatencyUs, OpsPerSec}
-    end, Sizes),
+            {Size, LatencyUs, OpsPerSec}
+        end,
+        Sizes
+    ),
 
     %% Return persistent results for comparison (more representative)
     {PersistentResults, LifecycleResults}.
@@ -131,125 +153,149 @@ run_channel_bench() ->
 
 run_reactor_worker_bench() ->
     %% Protocol that stays open for multiple messages
-    PersistentSetup = <<"
-import erlang.reactor as reactor
-
-class PersistentEchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'read_pending'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'read_pending'
-
-reactor.set_protocol_factory(PersistentEchoProtocol)
-">>,
+    PersistentSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class PersistentEchoProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'read_pending'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'read_pending'\n"
+        "\n"
+        "reactor.set_protocol_factory(PersistentEchoProtocol)\n"
+    >>,
 
     %% Protocol that closes after one message
-    LifecycleSetup = <<"
-import erlang.reactor as reactor
-
-class OneMessageProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(OneMessageProtocol)
-">>,
+    LifecycleSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class OneMessageProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(OneMessageProtocol)\n"
+    >>,
 
     Sizes = [64, 1024, 16384],
 
     %% First: Messages on persistent connection
     io:format("  A) Messages on persistent connection (500 msgs):~n"),
-    PersistentResults = lists:map(fun(Size) ->
-        Data = binary:copy(<<$X>>, Size),
-        Iterations = 500,
+    PersistentResults = lists:map(
+        fun(Size) ->
+            Data = binary:copy(<<$X>>, Size),
+            Iterations = 500,
 
-        {ok, Ctx} = py_reactor_context:start_link(900 + Size, worker, #{
-            setup_code => PersistentSetup
-        }),
+            {ok, Ctx} = py_reactor_context:start_link(900 + Size, worker, #{
+                setup_code => PersistentSetup
+            }),
 
-        %% Create one persistent connection
-        {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
-        {ok, Port} = inet:port(LSock),
-        {ok, Client} = gen_tcp:connect("127.0.0.1", Port, [binary, {active, false}]),
-        {ok, Server} = gen_tcp:accept(LSock, 1000),
-        gen_tcp:close(LSock),
-        {ok, Fd} = inet:getfd(Server),
-        ok = py_reactor_context:handoff(Ctx, Fd, #{type => bench}),
-        timer:sleep(10),
+            %% Create one persistent connection
+            {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+            {ok, Port} = inet:port(LSock),
+            {ok, Client} = gen_tcp:connect("127.0.0.1", Port, [binary, {active, false}]),
+            {ok, Server} = gen_tcp:accept(LSock, 1000),
+            gen_tcp:close(LSock),
+            {ok, Fd} = inet:getfd(Server),
+            ok = py_reactor_context:handoff(Ctx, Fd, #{type => bench}),
+            timer:sleep(10),
 
-        %% Warm up
-        lists:foreach(fun(_) ->
-            ok = gen_tcp:send(Client, Data),
-            {ok, _} = recv_all(Client, Size, 5000)
-        end, lists:seq(1, 50)),
+            %% Warm up
+            lists:foreach(
+                fun(_) ->
+                    ok = gen_tcp:send(Client, Data),
+                    {ok, _} = recv_all(Client, Size, 5000)
+                end,
+                lists:seq(1, 50)
+            ),
 
-        %% Benchmark messages on persistent connection
-        Start = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = gen_tcp:send(Client, Data),
-            {ok, _} = recv_all(Client, Size, 5000)
-        end, lists:seq(1, Iterations)),
-        End = erlang:monotonic_time(microsecond),
+            %% Benchmark messages on persistent connection
+            Start = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = gen_tcp:send(Client, Data),
+                    {ok, _} = recv_all(Client, Size, 5000)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        gen_tcp:close(Client),
-        py_reactor_context:stop(Ctx),
+            gen_tcp:close(Client),
+            py_reactor_context:stop(Ctx),
 
-        TimeMs = (End - Start) / 1000,
-        OpsPerSec = round(Iterations / (TimeMs / 1000)),
-        LatencyUs = (End - Start) / Iterations,
+            TimeMs = (End - Start) / 1000,
+            OpsPerSec = round(Iterations / (TimeMs / 1000)),
+            LatencyUs = (End - Start) / Iterations,
 
-        io:format("    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
-                  [Size, LatencyUs, OpsPerSec]),
+            io:format(
+                "    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
+                [Size, LatencyUs, OpsPerSec]
+            ),
 
-        {Size, LatencyUs, OpsPerSec}
-    end, Sizes),
+            {Size, LatencyUs, OpsPerSec}
+        end,
+        Sizes
+    ),
 
     %% Second: Full lifecycle per operation
     io:format("~n  B) Full lifecycle per op (connect+handoff+echo+close, 100 ops):~n"),
-    LifecycleResults = lists:map(fun(Size) ->
-        Data = binary:copy(<<$X>>, Size),
-        Iterations = 100,
+    LifecycleResults = lists:map(
+        fun(Size) ->
+            Data = binary:copy(<<$X>>, Size),
+            Iterations = 100,
 
-        {ok, Ctx} = py_reactor_context:start_link(800 + Size, worker, #{
-            setup_code => LifecycleSetup
-        }),
+            {ok, Ctx} = py_reactor_context:start_link(800 + Size, worker, #{
+                setup_code => LifecycleSetup
+            }),
 
-        %% Warm up
-        lists:foreach(fun(_) ->
-            run_single_reactor_test(Ctx, Data)
-        end, lists:seq(1, 10)),
+            %% Warm up
+            lists:foreach(
+                fun(_) ->
+                    run_single_reactor_test(Ctx, Data)
+                end,
+                lists:seq(1, 10)
+            ),
 
-        %% Benchmark full lifecycle
-        Start = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            run_single_reactor_test(Ctx, Data)
-        end, lists:seq(1, Iterations)),
-        End = erlang:monotonic_time(microsecond),
+            %% Benchmark full lifecycle
+            Start = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    run_single_reactor_test(Ctx, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        py_reactor_context:stop(Ctx),
+            py_reactor_context:stop(Ctx),
 
-        TimeMs = (End - Start) / 1000,
-        OpsPerSec = round(Iterations / (TimeMs / 1000)),
-        LatencyUs = (End - Start) / Iterations,
+            TimeMs = (End - Start) / 1000,
+            OpsPerSec = round(Iterations / (TimeMs / 1000)),
+            LatencyUs = (End - Start) / Iterations,
 
-        io:format("    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
-                  [Size, LatencyUs, OpsPerSec]),
+            io:format(
+                "    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
+                [Size, LatencyUs, OpsPerSec]
+            ),
 
-        {Size, LatencyUs, OpsPerSec}
-    end, Sizes),
+            {Size, LatencyUs, OpsPerSec}
+        end,
+        Sizes
+    ),
 
     {PersistentResults, LifecycleResults}.
 
@@ -295,125 +341,149 @@ recv_all(Socket, Remaining, Timeout, Acc) ->
 
 run_reactor_owngil_bench() ->
     %% Protocol that stays open for multiple messages
-    PersistentSetup = <<"
-import erlang.reactor as reactor
-
-class PersistentEchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'read_pending'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'read_pending'
-
-reactor.set_protocol_factory(PersistentEchoProtocol)
-">>,
+    PersistentSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class PersistentEchoProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'read_pending'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'read_pending'\n"
+        "\n"
+        "reactor.set_protocol_factory(PersistentEchoProtocol)\n"
+    >>,
 
     %% Protocol that closes after one message
-    LifecycleSetup = <<"
-import erlang.reactor as reactor
-
-class OneMessageProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(OneMessageProtocol)
-">>,
+    LifecycleSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class OneMessageProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(OneMessageProtocol)\n"
+    >>,
 
     Sizes = [64, 1024, 16384],
 
     %% First: Messages on persistent connection
     io:format("  A) Messages on persistent connection (500 msgs):~n"),
-    PersistentResults = lists:map(fun(Size) ->
-        Data = binary:copy(<<$X>>, Size),
-        Iterations = 500,
+    PersistentResults = lists:map(
+        fun(Size) ->
+            Data = binary:copy(<<$X>>, Size),
+            Iterations = 500,
 
-        {ok, Ctx} = py_reactor_context:start_link(1900 + Size, owngil, #{
-            setup_code => PersistentSetup
-        }),
+            {ok, Ctx} = py_reactor_context:start_link(1900 + Size, owngil, #{
+                setup_code => PersistentSetup
+            }),
 
-        %% Create one persistent connection
-        {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
-        {ok, Port} = inet:port(LSock),
-        {ok, Client} = gen_tcp:connect("127.0.0.1", Port, [binary, {active, false}]),
-        {ok, Server} = gen_tcp:accept(LSock, 1000),
-        gen_tcp:close(LSock),
-        {ok, Fd} = inet:getfd(Server),
-        ok = py_reactor_context:handoff(Ctx, Fd, #{type => bench}),
-        timer:sleep(10),
+            %% Create one persistent connection
+            {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+            {ok, Port} = inet:port(LSock),
+            {ok, Client} = gen_tcp:connect("127.0.0.1", Port, [binary, {active, false}]),
+            {ok, Server} = gen_tcp:accept(LSock, 1000),
+            gen_tcp:close(LSock),
+            {ok, Fd} = inet:getfd(Server),
+            ok = py_reactor_context:handoff(Ctx, Fd, #{type => bench}),
+            timer:sleep(10),
 
-        %% Warm up
-        lists:foreach(fun(_) ->
-            ok = gen_tcp:send(Client, Data),
-            {ok, _} = recv_all(Client, Size, 5000)
-        end, lists:seq(1, 50)),
+            %% Warm up
+            lists:foreach(
+                fun(_) ->
+                    ok = gen_tcp:send(Client, Data),
+                    {ok, _} = recv_all(Client, Size, 5000)
+                end,
+                lists:seq(1, 50)
+            ),
 
-        %% Benchmark messages on persistent connection
-        Start = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = gen_tcp:send(Client, Data),
-            {ok, _} = recv_all(Client, Size, 5000)
-        end, lists:seq(1, Iterations)),
-        End = erlang:monotonic_time(microsecond),
+            %% Benchmark messages on persistent connection
+            Start = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = gen_tcp:send(Client, Data),
+                    {ok, _} = recv_all(Client, Size, 5000)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        gen_tcp:close(Client),
-        py_reactor_context:stop(Ctx),
+            gen_tcp:close(Client),
+            py_reactor_context:stop(Ctx),
 
-        TimeMs = (End - Start) / 1000,
-        OpsPerSec = round(Iterations / (TimeMs / 1000)),
-        LatencyUs = (End - Start) / Iterations,
+            TimeMs = (End - Start) / 1000,
+            OpsPerSec = round(Iterations / (TimeMs / 1000)),
+            LatencyUs = (End - Start) / Iterations,
 
-        io:format("    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
-                  [Size, LatencyUs, OpsPerSec]),
+            io:format(
+                "    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
+                [Size, LatencyUs, OpsPerSec]
+            ),
 
-        {Size, LatencyUs, OpsPerSec}
-    end, Sizes),
+            {Size, LatencyUs, OpsPerSec}
+        end,
+        Sizes
+    ),
 
     %% Second: Full lifecycle per operation
     io:format("~n  B) Full lifecycle per op (connect+handoff+echo+close, 100 ops):~n"),
-    LifecycleResults = lists:map(fun(Size) ->
-        Data = binary:copy(<<$X>>, Size),
-        Iterations = 100,
+    LifecycleResults = lists:map(
+        fun(Size) ->
+            Data = binary:copy(<<$X>>, Size),
+            Iterations = 100,
 
-        {ok, Ctx} = py_reactor_context:start_link(1800 + Size, owngil, #{
-            setup_code => LifecycleSetup
-        }),
+            {ok, Ctx} = py_reactor_context:start_link(1800 + Size, owngil, #{
+                setup_code => LifecycleSetup
+            }),
 
-        %% Warm up
-        lists:foreach(fun(_) ->
-            run_single_reactor_test(Ctx, Data)
-        end, lists:seq(1, 10)),
+            %% Warm up
+            lists:foreach(
+                fun(_) ->
+                    run_single_reactor_test(Ctx, Data)
+                end,
+                lists:seq(1, 10)
+            ),
 
-        %% Benchmark full lifecycle
-        Start = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            run_single_reactor_test(Ctx, Data)
-        end, lists:seq(1, Iterations)),
-        End = erlang:monotonic_time(microsecond),
+            %% Benchmark full lifecycle
+            Start = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    run_single_reactor_test(Ctx, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        py_reactor_context:stop(Ctx),
+            py_reactor_context:stop(Ctx),
 
-        TimeMs = (End - Start) / 1000,
-        OpsPerSec = round(Iterations / (TimeMs / 1000)),
-        LatencyUs = (End - Start) / Iterations,
+            TimeMs = (End - Start) / 1000,
+            OpsPerSec = round(Iterations / (TimeMs / 1000)),
+            LatencyUs = (End - Start) / Iterations,
 
-        io:format("    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
-                  [Size, LatencyUs, OpsPerSec]),
+            io:format(
+                "    Size ~6B: ~8.1f us/op, ~8w ops/sec~n",
+                [Size, LatencyUs, OpsPerSec]
+            ),
 
-        {Size, LatencyUs, OpsPerSec}
-    end, Sizes),
+            {Size, LatencyUs, OpsPerSec}
+        end,
+        Sizes
+    ),
 
     {PersistentResults, LifecycleResults}.
 
@@ -430,35 +500,51 @@ print_comparison(ChPersistent, ChLifecycle, WkPersistent, WkLifecycle, OgPersist
     %% Persistent connection comparison (messages/sec on existing connection)
     io:format("A) PERSISTENT CONNECTION (messages on existing connection)~n"),
     io:format("-----------------------------------------------------------~n"),
-    io:format("~8s | ~12s | ~12s | ~12s~n",
-              ["Size", "Channel", "Reactor/W", "Reactor/OG"]),
+    io:format(
+        "~8s | ~12s | ~12s | ~12s~n",
+        ["Size", "Channel", "Reactor/W", "Reactor/OG"]
+    ),
     io:format("~s~n", [string:copies("-", 52)]),
 
-    lists:foreach(fun({{Size, _, ChOps}, {_, _, WkOps}}) ->
-        OgOps = case lists:keyfind(Size, 1, OgPersistent) of
-            {_, _, O} -> integer_to_list(O);
-            false -> "N/A"
+    lists:foreach(
+        fun({{Size, _, ChOps}, {_, _, WkOps}}) ->
+            OgOps =
+                case lists:keyfind(Size, 1, OgPersistent) of
+                    {_, _, O} -> integer_to_list(O);
+                    false -> "N/A"
+                end,
+            io:format(
+                "~8B | ~12w | ~12w | ~12s~n",
+                [Size, ChOps, WkOps, OgOps]
+            )
         end,
-        io:format("~8B | ~12w | ~12w | ~12s~n",
-                  [Size, ChOps, WkOps, OgOps])
-    end, lists:zip(ChPersistent, WkPersistent)),
+        lists:zip(ChPersistent, WkPersistent)
+    ),
 
     %% Full lifecycle comparison (connections/sec including setup/teardown)
     io:format("~n"),
     io:format("B) FULL LIFECYCLE (create + send/recv + close per op)~n"),
     io:format("-----------------------------------------------------------~n"),
-    io:format("~8s | ~12s | ~12s | ~12s~n",
-              ["Size", "Channel", "Reactor/W", "Reactor/OG"]),
+    io:format(
+        "~8s | ~12s | ~12s | ~12s~n",
+        ["Size", "Channel", "Reactor/W", "Reactor/OG"]
+    ),
     io:format("~s~n", [string:copies("-", 52)]),
 
-    lists:foreach(fun({{Size, _, ChOps}, {_, _, WkOps}}) ->
-        OgOps = case lists:keyfind(Size, 1, OgLifecycle) of
-            {_, _, O} -> integer_to_list(O);
-            false -> "N/A"
+    lists:foreach(
+        fun({{Size, _, ChOps}, {_, _, WkOps}}) ->
+            OgOps =
+                case lists:keyfind(Size, 1, OgLifecycle) of
+                    {_, _, O} -> integer_to_list(O);
+                    false -> "N/A"
+                end,
+            io:format(
+                "~8B | ~12w | ~12w | ~12s~n",
+                [Size, ChOps, WkOps, OgOps]
+            )
         end,
-        io:format("~8B | ~12w | ~12w | ~12s~n",
-                  [Size, ChOps, WkOps, OgOps])
-    end, lists:zip(ChLifecycle, WkLifecycle)),
+        lists:zip(ChLifecycle, WkLifecycle)
+    ),
 
     io:format("~n"),
     io:format("Legend:~n"),

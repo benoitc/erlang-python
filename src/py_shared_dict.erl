@@ -27,7 +27,6 @@
     shared_dict_destroy/1
 ]).
 
-
 %% @doc Create a new process-scoped SharedDict.
 %%
 %% Creates a SharedDict owned by the calling process. The dict is automatically
@@ -106,5 +105,3 @@ shared_dict_keys(Handle) ->
 -spec shared_dict_destroy(reference()) -> ok.
 shared_dict_destroy(Handle) ->
     py_nif:shared_dict_destroy(Handle).
-
-

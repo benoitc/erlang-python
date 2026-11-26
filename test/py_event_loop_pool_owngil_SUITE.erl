@@ -41,17 +41,19 @@ all() ->
     [{group, owngil_tests}].
 
 groups() ->
-    [{owngil_tests, [sequence], [
-        test_owngil_pool_stats,
-        test_owngil_session_creation,
-        test_sync_function_call,
-        test_async_coroutine_call,
-        test_concurrent_tasks,
-        test_same_process_same_worker,
-        test_tasks_execute_in_order,
-        test_session_cleanup_on_process_exit,
-        test_true_parallel_execution
-    ]}].
+    [
+        {owngil_tests, [sequence], [
+            test_owngil_pool_stats,
+            test_owngil_session_creation,
+            test_sync_function_call,
+            test_async_coroutine_call,
+            test_concurrent_tasks,
+            test_same_process_same_worker,
+            test_tasks_execute_in_order,
+            test_session_cleanup_on_process_exit,
+            test_true_parallel_execution
+        ]}
+    ].
 
 init_per_suite(Config) ->
     %% Check if subinterpreters are supported
@@ -84,7 +86,8 @@ wait_for_owngil_pool(Timeout) when Timeout =< 0 ->
 wait_for_owngil_pool(Timeout) ->
     Stats = py_event_loop_pool:get_stats(),
     case maps:get(owngil_enabled, Stats, false) of
-        true -> ok;
+        true ->
+            ok;
         false ->
             timer:sleep(100),
             wait_for_owngil_pool(Timeout - 100)
@@ -154,8 +157,10 @@ test_async_coroutine_call(_Config) ->
 
 test_concurrent_tasks(_Config) ->
     NumTasks = 20,
-    Refs = [py_event_loop_pool:create_task(math, sqrt, [float(I * I)])
-            || I <- lists:seq(1, NumTasks)],
+    Refs = [
+        py_event_loop_pool:create_task(math, sqrt, [float(I * I)])
+     || I <- lists:seq(1, NumTasks)
+    ],
     ct:log("Created ~p tasks", [length(Refs)]),
 
     Results = [py_event_loop_pool:await(Ref, 5000) || Ref <- Refs],
@@ -173,8 +178,10 @@ test_same_process_same_worker(_Config) ->
     %% (same process always routes to same worker due to PID hashing)
 
     %% Submit multiple tasks from this process - they all go to same worker
-    Refs = [py_event_loop_pool:create_task(math, sqrt, [float(I * I)])
-            || I <- lists:seq(1, 5)],
+    Refs = [
+        py_event_loop_pool:create_task(math, sqrt, [float(I * I)])
+     || I <- lists:seq(1, 5)
+    ],
 
     Results = [py_event_loop_pool:await(Ref, 5000) || Ref <- Refs],
     ct:log("Results: ~p", [Results]),
@@ -186,8 +193,10 @@ test_same_process_same_worker(_Config) ->
 
 test_tasks_execute_in_order(_Config) ->
     %% All tasks from this process go to the same worker, so they execute in order
-    Refs = [py_event_loop_pool:create_task(math, sqrt, [float(I)])
-            || I <- [1, 4, 9, 16, 25]],
+    Refs = [
+        py_event_loop_pool:create_task(math, sqrt, [float(I)])
+     || I <- [1, 4, 9, 16, 25]
+    ],
 
     Results = [py_event_loop_pool:await(Ref, 5000) || Ref <- Refs],
     ct:log("Results: ~p", [Results]),
@@ -208,20 +217,28 @@ test_session_cleanup_on_process_exit(_Config) ->
     NumProcs = 5,
 
     %% Spawn multiple processes that create sessions
-    Pids = [spawn(fun() ->
-        %% Create a task which creates a session
-        Ref = py_event_loop_pool:create_task(math, sqrt, [9.0]),
-        {ok, 3.0} = py_event_loop_pool:await(Ref, 5000),
-        Parent ! {self(), session_created},
-        receive stop -> ok end
-    end) || _ <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn(fun() ->
+            %% Create a task which creates a session
+            Ref = py_event_loop_pool:create_task(math, sqrt, [9.0]),
+            {ok, 3.0} = py_event_loop_pool:await(Ref, 5000),
+            Parent ! {self(), session_created},
+            receive
+                stop -> ok
+            end
+        end)
+     || _ <- lists:seq(1, NumProcs)
+    ],
 
     %% Wait for all sessions to be created
-    [receive
-        {Pid, session_created} -> ok
-    after 5000 ->
-        ct:fail({timeout_waiting_for_session, Pid})
-    end || Pid <- Pids],
+    [
+        receive
+            {Pid, session_created} -> ok
+        after 5000 ->
+            ct:fail({timeout_waiting_for_session, Pid})
+        end
+     || Pid <- Pids
+    ],
 
     %% Check stats after creation
     Stats1 = py_event_loop_pool:get_stats(),
@@ -230,7 +247,8 @@ test_session_cleanup_on_process_exit(_Config) ->
 
     %% Kill all processes
     [Pid ! stop || Pid <- Pids],
-    timer:sleep(500),  %% Give time for cleanup
+    %% Give time for cleanup
+    timer:sleep(500),
 
     %% Verify session count after cleanup
     Stats2 = py_event_loop_pool:get_stats(),
@@ -255,14 +273,23 @@ test_true_parallel_execution(_Config) ->
     T1 = erlang:monotonic_time(millisecond),
 
     %% Run math.sqrt tasks in parallel from different processes
-    Pids = [spawn(fun() ->
-        Ref = py_event_loop_pool:create_task(math, sqrt, [float(I * I)]),
-        Result = py_event_loop_pool:await(Ref, 5000),
-        Parent ! {self(), Result}
-    end) || I <- lists:seq(1, NumWorkers)],
+    Pids = [
+        spawn(fun() ->
+            Ref = py_event_loop_pool:create_task(math, sqrt, [float(I * I)]),
+            Result = py_event_loop_pool:await(Ref, 5000),
+            Parent ! {self(), Result}
+        end)
+     || I <- lists:seq(1, NumWorkers)
+    ],
 
     %% Collect results
-    Results = [receive {Pid, R} -> R after 5000 -> {error, timeout} end || Pid <- Pids],
+    Results = [
+        receive
+            {Pid, R} -> R
+        after 5000 -> {error, timeout}
+        end
+     || Pid <- Pids
+    ],
     T2 = erlang:monotonic_time(millisecond),
     Elapsed = T2 - T1,
 

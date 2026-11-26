@@ -95,17 +95,13 @@ init([]) ->
 handle_call(enable, _From, State) ->
     py_nif:set_trace_receiver(self()),
     {reply, ok, State#{enabled => true}};
-
 handle_call(disable, _From, State) ->
     py_nif:clear_trace_receiver(),
     {reply, ok, State#{enabled => false}};
-
 handle_call(get_spans, _From, #{completed := Completed} = State) ->
     {reply, {ok, lists:reverse(Completed)}, State};
-
 handle_call(clear, _From, State) ->
     {reply, ok, State#{spans => #{}, completed => []}};
-
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -114,8 +110,10 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @private Handle span events from Python
-handle_info({span_start, SpanId, ParentId, Name, Attrs, StartTime},
-            #{spans := Spans} = State) ->
+handle_info(
+    {span_start, SpanId, ParentId, Name, Attrs, StartTime},
+    #{spans := Spans} = State
+) ->
     Span = #{
         span_id => SpanId,
         parent_id => ParentId,
@@ -125,9 +123,10 @@ handle_info({span_start, SpanId, ParentId, Name, Attrs, StartTime},
         events => []
     },
     {noreply, State#{spans => Spans#{SpanId => Span}}};
-
-handle_info({span_end, SpanId, Status, Attrs, EndTime},
-            #{spans := Spans, completed := Completed} = State) ->
+handle_info(
+    {span_end, SpanId, Status, Attrs, EndTime},
+    #{spans := Spans, completed := Completed} = State
+) ->
     case maps:take(SpanId, Spans) of
         {Span, NewSpans} ->
             Done = Span#{
@@ -140,7 +139,6 @@ handle_info({span_end, SpanId, Status, Attrs, EndTime},
         error ->
             {noreply, State}
     end;
-
 handle_info({span_event, SpanId, Name, Attrs, Time}, #{spans := Spans} = State) ->
     case maps:get(SpanId, Spans, undefined) of
         undefined ->
@@ -151,7 +149,6 @@ handle_info({span_event, SpanId, Name, Attrs, Time}, #{spans := Spans} = State) 
             NewSpan = Span#{events => [Event | Events]},
             {noreply, State#{spans => Spans#{SpanId => NewSpan}}}
     end;
-
 handle_info(_Msg, State) ->
     {noreply, State}.
 

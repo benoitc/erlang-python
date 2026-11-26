@@ -51,39 +51,49 @@ run_sync_receive_bench() ->
     Ctx = py:context(1),
 
     %% Define sync receiver function
-    ok = py:exec(Ctx, <<"
-from erlang import Channel
+    ok = py:exec(Ctx, <<
+        "\n"
+        "from erlang import Channel\n"
+        "\n"
+        "def sync_receive_n(ch_ref, n):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    for _ in range(n):\n"
+        "        ch.receive()\n"
+        "    return n\n"
+    >>),
 
-def sync_receive_n(ch_ref, n):
-    ch = Channel(ch_ref)
-    for _ in range(n):
-        ch.receive()
-    return n
-">>),
+    lists:foreach(
+        fun(Size) ->
+            {ok, Ch} = py_channel:new(),
+            Data = binary:copy(<<0>>, Size),
 
-    lists:foreach(fun(Size) ->
-        {ok, Ch} = py_channel:new(),
-        Data = binary:copy(<<0>>, Size),
+            %% Fill channel
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
 
-        %% Fill channel
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data)
-        end, lists:seq(1, Iterations)),
+            %% Time Python sync receive
+            Start = erlang:monotonic_time(microsecond),
+            {ok, Iterations} = py:eval(
+                Ctx,
+                <<"sync_receive_n(ch, n)">>,
+                #{<<"ch">> => Ch, <<"n">> => Iterations}
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        %% Time Python sync receive
-        Start = erlang:monotonic_time(microsecond),
-        {ok, Iterations} = py:eval(Ctx, <<"sync_receive_n(ch, n)">>,
-                                    #{<<"ch">> => Ch, <<"n">> => Iterations}),
-        End = erlang:monotonic_time(microsecond),
+            TotalTime = (End - Start) / 1000000,
+            AvgUs = (TotalTime / Iterations) * 1000000,
+            Throughput = round(Iterations / TotalTime),
 
-        TotalTime = (End - Start) / 1000000,
-        AvgUs = (TotalTime / Iterations) * 1000000,
-        Throughput = round(Iterations / TotalTime),
+            io:format("~8B | ~12w | ~12.2f~n", [Size, Throughput, AvgUs]),
 
-        io:format("~8B | ~12w | ~12.2f~n", [Size, Throughput, AvgUs]),
-
-        py_channel:close(Ch)
-    end, Sizes),
+            py_channel:close(Ch)
+        end,
+        Sizes
+    ),
     ok.
 
 run_async_receive_bench() ->
@@ -99,43 +109,53 @@ run_async_receive_bench() ->
     Ctx = py:context(1),
 
     %% Define async receiver function
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import Channel
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import Channel\n"
+        "\n"
+        "async def async_receive_n(ch_ref, n):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    for _ in range(n):\n"
+        "        await ch.async_receive()\n"
+        "    return n\n"
+        "\n"
+        "def run_async_receive(ch_ref, n):\n"
+        "    return erlang.run(async_receive_n(ch_ref, n))\n"
+    >>),
 
-async def async_receive_n(ch_ref, n):
-    ch = Channel(ch_ref)
-    for _ in range(n):
-        await ch.async_receive()
-    return n
+    lists:foreach(
+        fun(Size) ->
+            {ok, Ch} = py_channel:new(),
+            Data = binary:copy(<<0>>, Size),
 
-def run_async_receive(ch_ref, n):
-    return erlang.run(async_receive_n(ch_ref, n))
-">>),
+            %% Fill channel
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
 
-    lists:foreach(fun(Size) ->
-        {ok, Ch} = py_channel:new(),
-        Data = binary:copy(<<0>>, Size),
+            %% Time Python async receive
+            Start = erlang:monotonic_time(microsecond),
+            {ok, Iterations} = py:eval(
+                Ctx,
+                <<"run_async_receive(ch, n)">>,
+                #{<<"ch">> => Ch, <<"n">> => Iterations}
+            ),
+            End = erlang:monotonic_time(microsecond),
 
-        %% Fill channel
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data)
-        end, lists:seq(1, Iterations)),
+            TotalTime = (End - Start) / 1000000,
+            AvgUs = (TotalTime / Iterations) * 1000000,
+            Throughput = round(Iterations / TotalTime),
 
-        %% Time Python async receive
-        Start = erlang:monotonic_time(microsecond),
-        {ok, Iterations} = py:eval(Ctx, <<"run_async_receive(ch, n)">>,
-                                    #{<<"ch">> => Ch, <<"n">> => Iterations}),
-        End = erlang:monotonic_time(microsecond),
+            io:format("~8B | ~12w | ~12.2f~n", [Size, Throughput, AvgUs]),
 
-        TotalTime = (End - Start) / 1000000,
-        AvgUs = (TotalTime / Iterations) * 1000000,
-        Throughput = round(Iterations / TotalTime),
-
-        io:format("~8B | ~12w | ~12.2f~n", [Size, Throughput, AvgUs]),
-
-        py_channel:close(Ch)
-    end, Sizes),
+            py_channel:close(Ch)
+        end,
+        Sizes
+    ),
     ok.
 
 run_comparison() ->
@@ -148,25 +168,26 @@ run_comparison() ->
     Ctx = py:context(1),
 
     %% Define both functions
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import Channel
-
-def sync_receive_n(ch_ref, n):
-    ch = Channel(ch_ref)
-    for _ in range(n):
-        ch.receive()
-    return n
-
-async def async_receive_n(ch_ref, n):
-    ch = Channel(ch_ref)
-    for _ in range(n):
-        await ch.async_receive()
-    return n
-
-def run_async_receive(ch_ref, n):
-    return erlang.run(async_receive_n(ch_ref, n))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import Channel\n"
+        "\n"
+        "def sync_receive_n(ch_ref, n):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    for _ in range(n):\n"
+        "        ch.receive()\n"
+        "    return n\n"
+        "\n"
+        "async def async_receive_n(ch_ref, n):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    for _ in range(n):\n"
+        "        await ch.async_receive()\n"
+        "    return n\n"
+        "\n"
+        "def run_async_receive(ch_ref, n):\n"
+        "    return erlang.run(async_receive_n(ch_ref, n))\n"
+    >>),
 
     io:format("~15s | ~12s | ~12s~n", ["Method", "Time (ms)", "Throughput"]),
     io:format("~s~n", [string:copies("-", 45)]),
@@ -177,8 +198,11 @@ def run_async_receive(ch_ref, n):
     {ok, SyncCh} = py_channel:new(),
     lists:foreach(fun(_) -> ok = py_channel:send(SyncCh, Data) end, lists:seq(1, Iterations)),
     SyncStart = erlang:monotonic_time(microsecond),
-    {ok, Iterations} = py:eval(Ctx, <<"sync_receive_n(ch, n)">>,
-                                #{<<"ch">> => SyncCh, <<"n">> => Iterations}),
+    {ok, Iterations} = py:eval(
+        Ctx,
+        <<"sync_receive_n(ch, n)">>,
+        #{<<"ch">> => SyncCh, <<"n">> => Iterations}
+    ),
     SyncEnd = erlang:monotonic_time(microsecond),
     SyncTime = (SyncEnd - SyncStart) / 1000,
     SyncThroughput = round(Iterations / (SyncTime / 1000)),
@@ -189,8 +213,11 @@ def run_async_receive(ch_ref, n):
     {ok, AsyncCh} = py_channel:new(),
     lists:foreach(fun(_) -> ok = py_channel:send(AsyncCh, Data) end, lists:seq(1, Iterations)),
     AsyncStart = erlang:monotonic_time(microsecond),
-    {ok, Iterations} = py:eval(Ctx, <<"run_async_receive(ch, n)">>,
-                                #{<<"ch">> => AsyncCh, <<"n">> => Iterations}),
+    {ok, Iterations} = py:eval(
+        Ctx,
+        <<"run_async_receive(ch, n)">>,
+        #{<<"ch">> => AsyncCh, <<"n">> => Iterations}
+    ),
     AsyncEnd = erlang:monotonic_time(microsecond),
     AsyncTime = (AsyncEnd - AsyncStart) / 1000,
     AsyncThroughput = round(Iterations / (AsyncTime / 1000)),
@@ -214,7 +241,8 @@ def run_async_receive(ch_ref, n):
     io:format("NIF baseline is ~.1fx faster than sync receive~n", [SyncTime / NifTime]),
     ok.
 
-receive_all_nif(_Ch, 0) -> ok;
+receive_all_nif(_Ch, 0) ->
+    ok;
 receive_all_nif(Ch, N) ->
     {ok, _} = py_nif:channel_try_receive(Ch),
     receive_all_nif(Ch, N - 1).

@@ -222,18 +222,19 @@
 %%% ============================================================================
 
 load_nif() ->
-    PrivDir = case code:priv_dir(erlang_python) of
-        {error, bad_name} ->
-            %% Fallback for development
-            case code:which(?MODULE) of
-                Filename when is_list(Filename) ->
-                    filename:join([filename:dirname(Filename), "..", "priv"]);
-                _ ->
-                    "priv"
-            end;
-        Dir ->
-            Dir
-    end,
+    PrivDir =
+        case code:priv_dir(erlang_python) of
+            {error, bad_name} ->
+                %% Fallback for development
+                case code:which(?MODULE) of
+                    Filename when is_list(Filename) ->
+                        filename:join([filename:dirname(Filename), "..", "priv"]);
+                    _ ->
+                        "priv"
+                end;
+            Dir ->
+                Dir
+        end,
     NifPath = filename:join(PrivDir, "py_nif"),
     erlang:load_nif(NifPath, 0).
 
@@ -398,8 +399,15 @@ owngil_create_session(_WorkerHint) ->
 %% Args: WorkerId, HandleId, CallerPid, Ref, Module, Func, Args
 %% The task runs in the worker's asyncio event loop.
 %% Result is sent to CallerPid as {async_result, Ref, Result}.
--spec owngil_submit_task(non_neg_integer(), non_neg_integer(), pid(), reference(),
-                          binary(), binary(), list()) -> ok | {error, term()}.
+-spec owngil_submit_task(
+    non_neg_integer(),
+    non_neg_integer(),
+    pid(),
+    reference(),
+    binary(),
+    binary(),
+    list()
+) -> ok | {error, term()}.
 owngil_submit_task(_WorkerId, _HandleId, _CallerPid, _Ref, _Module, _Func, _Args) ->
     ?NIF_STUB.
 
@@ -411,7 +419,8 @@ owngil_destroy_session(_WorkerId, _HandleId) ->
 
 %% @doc Apply imports to an OWN_GIL session.
 %% Imports modules into the worker's sys.modules.
--spec owngil_apply_imports(non_neg_integer(), non_neg_integer(), [{binary(), binary() | all}]) -> ok | {error, term()}.
+-spec owngil_apply_imports(non_neg_integer(), non_neg_integer(), [{binary(), binary() | all}]) ->
+    ok | {error, term()}.
 owngil_apply_imports(_WorkerId, _HandleId, _Imports) ->
     ?NIF_STUB.
 
@@ -610,7 +619,9 @@ submit_task(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs) ->
 %% Like submit_task but includes an env resource reference. The env's globals
 %% dict is used for function lookup, allowing functions defined via py:exec()
 %% to be called from the event loop.
--spec submit_task_with_env(reference(), pid(), reference(), binary(), binary(), list(), map(), reference()) ->
+-spec submit_task_with_env(
+    reference(), pid(), reference(), binary(), binary(), list(), map(), reference()
+) ->
     ok | {error, term()}.
 submit_task_with_env(_LoopRef, _CallerPid, _Ref, _Module, _Func, _Args, _Kwargs, _EnvRef) ->
     ?NIF_STUB.
@@ -896,7 +907,8 @@ create_test_udp_socket(_Port) ->
 
 %% @doc Receive data from a UDP socket.
 %% Returns the data and source address: {Data, {Host, Port}}.
--spec recvfrom_test_udp(integer(), integer()) -> {ok, {binary(), {binary(), integer()}}} | {error, term()}.
+-spec recvfrom_test_udp(integer(), integer()) ->
+    {ok, {binary(), {binary(), integer()}}} | {error, term()}.
 recvfrom_test_udp(_Fd, _MaxSize) ->
     ?NIF_STUB.
 
@@ -1028,9 +1040,10 @@ context_memory_usage(_ContextRef) ->
 %% @param Kwargs Map of keyword arguments
 %% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_call(reference(), binary(), binary(), list(), map()) ->
-    {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
-    {schedule, binary(), tuple()}.
+    {ok, term()}
+    | {error, term()}
+    | {suspended, non_neg_integer(), reference(), {atom(), list()}}
+    | {schedule, binary(), tuple()}.
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
     ?NIF_STUB.
 
@@ -1044,9 +1057,10 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs) ->
 %% @param EnvRef Process-local environment reference
 %% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_call(reference(), binary(), binary(), list(), map(), reference()) ->
-    {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
-    {schedule, binary(), tuple()}.
+    {ok, term()}
+    | {error, term()}
+    | {suspended, non_neg_integer(), reference(), {atom(), list()}}
+    | {schedule, binary(), tuple()}.
 context_call(_ContextRef, _Module, _Func, _Args, _Kwargs, _EnvRef) ->
     ?NIF_STUB.
 
@@ -1059,9 +1073,10 @@ context_call(_ContextRef, _Module, _Func, _Args, _Kwargs, _EnvRef) ->
 %% @param Locals Map of local variables
 %% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_eval(reference(), binary(), map()) ->
-    {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
-    {schedule, binary(), tuple()}.
+    {ok, term()}
+    | {error, term()}
+    | {suspended, non_neg_integer(), reference(), {atom(), list()}}
+    | {schedule, binary(), tuple()}.
 context_eval(_ContextRef, _Code, _Locals) ->
     ?NIF_STUB.
 
@@ -1073,9 +1088,10 @@ context_eval(_ContextRef, _Code, _Locals) ->
 %% @param EnvRef Process-local environment reference
 %% @returns {ok, Result} | {error, Reason} | {suspended, ...} | {schedule, ...}
 -spec context_eval(reference(), binary(), map(), reference()) ->
-    {ok, term()} | {error, term()} |
-    {suspended, non_neg_integer(), reference(), {atom(), list()}} |
-    {schedule, binary(), tuple()}.
+    {ok, term()}
+    | {error, term()}
+    | {suspended, non_neg_integer(), reference(), {atom(), list()}}
+    | {schedule, binary(), tuple()}.
 context_eval(_ContextRef, _Code, _Locals, _EnvRef) ->
     ?NIF_STUB.
 
@@ -1154,30 +1170,67 @@ context_exec_async(_ContextRef, _CallerPid, _RequestId, _Code) ->
 
 %% @doc Async call with process-local environment.
 %% @private
--spec context_call_with_env_async(reference(), pid(), term(),
-                                   binary(), binary(), list(), map(),
-                                   reference()) ->
+-spec context_call_with_env_async(
+    reference(),
+    pid(),
+    term(),
+    binary(),
+    binary(),
+    list(),
+    map(),
+    reference()
+) ->
     {enqueued, term()} | {error, term()}.
-context_call_with_env_async(_CtxRef, _CallerPid, _RequestId,
-                             _Module, _Func, _Args, _Kwargs, _EnvRef) ->
+context_call_with_env_async(
+    _CtxRef,
+    _CallerPid,
+    _RequestId,
+    _Module,
+    _Func,
+    _Args,
+    _Kwargs,
+    _EnvRef
+) ->
     ?NIF_STUB.
 
 %% @doc Async eval with process-local environment.
 %% @private
--spec context_eval_with_env_async(reference(), pid(), term(),
-                                   binary(), map(), reference()) ->
+-spec context_eval_with_env_async(
+    reference(),
+    pid(),
+    term(),
+    binary(),
+    map(),
+    reference()
+) ->
     {enqueued, term()} | {error, term()}.
-context_eval_with_env_async(_CtxRef, _CallerPid, _RequestId,
-                             _Code, _Locals, _EnvRef) ->
+context_eval_with_env_async(
+    _CtxRef,
+    _CallerPid,
+    _RequestId,
+    _Code,
+    _Locals,
+    _EnvRef
+) ->
     ?NIF_STUB.
 
 %% @doc Async exec with process-local environment.
 %% @private
--spec context_exec_with_env_async(reference(), pid(), term(),
-                                   binary(), reference()) ->
+-spec context_exec_with_env_async(
+    reference(),
+    pid(),
+    term(),
+    binary(),
+    reference()
+) ->
     {enqueued, term()} | {error, term()}.
-context_exec_with_env_async(_CtxRef, _CallerPid, _RequestId,
-                             _Code, _EnvRef) ->
+context_exec_with_env_async(
+    _CtxRef,
+    _CallerPid,
+    _RequestId,
+    _Code,
+    _EnvRef
+) ->
     ?NIF_STUB.
 
 %% @doc Call a method on a Python object in a context.
@@ -1280,8 +1333,10 @@ context_write_callback_response(_ContextRef, _Data) ->
 %% returns {error, not_supported_in_thread_model}. Thread-model contexts use
 %% blocking pipe-based callbacks instead of suspension/resume.
 -spec context_resume(reference(), reference(), binary()) ->
-    {ok, term()} | {error, term()} | {error, not_supported_in_thread_model} |
-    {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
+    {ok, term()}
+    | {error, term()}
+    | {error, not_supported_in_thread_model}
+    | {suspended, non_neg_integer(), reference(), {binary(), tuple()}}.
 context_resume(_ContextRef, _StateRef, _Result) ->
     ?NIF_STUB.
 

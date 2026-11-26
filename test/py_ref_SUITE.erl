@@ -46,12 +46,20 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Start contexts for testing
-    try py:stop_contexts() catch _:_ -> ok end,
+    try
+        py:stop_contexts()
+    catch
+        _:_ -> ok
+    end,
     {ok, _} = py:start_contexts(#{contexts => 2}),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    try py:stop_contexts() catch _:_ -> ok end,
+    try
+        py:stop_contexts()
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %% ============================================================================
@@ -87,13 +95,14 @@ test_getattr(_Config) ->
     Ctx = py:context(),
 
     %% Create an object with attributes
-    ok = py:exec(Ctx, <<"
-class TestObj:
-    def __init__(self):
-        self.name = 'test'
-        self.value = 42
-test_obj = TestObj()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "class TestObj:\n"
+        "    def __init__(self):\n"
+        "        self.name = 'test'\n"
+        "        self.value = 42\n"
+        "test_obj = TestObj()\n"
+    >>),
 
     %% Get attributes via eval
     {ok, <<"test">>} = py:eval(Ctx, <<"test_obj.name">>, #{}),
@@ -114,10 +123,13 @@ test_ref_gc(_Config) ->
     Ctx = py:context(),
 
     %% Create objects in a loop
-    lists:foreach(fun(I) ->
-        Code = iolist_to_binary([<<"x">>, integer_to_binary(I), <<" = [1,2,3] * 100">>]),
-        ok = py:exec(Ctx, Code)
-    end, lists:seq(1, 100)),
+    lists:foreach(
+        fun(I) ->
+            Code = iolist_to_binary([<<"x">>, integer_to_binary(I), <<" = [1,2,3] * 100">>]),
+            ok = py:exec(Ctx, Code)
+        end,
+        lists:seq(1, 100)
+    ),
 
     %% Force Erlang GC
     erlang:garbage_collect(),

@@ -44,31 +44,39 @@ all() ->
     [{group, venv_tests}].
 
 groups() ->
-    [{venv_tests, [sequence], [
-        test_ensure_venv_creates_venv,
-        test_ensure_venv_activates_existing,
-        test_ensure_venv_with_requirements,
-        test_ensure_venv_installs_new_deps,
-        test_ensure_venv_force_recreate,
-        test_activate_venv,
-        test_deactivate_venv,
-        test_venv_info,
-        test_venv_path_metacharacters
-    ]}].
+    [
+        {venv_tests, [sequence], [
+            test_ensure_venv_creates_venv,
+            test_ensure_venv_activates_existing,
+            test_ensure_venv_with_requirements,
+            test_ensure_venv_installs_new_deps,
+            test_ensure_venv_force_recreate,
+            test_activate_venv,
+            test_deactivate_venv,
+            test_venv_info,
+            test_venv_path_metacharacters
+        ]}
+    ].
 
 init_per_suite(Config) ->
     application:ensure_all_started(erlang_python),
     %% Get Python executable path once for all tests
-    Expr = <<"(lambda: next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3'))()">>,
+    Expr =
+        <<"(lambda: next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3'))()">>,
     {ok, PythonPath} = py:eval(Expr),
     %% Create a shared base venv once (without pip for speed)
-    SharedDir = filename:join(["/tmp", "py_venv_suite_" ++ integer_to_list(erlang:unique_integer([positive]))]),
+    SharedDir = filename:join([
+        "/tmp", "py_venv_suite_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ]),
     filelib:ensure_dir(filename:join(SharedDir, "dummy")),
     SharedVenv = filename:join(SharedDir, "shared_venv"),
     create_venv_fast(SharedVenv, binary_to_list(PythonPath)),
-    [{python_path, binary_to_list(PythonPath)},
-     {shared_dir, SharedDir},
-     {shared_venv, SharedVenv} | Config].
+    [
+        {python_path, binary_to_list(PythonPath)},
+        {shared_dir, SharedDir},
+        {shared_venv, SharedVenv}
+        | Config
+    ].
 
 end_per_suite(Config) ->
     %% Clean up shared directory
@@ -90,7 +98,9 @@ create_venv_fast(VenvPath, PythonPath) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Create unique temp directory for each test
-    TempDir = filename:join(["/tmp", "py_venv_test_" ++ integer_to_list(erlang:unique_integer([positive]))]),
+    TempDir = filename:join([
+        "/tmp", "py_venv_test_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ]),
     filelib:ensure_dir(filename:join(TempDir, "dummy")),
     [{temp_dir, TempDir} | Config].
 

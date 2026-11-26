@@ -219,28 +219,39 @@ test_multiple_contexts(Config) ->
     NumContexts = 4,
 
     %% Start multiple contexts
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, Mode),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, Mode),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     try
         %% Run calls in parallel
         Parent = self(),
-        Pids = [spawn_link(fun() ->
-            Results = [py_context:call(Ctx, math, sqrt, [N*N], #{})
-                       || N <- lists:seq(1, 10)],
-            Parent ! {self(), Results}
-        end) || Ctx <- Contexts],
+        Pids = [
+            spawn_link(fun() ->
+                Results = [
+                    py_context:call(Ctx, math, sqrt, [N * N], #{})
+                 || N <- lists:seq(1, 10)
+                ],
+                Parent ! {self(), Results}
+            end)
+         || Ctx <- Contexts
+        ],
 
         %% Collect results
-        [receive
-            {Pid, Results} ->
-                %% Verify all calls succeeded
-                lists:foreach(fun({ok, _}) -> ok end, Results)
-        after 5000 ->
-            ct:fail("Timeout waiting for results")
-        end || Pid <- Pids]
+        [
+            receive
+                {Pid, Results} ->
+                    %% Verify all calls succeeded
+                    lists:foreach(fun({ok, _}) -> ok end, Results)
+            after 5000 ->
+                ct:fail("Timeout waiting for results")
+            end
+         || Pid <- Pids
+        ]
     after
         [py_context:stop(Ctx) || Ctx <- Contexts]
     end.
@@ -256,21 +267,30 @@ test_context_parallel_calls(Config) ->
         Parent = self(),
         NumCalls = 20,
 
-        Pids = [spawn_link(fun() ->
-            Result = py_context:call(Ctx, math, sqrt, [N*N], #{}),
-            Parent ! {self(), N, Result}
-        end) || N <- lists:seq(1, NumCalls)],
+        Pids = [
+            spawn_link(fun() ->
+                Result = py_context:call(Ctx, math, sqrt, [N * N], #{}),
+                Parent ! {self(), N, Result}
+            end)
+         || N <- lists:seq(1, NumCalls)
+        ],
 
-        Results = [receive
-            {Pid, N, Result} -> {N, Result}
-        after 5000 ->
-            ct:fail("Timeout")
-        end || Pid <- Pids],
+        Results = [
+            receive
+                {Pid, N, Result} -> {N, Result}
+            after 5000 ->
+                ct:fail("Timeout")
+            end
+         || Pid <- Pids
+        ],
 
         %% Verify all returned correct values
-        lists:foreach(fun({N, {ok, Val}}) ->
-            true = abs(Val - float(N)) < 0.0001
-        end, Results)
+        lists:foreach(
+            fun({N, {ok, Val}}) ->
+                true = abs(Val - float(N)) < 0.0001
+            end,
+            Results
+        )
     after
         py_context:stop(Ctx)
     end.

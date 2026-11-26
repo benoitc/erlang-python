@@ -69,10 +69,12 @@ groups() ->
         test_restart_remaps,
         test_churn_no_leak
     ],
-    [{erlang, [], ErlangOnly},
-     {worker, [], Both},
-     {isolated, [], Both},
-     {isolated_only, [], IsolatedOnly}].
+    [
+        {erlang, [], ErlangOnly},
+        {worker, [], Both},
+        {isolated, [], Both},
+        {isolated_only, [], IsolatedOnly}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -138,9 +140,15 @@ test_owner_death_closes(_Config) ->
     Owner = spawn(fun() ->
         {ok, Shm} = py_shm:new(4096),
         Self ! {shm, Shm},
-        receive die -> ok end
+        receive
+            die -> ok
+        end
     end),
-    Shm = receive {shm, S} -> S after 5000 -> ct:fail(no_shm) end,
+    Shm =
+        receive
+            {shm, S} -> S
+        after 5000 -> ct:fail(no_shm)
+        end,
     {'$py_shm', _, Path, _} = Shm,
     true = filelib:is_file(Path),
     Owner ! die,
@@ -174,9 +182,14 @@ test_nested_in_structure(Config) ->
     C = new_ctx(Config),
     {ok, A} = py_shm:new(4096),
     {ok, B} = py_shm:new(8192),
-    {ok, [4096, 8192]} = py_context:call(C, ?MOD, shm_in_structure,
-                                         [#{regions => [A, B], label => x}]),
-    py_shm:close(A), py_shm:close(B),
+    {ok, [4096, 8192]} = py_context:call(
+        C,
+        ?MOD,
+        shm_in_structure,
+        [#{regions => [A, B], label => x}]
+    ),
+    py_shm:close(A),
+    py_shm:close(B),
     stop(C).
 
 test_python_sees_later_write(Config) ->
@@ -222,7 +235,9 @@ test_mapped_once(Config) ->
 
 test_numpy(Config) ->
     C = new_ctx(Config),
-    case py_context:eval(C, <<"__import__('importlib.util').util.find_spec('numpy') is not None">>) of
+    case
+        py_context:eval(C, <<"__import__('importlib.util').util.find_spec('numpy') is not None">>)
+    of
         {ok, true} ->
             {ok, Shm} = py_shm:new(?MB),
             ok = py_shm:write(Shm, 0, binary:copy(<<3>>, 1000)),
@@ -245,7 +260,8 @@ test_two_contexts_share(Config) ->
     {ok, 5} = py_context:call(C1, ?MOD, shm_write, [Shm, 0, {bytes, <<"hello">>}]),
     {ok, <<"hello">>} = py_context:call(C2, ?MOD, shm_read, [Shm, 0, 5]),
     py_shm:close(Shm),
-    stop(C1), stop(C2).
+    stop(C1),
+    stop(C2).
 
 test_mixed_pool_share(Config) ->
     Iso = new_ctx(Config),
@@ -267,8 +283,10 @@ test_size_mismatch_refused(Config) ->
     {ok, {'$py_shm', Id, Path, _} = Shm} = py_shm:new(4096),
     Lie = {'$py_shm', Id, Path, 8192},
     case py_context:call(C, ?MOD, shm_len, [Lie]) of
-        {error, {'RuntimeError', _}} -> ok;          %% isolated: raised in the child
-        {error, arg_conversion_failed} -> ok         %% embedded: conversion refused
+        %% isolated: raised in the child
+        {error, {'RuntimeError', _}} -> ok;
+        %% embedded: conversion refused
+        {error, arg_conversion_failed} -> ok
     end,
     py_shm:close(Shm),
     stop(C).
@@ -296,7 +314,8 @@ test_read_only_handle(Config) ->
     Ro = py_shm:read_only(Rw),
     {ok, <<"read_only">>} = py_context:call(C, ?MOD, shm_write_readonly, [Ro]),
     {ok, 3} = py_context:call(C, ?MOD, shm_write, [Rw, 0, {bytes, <<"abc">>}]),
-    py_shm:close(Shm), py_shm:close(Rw),
+    py_shm:close(Shm),
+    py_shm:close(Rw),
     stop(C).
 
 test_restart_remaps(Config) ->
@@ -314,12 +333,15 @@ test_churn_no_leak(Config) ->
     Dir = py_shm:private_dir(),
     Files0 = length(filelib:wildcard(filename:join(Dir, "shm_*"))),
     Regions0 = ets:info(py_shm_regions, size),
-    lists:foreach(fun(I) ->
-        {ok, Shm} = py_shm:new(64 * 1024),
-        ok = py_shm:write(Shm, 0, <<I:32>>),
-        {ok, <<I:32>>} = py_context:call(C, ?MOD, shm_read, [Shm, 0, 4]),
-        ok = py_shm:close(Shm)
-    end, lists:seq(1, 200)),
+    lists:foreach(
+        fun(I) ->
+            {ok, Shm} = py_shm:new(64 * 1024),
+            ok = py_shm:write(Shm, 0, <<I:32>>),
+            {ok, <<I:32>>} = py_context:call(C, ?MOD, shm_read, [Shm, 0, 4]),
+            ok = py_shm:close(Shm)
+        end,
+        lists:seq(1, 200)
+    ),
     Files1 = length(filelib:wildcard(filename:join(Dir, "shm_*"))),
     Files0 = Files1,
     Regions0 = ets:info(py_shm_regions, size),
@@ -341,8 +363,11 @@ new_ctx(Config) ->
 
 add_path(Config) ->
     TestDir = ?config(test_dir, Config),
-    iolist_to_binary(io_lib:format(
-        "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')", [TestDir, TestDir])).
+    iolist_to_binary(
+        io_lib:format(
+            "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')", [TestDir, TestDir]
+        )
+    ).
 
 stop(C) ->
     ok = py_context:stop(C),
@@ -354,7 +379,8 @@ wait_until(Fun, TimeoutMs) ->
 
 wait_loop(Fun, Deadline) ->
     case Fun() of
-        true -> ok;
+        true ->
+            ok;
         false ->
             erlang:monotonic_time(millisecond) < Deadline orelse ct:fail(condition_not_met),
             timer:sleep(50),

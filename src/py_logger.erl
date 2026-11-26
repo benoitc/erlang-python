@@ -89,7 +89,6 @@ handle_info({py_log, Level, Logger, Message, Meta, _Ts}, State) ->
         py_meta => Meta
     }),
     {noreply, State};
-
 handle_info(_Msg, State) ->
     {noreply, State}.
 

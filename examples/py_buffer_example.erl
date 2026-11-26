@@ -60,12 +60,13 @@ basic_buffer_demo() ->
     %% Pass to Python and read
     io:format("Reading from Python...~n"),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-def read_all(buf):
-    data = buf.read()
-    print(f'  Read {len(data)} bytes: {data}')
-    return data
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def read_all(buf):\n"
+        "    data = buf.read()\n"
+        "    print(f'  Read {len(data)} bytes: {data}')\n"
+        "    return data\n"
+    >>),
 
     {ok, Data} = py:eval(Ctx, <<"read_all(buf)">>, #{<<"buf">> => Buf}),
     io:format("Erlang received: ~p~n~n", [Data]),
@@ -89,30 +90,31 @@ http_body_demo() ->
 
     %% Build WSGI-like environ
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import json
-
-def handle_request(environ):
-    '''Simulate WSGI request handler.'''
-    method = environ.get('REQUEST_METHOD', 'GET')
-    path = environ.get('PATH_INFO', '/')
-    content_type = environ.get('CONTENT_TYPE', '')
-
-    print(f'  {method} {path}')
-    print(f'  Content-Type: {content_type}')
-
-    # Read body from wsgi.input (PyBuffer)
-    wsgi_input = environ.get('wsgi.input')
-    if wsgi_input:
-        body = wsgi_input.read()
-        print(f'  Body ({len(body)} bytes): {body[:50]}...' if len(body) > 50 else f'  Body: {body}')
-
-        if content_type == 'application/json':
-            data = json.loads(body)
-            return {'status': 'ok', 'user': data.get('user')}
-
-    return {'status': 'ok'}
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import json\n"
+        "\n"
+        "def handle_request(environ):\n"
+        "    '''Simulate WSGI request handler.'''\n"
+        "    method = environ.get('REQUEST_METHOD', 'GET')\n"
+        "    path = environ.get('PATH_INFO', '/')\n"
+        "    content_type = environ.get('CONTENT_TYPE', '')\n"
+        "\n"
+        "    print(f'  {method} {path}')\n"
+        "    print(f'  Content-Type: {content_type}')\n"
+        "\n"
+        "    # Read body from wsgi.input (PyBuffer)\n"
+        "    wsgi_input = environ.get('wsgi.input')\n"
+        "    if wsgi_input:\n"
+        "        body = wsgi_input.read()\n"
+        "        print(f'  Body ({len(body)} bytes): {body[:50]}...' if len(body) > 50 else f'  Body: {body}')\n"
+        "\n"
+        "        if content_type == 'application/json':\n"
+        "            data = json.loads(body)\n"
+        "            return {'status': 'ok', 'user': data.get('user')}\n"
+        "\n"
+        "    return {'status': 'ok'}\n"
+    >>),
 
     Environ = #{
         <<"REQUEST_METHOD">> => <<"POST">>,
@@ -138,34 +140,35 @@ file_like_demo() ->
     ok = py_buffer:write(Buf, <<"Role: Admin\n">>),
     ok = py_buffer:close(Buf),
 
-    ok = py:exec(Ctx, <<"
-def demonstrate_file_methods(buf):
-    '''Show file-like methods.'''
-    print('  File-like properties:')
-    print(f'    readable(): {buf.readable()}')
-    print(f'    writable(): {buf.writable()}')
-    print(f'    seekable(): {buf.seekable()}')
-    print(f'    len(buf): {len(buf)}')
-    print()
-
-    # Read first line
-    line1 = buf.readline()
-    print(f'  readline(): {line1}')
-
-    # Current position
-    pos = buf.tell()
-    print(f'  tell(): {pos}')
-
-    # Seek back to start
-    buf.seek(0)
-    print(f'  seek(0), tell(): {buf.tell()}')
-
-    # Read all remaining
-    rest = buf.read()
-    print(f'  read(): {rest[:30]}...')
-
-    return 'done'
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def demonstrate_file_methods(buf):\n"
+        "    '''Show file-like methods.'''\n"
+        "    print('  File-like properties:')\n"
+        "    print(f'    readable(): {buf.readable()}')\n"
+        "    print(f'    writable(): {buf.writable()}')\n"
+        "    print(f'    seekable(): {buf.seekable()}')\n"
+        "    print(f'    len(buf): {len(buf)}')\n"
+        "    print()\n"
+        "\n"
+        "    # Read first line\n"
+        "    line1 = buf.readline()\n"
+        "    print(f'  readline(): {line1}')\n"
+        "\n"
+        "    # Current position\n"
+        "    pos = buf.tell()\n"
+        "    print(f'  tell(): {pos}')\n"
+        "\n"
+        "    # Seek back to start\n"
+        "    buf.seek(0)\n"
+        "    print(f'  seek(0), tell(): {buf.tell()}')\n"
+        "\n"
+        "    # Read all remaining\n"
+        "    rest = buf.read()\n"
+        "    print(f'  read(): {rest[:30]}...')\n"
+        "\n"
+        "    return 'done'\n"
+    >>),
 
     {ok, _} = py:eval(Ctx, <<"demonstrate_file_methods(buf)">>, #{<<"buf">> => Buf}),
     io:format("~n"),
@@ -182,36 +185,37 @@ memoryview_demo() ->
     ok = py_buffer:write(Buf, Data),
     ok = py_buffer:close(Buf),
 
-    ok = py:exec(Ctx, <<"
-def zero_copy_parse(buf):
-    '''Demonstrate zero-copy access via memoryview.'''
-
-    # Get memoryview - no data copying!
-    mv = memoryview(buf)
-    print(f'  memoryview created, {len(mv)} bytes')
-    print(f'  readonly: {mv.readonly}')
-    print(f'  ndim: {mv.ndim}')
-
-    # Find colon positions using find (uses memchr internally)
-    data_bytes = bytes(mv)  # Only for find, still efficient
-
-    # Parse header
-    first_colon = buf.find(b':')
-    header = bytes(mv[:first_colon])
-    print(f'  Header: {header}')
-
-    # Find PAYLOAD section
-    payload_start = buf.find(b'PAYLOAD:') + 8
-    payload_end = buf.find(b':END')
-    payload = bytes(mv[payload_start:payload_end])
-    print(f'  Payload: {payload}')
-
-    # Release memoryview
-    mv.release()
-    print('  memoryview released')
-
-    return payload
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def zero_copy_parse(buf):\n"
+        "    '''Demonstrate zero-copy access via memoryview.'''\n"
+        "\n"
+        "    # Get memoryview - no data copying!\n"
+        "    mv = memoryview(buf)\n"
+        "    print(f'  memoryview created, {len(mv)} bytes')\n"
+        "    print(f'  readonly: {mv.readonly}')\n"
+        "    print(f'  ndim: {mv.ndim}')\n"
+        "\n"
+        "    # Find colon positions using find (uses memchr internally)\n"
+        "    data_bytes = bytes(mv)  # Only for find, still efficient\n"
+        "\n"
+        "    # Parse header\n"
+        "    first_colon = buf.find(b':')\n"
+        "    header = bytes(mv[:first_colon])\n"
+        "    print(f'  Header: {header}')\n"
+        "\n"
+        "    # Find PAYLOAD section\n"
+        "    payload_start = buf.find(b'PAYLOAD:') + 8\n"
+        "    payload_end = buf.find(b':END')\n"
+        "    payload = bytes(mv[payload_start:payload_end])\n"
+        "    print(f'  Payload: {payload}')\n"
+        "\n"
+        "    # Release memoryview\n"
+        "    mv.release()\n"
+        "    print('  memoryview released')\n"
+        "\n"
+        "    return payload\n"
+    >>),
 
     {ok, Payload} = py:eval(Ctx, <<"zero_copy_parse(buf)">>, #{<<"buf">> => Buf}),
     io:format("Extracted payload: ~p~n~n", [Payload]),
@@ -230,29 +234,30 @@ line_iteration_demo() ->
     ok = py_buffer:write(Buf, <<"3,Charlie,92\n">>),
     ok = py_buffer:close(Buf),
 
-    ok = py:exec(Ctx, <<"
-def process_csv(buf):
-    '''Iterate over lines like a file.'''
-    records = []
-    header = None
-
-    for line in buf:
-        line = line.strip()
-        if not line:
-            continue
-
-        parts = line.decode().split(',')
-
-        if header is None:
-            header = parts
-            print(f'  Header: {header}')
-        else:
-            record = dict(zip(header, parts))
-            records.append(record)
-            print(f'  Record: {record}')
-
-    return records
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def process_csv(buf):\n"
+        "    '''Iterate over lines like a file.'''\n"
+        "    records = []\n"
+        "    header = None\n"
+        "\n"
+        "    for line in buf:\n"
+        "        line = line.strip()\n"
+        "        if not line:\n"
+        "            continue\n"
+        "\n"
+        "        parts = line.decode().split(',')\n"
+        "\n"
+        "        if header is None:\n"
+        "            header = parts\n"
+        "            print(f'  Header: {header}')\n"
+        "        else:\n"
+        "            record = dict(zip(header, parts))\n"
+        "            records.append(record)\n"
+        "            print(f'  Record: {record}')\n"
+        "\n"
+        "    return records\n"
+    >>),
 
     {ok, Records} = py:eval(Ctx, <<"process_csv(buf)">>, #{<<"buf">> => Buf}),
     io:format("Parsed ~p records~n~n", [length(Records)]),
@@ -267,35 +272,36 @@ asyncio_demo() ->
 
     Ctx = py:context(1),
 
-    ok = py:exec(Ctx, <<"
-import asyncio
-
-async def async_buffer_reader(buf):
-    '''Read from buffer asynchronously as Erlang streams data.'''
-    chunks = []
-    read_count = 0
-
-    while not buf.at_eof():
-        available = buf.readable_amount()
-        if available > 0:
-            chunk = buf.read_nonblock(available)
-            chunks.append(chunk)
-            read_count += 1
-            print(f'    [Python] Read chunk {read_count}: {len(chunk)} bytes')
-        else:
-            # Yield to event loop while waiting for Erlang to write more
-            await asyncio.sleep(0.005)
-
-    return b''.join(chunks)
-
-def run_async_reader(buf):
-    '''Run async reader.'''
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(async_buffer_reader(buf))
-    finally:
-        loop.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "\n"
+        "async def async_buffer_reader(buf):\n"
+        "    '''Read from buffer asynchronously as Erlang streams data.'''\n"
+        "    chunks = []\n"
+        "    read_count = 0\n"
+        "\n"
+        "    while not buf.at_eof():\n"
+        "        available = buf.readable_amount()\n"
+        "        if available > 0:\n"
+        "            chunk = buf.read_nonblock(available)\n"
+        "            chunks.append(chunk)\n"
+        "            read_count += 1\n"
+        "            print(f'    [Python] Read chunk {read_count}: {len(chunk)} bytes')\n"
+        "        else:\n"
+        "            # Yield to event loop while waiting for Erlang to write more\n"
+        "            await asyncio.sleep(0.005)\n"
+        "\n"
+        "    return b''.join(chunks)\n"
+        "\n"
+        "def run_async_reader(buf):\n"
+        "    '''Run async reader.'''\n"
+        "    loop = asyncio.new_event_loop()\n"
+        "    try:\n"
+        "        return loop.run_until_complete(async_buffer_reader(buf))\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
 
     %% Spawn a process to stream data from Erlang
     spawn_link(fun() ->
@@ -304,11 +310,15 @@ def run_async_reader(buf):
             <<" Streaming chunk 2.">>,
             <<" Final chunk 3.">>
         ],
-        lists:foreach(fun(Chunk) ->
-            timer:sleep(30),  %% Simulate network delay
-            io:format("  [Erlang] Writing: ~p~n", [Chunk]),
-            ok = py_buffer:write(Buf, Chunk)
-        end, Chunks),
+        lists:foreach(
+            fun(Chunk) ->
+                %% Simulate network delay
+                timer:sleep(30),
+                io:format("  [Erlang] Writing: ~p~n", [Chunk]),
+                ok = py_buffer:write(Buf, Chunk)
+            end,
+            Chunks
+        ),
         timer:sleep(10),
         io:format("  [Erlang] Closing buffer (EOF)~n"),
         ok = py_buffer:close(Buf),
@@ -320,7 +330,10 @@ def run_async_reader(buf):
     {ok, Result} = py:eval(Ctx, <<"run_async_reader(buf)">>, #{<<"buf">> => Buf}),
 
     %% Wait for writer
-    receive writer_done -> ok after 2000 -> ok end,
+    receive
+        writer_done -> ok
+    after 2000 -> ok
+    end,
 
     io:format("  Final result: ~p~n~n", [Result]),
     ok.

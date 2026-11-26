@@ -28,10 +28,11 @@ main(Args) ->
 
     io:format("~n=== RAG (Retrieval-Augmented Generation) Example ===~n~n"),
 
-    VenvPath = case Args of
-        [Path | _] -> Path;
-        [] -> "/tmp/ai-venv"
-    end,
+    VenvPath =
+        case Args of
+            [Path | _] -> Path;
+            [] -> "/tmp/ai-venv"
+        end,
 
     case activate_venv(VenvPath) of
         ok -> ok;
@@ -75,23 +76,29 @@ main(Args) ->
         <<"Can you update Erlang code while the system is running?">>
     ],
 
-    lists:foreach(fun(Question) ->
-        io:format("~n========================================~n"),
-        io:format("Question: ~s~n", [Question]),
-        io:format("========================================~n~n"),
+    lists:foreach(
+        fun(Question) ->
+            io:format("~n========================================~n"),
+            io:format("Question: ~s~n", [Question]),
+            io:format("========================================~n~n"),
 
-        %% Retrieve relevant context
-        Context = retrieve(Question, Index, 2),
-        io:format("Retrieved context:~n"),
-        lists:foreach(fun({Score, Text}) ->
-            io:format("  [~.3f] ~s~n", [Score, Text])
-        end, Context),
+            %% Retrieve relevant context
+            Context = retrieve(Question, Index, 2),
+            io:format("Retrieved context:~n"),
+            lists:foreach(
+                fun({Score, Text}) ->
+                    io:format("  [~.3f] ~s~n", [Score, Text])
+                end,
+                Context
+            ),
 
-        %% Generate answer
-        io:format("~nGenerating answer...~n"),
-        Answer = generate_answer(Question, Context),
-        io:format("~nAnswer: ~s~n", [Answer])
-    end, Questions),
+            %% Generate answer
+            io:format("~nGenerating answer...~n"),
+            Answer = generate_answer(Question, Context),
+            io:format("~nAnswer: ~s~n", [Answer])
+        end,
+        Questions
+    ),
 
     io:format("~n=== Done ===~n~n"),
     cleanup().
@@ -122,7 +129,10 @@ activate_venv(VenvPath) ->
     end.
 
 add_to_python_path(Dir) ->
-    {ok, _} = py:eval(<<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>, #{path => Dir}),
+    {ok, _} = py:eval(
+        <<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>,
+        #{path => Dir}
+    ),
     ok.
 
 build_index(Documents) ->
@@ -131,8 +141,10 @@ build_index(Documents) ->
 
 retrieve(Query, Index, TopK) ->
     {ok, QueryEmb} = py:call(ai_helpers, embed_single, [Query]),
-    Scored = [{cosine_similarity(QueryEmb, Emb), Text}
-              || {Text, Emb} <- Index],
+    Scored = [
+        {cosine_similarity(QueryEmb, Emb), Text}
+     || {Text, Emb} <- Index
+    ],
     Sorted = lists:reverse(lists:sort(Scored)),
     lists:sublist(Sorted, TopK).
 

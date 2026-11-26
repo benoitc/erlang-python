@@ -102,7 +102,8 @@
 
 %% Process dictionary key for bound context (pool-aware)
 -define(BOUND_CONTEXT_KEY(Pool), {py_bound_context, Pool}).
--define(BOUND_CONTEXT_KEY, py_bound_context).  %% Legacy for default pool
+%% Legacy for default pool
+-define(BOUND_CONTEXT_KEY, py_bound_context).
 
 %% Default pool name
 -define(DEFAULT_POOL, default).
@@ -359,7 +360,11 @@ stop_pool(Pool) when is_atom(Pool) ->
         Contexts ->
             lists:foreach(
                 fun(Ctx) ->
-                    try py_context_sup:stop_context(Ctx) catch _:_ -> ok end
+                    try
+                        py_context_sup:stop_context(Ctx)
+                    catch
+                        _:_ -> ok
+                    end
                 end,
                 Contexts
             )
@@ -369,12 +374,24 @@ stop_pool(Pool) when is_atom(Pool) ->
     Size = persistent_term:get(?POOL_SIZE_KEY(Pool), 0),
     lists:foreach(
         fun(N) ->
-            try persistent_term:erase(?POOL_CONTEXT_KEY(Pool, N)) catch _:_ -> ok end
+            try
+                persistent_term:erase(?POOL_CONTEXT_KEY(Pool, N))
+            catch
+                _:_ -> ok
+            end
         end,
         lists:seq(1, Size)
     ),
-    try persistent_term:erase(?POOL_SIZE_KEY(Pool)) catch _:_ -> ok end,
-    try persistent_term:erase(?POOL_CONTEXTS_KEY(Pool)) catch _:_ -> ok end,
+    try
+        persistent_term:erase(?POOL_SIZE_KEY(Pool))
+    catch
+        _:_ -> ok
+    end,
+    try
+        persistent_term:erase(?POOL_CONTEXTS_KEY(Pool))
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %% @doc Check if a pool has been started and is still alive.
@@ -384,7 +401,8 @@ stop_pool(Pool) when is_atom(Pool) ->
 -spec pool_started(pool_name()) -> boolean().
 pool_started(Pool) when is_atom(Pool) ->
     case persistent_term:get(?POOL_SIZE_KEY(Pool), 0) of
-        0 -> false;
+        0 ->
+            false;
         _N ->
             %% Verify at least one context is actually alive
             case persistent_term:get(?POOL_CONTEXT_KEY(Pool, 1), undefined) of

@@ -49,41 +49,42 @@
     native_wait_bytes_no_leak_test/1
 ]).
 
-all() -> [
-    create_byte_channel_test,
-    create_byte_channel_with_max_size_test,
-    erlang_send_bytes_test,
-    erlang_receive_bytes_test,
-    send_receive_multiple_bytes_test,
-    try_receive_empty_bytes_test,
-    close_byte_channel_test,
-    byte_channel_info_test,
-    backpressure_bytes_test,
-    send_bytes_to_closed_test,
-    %% Python tests
-    python_byte_channel_class_test,
-    python_byte_channel_send_bytes_test,
-    python_byte_channel_receive_bytes_test,
-    %% Sync blocking receive tests
-    sync_receive_bytes_immediate_test,
-    sync_receive_bytes_wait_test,
-    sync_receive_bytes_closed_test,
-    %% Large payload test
-    large_payload_bytes_test,
-    %% Async event loop dispatch test
-    async_receive_bytes_e2e_test,
-    %% create_task + async receive test
-    create_task_async_receive_test,
-    %% Close and drain tests
-    close_drain_bytes_erlang_test,
-    close_drain_bytes_python_sync_test,
-    close_drain_bytes_python_async_test,
-    close_drain_bytes_create_task_async_test,
-    %% Native async receive: cancel after wake-up, send then close
-    native_cancel_ready_bytes_test,
-    native_send_then_close_bytes_test,
-    native_wait_bytes_no_leak_test
-].
+all() ->
+    [
+        create_byte_channel_test,
+        create_byte_channel_with_max_size_test,
+        erlang_send_bytes_test,
+        erlang_receive_bytes_test,
+        send_receive_multiple_bytes_test,
+        try_receive_empty_bytes_test,
+        close_byte_channel_test,
+        byte_channel_info_test,
+        backpressure_bytes_test,
+        send_bytes_to_closed_test,
+        %% Python tests
+        python_byte_channel_class_test,
+        python_byte_channel_send_bytes_test,
+        python_byte_channel_receive_bytes_test,
+        %% Sync blocking receive tests
+        sync_receive_bytes_immediate_test,
+        sync_receive_bytes_wait_test,
+        sync_receive_bytes_closed_test,
+        %% Large payload test
+        large_payload_bytes_test,
+        %% Async event loop dispatch test
+        async_receive_bytes_e2e_test,
+        %% create_task + async receive test
+        create_task_async_receive_test,
+        %% Close and drain tests
+        close_drain_bytes_erlang_test,
+        close_drain_bytes_python_sync_test,
+        close_drain_bytes_python_async_test,
+        close_drain_bytes_create_task_async_test,
+        %% Native async receive: cancel after wake-up, send then close
+        native_cancel_ready_bytes_test,
+        native_send_then_close_bytes_test,
+        native_wait_bytes_no_leak_test
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -99,14 +100,15 @@ end_per_suite(_Config) ->
 init_per_testcase(async_receive_bytes_e2e_test, Config) ->
     %% Define the async receive helper function
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import ByteChannel
-
-async def receive_bytes(ch_ref):
-    ch = ByteChannel(ch_ref)
-    return await ch.async_receive_bytes()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import ByteChannel\n"
+        "\n"
+        "async def receive_bytes(ch_ref):\n"
+        "    ch = ByteChannel(ch_ref)\n"
+        "    return await ch.async_receive_bytes()\n"
+    >>),
     Config;
 init_per_testcase(_TestCase, Config) ->
     Config.
@@ -376,16 +378,22 @@ async_receive_bytes_e2e_test(_Config) ->
     Ctx = py:context(1),
 
     %% Run async receive - data is already there, should return immediately
-    {ok, <<"immediate_bytes">>} = py:eval(Ctx, <<"erlang.run(receive_bytes(ch))">>,
-                                          #{<<"ch">> => Ch}),
+    {ok, <<"immediate_bytes">>} = py:eval(
+        Ctx,
+        <<"erlang.run(receive_bytes(ch))">>,
+        #{<<"ch">> => Ch}
+    ),
     ct:pal("Async receive immediate data OK"),
 
     %% Test 2: Send data after async starts - tests event dispatch
     %% We send data first, then run async (to avoid race conditions in test)
     ok = py_byte_channel:send(Ch, <<"async_bytes">>),
 
-    {ok, <<"async_bytes">>} = py:eval(Ctx, <<"erlang.run(receive_bytes(ch))">>,
-                                      #{<<"ch">> => Ch}),
+    {ok, <<"async_bytes">>} = py:eval(
+        Ctx,
+        <<"erlang.run(receive_bytes(ch))">>,
+        #{<<"ch">> => Ch}
+    ),
     ct:pal("Async receive via erlang.run() OK"),
 
     ok = py_byte_channel:close(Ch).
@@ -404,24 +412,26 @@ create_task_async_receive_test(_Config) ->
 
     %% Define and run the task - env reuse should make __main__ functions visible
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import ByteChannel
-
-async def task_receive_bytes(ch_ref, reply_pid):
-    '''Task that receives bytes and sends result back to Erlang.'''
-    try:
-        ch = ByteChannel(ch_ref)
-        data = await ch.async_receive_bytes()
-        erlang.send(reply_pid, ('result', data))
-    except Exception as e:
-        erlang.send(reply_pid, ('error', str(e)))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import ByteChannel\n"
+        "\n"
+        "async def task_receive_bytes(ch_ref, reply_pid):\n"
+        "    '''Task that receives bytes and sends result back to Erlang.'''\n"
+        "    try:\n"
+        "        ch = ByteChannel(ch_ref)\n"
+        "        data = await ch.async_receive_bytes()\n"
+        "        erlang.send(reply_pid, ('result', data))\n"
+        "    except Exception as e:\n"
+        "        erlang.send(reply_pid, ('error', str(e)))\n"
+    >>),
 
     %% Create a task that will await on channel receive
     %% create_task/3 uses the global event loop internally
     TaskRef = py_event_loop:create_task(
-        "__main__", "task_receive_bytes", [Ch, self()]),
+        "__main__", "task_receive_bytes", [Ch, self()]
+    ),
 
     %% Wait for result from the task
     %% Note: Python tuple ('result', data) becomes {<<"result">>, data} in Erlang
@@ -441,8 +451,7 @@ async def task_receive_bytes(ch_ref, reply_pid):
     %% Wait for task to complete
     case py_event_loop:await(TaskRef, 5000) of
         {ok, _} -> ok;
-        {error, AwaitErr} ->
-            ct:pal("Await error: ~p", [AwaitErr])
+        {error, AwaitErr} -> ct:pal("Await error: ~p", [AwaitErr])
     end,
 
     ok = py_byte_channel:close(Ch).
@@ -492,17 +501,18 @@ close_drain_bytes_python_sync_test(_Config) ->
 
     %% Python should be able to drain all messages via iteration
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-from erlang import ByteChannel, ByteChannelClosed
-
-def drain_byte_channel(ch_ref):
-    '''Drain all chunks from byte channel, return as list.'''
-    ch = ByteChannel(ch_ref)
-    chunks = []
-    for chunk in ch:
-        chunks.append(chunk)
-    return chunks
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "from erlang import ByteChannel, ByteChannelClosed\n"
+        "\n"
+        "def drain_byte_channel(ch_ref):\n"
+        "    '''Drain all chunks from byte channel, return as list.'''\n"
+        "    ch = ByteChannel(ch_ref)\n"
+        "    chunks = []\n"
+        "    for chunk in ch:\n"
+        "        chunks.append(chunk)\n"
+        "    return chunks\n"
+    >>),
 
     {ok, [<<"data1">>, <<"data2">>, <<"data3">>]} =
         py:eval(Ctx, <<"drain_byte_channel(ch)">>, #{<<"ch">> => Ch}),
@@ -523,18 +533,19 @@ close_drain_bytes_python_async_test(_Config) ->
 
     %% Python should be able to drain all messages via async iteration
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import ByteChannel, ByteChannelClosed
-
-async def async_drain_byte_channel(ch_ref):
-    '''Async drain all chunks from byte channel, return as list.'''
-    ch = ByteChannel(ch_ref)
-    chunks = []
-    async for chunk in ch:
-        chunks.append(chunk)
-    return chunks
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import ByteChannel, ByteChannelClosed\n"
+        "\n"
+        "async def async_drain_byte_channel(ch_ref):\n"
+        "    '''Async drain all chunks from byte channel, return as list.'''\n"
+        "    ch = ByteChannel(ch_ref)\n"
+        "    chunks = []\n"
+        "    async for chunk in ch:\n"
+        "        chunks.append(chunk)\n"
+        "    return chunks\n"
+    >>),
 
     {ok, [<<"part1">>, <<"part2">>, <<"part3">>]} =
         py:eval(Ctx, <<"erlang.run(async_drain_byte_channel(ch))">>, #{<<"ch">> => Ch}),
@@ -548,26 +559,28 @@ close_drain_bytes_create_task_async_test(_Config) ->
 
     %% Define the async drain task
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import ByteChannel
-
-async def drain_task(ch_ref, reply_pid):
-    '''Task that drains byte channel and sends results back.'''
-    try:
-        ch = ByteChannel(ch_ref)
-        chunks = []
-        async for chunk in ch:
-            chunks.append(chunk)
-        erlang.send(reply_pid, ('result', chunks))
-    except Exception as e:
-        erlang.send(reply_pid, ('error', str(e)))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import ByteChannel\n"
+        "\n"
+        "async def drain_task(ch_ref, reply_pid):\n"
+        "    '''Task that drains byte channel and sends results back.'''\n"
+        "    try:\n"
+        "        ch = ByteChannel(ch_ref)\n"
+        "        chunks = []\n"
+        "        async for chunk in ch:\n"
+        "            chunks.append(chunk)\n"
+        "        erlang.send(reply_pid, ('result', chunks))\n"
+        "    except Exception as e:\n"
+        "        erlang.send(reply_pid, ('error', str(e)))\n"
+    >>),
 
     %% Create the task BEFORE sending any data
     %% This forces the task to register a waiter and wait for notifications
     TaskRef = py_event_loop:create_task(
-        "__main__", "drain_task", [Ch, self()]),
+        "__main__", "drain_task", [Ch, self()]
+    ),
 
     %% Give the task time to start and register waiter
     timer:sleep(100),
@@ -597,8 +610,7 @@ async def drain_task(ch_ref, reply_pid):
     %% Wait for task to complete
     case py_event_loop:await(TaskRef, 5000) of
         {ok, _} -> ok;
-        {error, AwaitErr} ->
-            ct:pal("Await error: ~p", [AwaitErr])
+        {error, AwaitErr} -> ct:pal("Await error: ~p", [AwaitErr])
     end.
 
 %% A receiver cancelled after its wake-up ran, before it resumed, leaves
@@ -609,29 +621,30 @@ native_cancel_ready_bytes_test(_Config) ->
         py_byte_channel:send(Ch, <<"payload">>)
     end),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import erlang
-async def cancel_ready_bytes(ref):
-    loop = asyncio.get_running_loop()
-    channel = erlang.ByteChannel(ref)
-    before = set(loop._timers)
-    receiver = asyncio.create_task(channel.async_receive_bytes())
-    await asyncio.sleep(0)
-    callbacks = set(loop._timers) - before
-    assert len(callbacks) == 1
-    ready = loop._timers[callbacks.pop()]
-    erlang.call('byte_channel_regression_send')
-    ready._run()
-    receiver.cancel()
-    try:
-        await receiver
-    except asyncio.CancelledError:
-        pass
-    return channel.try_receive_bytes()
-def run_cancel_ready_bytes(ref):
-    return erlang.run(cancel_ready_bytes(ref))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import erlang\n"
+        "async def cancel_ready_bytes(ref):\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    channel = erlang.ByteChannel(ref)\n"
+        "    before = set(loop._timers)\n"
+        "    receiver = asyncio.create_task(channel.async_receive_bytes())\n"
+        "    await asyncio.sleep(0)\n"
+        "    callbacks = set(loop._timers) - before\n"
+        "    assert len(callbacks) == 1\n"
+        "    ready = loop._timers[callbacks.pop()]\n"
+        "    erlang.call('byte_channel_regression_send')\n"
+        "    ready._run()\n"
+        "    receiver.cancel()\n"
+        "    try:\n"
+        "        await receiver\n"
+        "    except asyncio.CancelledError:\n"
+        "        pass\n"
+        "    return channel.try_receive_bytes()\n"
+        "def run_cancel_ready_bytes(ref):\n"
+        "    return erlang.run(cancel_ready_bytes(ref))\n"
+    >>),
     try
         {ok, <<"payload">>} = py:call(Ctx, '__main__', run_cancel_ready_bytes, [Ch])
     after
@@ -648,23 +661,24 @@ native_send_then_close_bytes_test(_Config) ->
         py_byte_channel:close(Ch)
     end),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import erlang
-async def send_then_close_bytes(ref):
-    channel = erlang.ByteChannel(ref)
-    receiver = asyncio.create_task(channel.async_receive_bytes())
-    await asyncio.sleep(0)
-    erlang.call('byte_channel_regression_send_close')
-    assert await asyncio.wait_for(receiver, 1) == b'last'
-    try:
-        await asyncio.wait_for(channel.async_receive_bytes(), 1)
-    except erlang.ByteChannelClosed:
-        return True
-    return False
-def run_send_then_close_bytes(ref):
-    return erlang.run(send_then_close_bytes(ref))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import erlang\n"
+        "async def send_then_close_bytes(ref):\n"
+        "    channel = erlang.ByteChannel(ref)\n"
+        "    receiver = asyncio.create_task(channel.async_receive_bytes())\n"
+        "    await asyncio.sleep(0)\n"
+        "    erlang.call('byte_channel_regression_send_close')\n"
+        "    assert await asyncio.wait_for(receiver, 1) == b'last'\n"
+        "    try:\n"
+        "        await asyncio.wait_for(channel.async_receive_bytes(), 1)\n"
+        "    except erlang.ByteChannelClosed:\n"
+        "        return True\n"
+        "    return False\n"
+        "def run_send_then_close_bytes(ref):\n"
+        "    return erlang.run(send_then_close_bytes(ref))\n"
+    >>),
     try
         {ok, true} = py:call(Ctx, '__main__', run_send_then_close_bytes, [Ch])
     after
@@ -678,28 +692,29 @@ native_wait_bytes_no_leak_test(_Config) ->
     Chunk = binary:copy(<<"x">>, 4096),
     [ok = py_byte_channel:send(Ch, Chunk) || _ <- lists:seq(1, 1000)],
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import gc
-import tracemalloc
-import erlang
-async def wait_drain_growth(ref, n):
-    capsule = asyncio.get_running_loop()._loop_capsule
-    tracemalloc.start()
-    try:
-        gc.collect()
-        before = tracemalloc.get_traced_memory()[0]
-        for i in range(n):
-            result = erlang._byte_channel_wait(ref, i + 1, capsule)
-            assert result[0] == 'ok' and len(result[1]) == 4096
-            del result
-        gc.collect()
-        return tracemalloc.get_traced_memory()[0] - before
-    finally:
-        tracemalloc.stop()
-def run_wait_drain_growth(ref, n):
-    return erlang.run(wait_drain_growth(ref, n))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import gc\n"
+        "import tracemalloc\n"
+        "import erlang\n"
+        "async def wait_drain_growth(ref, n):\n"
+        "    capsule = asyncio.get_running_loop()._loop_capsule\n"
+        "    tracemalloc.start()\n"
+        "    try:\n"
+        "        gc.collect()\n"
+        "        before = tracemalloc.get_traced_memory()[0]\n"
+        "        for i in range(n):\n"
+        "            result = erlang._byte_channel_wait(ref, i + 1, capsule)\n"
+        "            assert result[0] == 'ok' and len(result[1]) == 4096\n"
+        "            del result\n"
+        "        gc.collect()\n"
+        "        return tracemalloc.get_traced_memory()[0] - before\n"
+        "    finally:\n"
+        "        tracemalloc.stop()\n"
+        "def run_wait_drain_growth(ref, n):\n"
+        "    return erlang.run(wait_drain_growth(ref, n))\n"
+    >>),
     try
         {ok, Growth} = py:call(Ctx, '__main__', run_wait_drain_growth, [Ch, 1000]),
         ct:pal("traced growth after 1000 x 4 KB waits: ~p bytes", [Growth]),

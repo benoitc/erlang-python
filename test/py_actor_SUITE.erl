@@ -31,21 +31,22 @@ test_counter_actor(_Config) ->
     Ctx = py:context(),
 
     %% Initialize Counter class
-    ok = py:exec(Ctx, <<"
-class Counter:
-    def __init__(self):
-        self.value = 0
-    def increment(self):
-        self.value += 1
-        return self.value
-    def decrement(self):
-        self.value -= 1
-        return self.value
-    def get(self):
-        return self.value
-
-counter = Counter()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "class Counter:\n"
+        "    def __init__(self):\n"
+        "        self.value = 0\n"
+        "    def increment(self):\n"
+        "        self.value += 1\n"
+        "        return self.value\n"
+        "    def decrement(self):\n"
+        "        self.value -= 1\n"
+        "        return self.value\n"
+        "    def get(self):\n"
+        "        return self.value\n"
+        "\n"
+        "counter = Counter()\n"
+    >>),
 
     %% Test increment
     {ok, 1} = py:eval(Ctx, <<"counter.increment()">>),
@@ -99,10 +100,14 @@ test_reset_via_termination(_Config) ->
         ok = py:exec(Ctx, <<"reset_test = 42">>),
         {ok, 42} = py:eval(Ctx, <<"reset_test">>),
         Self ! {ready, self()},
-        receive stop -> ok end
+        receive
+            stop -> ok
+        end
     end),
 
-    receive {ready, Pid1} -> ok end,
+    receive
+        {ready, Pid1} -> ok
+    end,
 
     %% Stop the process
     Pid1 ! stop,

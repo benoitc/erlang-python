@@ -49,12 +49,20 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Ensure router is stopped before each test
-    try py_context_router:stop() catch _:_ -> ok end,
+    try
+        py_context_router:stop()
+    catch
+        _:_ -> ok
+    end,
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
     %% Clean up after each test
-    try py_context_router:stop() catch _:_ -> ok end,
+    try
+        py_context_router:stop()
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %% ============================================================================
@@ -69,9 +77,12 @@ test_start_stop(_Config) ->
     true = length(Contexts) > 0,
 
     %% All contexts should be alive
-    lists:foreach(fun(Ctx) ->
-        true = is_process_alive(Ctx)
-    end, Contexts),
+    lists:foreach(
+        fun(Ctx) ->
+            true = is_process_alive(Ctx)
+        end,
+        Contexts
+    ),
 
     %% num_contexts should match
     NumContexts = py_context_router:num_contexts(),
@@ -85,9 +96,12 @@ test_start_stop(_Config) ->
 
     %% Contexts should be dead after stop
     timer:sleep(100),
-    lists:foreach(fun(Ctx) ->
-        false = is_process_alive(Ctx)
-    end, Contexts),
+    lists:foreach(
+        fun(Ctx) ->
+            false = is_process_alive(Ctx)
+        end,
+        Contexts
+    ),
 
     %% num_contexts should be 0 after stop
     0 = py_context_router:num_contexts().
@@ -155,16 +169,22 @@ test_cross_scheduler_distribution(_Config) ->
     Parent = self(),
     NumProcs = 100,
 
-    Pids = [spawn(fun() ->
-        Ctx = py_context_router:get_context(),
-        Parent ! {self(), Ctx}
-    end) || _ <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn(fun() ->
+            Ctx = py_context_router:get_context(),
+            Parent ! {self(), Ctx}
+        end)
+     || _ <- lists:seq(1, NumProcs)
+    ],
 
-    Contexts = [receive
-        {Pid, Ctx} -> Ctx
-    after 5000 ->
-        ct:fail("Timeout waiting for context")
-    end || Pid <- Pids],
+    Contexts = [
+        receive
+            {Pid, Ctx} -> Ctx
+        after 5000 ->
+            ct:fail("Timeout waiting for context")
+        end
+     || Pid <- Pids
+    ],
 
     %% Should have used at least one context
     UniqueContexts = lists:usort(Contexts),
@@ -193,17 +213,20 @@ test_context_calls(_Config) ->
 
 %% @doc Test multiple start/stop cycles.
 test_multiple_start_stop(_Config) ->
-    lists:foreach(fun(_) ->
-        {ok, Contexts1} = py_context_router:start(#{contexts => 2}),
-        2 = length(Contexts1),
+    lists:foreach(
+        fun(_) ->
+            {ok, Contexts1} = py_context_router:start(#{contexts => 2}),
+            2 = length(Contexts1),
 
-        %% Make a call to verify it works
-        Ctx = py_context_router:get_context(),
-        {ok, 4.0} = py_context:call(Ctx, math, sqrt, [16], #{}),
+            %% Make a call to verify it works
+            Ctx = py_context_router:get_context(),
+            {ok, 4.0} = py_context:call(Ctx, math, sqrt, [16], #{}),
 
-        ok = py_context_router:stop(),
-        timer:sleep(50)
-    end, lists:seq(1, 3)).
+            ok = py_context_router:stop(),
+            timer:sleep(50)
+        end,
+        lists:seq(1, 3)
+    ).
 
 %% @doc Test with custom number of contexts.
 test_custom_num_contexts(_Config) ->

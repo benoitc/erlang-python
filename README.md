@@ -49,7 +49,7 @@ rebar3 compile
 
 To work on erlang_python itself (tests, CI matrix, FreeBSD VM, how to add
 a NIF, an `erlang.*` function, an option, a suite or a guide), see
-[docs/contributing.md](docs/contributing.md).
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quick Start
 

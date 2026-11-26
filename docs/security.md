@@ -190,6 +190,7 @@ Signal handling is also not supported in the Erlang event loop. The `ErlangEvent
 
 ## See Also
 
+- [Security policy](https://github.com/benoitc/erlang-python/blob/main/SECURITY.md) - What to report privately, and what is a bug
 - [Getting Started](getting-started.md) - Basic usage guide
 - [Asyncio](asyncio.md) - Erlang-native asyncio event loop
 - [Threading](threading.md) - Python threading support

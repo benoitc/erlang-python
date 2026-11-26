@@ -32,8 +32,11 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    NumContexts = application:get_env(erlang_python, num_contexts,
-                                       erlang:system_info(schedulers)),
+    NumContexts = application:get_env(
+        erlang_python,
+        num_contexts,
+        erlang:system_info(schedulers)
+    ),
     ContextMode = application:get_env(erlang_python, context_mode, worker),
 
     %% Per-context memory caps hook the obmalloc arena allocator, which has to
@@ -188,10 +191,20 @@ init([]) ->
         modules => [py_event_loop_pool]
     },
 
-    Children = [CallbackSpec, ShmSpec, ThreadHandlerSpec, LoggerSpec, TracerSpec,
-                ContextSupSpec, SessionSupSpec, ContextRouterInitSpec,
-                WorkerRegistrySpec, WorkerSupSpec, EventLoopSpec,
-                EventLoopPoolSpec],
+    Children = [
+        CallbackSpec,
+        ShmSpec,
+        ThreadHandlerSpec,
+        LoggerSpec,
+        TracerSpec,
+        ContextSupSpec,
+        SessionSupSpec,
+        ContextRouterInitSpec,
+        WorkerRegistrySpec,
+        WorkerSupSpec,
+        EventLoopSpec,
+        EventLoopPoolSpec
+    ],
 
     {ok, {
         #{strategy => one_for_all, intensity => 5, period => 10},

@@ -81,7 +81,6 @@
 %% Used by py_context_embedded
 -export([register_nif_ref/1, unregister_nif_ref/0]).
 
-
 %% Maps context pid -> NIF context reference. Read by interrupt/1, which must
 %% reach the NIF reference while the context process is blocked in a NIF and
 %% therefore cannot answer get_nif_ref/1.
@@ -98,9 +97,6 @@
 -type context() :: pid().
 
 -export_type([context_mode/0, context/0]).
-
-
-
 
 %% ============================================================================
 %% API
@@ -223,8 +219,14 @@ call(Ctx, Module, Func, Args, Kwargs) ->
     call(Ctx, Module, Func, Args, Kwargs, infinity).
 
 %% @doc Call a Python function with timeout.
--spec call(context(), atom() | binary(), atom() | binary(), list(), map(),
-           timeout()) -> {ok, term()} | {error, term()}.
+-spec call(
+    context(),
+    atom() | binary(),
+    atom() | binary(),
+    list(),
+    map(),
+    timeout()
+) -> {ok, term()} | {error, term()}.
 call(Ctx, Module, Func, Args, Kwargs, Timeout) when is_pid(Ctx) ->
     MRef = erlang:monitor(process, Ctx),
     ModuleBin = to_binary(Module),
@@ -242,8 +244,15 @@ call(Ctx, Module, Func, Args, Kwargs, Timeout) when is_pid(Ctx) ->
 %% @param Timeout Timeout in milliseconds
 %% @param EnvRef Process-local environment reference
 %% @returns {ok, Result} | {error, Reason}
--spec call(context(), atom() | binary(), atom() | binary(), list(), map(),
-           timeout(), reference()) -> {ok, term()} | {error, term()}.
+-spec call(
+    context(),
+    atom() | binary(),
+    atom() | binary(),
+    list(),
+    map(),
+    timeout(),
+    reference()
+) -> {ok, term()} | {error, term()}.
 call(Ctx, Module, Func, Args, Kwargs, Timeout, EnvRef) when is_pid(Ctx), is_reference(EnvRef) ->
     MRef = erlang:monitor(process, Ctx),
     ModuleBin = to_binary(Module),
@@ -611,8 +620,17 @@ submit_embedded(Ctx, Module, Func, Args, Kwargs) ->
     case loop_ref(Ctx) of
         {ok, LoopRef} ->
             TaskRef = make_ref(),
-            case py_nif:submit_task(LoopRef, self(), TaskRef,
-                                    to_binary(Module), to_binary(Func), Args, Kwargs) of
+            case
+                py_nif:submit_task(
+                    LoopRef,
+                    self(),
+                    TaskRef,
+                    to_binary(Module),
+                    to_binary(Func),
+                    Args,
+                    Kwargs
+                )
+            of
                 ok -> {ok, TaskRef};
                 {error, _} = Error -> Error
             end;
@@ -631,8 +649,14 @@ submit_await(Ctx, Module, Func, Args) ->
 submit_await(Ctx, Module, Func, Args, Kwargs) ->
     submit_await(Ctx, Module, Func, Args, Kwargs, 5000).
 
--spec submit_await(context(), atom() | binary(), atom() | binary(), list(), map(),
-                   timeout()) -> {ok, term()} | {error, term()}.
+-spec submit_await(
+    context(),
+    atom() | binary(),
+    atom() | binary(),
+    list(),
+    map(),
+    timeout()
+) -> {ok, term()} | {error, term()}.
 submit_await(Ctx, Module, Func, Args, Kwargs, Timeout) ->
     case submit(Ctx, Module, Func, Args, Kwargs) of
         {ok, TaskRef} -> py_event_loop:await(TaskRef, Timeout);
@@ -697,7 +721,8 @@ register_nif_ref(Ref) ->
         true = ets:insert(?REF_TAB, {self(), Ref}),
         ok
     catch
-        error:badarg -> ok  %% table not created (library used without the app)
+        %% table not created (library used without the app)
+        error:badarg -> ok
     end.
 
 %% @private

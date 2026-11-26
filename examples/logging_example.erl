@@ -35,17 +35,18 @@ logging_demo() ->
 
     %% Log messages from Python
     io:format("Sending log messages from Python:~n"),
-    ok = py:exec(<<"
-import logging
-
-# Create a custom logger
-logger = logging.getLogger('myapp')
-
-logger.debug('Debug: detailed diagnostic info')
-logger.info('Info: normal operation message')
-logger.warning('Warning: something unexpected')
-logger.error('Error: something failed')
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import logging\n"
+        "\n"
+        "# Create a custom logger\n"
+        "logger = logging.getLogger('myapp')\n"
+        "\n"
+        "logger.debug('Debug: detailed diagnostic info')\n"
+        "logger.info('Info: normal operation message')\n"
+        "logger.warning('Warning: something unexpected')\n"
+        "logger.error('Error: something failed')\n"
+    >>),
 
     %% Give async messages time to be delivered
     timer:sleep(100),
@@ -61,80 +62,85 @@ tracing_demo() ->
 
     %% Create some traced operations
     io:format("Running traced Python code...~n~n"),
-    ok = py:exec(<<"
-import erlang
-import time
-
-# Basic span
-with erlang.Span('process-order', order_id=12345):
-    time.sleep(0.001)  # Simulate work
-
-# Nested spans
-with erlang.Span('handle-request', endpoint='/api/users'):
-    with erlang.Span('validate-input'):
-        time.sleep(0.0005)
-    with erlang.Span('query-database', table='users'):
-        time.sleep(0.001)
-    with erlang.Span('format-response'):
-        time.sleep(0.0002)
-
-# Span with events
-with erlang.Span('batch-process') as span:
-    span.event('started', batch_size=100)
-    time.sleep(0.0005)
-    span.event('progress', completed=50, remaining=50)
-    time.sleep(0.0005)
-    span.event('finished', total_processed=100)
-
-# Traced function using decorator
-@erlang.trace()
-def calculate_something():
-    time.sleep(0.0002)
-    return 42
-
-result = calculate_something()
-
-# Span with error
-try:
-    with erlang.Span('risky-operation'):
-        raise ValueError('Something went wrong!')
-except ValueError:
-    pass
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "import time\n"
+        "\n"
+        "# Basic span\n"
+        "with erlang.Span('process-order', order_id=12345):\n"
+        "    time.sleep(0.001)  # Simulate work\n"
+        "\n"
+        "# Nested spans\n"
+        "with erlang.Span('handle-request', endpoint='/api/users'):\n"
+        "    with erlang.Span('validate-input'):\n"
+        "        time.sleep(0.0005)\n"
+        "    with erlang.Span('query-database', table='users'):\n"
+        "        time.sleep(0.001)\n"
+        "    with erlang.Span('format-response'):\n"
+        "        time.sleep(0.0002)\n"
+        "\n"
+        "# Span with events\n"
+        "with erlang.Span('batch-process') as span:\n"
+        "    span.event('started', batch_size=100)\n"
+        "    time.sleep(0.0005)\n"
+        "    span.event('progress', completed=50, remaining=50)\n"
+        "    time.sleep(0.0005)\n"
+        "    span.event('finished', total_processed=100)\n"
+        "\n"
+        "# Traced function using decorator\n"
+        "@erlang.trace()\n"
+        "def calculate_something():\n"
+        "    time.sleep(0.0002)\n"
+        "    return 42\n"
+        "\n"
+        "result = calculate_something()\n"
+        "\n"
+        "# Span with error\n"
+        "try:\n"
+        "    with erlang.Span('risky-operation'):\n"
+        "        raise ValueError('Something went wrong!')\n"
+        "except ValueError:\n"
+        "    pass\n"
+    >>),
 
     %% Retrieve and display spans
     {ok, Spans} = py:get_traces(),
     io:format("Collected ~p spans:~n~n", [length(Spans)]),
 
-    lists:foreach(fun(Span) ->
-        Name = maps:get(name, Span),
-        Status = maps:get(status, Span),
-        Duration = maps:get(duration_us, Span),
-        ParentId = maps:get(parent_id, Span),
-        Events = maps:get(events, Span, []),
-        Attrs = maps:get(attributes, Span),
+    lists:foreach(
+        fun(Span) ->
+            Name = maps:get(name, Span),
+            Status = maps:get(status, Span),
+            Duration = maps:get(duration_us, Span),
+            ParentId = maps:get(parent_id, Span),
+            Events = maps:get(events, Span, []),
+            Attrs = maps:get(attributes, Span),
 
-        ParentStr = case ParentId of
-            undefined -> "none";
-            _ -> integer_to_list(ParentId rem 10000) ++ "..."
+            ParentStr =
+                case ParentId of
+                    undefined -> "none";
+                    _ -> integer_to_list(ParentId rem 10000) ++ "..."
+                end,
+
+            io:format("  ~s~n", [Name]),
+            io:format("    Status: ~p, Duration: ~p us~n", [Status, Duration]),
+            io:format("    Parent: ~s~n", [ParentStr]),
+
+            case maps:size(Attrs) of
+                0 -> ok;
+                _ -> io:format("    Attributes: ~p~n", [Attrs])
+            end,
+
+            case length(Events) of
+                0 -> ok;
+                N -> io:format("    Events: ~p~n", [N])
+            end,
+
+            io:format("~n")
         end,
-
-        io:format("  ~s~n", [Name]),
-        io:format("    Status: ~p, Duration: ~p us~n", [Status, Duration]),
-        io:format("    Parent: ~s~n", [ParentStr]),
-
-        case maps:size(Attrs) of
-            0 -> ok;
-            _ -> io:format("    Attributes: ~p~n", [Attrs])
-        end,
-
-        case length(Events) of
-            0 -> ok;
-            N -> io:format("    Events: ~p~n", [N])
-        end,
-
-        io:format("~n")
-    end, Spans),
+        Spans
+    ),
 
     %% Clean up
     ok = py:clear_traces(),

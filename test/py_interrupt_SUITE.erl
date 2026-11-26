@@ -129,14 +129,16 @@ test_interrupt_idle_context(Config) ->
 %% around the hot loop does not swallow the interrupt.
 test_base_exception_not_swallowed(Config) ->
     Ctx = ?config(ctx, Config),
-    Code = <<"
-def _guarded():
-    while True:
-        try:
-            pass
-        except Exception:
-            pass
-_guarded()">>,
+    Code = <<
+        "\n"
+        "def _guarded():\n"
+        "    while True:\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "_guarded()"
+    >>,
     {error, timeout} = py_context:eval(Ctx, <<"exec('''", Code/binary, "''')">>, #{}, 500),
     {ok, 4} = py_context:eval(Ctx, <<"2+2">>, #{}, 5000),
     ok.
@@ -155,14 +157,18 @@ test_no_stale_reply_in_mailbox(Config) ->
 %% to the next request on the same context.
 test_interrupt_does_not_leak_to_next_request(Config) ->
     Ctx = ?config(ctx, Config),
-    Bad = lists:foldl(fun(_, Acc) ->
-        %% Very short timeout so the interrupt races request completion
-        _ = py_context:eval(Ctx, ?BUSY, #{}, 20),
-        case py_context:eval(Ctx, <<"1+1">>, #{}, 5000) of
-            {ok, 2} -> Acc;
-            Other -> [Other | Acc]
-        end
-    end, [], lists:seq(1, 50)),
+    Bad = lists:foldl(
+        fun(_, Acc) ->
+            %% Very short timeout so the interrupt races request completion
+            _ = py_context:eval(Ctx, ?BUSY, #{}, 20),
+            case py_context:eval(Ctx, <<"1+1">>, #{}, 5000) of
+                {ok, 2} -> Acc;
+                Other -> [Other | Acc]
+            end
+        end,
+        [],
+        lists:seq(1, 50)
+    ),
     [] = Bad,
     ok.
 
@@ -172,12 +178,13 @@ test_interrupt_does_not_leak_to_next_request(Config) ->
 test_interrupt_during_callback(Config) ->
     Ctx = ?config(ctx, Config),
     ok = py:register_function(<<"interrupt_test_echo">>, fun([X]) -> X end),
-    Code = <<"
-import erlang
-_n = 0
-while True:
-    _n = erlang.call('interrupt_test_echo', _n) + 1
-">>,
+    Code = <<
+        "\n"
+        "import erlang\n"
+        "_n = 0\n"
+        "while True:\n"
+        "    _n = erlang.call('interrupt_test_echo', _n) + 1\n"
+    >>,
     {error, timeout} = py_context:eval(Ctx, <<"exec('''", Code/binary, "''')">>, #{}, 500),
     {ok, 4} = py_context:eval(Ctx, <<"2+2">>, #{}, 10000),
     py:unregister_function(<<"interrupt_test_echo">>),
@@ -189,7 +196,8 @@ while True:
 test_blocking_c_call_recovers(Config) ->
     Ctx = ?config(ctx, Config),
     {error, timeout} = py_context:eval(
-        Ctx, <<"__import__('time').sleep(2) or 1">>, #{}, 200),
+        Ctx, <<"__import__('time').sleep(2) or 1">>, #{}, 200
+    ),
     %% Once the sleep finishes the context accepts work again
     {ok, 4} = py_context:eval(Ctx, <<"2+2">>, #{}, 10000),
     ok.
@@ -199,6 +207,7 @@ test_blocking_c_call_recovers(Config) ->
 %%% ============================================================================
 
 flush() ->
-    receive _ -> flush()
+    receive
+        _ -> flush()
     after 0 -> ok
     end.

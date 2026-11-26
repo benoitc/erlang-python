@@ -56,15 +56,17 @@
 %%% </ul>
 -module(py_session).
 
--export([template/1,
-         stop_template/1,
-         new/1,
-         new/2,
-         close/1,
-         run/4,
-         run/5,
-         refresh/1,
-         info/1]).
+-export([
+    template/1,
+    stop_template/1,
+    new/1,
+    new/2,
+    close/1,
+    run/4,
+    run/5,
+    refresh/1,
+    info/1
+]).
 
 -type template() :: pid().
 -type session() :: pid().
@@ -109,8 +111,12 @@ new(T, Opts) ->
         {reimport, Ctx, Passthrough} ->
             %% A session over several calls: its own module dictionary in
             %% that context, behind a process that answers like a context
-            py_reimport_session:start_link(T, Ctx, Passthrough,
-                                           py_session_template:mode(T));
+            py_reimport_session:start_link(
+                T,
+                Ctx,
+                Passthrough,
+                py_session_template:mode(T)
+            );
         {error, _} = Err ->
             Err
     end.
@@ -133,10 +139,20 @@ run(T, Module, Func, Args) ->
 run(T, Module, Func, Args, Opts) ->
     case py_session_template:checkout(T, maps:get(timeout, Opts, 15000)) of
         {reimport, Ctx, Passthrough} ->
-            py_context:call(Ctx, '_erlang_impl._reimport', run,
-                            [Passthrough, py_child:to_bin(Module), py_child:to_bin(Func),
-                             Args, maps:get(kwargs, Opts, #{})],
-                            #{}, maps:get(timeout, Opts, infinity));
+            py_context:call(
+                Ctx,
+                '_erlang_impl._reimport',
+                run,
+                [
+                    Passthrough,
+                    py_child:to_bin(Module),
+                    py_child:to_bin(Func),
+                    Args,
+                    maps:get(kwargs, Opts, #{})
+                ],
+                #{},
+                maps:get(timeout, Opts, infinity)
+            );
         {ok, Ctx} ->
             %% taken from the warm pool, handed over as new/2 does
             run_in(T, Ctx, Module, Func, Args, Opts);
@@ -151,8 +167,14 @@ run_in(T, Ctx, Module, Func, Args, Opts) ->
         {MRef, ok} ->
             erlang:demonitor(MRef, [flush]),
             try
-                py_context:call(Ctx, Module, Func, Args, maps:get(kwargs, Opts, #{}),
-                                maps:get(timeout, Opts, infinity))
+                py_context:call(
+                    Ctx,
+                    Module,
+                    Func,
+                    Args,
+                    maps:get(kwargs, Opts, #{}),
+                    maps:get(timeout, Opts, infinity)
+                )
             after
                 close(Ctx)
             end;
@@ -164,8 +186,14 @@ run_new(T, Module, Func, Args, Opts) ->
     case new(T, Opts) of
         {ok, S} ->
             try
-                py_context:call(S, Module, Func, Args, maps:get(kwargs, Opts, #{}),
-                                maps:get(timeout, Opts, infinity))
+                py_context:call(
+                    S,
+                    Module,
+                    Func,
+                    Args,
+                    maps:get(kwargs, Opts, #{}),
+                    maps:get(timeout, Opts, infinity)
+                )
             after
                 close(S)
             end;

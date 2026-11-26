@@ -53,45 +53,46 @@
     close_drain_create_task_async_test/1
 ]).
 
-all() -> [
-    create_channel_test,
-    create_channel_with_max_size_test,
-    send_receive_test,
-    send_receive_multiple_test,
-    try_receive_empty_test,
-    close_channel_test,
-    channel_info_test,
-    backpressure_test,
-    send_to_closed_test,
-    python_receive_test,
-    python_try_receive_test,
-    python_iterate_test,
-    async_receive_immediate_test,
-    native_none_payload_test,
-    native_cancel_ready_test,
-    native_send_then_close_test,
-    fallback_none_payload_test,
-    async_receive_wait_test,
-    async_iteration_test,
-    async_closed_channel_test,
-    channel_ref_roundtrip_test,
-    channel_ref_call_test,
-    %% Sync blocking receive tests
-    sync_receive_immediate_test,
-    sync_receive_wait_test,
-    sync_receive_closed_test,
-    sync_receive_multiple_waiters_test,
-    %% Mixed waiter rejection tests
-    mixed_waiter_sync_blocks_async_test,
-    mixed_waiter_async_blocks_sync_test,
-    %% Async receive with actual waiting
-    async_receive_wait_e2e_test,
-    %% Close and drain tests
-    close_drain_erlang_test,
-    close_drain_python_sync_test,
-    close_drain_python_async_test,
-    close_drain_create_task_async_test
-].
+all() ->
+    [
+        create_channel_test,
+        create_channel_with_max_size_test,
+        send_receive_test,
+        send_receive_multiple_test,
+        try_receive_empty_test,
+        close_channel_test,
+        channel_info_test,
+        backpressure_test,
+        send_to_closed_test,
+        python_receive_test,
+        python_try_receive_test,
+        python_iterate_test,
+        async_receive_immediate_test,
+        native_none_payload_test,
+        native_cancel_ready_test,
+        native_send_then_close_test,
+        fallback_none_payload_test,
+        async_receive_wait_test,
+        async_iteration_test,
+        async_closed_channel_test,
+        channel_ref_roundtrip_test,
+        channel_ref_call_test,
+        %% Sync blocking receive tests
+        sync_receive_immediate_test,
+        sync_receive_wait_test,
+        sync_receive_closed_test,
+        sync_receive_multiple_waiters_test,
+        %% Mixed waiter rejection tests
+        mixed_waiter_sync_blocks_async_test,
+        mixed_waiter_async_blocks_sync_test,
+        %% Async receive with actual waiting
+        async_receive_wait_e2e_test,
+        %% Close and drain tests
+        close_drain_erlang_test,
+        close_drain_python_sync_test,
+        close_drain_python_async_test,
+        close_drain_create_task_async_test
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -114,20 +115,21 @@ native_none_payload_test(_Config) ->
         py_channel:send(Ch, none)
     end),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import erlang
-async def receive_none(ref):
-    value = await asyncio.wait_for(erlang.Channel(ref).async_receive(), 0.2)
-    assert value is None
-    receiver = asyncio.create_task(erlang.Channel(ref).async_receive())
-    await asyncio.sleep(0)
-    erlang.call('channel_regression_none')
-    assert await asyncio.wait_for(receiver, 0.2) is None
-    return True
-def run_receive_none(ref):
-    return erlang.run(receive_none(ref))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import erlang\n"
+        "async def receive_none(ref):\n"
+        "    value = await asyncio.wait_for(erlang.Channel(ref).async_receive(), 0.2)\n"
+        "    assert value is None\n"
+        "    receiver = asyncio.create_task(erlang.Channel(ref).async_receive())\n"
+        "    await asyncio.sleep(0)\n"
+        "    erlang.call('channel_regression_none')\n"
+        "    assert await asyncio.wait_for(receiver, 0.2) is None\n"
+        "    return True\n"
+        "def run_receive_none(ref):\n"
+        "    return erlang.run(receive_none(ref))\n"
+    >>),
     try
         {ok, true} = py:call(Ctx, '__main__', run_receive_none, [Ch])
     after
@@ -141,30 +143,31 @@ native_cancel_ready_test(_Config) ->
         py_channel:send(Ch, 42)
     end),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import erlang
-async def cancel_ready(ref):
-    loop = asyncio.get_running_loop()
-    channel = erlang.Channel(ref)
-    before = set(loop._timers)
-    receiver = asyncio.create_task(channel.async_receive())
-    await asyncio.sleep(0)
-    callbacks = set(loop._timers) - before
-    assert len(callbacks) == 1
-    ready = loop._timers[callbacks.pop()]
-    erlang.call('channel_regression_send')
-    ready._run()
-    receiver.cancel()
-    try:
-        await receiver
-    except asyncio.CancelledError:
-        pass
-    assert channel.try_receive() == 42
-    return True
-def run_cancel_ready(ref):
-    return erlang.run(cancel_ready(ref))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import erlang\n"
+        "async def cancel_ready(ref):\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    channel = erlang.Channel(ref)\n"
+        "    before = set(loop._timers)\n"
+        "    receiver = asyncio.create_task(channel.async_receive())\n"
+        "    await asyncio.sleep(0)\n"
+        "    callbacks = set(loop._timers) - before\n"
+        "    assert len(callbacks) == 1\n"
+        "    ready = loop._timers[callbacks.pop()]\n"
+        "    erlang.call('channel_regression_send')\n"
+        "    ready._run()\n"
+        "    receiver.cancel()\n"
+        "    try:\n"
+        "        await receiver\n"
+        "    except asyncio.CancelledError:\n"
+        "        pass\n"
+        "    assert channel.try_receive() == 42\n"
+        "    return True\n"
+        "def run_cancel_ready(ref):\n"
+        "    return erlang.run(cancel_ready(ref))\n"
+    >>),
     try
         {ok, true} = py:call(Ctx, '__main__', run_cancel_ready, [Ch])
     after
@@ -181,23 +184,24 @@ native_send_then_close_test(_Config) ->
         py_channel:close(Ch)
     end),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import erlang
-async def send_then_close(ref):
-    channel = erlang.Channel(ref)
-    receiver = asyncio.create_task(channel.async_receive())
-    await asyncio.sleep(0)
-    erlang.call('channel_regression_send_close')
-    assert await asyncio.wait_for(receiver, 1) == 42
-    try:
-        await asyncio.wait_for(channel.async_receive(), 1)
-    except erlang.ChannelClosed:
-        return True
-    return False
-def run_send_then_close(ref):
-    return erlang.run(send_then_close(ref))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import erlang\n"
+        "async def send_then_close(ref):\n"
+        "    channel = erlang.Channel(ref)\n"
+        "    receiver = asyncio.create_task(channel.async_receive())\n"
+        "    await asyncio.sleep(0)\n"
+        "    erlang.call('channel_regression_send_close')\n"
+        "    assert await asyncio.wait_for(receiver, 1) == 42\n"
+        "    try:\n"
+        "        await asyncio.wait_for(channel.async_receive(), 1)\n"
+        "    except erlang.ChannelClosed:\n"
+        "        return True\n"
+        "    return False\n"
+        "def run_send_then_close(ref):\n"
+        "    return erlang.run(send_then_close(ref))\n"
+    >>),
     try
         {ok, true} = py:call(Ctx, '__main__', run_send_then_close, [Ch])
     after
@@ -211,19 +215,20 @@ fallback_none_payload_test(_Config) ->
     ok = py_channel:send(Ch, none),
     ok = py_channel:send(Ch, second),
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-import erlang
-def fallback_receive_two(ref):
-    channel = erlang.Channel(ref)
-    loop = asyncio.SelectorEventLoop()
-    try:
-        first = loop.run_until_complete(asyncio.wait_for(channel.async_receive(), 1))
-        second = loop.run_until_complete(asyncio.wait_for(channel.async_receive(), 1))
-        return [first, second]
-    finally:
-        loop.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "import erlang\n"
+        "def fallback_receive_two(ref):\n"
+        "    channel = erlang.Channel(ref)\n"
+        "    loop = asyncio.SelectorEventLoop()\n"
+        "    try:\n"
+        "        first = loop.run_until_complete(asyncio.wait_for(channel.async_receive(), 1))\n"
+        "        second = loop.run_until_complete(asyncio.wait_for(channel.async_receive(), 1))\n"
+        "        return [first, second]\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
     try
         {ok, [none, <<"second">>]} = py:call(Ctx, '__main__', fallback_receive_two, [Ch])
     after
@@ -384,24 +389,25 @@ async_receive_immediate_test(_Config) ->
 
     %% Run async receive via Python - data should return immediately
     Ctx = py:context(1),
-    _Code = <<"
-import asyncio
-from erlang import Channel
-
-async def test_immediate(ch_ref):
-    ch = Channel(ch_ref)
-    result = await ch.async_receive()
-    return result
-
-# Run the async function
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-try:
-    result = loop.run_until_complete(test_immediate(channel_ref))
-finally:
-    loop.close()
-result
-">>,
+    _Code = <<
+        "\n"
+        "import asyncio\n"
+        "from erlang import Channel\n"
+        "\n"
+        "async def test_immediate(ch_ref):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    result = await ch.async_receive()\n"
+        "    return result\n"
+        "\n"
+        "# Run the async function\n"
+        "loop = asyncio.new_event_loop()\n"
+        "asyncio.set_event_loop(loop)\n"
+        "try:\n"
+        "    result = loop.run_until_complete(test_immediate(channel_ref))\n"
+        "finally:\n"
+        "    loop.close()\n"
+        "result\n"
+    >>,
     %% Set channel ref as a variable
     ok = py:exec(Ctx, <<"channel_ref = None">>),
     %% For now, test that the async methods exist
@@ -624,7 +630,10 @@ mixed_waiter_sync_blocks_async_test(_Config) ->
 
     %% Clean up: send data to clear sync waiter
     ok = py_channel:send(Ch, <<"data">>),
-    receive channel_data_ready -> ok after 100 -> ok end,
+    receive
+        channel_data_ready -> ok
+    after 100 -> ok
+    end,
 
     py_nif:event_loop_destroy(Loop),
     ok = py_channel:close(Ch).
@@ -661,19 +670,23 @@ async_receive_wait_e2e_test(_Config) ->
     ok = py:exec(Ctx, <<"channel_ref = None">>),
 
     %% Define async function that receives from channel
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import Channel
-
-async def receive_from_channel(ch_ref):
-    ch = Channel(ch_ref)
-    data = await ch.async_receive()
-    return data
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import Channel\n"
+        "\n"
+        "async def receive_from_channel(ch_ref):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    data = await ch.async_receive()\n"
+        "    return data\n"
+    >>),
 
     %% Run the async receive - data is already there
-    {ok, <<"async_data">>} = py:eval(Ctx, <<"erlang.run(receive_from_channel(ch))">>,
-                                      #{<<"ch">> => Ch}),
+    {ok, <<"async_data">>} = py:eval(
+        Ctx,
+        <<"erlang.run(receive_from_channel(ch))">>,
+        #{<<"ch">> => Ch}
+    ),
     ct:pal("Async receive successfully received data via erlang.run()"),
 
     ok = py_channel:close(Ch).
@@ -723,17 +736,18 @@ close_drain_python_sync_test(_Config) ->
 
     %% Python should be able to drain all messages via iteration
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-from erlang import Channel, ChannelClosed
-
-def drain_channel(ch_ref):
-    '''Drain all messages from channel, return as list.'''
-    ch = Channel(ch_ref)
-    messages = []
-    for msg in ch:
-        messages.append(msg)
-    return messages
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "from erlang import Channel, ChannelClosed\n"
+        "\n"
+        "def drain_channel(ch_ref):\n"
+        "    '''Drain all messages from channel, return as list.'''\n"
+        "    ch = Channel(ch_ref)\n"
+        "    messages = []\n"
+        "    for msg in ch:\n"
+        "        messages.append(msg)\n"
+        "    return messages\n"
+    >>),
 
     {ok, [<<"first">>, <<"second">>, <<"third">>]} =
         py:eval(Ctx, <<"drain_channel(ch)">>, #{<<"ch">> => Ch}),
@@ -754,18 +768,19 @@ close_drain_python_async_test(_Config) ->
 
     %% Python should be able to drain all messages via async iteration
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import Channel, ChannelClosed
-
-async def async_drain_channel(ch_ref):
-    '''Async drain all messages from channel, return as list.'''
-    ch = Channel(ch_ref)
-    messages = []
-    async for msg in ch:
-        messages.append(msg)
-    return messages
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import Channel, ChannelClosed\n"
+        "\n"
+        "async def async_drain_channel(ch_ref):\n"
+        "    '''Async drain all messages from channel, return as list.'''\n"
+        "    ch = Channel(ch_ref)\n"
+        "    messages = []\n"
+        "    async for msg in ch:\n"
+        "        messages.append(msg)\n"
+        "    return messages\n"
+    >>),
 
     {ok, [<<"alpha">>, <<"beta">>, <<"gamma">>]} =
         py:eval(Ctx, <<"erlang.run(async_drain_channel(ch))">>, #{<<"ch">> => Ch}),
@@ -779,26 +794,28 @@ close_drain_create_task_async_test(_Config) ->
 
     %% Define the async drain task
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import erlang
-from erlang import Channel
-
-async def drain_task(ch_ref, reply_pid):
-    '''Task that drains channel and sends results back.'''
-    try:
-        ch = Channel(ch_ref)
-        messages = []
-        async for msg in ch:
-            messages.append(msg)
-        erlang.send(reply_pid, ('result', messages))
-    except Exception as e:
-        erlang.send(reply_pid, ('error', str(e)))
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "from erlang import Channel\n"
+        "\n"
+        "async def drain_task(ch_ref, reply_pid):\n"
+        "    '''Task that drains channel and sends results back.'''\n"
+        "    try:\n"
+        "        ch = Channel(ch_ref)\n"
+        "        messages = []\n"
+        "        async for msg in ch:\n"
+        "            messages.append(msg)\n"
+        "        erlang.send(reply_pid, ('result', messages))\n"
+        "    except Exception as e:\n"
+        "        erlang.send(reply_pid, ('error', str(e)))\n"
+    >>),
 
     %% Create the task BEFORE sending any data
     %% This forces the task to register a waiter and wait for notifications
     TaskRef = py_event_loop:create_task(
-        "__main__", "drain_task", [Ch, self()]),
+        "__main__", "drain_task", [Ch, self()]
+    ),
 
     %% Give the task time to start and register waiter
     timer:sleep(100),
@@ -828,6 +845,5 @@ async def drain_task(ch_ref, reply_pid):
     %% Wait for task to complete
     case py_event_loop:await(TaskRef, 5000) of
         {ok, _} -> ok;
-        {error, AwaitErr} ->
-            ct:pal("Await error: ~p", [AwaitErr])
+        {error, AwaitErr} -> ct:pal("Await error: ~p", [AwaitErr])
     end.

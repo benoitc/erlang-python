@@ -22,13 +22,17 @@ main(_) ->
 
     %% Stream tokens using inline generator
     io:format("Streaming tokens: "),
-    {ok, Tokens} = py:stream_eval(<<"(word + ' ' for word in 'Hello world from Python generator'.split())">>),
+    {ok, Tokens} = py:stream_eval(
+        <<"(word + ' ' for word in 'Hello world from Python generator'.split())">>
+    ),
     lists:foreach(fun(T) -> io:format("~s", [T]) end, Tokens),
     io:format("~n~n"),
 
     %% Fibonacci sequence using inline generator with walrus operator
     io:format("Fibonacci(10): "),
-    {ok, Fibs} = py:stream_eval(<<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>),
+    {ok, Fibs} = py:stream_eval(
+        <<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>
+    ),
     io:format("~p~n~n", [Fibs]),
 
     %% Custom range using builtin iter

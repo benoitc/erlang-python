@@ -26,11 +26,12 @@ start() ->
     {ok, _} = application:ensure_all_started(erlang_python),
 
     %% Load our Python demo module
-    {ok, _} = py:exec(<<"
-import sys
-sys.path.insert(0, 'examples')
-import reentrant_demo
-">>),
+    {ok, _} = py:exec(<<
+        "\n"
+        "import sys\n"
+        "sys.path.insert(0, 'examples')\n"
+        "import reentrant_demo\n"
+    >>),
 
     %% Register Erlang functions that Python can call
     register_callbacks(),
@@ -111,14 +112,20 @@ register_callbacks() ->
     %% Processor handler
     py:register_function(processor_handle, fun([Name, Value]) ->
         %% Call back to the processor's compute method
-        {ok, Result} = py:eval(iolist_to_binary(io_lib:format(
-            "reentrant_demo.DataProcessor('~s').compute(~p, 100)", [Name, Value]))),
+        {ok, Result} = py:eval(
+            iolist_to_binary(
+                io_lib:format(
+                    "reentrant_demo.DataProcessor('~s').compute(~p, 100)", [Name, Value]
+                )
+            )
+        ),
         Result
     end),
 
     %% Factor lookup for processor
     py:register_function(get_factor, fun([_Name]) ->
-        2  % Simple factor
+        % Simple factor
+        2
     end),
 
     ok.
@@ -137,7 +144,12 @@ demo_basic() ->
 
     io:format("Flow: Python -> Erlang -> Python -> Erlang (result)~n"),
     io:format("Result: ~p (expected: 21)~n", [Result]),
-    io:format("Test ~s~n", [if Result == 21 -> "PASSED"; true -> "FAILED" end]),
+    io:format("Test ~s~n", [
+        if
+            Result == 21 -> "PASSED";
+            true -> "FAILED"
+        end
+    ]),
     Result.
 
 %% @doc Demonstrate Fibonacci with reentrant memoization.
@@ -155,7 +167,12 @@ demo_fibonacci() ->
     {ok, Fib15} = py:call(reentrant_demo, fibonacci, [15]),
     io:format("fibonacci(15) = ~p (expected: 610)~n", [Fib15]),
 
-    io:format("Test ~s~n", [if Fib10 == 55, Fib15 == 610 -> "PASSED"; true -> "FAILED" end]),
+    io:format("Test ~s~n", [
+        if
+            Fib10 == 55, Fib15 == 610 -> "PASSED";
+            true -> "FAILED"
+        end
+    ]),
     {Fib10, Fib15}.
 
 %% @doc Demonstrate deeply nested callbacks.
@@ -171,7 +188,12 @@ demo_nested() ->
     {ok, Result10} = py:call(reentrant_demo, nested_compute, [0, 10]),
     io:format("nested_compute(0, 10) = ~p (expected: 10)~n", [Result10]),
 
-    io:format("Test ~s~n", [if Result5 == 5, Result10 == 10 -> "PASSED"; true -> "FAILED" end]),
+    io:format("Test ~s~n", [
+        if
+            Result5 == 5, Result10 == 10 -> "PASSED";
+            true -> "FAILED"
+        end
+    ]),
     {Result5, Result10}.
 
 %% @doc Demonstrate OOP-style reentrant callbacks.
@@ -187,7 +209,12 @@ demo_processor() ->
     io:format("Expected: processor='test', result=(42+100)*2=284~n"),
 
     #{<<"result">> := ComputeResult} = Result,
-    io:format("Test ~s~n", [if ComputeResult == 284 -> "PASSED"; true -> "FAILED" end]),
+    io:format("Test ~s~n", [
+        if
+            ComputeResult == 284 -> "PASSED";
+            true -> "FAILED"
+        end
+    ]),
     Result.
 
 %% @doc Run all demos.

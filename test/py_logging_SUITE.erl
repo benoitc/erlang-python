@@ -88,13 +88,14 @@ test_log_levels(_Config) ->
     ok = py:configure_logging(#{level => warning}),
 
     %% Log at different levels using exec for multi-statement code
-    ok = py:exec(<<"
-import logging
-logging.debug('debug msg')
-logging.info('info msg')
-logging.warning('warning msg')
-logging.error('error msg')
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import logging\n"
+        "logging.debug('debug msg')\n"
+        "logging.info('info msg')\n"
+        "logging.warning('warning msg')\n"
+        "logging.error('error msg')\n"
+    >>),
 
     %% Give a moment for async delivery
     timer:sleep(50),
@@ -105,17 +106,18 @@ logging.error('error msg')
 test_log_from_thread(_Config) ->
     ok = py:configure_logging(),
 
-    ok = py:exec(<<"
-import logging
-import threading
-
-def log_in_thread():
-    logging.info('message from thread')
-
-t = threading.Thread(target=log_in_thread)
-t.start()
-t.join()
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import logging\n"
+        "import threading\n"
+        "\n"
+        "def log_in_thread():\n"
+        "    logging.info('message from thread')\n"
+        "\n"
+        "t = threading.Thread(target=log_in_thread)\n"
+        "t.start()\n"
+        "t.join()\n"
+    >>),
 
     timer:sleep(100),
     ok.
@@ -124,11 +126,12 @@ t.join()
 test_trace_basic(_Config) ->
     ok = py:enable_tracing(),
 
-    ok = py:exec(<<"
-import erlang
-with erlang.Span('test-span', key='value'):
-    pass
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "with erlang.Span('test-span', key='value'):\n"
+        "    pass\n"
+    >>),
 
     {ok, Spans} = py:get_traces(),
     1 = length(Spans),
@@ -143,12 +146,13 @@ with erlang.Span('test-span', key='value'):
 test_trace_nested(_Config) ->
     ok = py:enable_tracing(),
 
-    ok = py:exec(<<"
-import erlang
-with erlang.Span('parent'):
-    with erlang.Span('child'):
-        pass
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "with erlang.Span('parent'):\n"
+        "    with erlang.Span('child'):\n"
+        "        pass\n"
+    >>),
 
     {ok, Spans} = py:get_traces(),
     2 = length(Spans),
@@ -168,15 +172,16 @@ with erlang.Span('parent'):
 test_trace_decorator(_Config) ->
     ok = py:enable_tracing(),
 
-    ok = py:exec(<<"
-import erlang
-
-@erlang.trace()
-def my_traced_function():
-    return 42
-
-result = my_traced_function()
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "\n"
+        "@erlang.trace()\n"
+        "def my_traced_function():\n"
+        "    return 42\n"
+        "\n"
+        "result = my_traced_function()\n"
+    >>),
 
     {ok, Spans} = py:get_traces(),
     1 = length(Spans),
@@ -190,12 +195,13 @@ result = my_traced_function()
 test_trace_events(_Config) ->
     ok = py:enable_tracing(),
 
-    ok = py:exec(<<"
-import erlang
-with erlang.Span('work') as span:
-    span.event('checkpoint', items=10)
-    span.event('progress', percent=50)
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "with erlang.Span('work') as span:\n"
+        "    span.event('checkpoint', items=10)\n"
+        "    span.event('progress', percent=50)\n"
+    >>),
 
     {ok, [Span]} = py:get_traces(),
     Events = maps:get(events, Span),
@@ -212,14 +218,15 @@ with erlang.Span('work') as span:
 test_trace_error(_Config) ->
     ok = py:enable_tracing(),
 
-    ok = py:exec(<<"
-import erlang
-try:
-    with erlang.Span('failing'):
-        raise ValueError('intentional error')
-except ValueError:
-    pass
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import erlang\n"
+        "try:\n"
+        "    with erlang.Span('failing'):\n"
+        "        raise ValueError('intentional error')\n"
+        "except ValueError:\n"
+        "    pass\n"
+    >>),
 
     {ok, [Span]} = py:get_traces(),
     error = maps:get(status, Span),

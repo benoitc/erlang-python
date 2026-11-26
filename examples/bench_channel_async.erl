@@ -57,35 +57,44 @@ run_sync_channel_bench() ->
     Sizes = [64, 1024, 16384],
     Iterations = 5000,
 
-    io:format("~8s | ~12s | ~12s~n",
-              ["Size", "Throughput", "Avg (us)"]),
+    io:format(
+        "~8s | ~12s | ~12s~n",
+        ["Size", "Throughput", "Avg (us)"]
+    ),
     io:format("~s~n", [string:copies("-", 38)]),
 
-    lists:foreach(fun(Size) ->
-        {ok, Ch} = py_channel:new(),
-        Data = binary:copy(<<0>>, Size),
+    lists:foreach(
+        fun(Size) ->
+            {ok, Ch} = py_channel:new(),
+            Data = binary:copy(<<0>>, Size),
 
-        %% Fill channel
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data)
-        end, lists:seq(1, Iterations)),
+            %% Fill channel
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
 
-        %% Time receiving all messages via NIF
-        Start = erlang:monotonic_time(microsecond),
-        receive_all_sync(Ch, Iterations),
-        End = erlang:monotonic_time(microsecond),
+            %% Time receiving all messages via NIF
+            Start = erlang:monotonic_time(microsecond),
+            receive_all_sync(Ch, Iterations),
+            End = erlang:monotonic_time(microsecond),
 
-        TotalTime = (End - Start) / 1000000,
-        AvgUs = (TotalTime / Iterations) * 1000000,
-        Throughput = round(Iterations / TotalTime),
+            TotalTime = (End - Start) / 1000000,
+            AvgUs = (TotalTime / Iterations) * 1000000,
+            Throughput = round(Iterations / TotalTime),
 
-        io:format("~8B | ~12w | ~12.2f~n", [Size, Throughput, AvgUs]),
+            io:format("~8B | ~12w | ~12.2f~n", [Size, Throughput, AvgUs]),
 
-        py_channel:close(Ch)
-    end, Sizes),
+            py_channel:close(Ch)
+        end,
+        Sizes
+    ),
     ok.
 
-receive_all_sync(_Ch, 0) -> ok;
+receive_all_sync(_Ch, 0) ->
+    ok;
 receive_all_sync(Ch, N) ->
     {ok, _} = py_nif:channel_try_receive(Ch),
     receive_all_sync(Ch, N - 1).
@@ -96,16 +105,21 @@ run_async_channel_bench() ->
 
     Iterations = 1000,
 
-    io:format("~15s | ~12s | ~12s~n",
-              ["Operation", "Throughput", "Avg (us)"]),
+    io:format(
+        "~15s | ~12s | ~12s~n",
+        ["Operation", "Throughput", "Avg (us)"]
+    ),
     io:format("~s~n", [string:copies("-", 44)]),
 
     %% Test math.sqrt via async task API
     Start1 = erlang:monotonic_time(microsecond),
-    lists:foreach(fun(_) ->
-        Ref = py_event_loop:create_task(math, sqrt, [2.0]),
-        {ok, _} = py_event_loop:await(Ref, 5000)
-    end, lists:seq(1, Iterations)),
+    lists:foreach(
+        fun(_) ->
+            Ref = py_event_loop:create_task(math, sqrt, [2.0]),
+            {ok, _} = py_event_loop:await(Ref, 5000)
+        end,
+        lists:seq(1, Iterations)
+    ),
     End1 = erlang:monotonic_time(microsecond),
 
     TotalTime1 = (End1 - Start1) / 1000000,
@@ -121,15 +135,21 @@ run_async_channel_bench() ->
 
     Start2 = erlang:monotonic_time(microsecond),
     Parent = self(),
-    lists:foreach(fun(_) ->
-        spawn(fun() ->
-            lists:foreach(fun(_) ->
-                Ref = py_event_loop:create_task(math, sqrt, [2.0]),
-                {ok, _} = py_event_loop:await(Ref, 5000)
-            end, lists:seq(1, TasksPerProc)),
-            Parent ! done
-        end)
-    end, lists:seq(1, NumProcs)),
+    lists:foreach(
+        fun(_) ->
+            spawn(fun() ->
+                lists:foreach(
+                    fun(_) ->
+                        Ref = py_event_loop:create_task(math, sqrt, [2.0]),
+                        {ok, _} = py_event_loop:await(Ref, 5000)
+                    end,
+                    lists:seq(1, TasksPerProc)
+                ),
+                Parent ! done
+            end)
+        end,
+        lists:seq(1, NumProcs)
+    ),
     wait_all(NumProcs),
     End2 = erlang:monotonic_time(microsecond),
 
@@ -141,9 +161,12 @@ run_async_channel_bench() ->
 
     ok.
 
-wait_all(0) -> ok;
+wait_all(0) ->
+    ok;
 wait_all(N) ->
-    receive done -> wait_all(N - 1) end.
+    receive
+        done -> wait_all(N - 1)
+    end.
 
 run_comparison_bench() ->
     io:format("~n--- Sync vs Async Comparison ---~n"),
@@ -153,8 +176,10 @@ run_comparison_bench() ->
     Iterations = 1000,
 
     io:format("Message size: ~B bytes, Iterations: ~B~n~n", [Size, Iterations]),
-    io:format("~15s | ~12s | ~12s~n",
-              ["Method", "Time (ms)", "Throughput"]),
+    io:format(
+        "~15s | ~12s | ~12s~n",
+        ["Method", "Time (ms)", "Throughput"]
+    ),
     io:format("~s~n", [string:copies("-", 45)]),
 
     Data = binary:copy(<<0>>, Size),
@@ -172,9 +197,12 @@ run_comparison_bench() ->
 
     %% py:call sync (Python stdlib function)
     PyStart = erlang:monotonic_time(microsecond),
-    lists:foreach(fun(_) ->
-        {ok, _} = py:call(math, sqrt, [2.0])
-    end, lists:seq(1, Iterations)),
+    lists:foreach(
+        fun(_) ->
+            {ok, _} = py:call(math, sqrt, [2.0])
+        end,
+        lists:seq(1, Iterations)
+    ),
     PyEnd = erlang:monotonic_time(microsecond),
     PyTime = (PyEnd - PyStart) / 1000,
     PyThroughput = round(Iterations / (PyTime / 1000)),
@@ -182,10 +210,13 @@ run_comparison_bench() ->
 
     %% Async task API (sequential)
     AsyncStart = erlang:monotonic_time(microsecond),
-    lists:foreach(fun(_) ->
-        Ref = py_event_loop:create_task(math, sqrt, [2.0]),
-        {ok, _} = py_event_loop:await(Ref, 5000)
-    end, lists:seq(1, Iterations)),
+    lists:foreach(
+        fun(_) ->
+            Ref = py_event_loop:create_task(math, sqrt, [2.0]),
+            {ok, _} = py_event_loop:await(Ref, 5000)
+        end,
+        lists:seq(1, Iterations)
+    ),
     AsyncEnd = erlang:monotonic_time(microsecond),
     AsyncTime = (AsyncEnd - AsyncStart) / 1000,
     AsyncThroughput = round(Iterations / (AsyncTime / 1000)),
@@ -193,13 +224,19 @@ run_comparison_bench() ->
 
     %% Spawn task (fire-and-forget, then collect)
     SpawnStart = erlang:monotonic_time(microsecond),
-    Refs = lists:map(fun(_) ->
-        py_event_loop:create_task(math, sqrt, [2.0])
-    end, lists:seq(1, Iterations)),
+    Refs = lists:map(
+        fun(_) ->
+            py_event_loop:create_task(math, sqrt, [2.0])
+        end,
+        lists:seq(1, Iterations)
+    ),
     %% Await all
-    lists:foreach(fun(R) ->
-        {ok, _} = py_event_loop:await(R, 5000)
-    end, Refs),
+    lists:foreach(
+        fun(R) ->
+            {ok, _} = py_event_loop:await(R, 5000)
+        end,
+        Refs
+    ),
     SpawnEnd = erlang:monotonic_time(microsecond),
     SpawnTime = (SpawnEnd - SpawnStart) / 1000,
     SpawnThroughput = round(Iterations / (SpawnTime / 1000)),

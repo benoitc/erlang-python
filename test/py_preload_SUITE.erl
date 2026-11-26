@@ -144,13 +144,14 @@ preload_variable_inherited_test(_Config) ->
 
 preload_function_inherited_test(_Config) ->
     %% Set preload code with a function
-    ok = py_preload:set_code(<<"
-def double(x):
-    return x * 2
-
-def add(a, b):
-    return a + b
-">>),
+    ok = py_preload:set_code(<<
+        "\n"
+        "def double(x):\n"
+        "    return x * 2\n"
+        "\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+    >>),
 
     %% Create context and check functions work
     {ok, Ctx} = py_context:new(#{mode => worker}),
@@ -163,10 +164,11 @@ def add(a, b):
 
 preload_import_inherited_test(_Config) ->
     %% Set preload code with imports
-    ok = py_preload:set_code(<<"
-import json
-import os
-">>),
+    ok = py_preload:set_code(<<
+        "\n"
+        "import json\n"
+        "import os\n"
+    >>),
 
     %% Create context and check imports are available
     {ok, Ctx} = py_context:new(#{mode => worker}),
@@ -203,24 +205,31 @@ preload_isolation_test(_Config) ->
 
 preload_new_context_inherits_test(_Config) ->
     %% Set preload code
-    ok = py_preload:set_code(<<"
-SHARED_CONFIG = {'debug': True, 'version': '1.0'}
-
-def get_config_value(key):
-    return SHARED_CONFIG.get(key)
-">>),
+    ok = py_preload:set_code(<<
+        "\n"
+        "SHARED_CONFIG = {'debug': True, 'version': '1.0'}\n"
+        "\n"
+        "def get_config_value(key):\n"
+        "    return SHARED_CONFIG.get(key)\n"
+    >>),
 
     %% Create multiple contexts - all should have preload
-    Ctxs = [begin
-        {ok, C} = py_context:new(#{mode => worker}),
-        C
-    end || _ <- lists:seq(1, 3)],
+    Ctxs = [
+        begin
+            {ok, C} = py_context:new(#{mode => worker}),
+            C
+        end
+     || _ <- lists:seq(1, 3)
+    ],
 
     try
-        lists:foreach(fun(Ctx) ->
-            {ok, true} = py:eval(Ctx, <<"get_config_value('debug')">>),
-            {ok, <<"1.0">>} = py:eval(Ctx, <<"get_config_value('version')">>)
-        end, Ctxs)
+        lists:foreach(
+            fun(Ctx) ->
+                {ok, true} = py:eval(Ctx, <<"get_config_value('debug')">>),
+                {ok, <<"1.0">>} = py:eval(Ctx, <<"get_config_value('version')">>)
+            end,
+            Ctxs
+        )
     after
         lists:foreach(fun(Ctx) -> py_context:stop(Ctx) end, Ctxs)
     end.

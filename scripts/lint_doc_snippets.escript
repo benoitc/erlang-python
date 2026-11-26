@@ -2,8 +2,8 @@
 %% -*- erlang -*-
 %%! -smp enable
 %%
-%% lint_doc_snippets — verifies fenced code blocks in README.md and
-%% docs/*.md.
+%% lint_doc_snippets — verifies fenced code blocks in README.md,
+%% CONTRIBUTING.md and docs/*.md.
 %%
 %%   * ```erlang blocks: every `py:Fn(Args)` call must reference a
 %%     function exported from py.erl at the correct arity.
@@ -20,47 +20,64 @@
 
 main(Args) ->
     Root = filename:dirname(filename:dirname(escript:script_name())),
-    EbinDir = filename:join([Root, "_build", "default", "lib",
-                             "erlang_python", "ebin"]),
+    EbinDir = filename:join([
+        Root,
+        "_build",
+        "default",
+        "lib",
+        "erlang_python",
+        "ebin"
+    ]),
     case filelib:is_dir(EbinDir) of
         true ->
             true = code:add_path(EbinDir);
         false ->
-            io:format(standard_error,
-                      "ebin not found at ~s; run `rebar3 compile` first~n",
-                      [EbinDir]),
+            io:format(
+                standard_error,
+                "ebin not found at ~s; run `rebar3 compile` first~n",
+                [EbinDir]
+            ),
             halt(2)
     end,
     PyExports = load_py_exports(),
-    Files = case Args of
-        [] -> default_files(Root);
-        _  -> Args
-    end,
+    Files =
+        case Args of
+            [] -> default_files(Root);
+            _ -> Args
+        end,
     Failures = lists:foldl(
         fun(File, Acc) -> Acc + lint_file(File, PyExports) end,
-        0, Files),
+        0,
+        Files
+    ),
     case Failures of
         0 ->
             io:format("lint-docs: clean (~p file(s))~n", [length(Files)]),
             halt(0);
         N ->
-            io:format(standard_error,
-                      "lint-docs: ~p failure(s)~n", [N]),
+            io:format(
+                standard_error,
+                "lint-docs: ~p failure(s)~n",
+                [N]
+            ),
             halt(N)
     end.
 
 default_files(Root) ->
-    Readme = filename:join(Root, "README.md"),
-    Docs   = filelib:wildcard(filename:join([Root, "docs", "*.md"])),
-    [Readme | Docs].
+    Top = [filename:join(Root, F) || F <- ["README.md", "CONTRIBUTING.md"]],
+    Docs = filelib:wildcard(filename:join([Root, "docs", "*.md"])),
+    Top ++ Docs.
 
 load_py_exports() ->
     case code:ensure_loaded(py) of
         {module, py} ->
             sets:from_list(py:module_info(exports));
         Other ->
-            io:format(standard_error,
-                      "could not load py.beam: ~p~n", [Other]),
+            io:format(
+                standard_error,
+                "could not load py.beam: ~p~n",
+                [Other]
+            ),
             halt(2)
     end.
 
@@ -76,10 +93,15 @@ lint_file(File, PyExports) ->
             Blocks = collect_blocks(Numbered, <<>>, []),
             lists:foldl(
                 fun(Block, Acc) -> Acc + lint_block(File, Block, PyExports) end,
-                0, Blocks);
+                0,
+                Blocks
+            );
         {error, Reason} ->
-            io:format(standard_error, "~s: read failed (~p)~n",
-                      [File, Reason]),
+            io:format(
+                standard_error,
+                "~s: read failed (~p)~n",
+                [File, Reason]
+            ),
             1
     end.
 
@@ -95,10 +117,11 @@ collect_blocks([{_, Line} | Rest], Prev, Acc) ->
             Skip = is_skip_marker(Prev),
             {Body, RestAfter, StartLine} =
                 consume_block(Rest, [], Skip, Lang),
-            NewAcc = case Skip of
-                true  -> Acc;
-                false -> [{Lang, StartLine, Body} | Acc]
-            end,
+            NewAcc =
+                case Skip of
+                    true -> Acc;
+                    false -> [{Lang, StartLine, Body} | Acc]
+                end,
             collect_blocks(RestAfter, Line, NewAcc);
         _ ->
             collect_blocks(Rest, Line, Acc)
@@ -113,9 +136,9 @@ classify(Line) ->
     case Trim of
         <<"```erlang">> -> {open, erlang};
         <<"```python">> -> {open, python};
-        <<"```py">>     -> {open, python};
-        <<"```">>       -> close;
-        _               -> other
+        <<"```py">> -> {open, python};
+        <<"```">> -> close;
+        _ -> other
     end.
 
 %% Consume lines until the closing ``` fence. Returns {BodyBin, RestLines, FirstLine}.
@@ -126,10 +149,13 @@ consume_block([{LineNo, Line} | Rest], BodyAcc, _Skip, Lang) ->
         close ->
             {iolist_to_binary(lists:reverse(BodyAcc)), Rest, LineNo};
         _ ->
-            consume_block(Rest, [<<Line/binary, "\n">> | BodyAcc],
-                          _Skip, Lang)
+            consume_block(
+                Rest,
+                [<<Line/binary, "\n">> | BodyAcc],
+                _Skip,
+                Lang
+            )
     end.
-
 
 %%% ----------------------------------------------------------------
 %%% per-block lint
@@ -158,18 +184,32 @@ lint_erlang_block(File, Body, PyExports) ->
 %% Walk the token list looking for the pattern:
 %%     atom(py)  ':'  atom(Fn)  '('  ...  ')'
 %% The counter consumes tokens up to and including the matching `)`.
-check_py_calls(_File, [], _Exports) -> 0;
-check_py_calls(File, [{atom, _, py}, {':', _}, {atom, Loc, Fn},
-                      {'(', _} | Rest], Exports) ->
+check_py_calls(_File, [], _Exports) ->
+    0;
+check_py_calls(
+    File,
+    [
+        {atom, _, py},
+        {':', _},
+        {atom, Loc, Fn},
+        {'(', _}
+        | Rest
+    ],
+    Exports
+) ->
     {Arity, After} = count_top_level_args(Rest, 1, 0, 0),
-    Bad = case sets:is_element({Fn, Arity}, Exports) of
-        true  -> 0;
-        false ->
-            io:format(standard_error,
-                      "~s:~p: undefined or wrong-arity call py:~s/~p~n",
-                      [File, line_of(Loc), atom_to_list(Fn), Arity]),
-            1
-    end,
+    Bad =
+        case sets:is_element({Fn, Arity}, Exports) of
+            true ->
+                0;
+            false ->
+                io:format(
+                    standard_error,
+                    "~s:~p: undefined or wrong-arity call py:~s/~p~n",
+                    [File, line_of(Loc), atom_to_list(Fn), Arity]
+                ),
+                1
+        end,
     Bad + check_py_calls(File, After, Exports);
 check_py_calls(File, [_ | Rest], Exports) ->
     check_py_calls(File, Rest, Exports).
@@ -191,19 +231,33 @@ count_top_level_args([{')', _} | Rest], 1, _Args, ArgsSoFar) ->
     {ArgsSoFar + 1, Rest};
 count_top_level_args([], _Depth, ArgsSeen, ArgsSoFar) ->
     %% Truncated snippet; best-effort count.
-    {ArgsSoFar + (case ArgsSeen of 0 -> 0; _ -> 1 end), []};
-count_top_level_args([{Tok, _} | Rest], Depth, _Args, ArgsSoFar)
-        when Tok =:= '('; Tok =:= '['; Tok =:= '{'; Tok =:= '<<' ->
+    {
+        ArgsSoFar +
+            (case ArgsSeen of
+                0 -> 0;
+                _ -> 1
+            end),
+        []
+    };
+count_top_level_args([{Tok, _} | Rest], Depth, _Args, ArgsSoFar) when
+    Tok =:= '('; Tok =:= '['; Tok =:= '{'; Tok =:= '<<'
+->
     count_top_level_args(Rest, Depth + 1, 1, ArgsSoFar);
-count_top_level_args([{Tok, _} | Rest], Depth, _Args, ArgsSoFar)
-        when Tok =:= ')'; Tok =:= ']'; Tok =:= '}'; Tok =:= '>>' ->
+count_top_level_args([{Tok, _} | Rest], Depth, _Args, ArgsSoFar) when
+    Tok =:= ')'; Tok =:= ']'; Tok =:= '}'; Tok =:= '>>'
+->
     count_top_level_args(Rest, Depth - 1, 1, ArgsSoFar);
 %% `fun`, `case`, `if`, `try`, `receive`, `begin` open an `end`-terminated
 %% block. Treat them as depth brackets so commas inside fun bodies
 %% (which are part of one outer arg) are not counted.
-count_top_level_args([{Kw, _} | Rest], Depth, _Args, ArgsSoFar)
-        when Kw =:= 'fun'; Kw =:= 'case'; Kw =:= 'if'; Kw =:= 'try';
-             Kw =:= 'receive'; Kw =:= 'begin' ->
+count_top_level_args([{Kw, _} | Rest], Depth, _Args, ArgsSoFar) when
+    Kw =:= 'fun';
+    Kw =:= 'case';
+    Kw =:= 'if';
+    Kw =:= 'try';
+    Kw =:= 'receive';
+    Kw =:= 'begin'
+->
     count_top_level_args(Rest, Depth + 1, 1, ArgsSoFar);
 count_top_level_args([{'end', _} | Rest], Depth, _Args, ArgsSoFar) ->
     count_top_level_args(Rest, Depth - 1, 1, ArgsSoFar);
@@ -218,13 +272,17 @@ count_top_level_args([_Tok | Rest], Depth, _Args, ArgsSoFar) ->
 %% if-block, or a single line of a larger function). SyntaxError still
 %% fails the lint.
 lint_python_block(File, Body) ->
-    TmpDir = case os:getenv("TMPDIR") of
-        false -> "/tmp";
-        Dir   -> Dir
-    end,
-    Tmp = filename:join(TmpDir, "lint_snip_"
-                        ++ integer_to_list(erlang:unique_integer([positive]))
-                        ++ ".py"),
+    TmpDir =
+        case os:getenv("TMPDIR") of
+            false -> "/tmp";
+            Dir -> Dir
+        end,
+    Tmp = filename:join(
+        TmpDir,
+        "lint_snip_" ++
+            integer_to_list(erlang:unique_integer([positive])) ++
+            ".py"
+    ),
     ok = file:write_file(Tmp, Body),
     Script =
         "import ast,sys\n"
@@ -236,18 +294,26 @@ lint_python_block(File, Body) ->
         "except SyntaxError as e:\n"
         "    print(f'SyntaxError: {e}')\n"
         "    sys.exit(1)\n",
-    Cmd = "python3 -c " ++ shell_quote(Script) ++ " " ++ Tmp
-          ++ " 2>&1; echo __exit_$?__",
+    Cmd =
+        "python3 -c " ++ shell_quote(Script) ++ " " ++ Tmp ++
+            " 2>&1; echo __exit_$?__",
     Out = os:cmd(Cmd),
     file:delete(Tmp),
     case re:run(Out, <<"__exit_0__\\s*$">>, [{capture, none}]) of
-        match -> 0;
+        match ->
+            0;
         nomatch ->
-            Trimmed = re:replace(Out, <<"__exit_\\d+__\\s*$">>, <<>>,
-                                 [{return, list}]),
-            io:format(standard_error,
-                      "~s: python snippet failed:~n~s~n",
-                      [File, Trimmed]),
+            Trimmed = re:replace(
+                Out,
+                <<"__exit_\\d+__\\s*$">>,
+                <<>>,
+                [{return, list}]
+            ),
+            io:format(
+                standard_error,
+                "~s: python snippet failed:~n~s~n",
+                [File, Trimmed]
+            ),
             1
     end.
 

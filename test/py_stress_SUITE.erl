@@ -33,18 +33,20 @@ all() ->
     [{group, stress_tests}].
 
 groups() ->
-    [{stress_tests, [parallel], [
-        context_churn_test,
-        concurrent_calls_test,
-        concurrent_evals_test,
-        callback_storm_test,
-        counter_balance_test,
-        parallel_context_operations_test
-    ]},
-    {sequential_tests, [], [
-        finalize_race_test,
-        rapid_start_stop_test
-    ]}].
+    [
+        {stress_tests, [parallel], [
+            context_churn_test,
+            concurrent_calls_test,
+            concurrent_evals_test,
+            callback_storm_test,
+            counter_balance_test,
+            parallel_context_operations_test
+        ]},
+        {sequential_tests, [], [
+            finalize_race_test,
+            rapid_start_stop_test
+        ]}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -93,14 +95,22 @@ context_churn_test(_Config) ->
     Self = self(),
 
     %% Spawn processes that rapidly create/use/destroy contexts
-    Pids = [spawn_link(fun() ->
-        context_churn_worker(NumIterations, N),
-        Self ! {done, self()}
-    end) || N <- lists:seq(1, NumContexts)],
+    Pids = [
+        spawn_link(fun() ->
+            context_churn_worker(NumIterations, N),
+            Self ! {done, self()}
+        end)
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     %% Wait for all workers to complete
-    [receive {done, Pid} -> ok after 30000 -> ct:fail(timeout) end
-     || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 30000 -> ct:fail(timeout)
+        end
+     || Pid <- Pids
+    ],
 
     ok.
 
@@ -117,13 +127,21 @@ concurrent_calls_test(_Config) ->
     NumCalls = 20,
     Self = self(),
 
-    Pids = [spawn_link(fun() ->
-        concurrent_call_worker(NumCalls),
-        Self ! {done, self()}
-    end) || _ <- lists:seq(1, NumProcesses)],
+    Pids = [
+        spawn_link(fun() ->
+            concurrent_call_worker(NumCalls),
+            Self ! {done, self()}
+        end)
+     || _ <- lists:seq(1, NumProcesses)
+    ],
 
-    [receive {done, Pid} -> ok after 30000 -> ct:fail(timeout) end
-     || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 30000 -> ct:fail(timeout)
+        end
+     || Pid <- Pids
+    ],
 
     ok.
 
@@ -139,13 +157,21 @@ concurrent_evals_test(_Config) ->
     NumEvals = 20,
     Self = self(),
 
-    Pids = [spawn_link(fun() ->
-        concurrent_eval_worker(NumEvals),
-        Self ! {done, self()}
-    end) || _ <- lists:seq(1, NumProcesses)],
+    Pids = [
+        spawn_link(fun() ->
+            concurrent_eval_worker(NumEvals),
+            Self ! {done, self()}
+        end)
+     || _ <- lists:seq(1, NumProcesses)
+    ],
 
-    [receive {done, Pid} -> ok after 30000 -> ct:fail(timeout) end
-     || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 30000 -> ct:fail(timeout)
+        end
+     || Pid <- Pids
+    ],
 
     ok.
 
@@ -168,9 +194,12 @@ callback_storm_test(_Config) ->
     %% Use py:eval with inline code - no stored state needed
     %% This avoids __main__ namespace conflicts in parallel tests
     NumCallbacks = 50,
-    Code = list_to_binary(io_lib:format(
-        "(lambda n, erl: len([erl.call('~s', i) for i in range(n)]))(~p, __import__('erlang'))",
-        [atom_to_list(CallbackName), NumCallbacks])),
+    Code = list_to_binary(
+        io_lib:format(
+            "(lambda n, erl: len([erl.call('~s', i) for i in range(n)]))(~p, __import__('erlang'))",
+            [atom_to_list(CallbackName), NumCallbacks]
+        )
+    ),
 
     {ok, NumCallbacks} = py:eval(Code),
 
@@ -198,17 +227,23 @@ do_finalize_race_test() ->
 
     %% Start some concurrent operations
     Self = self(),
-    Pids = [spawn(fun() ->
-        %% Each worker does some work
-        try
-            lists:foreach(fun(_) ->
-                py:eval(<<"1 + 1">>)
-            end, lists:seq(1, 10))
-        catch
-            _:_ -> ok
-        end,
-        Self ! {done, self()}
-    end) || _ <- lists:seq(1, 5)],
+    Pids = [
+        spawn(fun() ->
+            %% Each worker does some work
+            try
+                lists:foreach(
+                    fun(_) ->
+                        py:eval(<<"1 + 1">>)
+                    end,
+                    lists:seq(1, 10)
+                )
+            catch
+                _:_ -> ok
+            end,
+            Self ! {done, self()}
+        end)
+     || _ <- lists:seq(1, 5)
+    ],
 
     %% Give workers a bit of time to start
     timer:sleep(10),
@@ -217,7 +252,13 @@ do_finalize_race_test() ->
     ok = application:stop(erlang_python),
 
     %% Wait for workers to finish (they should handle shutdown gracefully)
-    [receive {done, Pid} -> ok after 5000 -> ok end || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 5000 -> ok
+        end
+     || Pid <- Pids
+    ],
 
     %% Restart for subsequent tests
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -229,9 +270,12 @@ do_finalize_race_test() ->
 counter_balance_test(_Config) ->
     %% Do some operations
     Ctx = py:context(1),
-    lists:foreach(fun(_) ->
-        {ok, _} = py:eval(Ctx, <<"1 + 1">>)
-    end, lists:seq(1, 100)),
+    lists:foreach(
+        fun(_) ->
+            {ok, _} = py:eval(Ctx, <<"1 + 1">>)
+        end,
+        lists:seq(1, 100)
+    ),
 
     %% Force GC
     erlang:garbage_collect(),
@@ -278,16 +322,32 @@ parallel_context_operations_test(_Config) ->
     %% Spawn workers for each context - use py:eval with inline expressions
     %% to avoid __main__ namespace conflicts
     Self = self(),
-    Pids = [spawn_link(fun() ->
-        Results = [py:eval(Ctx, list_to_binary(io_lib:format("~p * ~p", [I, I])))
-                   || I <- lists:seq(1, NumOps)],
-        AllOk = lists:all(fun({ok, _}) -> true; (_) -> false end, Results),
-        Self ! {done, self(), AllOk}
-    end) || Ctx <- Contexts],
+    Pids = [
+        spawn_link(fun() ->
+            Results = [
+                py:eval(Ctx, list_to_binary(io_lib:format("~p * ~p", [I, I])))
+             || I <- lists:seq(1, NumOps)
+            ],
+            AllOk = lists:all(
+                fun
+                    ({ok, _}) -> true;
+                    (_) -> false
+                end,
+                Results
+            ),
+            Self ! {done, self(), AllOk}
+        end)
+     || Ctx <- Contexts
+    ],
 
     %% Collect results
-    Results = [receive {done, Pid, Ok} -> Ok after 30000 -> false end
-               || Pid <- Pids],
+    Results = [
+        receive
+            {done, Pid, Ok} -> Ok
+        after 30000 -> false
+        end
+     || Pid <- Pids
+    ],
 
     true = lists:all(fun(X) -> X end, Results),
     ok.
@@ -304,18 +364,21 @@ rapid_start_stop_test(Config) ->
 do_rapid_start_stop_test() ->
     NumCycles = 5,
 
-    lists:foreach(fun(_) ->
-        %% Stop
-        ok = application:stop(erlang_python),
-        timer:sleep(50),
+    lists:foreach(
+        fun(_) ->
+            %% Stop
+            ok = application:stop(erlang_python),
+            timer:sleep(50),
 
-        %% Start
-        {ok, _} = application:ensure_all_started(erlang_python),
-        {ok, _} = py:start_contexts(),
+            %% Start
+            {ok, _} = application:ensure_all_started(erlang_python),
+            {ok, _} = py:start_contexts(),
 
-        %% Quick operation
-        {ok, 2} = py:eval(<<"1 + 1">>),
-        timer:sleep(50)
-    end, lists:seq(1, NumCycles)),
+            %% Quick operation
+            {ok, 2} = py:eval(<<"1 + 1">>),
+            timer:sleep(50)
+        end,
+        lists:seq(1, NumCycles)
+    ),
 
     ok.

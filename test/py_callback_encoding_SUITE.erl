@@ -31,20 +31,21 @@
     test_python_types/1
 ]).
 
-all() -> [
-    test_binary_with_escapes,
-    test_binary_non_utf8,
-    test_large_binary,
-    test_atom_becomes_str,
-    test_empty_list,
-    test_erlang_string_is_int_list,
-    test_nested_containers,
-    test_pid_round_trip,
-    test_ref_round_trip,
-    test_float_round_trip,
-    test_booleans_and_none,
-    test_python_types
-].
+all() ->
+    [
+        test_binary_with_escapes,
+        test_binary_non_utf8,
+        test_large_binary,
+        test_atom_becomes_str,
+        test_empty_list,
+        test_erlang_string_is_int_list,
+        test_nested_containers,
+        test_pid_round_trip,
+        test_ref_round_trip,
+        test_float_round_trip,
+        test_booleans_and_none,
+        test_python_types
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -128,18 +129,23 @@ test_ref_round_trip(_Config) ->
 
 %% @doc Floats are exact, not routed through a decimal-formatted string.
 test_float_round_trip(_Config) ->
-    lists:foreach(fun(F) -> F = probe(F) end,
-                  [3.14159265358979, 1.0e-300, 1.7976931348623157e308, -0.0]),
+    lists:foreach(
+        fun(F) -> F = probe(F) end,
+        [3.14159265358979, 1.0e-300, 1.7976931348623157e308, -0.0]
+    ),
     ok.
 
 test_booleans_and_none(_Config) ->
     true = probe(true),
     false = probe(false),
     <<"bool">> = probe_type(true),
-    lists:foreach(fun(A) ->
-        none = probe(A),
-        <<"NoneType">> = probe_type(A)
-    end, [undefined, nil, none]),
+    lists:foreach(
+        fun(A) ->
+            none = probe(A),
+            <<"NoneType">> = probe_type(A)
+        end,
+        [undefined, nil, none]
+    ),
     ok.
 
 %% @doc Tuples stay tuples and integers stay ints on the Python side.
@@ -164,6 +170,7 @@ probe(Value) ->
 probe_type(Value) ->
     py:register_function(cbenc_probe, fun(_) -> Value end),
     {ok, Type} = py:eval(
-        <<"type(__import__('erlang').call('cbenc_probe', [])).__name__">>),
+        <<"type(__import__('erlang').call('cbenc_probe', [])).__name__">>
+    ),
     py:unregister_function(cbenc_probe),
     Type.

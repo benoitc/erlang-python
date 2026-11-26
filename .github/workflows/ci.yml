@@ -317,6 +317,12 @@ jobs:
           PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
           echo "LD_LIBRARY_PATH=${PYTHON_LIB}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
+      - name: Check formatting
+        run: rebar3 fmt --check
+
+      - name: Run elvis lint
+        run: rebar3 lint
+
       - name: Compile
         run: rebar3 compile
 

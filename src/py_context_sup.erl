@@ -63,8 +63,11 @@ stop_context(Pid) when is_pid(Pid) ->
 %% @doc List all running context PIDs.
 -spec which_contexts() -> [pid()].
 which_contexts() ->
-    [Pid || {_, Pid, _, _} <- supervisor:which_children(?MODULE),
-            is_pid(Pid)].
+    [
+        Pid
+     || {_, Pid, _, _} <- supervisor:which_children(?MODULE),
+        is_pid(Pid)
+    ].
 
 %% ============================================================================
 %% Supervisor callbacks

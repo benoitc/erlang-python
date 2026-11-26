@@ -196,14 +196,18 @@ test_eval_complex_locals(_Config) ->
     {ok, <<"Alice">>} = py:eval(<<"data['name']">>, #{data => #{name => <<"Alice">>, age => 30}}),
 
     %% Test eval with nested structures
-    {ok, 42} = py:eval(<<"config['settings']['value']">>,
-                       #{config => #{settings => #{value => 42}}}),
+    {ok, 42} = py:eval(
+        <<"config['settings']['value']">>,
+        #{config => #{settings => #{value => 42}}}
+    ),
 
     %% Test eval with multiple complex locals using default argument capture
     %% Note: Python's eval() locals aren't accessible in nested scopes (lambda/comprehension)
     %% Use default argument to capture the value: lambda x, m=multiplier: x * m
-    {ok, [2, 4, 6]} = py:eval(<<"list(map(lambda x, m=multiplier: x * m, items))">>,
-                              #{items => [1, 2, 3], multiplier => 2}),
+    {ok, [2, 4, 6]} = py:eval(
+        <<"list(map(lambda x, m=multiplier: x * m, items))">>,
+        #{items => [1, 2, 3], multiplier => 2}
+    ),
 
     %% Test eval with multiple variables
     {ok, 6} = py:eval(<<"a + b + c">>, #{a => 1, b => 2, c => 3}),
@@ -212,8 +216,10 @@ test_eval_complex_locals(_Config) ->
     {ok, 3} = py:eval(<<"len(word)">>, #{word => <<"foo">>}),
 
     %% Test eval with nested map access
-    {ok, <<"value">>} = py:eval(<<"obj['nested']['key']">>,
-                                #{obj => #{nested => #{key => <<"value">>}}}),
+    {ok, <<"value">>} = py:eval(
+        <<"obj['nested']['key']">>,
+        #{obj => #{nested => #{key => <<"value">>}}}
+    ),
 
     ok.
 
@@ -221,10 +227,11 @@ test_exec(_Config) ->
     %% Test exec - just ensure it doesn't fail
     %% Note: exec runs on any worker, subsequent calls may go to different workers
     ok = py:exec(<<"x = 42">>),
-    ok = py:exec(<<"
-def my_func():
-    pass
-">>),
+    ok = py:exec(<<
+        "\n"
+        "def my_func():\n"
+        "    pass\n"
+    >>),
     ok.
 
 test_cast(_Config) ->
@@ -233,8 +240,16 @@ test_cast(_Config) ->
     ok = py:cast(erlang, send, [Self, {<<"result">>, <<"msg1">>}]),
     ok = py:cast(erlang, send, [Self, {<<"result">>, <<"msg2">>}]),
     %% Wait for results (order may vary)
-    R1 = receive {<<"result">>, V1} -> V1 after 5000 -> ct:fail(timeout1) end,
-    R2 = receive {<<"result">>, V2} -> V2 after 5000 -> ct:fail(timeout2) end,
+    R1 =
+        receive
+            {<<"result">>, V1} -> V1
+        after 5000 -> ct:fail(timeout1)
+        end,
+    R2 =
+        receive
+            {<<"result">>, V2} -> V2
+        after 5000 -> ct:fail(timeout2)
+        end,
     true = lists:sort([R1, R2]) =:= [<<"msg1">>, <<"msg2">>],
     ok.
 
@@ -386,7 +401,9 @@ test_stream_function(_Config) ->
 
     %% Fibonacci generator - compute fibonacci sequence using lambda wrapper
     %% (as documented pattern for inline generators)
-    {ok, Fib} = py:stream_eval(<<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>),
+    {ok, Fib} = py:stream_eval(
+        <<"(lambda: ((fib := [0, 1]), [fib.append(fib[-1] + fib[-2]) for _ in range(8)], iter(fib))[-1])()">>
+    ),
     ct:pal("Fibonacci result: ~p~n", [Fib]),
     [0, 1, 1, 2, 3, 5, 8, 13, 21, 34] = Fib,
 
@@ -403,7 +420,9 @@ test_stream_function(_Config) ->
     [3, 4, 5] = FilterResult,
 
     %% Test batching generator (as documented in streaming.md)
-    {ok, Batches} = py:stream_eval(<<"(lambda data, size: (data[i:i+size] for i in range(0, len(data), size)))([1,2,3,4,5,6,7], 3)">>),
+    {ok, Batches} = py:stream_eval(
+        <<"(lambda data, size: (data[i:i+size] for i in range(0, len(data), size)))([1,2,3,4,5,6,7], 3)">>
+    ),
     ct:pal("Batches: ~p~n", [Batches]),
     [[1, 2, 3], [4, 5, 6], [7]] = Batches,
 
@@ -567,26 +586,29 @@ test_erlang_import_syntax(_Config) ->
     py:register_function(greet, fun([Name]) -> <<"Hello, ", Name/binary>> end),
 
     %% Test basic import - will fail with AssertionError if result is wrong
-    ok = py:exec(<<"
-from erlang import add
-result = add(10, 20)
-assert result == 30, f'Expected 30, got {result}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import add\n"
+        "result = add(10, 20)\n"
+        "assert result == 30, f'Expected 30, got {result}'\n"
+    >>),
 
     %% Test import with alias
-    ok = py:exec(<<"
-from erlang import add as my_add
-result = my_add(40, 60)
-assert result == 100, f'Expected 100, got {result}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import add as my_add\n"
+        "result = my_add(40, 60)\n"
+        "assert result == 100, f'Expected 100, got {result}'\n"
+    >>),
 
     %% Test importing and using a string function
     %% Note: Erlang binary comes back as Python str (due to conversion)
-    ok = py:exec(<<"
-from erlang import greet
-result = greet('World')
-assert result == 'Hello, World' or result == b'Hello, World', f'Expected \"Hello, World\", got {result}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import greet\n"
+        "result = greet('World')\n"
+        "assert result == 'Hello, World' or result == b'Hello, World', f'Expected \"Hello, World\", got {result}'\n"
+    >>),
 
     %% Cleanup
     py:unregister_function(add),
@@ -671,7 +693,9 @@ test_parallel_execution(_Config) ->
                     4 = length(Results),
                     ok;
                 {error, Reason} ->
-                    ct:pal("Parallel execution failed: ~p (may be expected on some setups)~n", [Reason]),
+                    ct:pal("Parallel execution failed: ~p (may be expected on some setups)~n", [
+                        Reason
+                    ]),
                     ok
             end;
         false ->
@@ -687,7 +711,9 @@ test_venv(_Config) ->
     TmpDir = <<"/tmp/erlang_python_test_venv">>,
 
     %% Get Python version for site-packages path
-    {ok, PyVer} = py:eval(<<"f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'">>),
+    {ok, PyVer} = py:eval(
+        <<"f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'">>
+    ),
 
     %% Create minimal venv structure using os.makedirs
     SitePackages = <<TmpDir/binary, "/lib/", PyVer/binary, "/site-packages">>,
@@ -726,7 +752,9 @@ test_venv_pth(_Config) ->
     TmpDir = <<"/tmp/erlang_python_test_venv_pth">>,
     PkgSrc = <<"/tmp/erlang_python_test_pth_src">>,
 
-    {ok, PyVer} = py:eval(<<"f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'">>),
+    {ok, PyVer} = py:eval(
+        <<"f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'">>
+    ),
     SitePackages = <<TmpDir/binary, "/lib/", PyVer/binary, "/site-packages">>,
 
     %% Create fake venv with a .pth file pointing at PkgSrc
@@ -802,15 +830,24 @@ test_semaphore_concurrent(_Config) ->
     NumProcs = 20,
 
     %% Spawn processes that each acquire, sleep, and release
-    Pids = [spawn_link(fun() ->
-        ok = py_semaphore:acquire(5000),
-        timer:sleep(10),
-        ok = py_semaphore:release(),
-        Parent ! {done, self()}
-    end) || _ <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn_link(fun() ->
+            ok = py_semaphore:acquire(5000),
+            timer:sleep(10),
+            ok = py_semaphore:release(),
+            Parent ! {done, self()}
+        end)
+     || _ <- lists:seq(1, NumProcs)
+    ],
 
     %% Wait for all to complete
-    [receive {done, Pid} -> ok after 10000 -> ct:fail({timeout, Pid}) end || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 10000 -> ct:fail({timeout, Pid})
+        end
+     || Pid <- Pids
+    ],
 
     %% Current should be back to 0 (or initial state)
     timer:sleep(50),
@@ -838,11 +875,12 @@ test_semaphore_timeout(_Config) ->
         Parent ! {acquire_result, Result}
     end),
 
-    Result = receive
-        {acquire_result, R} -> R
-    after 2000 ->
-        ct:fail(timeout_waiting_for_result)
-    end,
+    Result =
+        receive
+            {acquire_result, R} -> R
+        after 2000 ->
+            ct:fail(timeout_waiting_for_result)
+        end,
 
     %% Should have gotten error
     {error, max_concurrent} = Result,
@@ -867,26 +905,35 @@ test_semaphore_rate_limiting(_Config) ->
     MaxSeen = atomics:new(1, [{signed, false}]),
 
     NumProcs = 10,
-    Pids = [spawn_link(fun() ->
-        ok = py_semaphore:acquire(10000),
-        atomics:add(Counter, 1, 1),
-        Cur = atomics:get(Counter, 1),
+    Pids = [
+        spawn_link(fun() ->
+            ok = py_semaphore:acquire(10000),
+            atomics:add(Counter, 1, 1),
+            Cur = atomics:get(Counter, 1),
 
-        %% Update max seen
-        OldMax = atomics:get(MaxSeen, 1),
-        case Cur > OldMax of
-            true -> atomics:put(MaxSeen, 1, Cur);
-            false -> ok
-        end,
+            %% Update max seen
+            OldMax = atomics:get(MaxSeen, 1),
+            case Cur > OldMax of
+                true -> atomics:put(MaxSeen, 1, Cur);
+                false -> ok
+            end,
 
-        timer:sleep(50),
-        atomics:sub(Counter, 1, 1),
-        ok = py_semaphore:release(),
-        Parent ! {done, self()}
-    end) || _ <- lists:seq(1, NumProcs)],
+            timer:sleep(50),
+            atomics:sub(Counter, 1, 1),
+            ok = py_semaphore:release(),
+            Parent ! {done, self()}
+        end)
+     || _ <- lists:seq(1, NumProcs)
+    ],
 
     %% Wait for all
-    [receive {done, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 30000 -> ct:fail({timeout, Pid})
+        end
+     || Pid <- Pids
+    ],
 
     %% Check that max concurrent never exceeded limit
     MaxConcurrent = atomics:get(MaxSeen, 1),
@@ -915,18 +962,20 @@ test_overload_protection(_Config) ->
         Parent ! {call_result, Result}
     end),
 
-    Result = receive
-        {call_result, R} -> R
-    after 2000 ->
-        ct:fail(timeout_waiting_for_result)
-    end,
+    Result =
+        receive
+            {call_result, R} -> R
+        after 2000 ->
+            ct:fail(timeout_waiting_for_result)
+        end,
 
     ct:pal("Overload result: ~p~n", [Result]),
 
     %% Should be overloaded error
     case Result of
         {error, {overloaded, _, _}} -> ok;
-        {error, timeout} -> ok;  %% Also acceptable
+        %% Also acceptable
+        {error, timeout} -> ok;
         Other -> ct:fail({unexpected_result, Other})
     end,
 
@@ -942,36 +991,40 @@ test_shared_state(_Config) ->
     {ok, #{value := 42}} = py:state_fetch(<<"test_key">>),
 
     %% Test from Python side - set from Python, read from Erlang
-    ok = py:exec(<<"
-from erlang import state_set
-state_set('python_key', {'message': 'hello from python', 'numbers': [1, 2, 3]})
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_set\n"
+        "state_set('python_key', {'message': 'hello from python', 'numbers': [1, 2, 3]})\n"
+    >>),
     {ok, Result} = py:state_fetch(<<"python_key">>),
     ct:pal("State from Python: ~p~n", [Result]),
     #{<<"message">> := <<"hello from python">>, <<"numbers">> := [1, 2, 3]} = Result,
 
     %% Test from Python side - read state set from Erlang
     ok = py:state_store(<<"erlang_key">>, #{count => 100}),
-    ok = py:exec(<<"
-from erlang import state_get
-data = state_get('erlang_key')
-assert data == {'count': 100}, f'Expected {{count: 100}}, got {data}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_get\n"
+        "data = state_get('erlang_key')\n"
+        "assert data == {'count': 100}, f'Expected {{count: 100}}, got {data}'\n"
+    >>),
 
     %% Test state_keys from Python
-    ok = py:exec(<<"
-from erlang import state_keys
-keys = state_keys()
-assert 'test_key' in keys, f'Expected test_key in {keys}'
-assert 'python_key' in keys, f'Expected python_key in {keys}'
-assert 'erlang_key' in keys, f'Expected erlang_key in {keys}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_keys\n"
+        "keys = state_keys()\n"
+        "assert 'test_key' in keys, f'Expected test_key in {keys}'\n"
+        "assert 'python_key' in keys, f'Expected python_key in {keys}'\n"
+        "assert 'erlang_key' in keys, f'Expected erlang_key in {keys}'\n"
+    >>),
 
     %% Test state_delete from Python
-    ok = py:exec(<<"
-from erlang import state_delete
-state_delete('python_key')
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_delete\n"
+        "state_delete('python_key')\n"
+    >>),
     {error, not_found} = py:state_fetch(<<"python_key">>),
 
     %% Test state_clear
@@ -986,23 +1039,24 @@ state_delete('python_key')
     6 = py:state_decr(<<"counter">>, 5),
 
     %% Test atomic counters from Python
-    ok = py:exec(<<"
-from erlang import state_incr, state_decr
-
-# Increment
-val = state_incr('py_counter')
-assert val == 1, f'Expected 1, got {val}'
-
-val = state_incr('py_counter', 5)
-assert val == 6, f'Expected 6, got {val}'
-
-# Decrement
-val = state_decr('py_counter')
-assert val == 5, f'Expected 5, got {val}'
-
-val = state_decr('py_counter', 3)
-assert val == 2, f'Expected 2, got {val}'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_incr, state_decr\n"
+        "\n"
+        "# Increment\n"
+        "val = state_incr('py_counter')\n"
+        "assert val == 1, f'Expected 1, got {val}'\n"
+        "\n"
+        "val = state_incr('py_counter', 5)\n"
+        "assert val == 6, f'Expected 6, got {val}'\n"
+        "\n"
+        "# Decrement\n"
+        "val = state_decr('py_counter')\n"
+        "assert val == 5, f'Expected 5, got {val}'\n"
+        "\n"
+        "val = state_decr('py_counter', 3)\n"
+        "assert val == 2, f'Expected 2, got {val}'\n"
+    >>),
     {ok, 2} = py:state_fetch(<<"py_counter">>),
 
     %% Cleanup
@@ -1061,8 +1115,14 @@ test_process_env_isolation(_Config) ->
     end),
 
     %% Wait for both processes to complete
-    receive {proc_a, ok} -> ok after 5000 -> ct:fail("Process A timed out") end,
-    receive {proc_b, ok} -> ok after 5000 -> ct:fail("Process B timed out") end,
+    receive
+        {proc_a, ok} -> ok
+    after 5000 -> ct:fail("Process A timed out")
+    end,
+    receive
+        {proc_b, ok} -> ok
+    after 5000 -> ct:fail("Process B timed out")
+    end,
 
     ct:pal("Process isolation test passed~n"),
     ok.
@@ -1115,7 +1175,8 @@ test_process_env_cleanup(_Config) ->
     %% Spawn a process that creates a large list
     spawn(fun() ->
         ok = py:exec(<<"big = list(range(1000000))">>),
-        timer:sleep(50)  % Let it exist briefly
+        % Let it exist briefly
+        timer:sleep(50)
     end),
 
     %% Wait for the process to exit
@@ -1183,8 +1244,9 @@ test_shared_dict_types(_Config) ->
     Retrieved = py:shared_dict_get(SD, <<"map">>),
     ct:pal("Map: ~p, Retrieved: ~p~n", [Map, Retrieved]),
     %% Note: Keys may be converted to Python strings and back
-    true = maps:get(<<"foo">>, Retrieved) =:= <<"bar">> orelse
-           maps:get(foo, Retrieved) =:= <<"bar">>,
+    true =
+        maps:get(<<"foo">>, Retrieved) =:= <<"bar">> orelse
+            maps:get(foo, Retrieved) =:= <<"bar">>,
 
     %% List
     List = [1, 2, 3, <<"four">>, 5.0],
@@ -1227,11 +1289,12 @@ test_shared_dict_process_death(_Config) ->
     end),
 
     %% Get the SharedDict reference
-    SDRef = receive
-        {sd_ref, Ref} -> Ref
-    after 5000 ->
-        error(timeout_waiting_for_sd_ref)
-    end,
+    SDRef =
+        receive
+            {sd_ref, Ref} -> Ref
+        after 5000 ->
+            error(timeout_waiting_for_sd_ref)
+        end,
 
     ct:pal("Got SharedDict ref from child: ~p~n", [SDRef]),
 
@@ -1259,28 +1322,31 @@ test_shared_dict_python_access(_Config) ->
 
     %% First, store the handle in Python's global namespace using eval
     %% We use eval with locals to pass the handle, then store it globally
-    {ok, _} = py:eval(<<"(globals().__setitem__('_sd_handle', handle), None)[-1]">>,
-                       #{<<"handle">> => SD}),
+    {ok, _} = py:eval(
+        <<"(globals().__setitem__('_sd_handle', handle), None)[-1]">>,
+        #{<<"handle">> => SD}
+    ),
 
     %% Now execute code that uses the stored handle
-    Code = <<"
-from erlang import SharedDict
-sd = SharedDict(_sd_handle)
-
-# Read value set from Erlang
-config = sd['config']
-result_port = config.get('port') or config.get(b'port')
-
-# Set a value from Python
-sd['python_key'] = {'set_from': 'python', 'value': 42}
-
-# Test contains
-has_config = 'config' in sd
-has_missing = 'missing' in sd
-
-# Test keys
-key_count = len(sd.keys())
-">>,
+    Code = <<
+        "\n"
+        "from erlang import SharedDict\n"
+        "sd = SharedDict(_sd_handle)\n"
+        "\n"
+        "# Read value set from Erlang\n"
+        "config = sd['config']\n"
+        "result_port = config.get('port') or config.get(b'port')\n"
+        "\n"
+        "# Set a value from Python\n"
+        "sd['python_key'] = {'set_from': 'python', 'value': 42}\n"
+        "\n"
+        "# Test contains\n"
+        "has_config = 'config' in sd\n"
+        "has_missing = 'missing' in sd\n"
+        "\n"
+        "# Test keys\n"
+        "key_count = len(sd.keys())\n"
+    >>,
 
     ok = py:exec(Code),
 
@@ -1373,14 +1439,26 @@ test_shared_dict_concurrent_same_key(_Config) ->
 
     %% Test 1: Concurrent writes to same key - verify no corruption
     %% Each process writes its process number repeatedly
-    Pids1 = [spawn_link(fun() ->
-        lists:foreach(fun(_) ->
-            ok = py:shared_dict_set(SD, <<"shared_key">>, N)
-        end, lists:seq(1, WritesPerProc)),
-        Parent ! {done_write, self()}
-    end) || N <- lists:seq(1, NumProcs)],
+    Pids1 = [
+        spawn_link(fun() ->
+            lists:foreach(
+                fun(_) ->
+                    ok = py:shared_dict_set(SD, <<"shared_key">>, N)
+                end,
+                lists:seq(1, WritesPerProc)
+            ),
+            Parent ! {done_write, self()}
+        end)
+     || N <- lists:seq(1, NumProcs)
+    ],
 
-    [receive {done_write, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- Pids1],
+    [
+        receive
+            {done_write, Pid} -> ok
+        after 30000 -> ct:fail({timeout, Pid})
+        end
+     || Pid <- Pids1
+    ],
 
     %% Final value should be a valid process number (1-NumProcs)
     FinalWrite = py:shared_dict_get(SD, <<"shared_key">>),
@@ -1392,27 +1470,51 @@ test_shared_dict_concurrent_same_key(_Config) ->
     ok = py:shared_dict_set(SD, <<"rw_key">>, 0),
 
     %% Half writers, half readers
-    WriterPids = [spawn_link(fun() ->
-        lists:foreach(fun(I) ->
-            ok = py:shared_dict_set(SD, <<"rw_key">>, I)
-        end, lists:seq(1, WritesPerProc)),
-        Parent ! {done_writer, self()}
-    end) || _ <- lists:seq(1, NumProcs div 2)],
+    WriterPids = [
+        spawn_link(fun() ->
+            lists:foreach(
+                fun(I) ->
+                    ok = py:shared_dict_set(SD, <<"rw_key">>, I)
+                end,
+                lists:seq(1, WritesPerProc)
+            ),
+            Parent ! {done_writer, self()}
+        end)
+     || _ <- lists:seq(1, NumProcs div 2)
+    ],
 
-    ReaderPids = [spawn_link(fun() ->
-        Reads = [py:shared_dict_get(SD, <<"rw_key">>) || _ <- lists:seq(1, WritesPerProc)],
-        %% All reads should return integers (no corruption)
-        true = lists:all(fun is_integer/1, Reads),
-        Parent ! {done_reader, self()}
-    end) || _ <- lists:seq(1, NumProcs div 2)],
+    ReaderPids = [
+        spawn_link(fun() ->
+            Reads = [py:shared_dict_get(SD, <<"rw_key">>) || _ <- lists:seq(1, WritesPerProc)],
+            %% All reads should return integers (no corruption)
+            true = lists:all(fun is_integer/1, Reads),
+            Parent ! {done_reader, self()}
+        end)
+     || _ <- lists:seq(1, NumProcs div 2)
+    ],
 
-    [receive {done_writer, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- WriterPids],
-    [receive {done_reader, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- ReaderPids],
+    [
+        receive
+            {done_writer, Pid} -> ok
+        after 30000 -> ct:fail({timeout, Pid})
+        end
+     || Pid <- WriterPids
+    ],
+    [
+        receive
+            {done_reader, Pid} -> ok
+        after 30000 -> ct:fail({timeout, Pid})
+        end
+     || Pid <- ReaderPids
+    ],
 
     %% Test 3: Rapid key updates - verify latest value is consistent type
-    lists:foreach(fun(I) ->
-        ok = py:shared_dict_set(SD, <<"type_key">>, I)
-    end, lists:seq(1, 1000)),
+    lists:foreach(
+        fun(I) ->
+            ok = py:shared_dict_set(SD, <<"type_key">>, I)
+        end,
+        lists:seq(1, 1000)
+    ),
 
     TypeVal = py:shared_dict_get(SD, <<"type_key">>),
     true = is_integer(TypeVal),
@@ -1429,32 +1531,43 @@ test_shared_dict_concurrent_different_keys(_Config) ->
     NumOps = 50,
 
     %% Spawn processes, each writing to its own key
-    Pids = [spawn_link(fun() ->
-        Key = list_to_binary("key_" ++ integer_to_list(N)),
-        %% Write operations
-        lists:foreach(fun(I) ->
-            ok = py:shared_dict_set(SD, Key, I)
-        end, lists:seq(1, NumOps)),
-        %% Final value should be NumOps
-        Final = py:shared_dict_get(SD, Key),
-        Parent ! {done, self(), Key, Final}
-    end) || N <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn_link(fun() ->
+            Key = list_to_binary("key_" ++ integer_to_list(N)),
+            %% Write operations
+            lists:foreach(
+                fun(I) ->
+                    ok = py:shared_dict_set(SD, Key, I)
+                end,
+                lists:seq(1, NumOps)
+            ),
+            %% Final value should be NumOps
+            Final = py:shared_dict_get(SD, Key),
+            Parent ! {done, self(), Key, Final}
+        end)
+     || N <- lists:seq(1, NumProcs)
+    ],
 
     %% Wait for all and collect results
-    Results = [receive
-        {done, Pid, Key, Final} -> {Key, Final}
-    after 30000 ->
-        ct:fail({timeout, Pid})
-    end || Pid <- Pids],
+    Results = [
+        receive
+            {done, Pid, Key, Final} -> {Key, Final}
+        after 30000 ->
+            ct:fail({timeout, Pid})
+        end
+     || Pid <- Pids
+    ],
 
     %% Verify all keys have correct final value
-    lists:foreach(fun({Key, Final}) ->
-        case Final of
-            NumOps -> ok;
-            Other ->
-                ct:fail({wrong_value, Key, expected, NumOps, got, Other})
-        end
-    end, Results),
+    lists:foreach(
+        fun({Key, Final}) ->
+            case Final of
+                NumOps -> ok;
+                Other -> ct:fail({wrong_value, Key, expected, NumOps, got, Other})
+            end
+        end,
+        Results
+    ),
 
     %% Verify all keys are present
     Keys = py:shared_dict_keys(SD),
@@ -1475,24 +1588,33 @@ test_shared_dict_concurrent_mixed(_Config) ->
     ok = py:shared_dict_set(SD, <<"shared_2">>, 0),
 
     %% Spawn processes that do mixed operations
-    Pids = [spawn_link(fun() ->
-        UniqueKey = list_to_binary("unique_" ++ integer_to_list(N)),
-        mixed_operations(SD, UniqueKey, NumOps),
-        Parent ! {done, self(), UniqueKey}
-    end) || N <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn_link(fun() ->
+            UniqueKey = list_to_binary("unique_" ++ integer_to_list(N)),
+            mixed_operations(SD, UniqueKey, NumOps),
+            Parent ! {done, self(), UniqueKey}
+        end)
+     || N <- lists:seq(1, NumProcs)
+    ],
 
     %% Wait for all processes
-    UniqueKeys = [receive
-        {done, Pid, Key} -> Key
-    after 30000 ->
-        ct:fail({timeout, Pid})
-    end || Pid <- Pids],
+    UniqueKeys = [
+        receive
+            {done, Pid, Key} -> Key
+        after 30000 ->
+            ct:fail({timeout, Pid})
+        end
+     || Pid <- Pids
+    ],
 
     %% Verify all unique keys exist with valid values
-    lists:foreach(fun(Key) ->
-        Value = py:shared_dict_get(SD, Key),
-        true = is_integer(Value) andalso Value >= 0
-    end, UniqueKeys),
+    lists:foreach(
+        fun(Key) ->
+            Value = py:shared_dict_get(SD, Key),
+            true = is_integer(Value) andalso Value >= 0
+        end,
+        UniqueKeys
+    ),
 
     %% Verify shared keys are integers (may have any value due to races)
     Shared1 = py:shared_dict_get(SD, <<"shared_1">>),
@@ -1505,7 +1627,8 @@ test_shared_dict_concurrent_mixed(_Config) ->
     ok.
 
 %% Helper for mixed operations
-mixed_operations(_SD, _UniqueKey, 0) -> ok;
+mixed_operations(_SD, _UniqueKey, 0) ->
+    ok;
 mixed_operations(SD, UniqueKey, N) ->
     %% Mix of operations
     case N rem 4 of
@@ -1530,31 +1653,40 @@ test_shared_dict_benchmark(_Config) ->
     {ok, SD} = py:shared_dict_new(),
 
     %% Warmup
-    lists:foreach(fun(I) ->
-        Key = list_to_binary("warmup_" ++ integer_to_list(I)),
-        ok = py:shared_dict_set(SD, Key, I),
-        I = py:shared_dict_get(SD, Key)
-    end, lists:seq(1, 100)),
+    lists:foreach(
+        fun(I) ->
+            Key = list_to_binary("warmup_" ++ integer_to_list(I)),
+            ok = py:shared_dict_set(SD, Key, I),
+            I = py:shared_dict_get(SD, Key)
+        end,
+        lists:seq(1, 100)
+    ),
 
     %% Single process benchmark
     NumOps = 1000,
 
     %% Benchmark SET operations
     SetStart = erlang:monotonic_time(microsecond),
-    lists:foreach(fun(I) ->
-        Key = list_to_binary("bench_" ++ integer_to_list(I rem 100)),
-        ok = py:shared_dict_set(SD, Key, I)
-    end, lists:seq(1, NumOps)),
+    lists:foreach(
+        fun(I) ->
+            Key = list_to_binary("bench_" ++ integer_to_list(I rem 100)),
+            ok = py:shared_dict_set(SD, Key, I)
+        end,
+        lists:seq(1, NumOps)
+    ),
     SetEnd = erlang:monotonic_time(microsecond),
     SetDuration = SetEnd - SetStart,
     SetOpsPerSec = (NumOps * 1000000) div max(1, SetDuration),
 
     %% Benchmark GET operations
     GetStart = erlang:monotonic_time(microsecond),
-    lists:foreach(fun(I) ->
-        Key = list_to_binary("bench_" ++ integer_to_list(I rem 100)),
-        _ = py:shared_dict_get(SD, Key)
-    end, lists:seq(1, NumOps)),
+    lists:foreach(
+        fun(I) ->
+            Key = list_to_binary("bench_" ++ integer_to_list(I rem 100)),
+            _ = py:shared_dict_get(SD, Key)
+        end,
+        lists:seq(1, NumOps)
+    ),
     GetEnd = erlang:monotonic_time(microsecond),
     GetDuration = GetEnd - GetStart,
     GetOpsPerSec = (NumOps * 1000000) div max(1, GetDuration),
@@ -1569,20 +1701,33 @@ test_shared_dict_benchmark(_Config) ->
     OpsPerProc = 500,
 
     ConcStart = erlang:monotonic_time(microsecond),
-    Pids = [spawn_link(fun() ->
-        lists:foreach(fun(I) ->
-            Key = list_to_binary("conc_" ++ integer_to_list(I rem 50)),
-            ok = py:shared_dict_set(SD, Key, I),
-            _ = py:shared_dict_get(SD, Key)
-        end, lists:seq(1, OpsPerProc)),
-        Parent ! {done, self()}
-    end) || _ <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn_link(fun() ->
+            lists:foreach(
+                fun(I) ->
+                    Key = list_to_binary("conc_" ++ integer_to_list(I rem 50)),
+                    ok = py:shared_dict_set(SD, Key, I),
+                    _ = py:shared_dict_get(SD, Key)
+                end,
+                lists:seq(1, OpsPerProc)
+            ),
+            Parent ! {done, self()}
+        end)
+     || _ <- lists:seq(1, NumProcs)
+    ],
 
-    [receive {done, Pid} -> ok after 30000 -> ct:fail({timeout, Pid}) end || Pid <- Pids],
+    [
+        receive
+            {done, Pid} -> ok
+        after 30000 -> ct:fail({timeout, Pid})
+        end
+     || Pid <- Pids
+    ],
     ConcEnd = erlang:monotonic_time(microsecond),
     ConcDuration = ConcEnd - ConcStart,
 
-    TotalConcOps = NumProcs * OpsPerProc * 2,  % SET + GET per iteration
+    % SET + GET per iteration
+    TotalConcOps = NumProcs * OpsPerProc * 2,
     ConcOpsPerSec = (TotalConcOps * 1000000) div max(1, ConcDuration),
 
     ct:pal("~n=== SharedDict Multi-Process Benchmark (~p procs) ===~n", [NumProcs]),

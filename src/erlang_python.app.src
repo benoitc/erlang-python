@@ -11,16 +11,18 @@
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, [{"GitHub", "https://github.com/benoitc/erlang-python"}]},
-    {files, ["rebar.config",
-             "do_cmake.sh",
-             "do_build.sh",
-             "README.md",
-             "LICENSE",
-             "CHANGELOG.md",
-             "src",
-             "c_src",
-             "priv",
-             "docs",
-             "examples",
-             "test"]}
+    {files, [
+        "rebar.config",
+        "do_cmake.sh",
+        "do_build.sh",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        "src",
+        "c_src",
+        "priv",
+        "docs",
+        "examples",
+        "test"
+    ]}
 ]}.

@@ -28,32 +28,33 @@ main(_) ->
     {ok, Ctx} = py_reactor_context:start_link(1, worker),
 
     %% Set up Python echo protocol
-    ok = py:exec(Ctx, <<"
-import erlang.reactor as reactor
-
-class EchoProtocol(reactor.Protocol):
-    '''Simple echo protocol - sends back whatever it receives.'''
-
-    def data_received(self, data):
-        # Echo data back
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'read_pending'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        if self.write_buffer:
-            return 'continue'
-        return 'read_pending'
-
-    def connection_lost(self):
-        print(f'Connection closed: fd={self.fd}')
-
-reactor.set_protocol_factory(EchoProtocol)
-print('Echo protocol registered')
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class EchoProtocol(reactor.Protocol):\n"
+        "    '''Simple echo protocol - sends back whatever it receives.'''\n"
+        "\n"
+        "    def data_received(self, data):\n"
+        "        # Echo data back\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'read_pending'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        if self.write_buffer:\n"
+        "            return 'continue'\n"
+        "        return 'read_pending'\n"
+        "\n"
+        "    def connection_lost(self):\n"
+        "        print(f'Connection closed: fd={self.fd}')\n"
+        "\n"
+        "reactor.set_protocol_factory(EchoProtocol)\n"
+        "print('Echo protocol registered')\n"
+    >>),
 
     %% Listen on port 9999
     Port = 9999,
@@ -77,29 +78,29 @@ accept_loop(LSock, Ctx) ->
             {ok, Fd} = prim_inet:getfd(Sock),
 
             %% Get client info
-            ClientInfo = case inet:peername(Sock) of
-                {ok, {Addr, Port}} ->
-                    #{addr => format_addr(Addr), port => Port};
-                _ ->
-                    #{addr => <<"unknown">>, port => 0}
-            end,
+            ClientInfo =
+                case inet:peername(Sock) of
+                    {ok, {Addr, Port}} ->
+                        #{addr => format_addr(Addr), port => Port};
+                    _ ->
+                        #{addr => <<"unknown">>, port => 0}
+                end,
 
-            io:format("Accepted connection from ~s:~p (fd=~p)~n",
-                      [maps:get(addr, ClientInfo), maps:get(port, ClientInfo), Fd]),
+            io:format(
+                "Accepted connection from ~s:~p (fd=~p)~n",
+                [maps:get(addr, ClientInfo), maps:get(port, ClientInfo), Fd]
+            ),
 
             %% Hand off to reactor context
             Ctx ! {fd_handoff, Fd, ClientInfo},
 
             accept_loop(LSock, Ctx);
-
         {error, timeout} ->
             %% No connection, keep waiting
             accept_loop(LSock, Ctx);
-
         {error, closed} ->
             io:format("Listen socket closed~n"),
             ok;
-
         {error, Reason} ->
             io:format("Accept error: ~p~n", [Reason]),
             accept_loop(LSock, Ctx)

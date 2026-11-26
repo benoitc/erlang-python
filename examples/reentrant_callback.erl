@@ -35,11 +35,12 @@ simple_example() ->
     io:format("--- Simple Reentrant Callback ---~n"),
 
     %% Define a Python function
-    ok = py:exec(<<"
-def square(x):
-    '''Simple Python function'''
-    return x * x
-">>),
+    ok = py:exec(<<
+        "\n"
+        "def square(x):\n"
+        "    '''Simple Python function'''\n"
+        "    return x * x\n"
+    >>),
 
     %% Register an Erlang function that uses Python
     py:register_function(square_via_python, fun([X]) ->
@@ -48,13 +49,14 @@ def square(x):
     end),
 
     %% Define a Python function that calls back to Erlang
-    ok = py:exec(<<"
-def process_number(x):
-    '''Calls Erlang which calls Python'''
-    from erlang import call
-    squared = call('square_via_python', x)
-    return squared + 1
-">>),
+    ok = py:exec(<<
+        "\n"
+        "def process_number(x):\n"
+        "    '''Calls Erlang which calls Python'''\n"
+        "    from erlang import call\n"
+        "    squared = call('square_via_python', x)\n"
+        "    return squared + 1\n"
+    >>),
 
     %% Test the full round-trip
     {ok, Result1} = py:call('__main__', process_number, [5]),
@@ -77,7 +79,8 @@ nested_example() ->
         io:format("  [Erlang] recurse(~p, ~p)~n", [Level, Max]),
         case Level >= Max of
             true ->
-                Level;  %% Base case
+                %% Base case
+                Level;
             false ->
                 %% Call back into Python to continue
                 {ok, Result} = py:call('__main__', python_recurse, [Level + 1, Max]),
@@ -86,19 +89,20 @@ nested_example() ->
     end),
 
     %% Define Python functions for recursion
-    ok = py:exec(<<"
-def start_recursion(max_level):
-    '''Entry point - starts the recursive chain'''
-    from erlang import call
-    print(f'  [Python] start_recursion({max_level})')
-    return call('recurse', 1, max_level)
-
-def python_recurse(level, max_level):
-    '''Called from Erlang during recursion'''
-    from erlang import call
-    print(f'  [Python] python_recurse({level}, {max_level})')
-    return call('recurse', level, max_level)
-">>),
+    ok = py:exec(<<
+        "\n"
+        "def start_recursion(max_level):\n"
+        "    '''Entry point - starts the recursive chain'''\n"
+        "    from erlang import call\n"
+        "    print(f'  [Python] start_recursion({max_level})')\n"
+        "    return call('recurse', 1, max_level)\n"
+        "\n"
+        "def python_recurse(level, max_level):\n"
+        "    '''Called from Erlang during recursion'''\n"
+        "    from erlang import call\n"
+        "    print(f'  [Python] python_recurse({level}, {max_level})')\n"
+        "    return call('recurse', level, max_level)\n"
+    >>),
 
     %% Test with 4 levels of nesting
     io:format("Testing 4 levels of nesting:~n"),
@@ -123,25 +127,26 @@ pipeline_example() ->
     end),
 
     %% Define Python pipeline
-    ok = py:exec(<<"
-def transform_pipeline(text):
-    '''Transform text through Python and Erlang functions'''
-    from erlang import call
-
-    # Step 1: Python processing
-    step1 = text.strip()
-
-    # Step 2: Erlang uppercase
-    step2 = call('erlang_uppercase', step1)
-
-    # Step 3: Python add prefix
-    step3 = 'Result: ' + step2
-
-    # Step 4: Erlang wrap in brackets
-    step4 = call('erlang_wrap', step3)
-
-    return step4
-">>),
+    ok = py:exec(<<
+        "\n"
+        "def transform_pipeline(text):\n"
+        "    '''Transform text through Python and Erlang functions'''\n"
+        "    from erlang import call\n"
+        "\n"
+        "    # Step 1: Python processing\n"
+        "    step1 = text.strip()\n"
+        "\n"
+        "    # Step 2: Erlang uppercase\n"
+        "    step2 = call('erlang_uppercase', step1)\n"
+        "\n"
+        "    # Step 3: Python add prefix\n"
+        "    step3 = 'Result: ' + step2\n"
+        "\n"
+        "    # Step 4: Erlang wrap in brackets\n"
+        "    step4 = call('erlang_wrap', step3)\n"
+        "\n"
+        "    return step4\n"
+    >>),
 
     %% Test the pipeline
     {ok, Result} = py:call('__main__', transform_pipeline, [<<"  hello world  ">>]),
