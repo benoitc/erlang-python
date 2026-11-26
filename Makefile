@@ -8,7 +8,7 @@ compile:
 test:
 	rebar3 ct --readable=compact
 
-# Validate fenced code blocks in README.md and docs/*.md.
+# Validate fenced code blocks in README.md, CONTRIBUTING.md and docs/*.md.
 # Erlang `py:Fn(...)` calls must reference a real export at the right
 # arity; Python blocks must parse (IndentationError tolerated for
 # tutorial fragments). Mark a block to skip with `<!-- skip-lint -->`

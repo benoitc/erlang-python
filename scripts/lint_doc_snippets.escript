@@ -2,8 +2,8 @@
 %% -*- erlang -*-
 %%! -smp enable
 %%
-%% lint_doc_snippets — verifies fenced code blocks in README.md and
-%% docs/*.md.
+%% lint_doc_snippets — verifies fenced code blocks in README.md,
+%% CONTRIBUTING.md and docs/*.md.
 %%
 %%   * ```erlang blocks: every `py:Fn(Args)` call must reference a
 %%     function exported from py.erl at the correct arity.
@@ -64,9 +64,9 @@ main(Args) ->
     end.
 
 default_files(Root) ->
-    Readme = filename:join(Root, "README.md"),
+    Top = [filename:join(Root, F) || F <- ["README.md", "CONTRIBUTING.md"]],
     Docs = filelib:wildcard(filename:join([Root, "docs", "*.md"])),
-    [Readme | Docs].
+    Top ++ Docs.
 
 load_py_exports() ->
     case code:ensure_loaded(py) of

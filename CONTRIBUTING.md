@@ -1,10 +1,77 @@
 # Contributing
 
-How to build, test and extend erlang_python. Read this before your first
-change; each recipe lists every file a change of that kind touches, so
-nothing is left half done. Design background is in
-[architecture](architecture.md), file ownership in [code map](code-map.md),
-message shapes in [protocols](protocols.md).
+This page is for people changing erlang_python itself: how to build and
+test it, what a change of each kind touches, and how to send it. For using
+the library, start with [Getting Started](docs/getting-started.md). Design
+background is in [architecture](docs/architecture.md), file ownership in
+[code map](docs/code-map.md), message shapes in
+[protocols](docs/protocols.md). AI agents also follow
+[AGENTS.md](https://github.com/benoitc/erlang-python/blob/main/AGENTS.md).
+
+## Write for the person who reads it
+
+Every issue, pull request and comment is read by a person. Make it easy for
+them.
+
+- Read what you send before you send it. You are responsible for every
+  line, whether you wrote it or a tool did.
+- Use plain English and short sentences. Say what happens, what you
+  expected, and how to reproduce it. Explain any term a reader may not
+  know.
+- Don't inflate it. No buzzwords, no severity scores, CVSS or CWE labels,
+  no "critical" for a bug, no long generated write-ups. If it takes a page
+  to explain, cut it down until it doesn't.
+- A bug report gives: the erlang_python, OTP and Python versions, the OS,
+  the context mode (`worker`, `owngil`, `isolated`, a session), a minimal
+  reproduction, what you got and what you expected. For a crash of the
+  node, the C stack trace or the ASan report helps most.
+- A pull request says what was wrong and why it matters, the fix in a few
+  lines, and any breaking change. Link the issue. Don't walk through the
+  diff file by file; the reviewer reads the code.
+- A fix comes with a test that fails without it.
+
+AI tools are fine to use. Before you open anything, you must have read the
+change, run the tests, and be able to answer questions about it yourself.
+
+Maintainers read every issue and pull request before acting on it. We close
+without further review:
+
+- text we cannot understand after one request to clarify;
+- descriptions that don't match the code or the reproduction;
+- reports that cannot be reproduced;
+- submissions opened by an automated agent that no person has read.
+
+## Security issues and bugs
+
+Python code that erlang_python runs holds every authority of the user
+running the node. The sandbox keeps Python from forking the VM, and
+isolated mode bounds what a child may consume and contains its crashes;
+neither confines what Python may reach. [Security](docs/security.md) and
+the limits in [Isolated Contexts](docs/isolated.md#limits) say what each
+one bounds.
+
+So anything Python code can do is a bug, not a security issue. That
+includes reports described as a sandbox escape or a denial of service,
+when they come from:
+
+- Python getting past the audit hook;
+- an isolated child or a session reading files, the network or the
+  environment;
+- a limit (rlimits, cgroups, `clear_env`) that was not applied;
+- a C extension crashing the node, or atoms sent from Python filling the
+  atom table.
+
+Report these as a normal bug, in public. The fix goes in a public pull
+request and in the CHANGELOG under Fixed. We don't publish advisories or
+request CVEs for them, and advisories filed for them are closed with a link
+to the fix.
+
+Only problems that give something to someone who cannot already run code
+on the node go through [SECURITY.md](https://github.com/benoitc/erlang-python/blob/main/SECURITY.md): memory corruption or
+code execution in the VM from data, not code, that passes through the
+library (terms, bytes in channels, buffers and shared memory), or the
+library loading or running code from a place the configuration did not
+name.
 
 ## Build
 
@@ -22,8 +89,11 @@ Notes:
   compile. A change in any `c_src` file rebuilds the one NIF.
 - The interpreter used at build time is the one embedded at run time.
   `python3-config` on `PATH` is the default.
-- `rm -rf _build` when switching Python versions or build flags; CMake
-  caches the interpreter.
+- CMake caches the interpreter and the build tool in `_build/cmake`. When
+  either moves, `rebar3 compile` prints a CMake error but exits 0 and keeps
+  the old `py_nif.so`. Run `rm -rf _build/cmake` when you switch Python
+  versions, build flags or toolchains, and check what the NIF links against
+  (`otool -L` on macOS, `ldd` on Linux).
 
 ## Test
 
@@ -31,9 +101,7 @@ Notes:
 rebar3 ct --readable=compact                       # everything
 rebar3 ct --suite test/py_isolated_SUITE           # one suite
 rebar3 ct --suite test/py_context_SUITE --case test_call   # one case
-rebar3 dialyzer && rebar3 xref                     # required before a PR
-make lint-docs                                     # snippets in README and docs/
-make check-code-map                                # every file in the code map
+STRESS=1 rebar3 ct --suite test/py_worker_loop_stress_SUITE  # stress suites
 ```
 
 Notes:
@@ -53,9 +121,11 @@ rebar3 compile
 LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0 rebar3 ct
 ```
 
-CI runs the matrix in `.github/workflows/ci.yml`: OTP 27 to 29 with Python
-3.12 to 3.14 on Ubuntu and macOS, FreeBSD 14 through `vmactions/freebsd-vm`,
-free-threaded 3.13t, and ASan. A PR is merged when all of them are green.
+A test must fail for one reason. A case that also passes when the call
+crashes, or that asserts a value it computed itself, is worse than no test
+because it reads as coverage. A feature comes with unit cases, a bench
+escript in `examples/` with numbers before and after, and a stress suite
+gated by `STRESS=1`.
 
 ### FreeBSD by hand
 
@@ -102,11 +172,40 @@ ssh -p 2222 root@127.0.0.1 'rm -rf ep && mkdir ep && tar -C ep -xzf ep.tgz && cd
 erlang-runtime28 | grep bin/erl` shows where. Use `-accel kvm` and the
 amd64 image on Linux hosts.
 
+## Before you commit
+
+Run what CI runs. These are the checks that gate a pull request:
+
+```sh
+rebar3 fmt                    # format first, then check the rest
+rebar3 compile
+rebar3 ct --readable=compact
+rebar3 fmt --check
+rebar3 lint
+rebar3 xref
+rebar3 dialyzer
+make lint-docs                # snippets in README.md, CONTRIBUTING.md and docs/
+make check-code-map           # every file in the code map
+rebar3 ex_doc
+```
+
+erlfmt formats `src`, `test`, `examples`, `scripts` and `rebar.config`; the
+C and Python sources have no formatter, so follow the style around your
+change. Elvis reads `elvis.config`. The modules that broke a rule when the
+rules were adopted are listed in that rule's `ignore`; a new module follows
+every rule, and a module comes off a list when it is reworked, never onto
+one to make a change pass.
+
+CI runs the matrix in `.github/workflows/ci.yml`: OTP 27 to 29 with Python
+3.12 to 3.14 on Ubuntu and macOS, FreeBSD 14 through `vmactions/freebsd-vm`,
+free-threaded 3.13t, ASan, the lint job (formatting, Elvis, xref, dialyzer,
+code map) and the documentation build. A pull request is merged when all of
+them are green.
+
 ## Recipes
 
-Every recipe ends with the same three steps: a test case, `rebar3
-dialyzer && rebar3 xref`, and an entry in `CHANGELOG.md` under the
-unreleased version.
+Every recipe ends with the same steps: a test case, the checks above, and
+an entry in `CHANGELOG.md` under the unreleased version.
 
 ### Add a NIF
 
@@ -202,14 +301,40 @@ supervisor to carry it.
 4. If the page documents a new API, add its rows to
    `test/coverage_audit.md`.
 
-## Before opening a pull request
+## Pull requests
 
-- `rebar3 ct`, `rebar3 dialyzer`, `rebar3 xref`, `make lint-docs` all
-  clean locally.
-- `CHANGELOG.md` updated under the unreleased version: `Added`, `Changed`,
-  `Removed` or `Fixed`. Removing a public function is a major version.
+Branch from `main` using the prefix that fits: `fix/`, `feat/`, `perf/`,
+`refactor/`, `docs/`, `test/` or `chore/`.
+
+Work on one issue goes in one pull request, with one commit per step a
+reviewer has to look at, each with its tests. Docs and the CHANGELOG entry
+go in the same pull request. Pull requests are merged with a merge commit,
+so the commits stay as you wrote them.
+
+Write the commit subject in the imperative, describing what the code now
+does rather than what it used to do, in about 60 characters. Keep the body
+to one short paragraph on why and how; the diff lists the files. Do not add
+generated-by or co-authored-by trailers.
+
+Say what the change is for and how it works. Skip the test inventory: CI
+reports that. If the change touches the public API, show it in a short code
+block.
+
+- `CHANGELOG.md` is updated under the unreleased version: `Added`,
+  `Changed`, `Removed` or `Fixed`, in plain English, saying what was wrong
+  or what is new and what it means for the user. No code snippets or
+  implementation details. Removing a public function is a major version.
 - A change that reverses or extends a decision in `docs/decisions/` gets a
   new record there; the old one is not edited.
-- The PR text says what the change intends and which path it takes; the
-  diff already lists the files.
-- One squashed commit per PR.
+
+Sync a branch that has fallen behind by merging `main` into it, not by
+rebasing.
+
+## Releases
+
+The version lives in `src/erlang_python.app.src`. A release is one commit
+on `main` that bumps it and dates the CHANGELOG section, then an annotated
+tag `vX.Y.Z` on that commit and a GitHub release whose notes are that
+CHANGELOG section as is. Before a release, the documentation is reviewed
+from a reader's point of view, and the findings the maintainer picks are
+fixed first.
