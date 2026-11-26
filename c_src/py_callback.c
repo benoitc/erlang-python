@@ -3157,19 +3157,13 @@ static PyObject *erlang_byte_channel_wait_impl(PyObject *self, PyObject *args) {
 
     pthread_mutex_lock(&channel->mutex);
 
-    /* Check if closed */
-    if (channel->closed) {
-        pthread_mutex_unlock(&channel->mutex);
-        return Py_BuildValue("(ss)", "error", "closed");
-    }
-
     /* Check if waiter already exists */
     if (channel->has_waiter || channel->has_sync_waiter) {
         pthread_mutex_unlock(&channel->mutex);
         return Py_BuildValue("(ss)", "error", "waiter_exists");
     }
 
-    /* Check if data available */
+    /* Check if data available (drained before reporting a close) */
     size_t queue_size = enif_ioq_size(channel->queue);
     if (queue_size > 0) {
         SysIOVec *iov;
@@ -3190,8 +3184,9 @@ static PyObject *erlang_byte_channel_wait_impl(PyObject *self, PyObject *args) {
             channel->current_size -= msg_size;
             pthread_mutex_unlock(&channel->mutex);
 
-            /* Return raw bytes (NO term decoding) */
-            return Py_BuildValue("(sO)", "ok", bytes);
+            /* Return raw bytes (NO term decoding); "N" hands the
+             * reference to the tuple */
+            return Py_BuildValue("(sN)", "ok", bytes);
         }
     }
 
