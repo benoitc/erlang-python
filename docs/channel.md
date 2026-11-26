@@ -158,6 +158,10 @@ msg = ch.try_receive()  # Returns None if empty
 **Returns:** Message or `None` if empty.
 **Raises:** `ChannelClosed` when the channel is closed.
 
+A queued `none` also comes back as `None`, so you cannot tell it from an
+empty channel. If Erlang may send `none`, use `receive(0)`, which raises
+`TimeoutError` when the channel is empty, or `async_receive()`.
+
 #### `async_receive()`
 
 Asyncio-compatible receive. Yields to other coroutines while waiting.
@@ -167,10 +171,11 @@ msg = await ch.async_receive()
 ```
 
 **Behavior:**
-- When using `ErlangEventLoop`: Uses event-driven notification (no polling). The channel notifies the event loop via timer dispatch when data arrives.
-- When using other asyncio loops: Falls back to polling with 100us sleep intervals.
+- If the channel has data, returns it immediately, including a queued `None`.
+- When using `ErlangEventLoop`: Uses event-driven notification (no polling). The channel notifies the event loop via timer dispatch when data arrives. A task cancelled while waiting leaves the message in the channel for the next receive.
+- When using other asyncio loops: Runs a blocking receive in the loop's default executor, in 100 ms waits. Cancelling the task does not stop a wait already running, so a message that arrives during it is lost.
 
-**Raises:** `ChannelClosed` when the channel is closed.
+**Raises:** `ChannelClosed` when the channel is closed and empty.
 
 #### `close()`
 
@@ -383,7 +388,7 @@ Python                              C / Erlang
 
 await ch.async_receive()
        │
-       ├── try_receive() ──────────▶ Check queue (fast path)
+       ├── receive(0) ─────────────▶ Check queue (fast path)
        │   └── Data? Return immediately
        │
        └── No data:
@@ -418,13 +423,20 @@ await future ◀─────────────────────�
        │  Fire handle from _timers
        │    │
        │    ▼
-       │  Callback: try_receive() → future.set_result(data)
+       │  Callback: future.set_result(None)  (wake only)
        │
+       ▼
+_channel_wait() again ──────────────▶ Dequeue under the channel lock
+       │                              (or register a new waiter)
        ▼
 Return data
 ```
 
 This avoids polling overhead - Python only wakes when data actually arrives.
+The callback only wakes the task, and the task takes the message itself when
+it resumes, so a task cancelled between the two leaves the message queued.
+After a close, the task still gets the messages queued before it, then
+`ChannelClosed`.
 
 ## ByteChannel - Raw Byte Streaming
 
@@ -509,7 +521,7 @@ async def process_bytes_async(channel_ref):
         process(chunk)
 ```
 
-**Event-driven async:** When using `ErlangEventLoop`, `async_receive_bytes()` uses event-driven notification instead of polling. The channel signals the event loop when data arrives, avoiding CPU overhead from sleep loops.
+**Event-driven async:** When using `ErlangEventLoop`, `async_receive_bytes()` uses event-driven notification instead of polling. The channel signals the event loop when data arrives, avoiding CPU overhead from sleep loops. As with `Channel`, a task cancelled while waiting on `ErlangEventLoop` leaves the bytes in the channel.
 
 ### ByteChannel vs Channel Architecture
 

@@ -50,8 +50,13 @@
   timeout. The context thread waited for the callback on its pipe while the
   nested call sat in its queue. It now waits inline and serves the nested
   call, as worker contexts do since 5.0.1.
+- Awaiting a message on a channel could lose it. A message that was `none`
+  arrived in Python as `None`, was taken for an empty channel and skipped,
+  on any event loop. On the Erlang event loop, a task cancelled just after a
+  message woke it dropped that message, on term and byte channels alike.
+  The message now stays in the channel until a receive returns it.
 
-
+## 5.0.1 (2026-09-22)
 
 ### Fixed
 

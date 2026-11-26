@@ -42,7 +42,11 @@
     close_drain_bytes_erlang_test/1,
     close_drain_bytes_python_sync_test/1,
     close_drain_bytes_python_async_test/1,
-    close_drain_bytes_create_task_async_test/1
+    close_drain_bytes_create_task_async_test/1,
+    %% Native async receive: cancel after wake-up, send then close
+    native_cancel_ready_bytes_test/1,
+    native_send_then_close_bytes_test/1,
+    native_wait_bytes_no_leak_test/1
 ]).
 
 all() -> [
@@ -74,7 +78,11 @@ all() -> [
     close_drain_bytes_erlang_test,
     close_drain_bytes_python_sync_test,
     close_drain_bytes_python_async_test,
-    close_drain_bytes_create_task_async_test
+    close_drain_bytes_create_task_async_test,
+    %% Native async receive: cancel after wake-up, send then close
+    native_cancel_ready_bytes_test,
+    native_send_then_close_bytes_test,
+    native_wait_bytes_no_leak_test
 ].
 
 init_per_suite(Config) ->
@@ -591,4 +599,111 @@ async def drain_task(ch_ref, reply_pid):
         {ok, _} -> ok;
         {error, AwaitErr} ->
             ct:pal("Await error: ~p", [AwaitErr])
+    end.
+
+%% A receiver cancelled after its wake-up ran, before it resumed, leaves
+%% the bytes in the channel.
+native_cancel_ready_bytes_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+    ok = py:register_function(byte_channel_regression_send, fun([]) ->
+        py_byte_channel:send(Ch, <<"payload">>)
+    end),
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import erlang
+async def cancel_ready_bytes(ref):
+    loop = asyncio.get_running_loop()
+    channel = erlang.ByteChannel(ref)
+    before = set(loop._timers)
+    receiver = asyncio.create_task(channel.async_receive_bytes())
+    await asyncio.sleep(0)
+    callbacks = set(loop._timers) - before
+    assert len(callbacks) == 1
+    ready = loop._timers[callbacks.pop()]
+    erlang.call('byte_channel_regression_send')
+    ready._run()
+    receiver.cancel()
+    try:
+        await receiver
+    except asyncio.CancelledError:
+        pass
+    return channel.try_receive_bytes()
+def run_cancel_ready_bytes(ref):
+    return erlang.run(cancel_ready_bytes(ref))
+">>),
+    try
+        {ok, <<"payload">>} = py:call(Ctx, '__main__', run_cancel_ready_bytes, [Ch])
+    after
+        py:unregister_function(byte_channel_regression_send),
+        py_byte_channel:close(Ch)
+    end.
+
+%% Bytes sent just before a close, while the receiver waits, are delivered:
+%% the woken receiver takes them before it sees the close.
+native_send_then_close_bytes_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+    ok = py:register_function(byte_channel_regression_send_close, fun([]) ->
+        ok = py_byte_channel:send(Ch, <<"last">>),
+        py_byte_channel:close(Ch)
+    end),
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import erlang
+async def send_then_close_bytes(ref):
+    channel = erlang.ByteChannel(ref)
+    receiver = asyncio.create_task(channel.async_receive_bytes())
+    await asyncio.sleep(0)
+    erlang.call('byte_channel_regression_send_close')
+    assert await asyncio.wait_for(receiver, 1) == b'last'
+    try:
+        await asyncio.wait_for(channel.async_receive_bytes(), 1)
+    except erlang.ByteChannelClosed:
+        return True
+    return False
+def run_send_then_close_bytes(ref):
+    return erlang.run(send_then_close_bytes(ref))
+">>),
+    try
+        {ok, true} = py:call(Ctx, '__main__', run_send_then_close_bytes, [Ch])
+    after
+        py:unregister_function(byte_channel_regression_send_close)
+    end.
+
+%% Bytes returned by the native wait when data is already queued are freed
+%% once the caller drops them (a woken receiver takes its data this way).
+native_wait_bytes_no_leak_test(_Config) ->
+    {ok, Ch} = py_byte_channel:new(),
+    Chunk = binary:copy(<<"x">>, 4096),
+    [ok = py_byte_channel:send(Ch, Chunk) || _ <- lists:seq(1, 1000)],
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import gc
+import tracemalloc
+import erlang
+async def wait_drain_growth(ref, n):
+    capsule = asyncio.get_running_loop()._loop_capsule
+    tracemalloc.start()
+    try:
+        gc.collect()
+        before = tracemalloc.get_traced_memory()[0]
+        for i in range(n):
+            result = erlang._byte_channel_wait(ref, i + 1, capsule)
+            assert result[0] == 'ok' and len(result[1]) == 4096
+            del result
+        gc.collect()
+        return tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+def run_wait_drain_growth(ref, n):
+    return erlang.run(wait_drain_growth(ref, n))
+">>),
+    try
+        {ok, Growth} = py:call(Ctx, '__main__', run_wait_drain_growth, [Ch, 1000]),
+        ct:pal("traced growth after 1000 x 4 KB waits: ~p bytes", [Growth]),
+        true = Growth < 1024 * 1024
+    after
+        py_byte_channel:close(Ch)
     end.
