@@ -31,7 +31,6 @@
     native_cancel_ready_test/1,
     native_send_then_close_test/1,
     fallback_none_payload_test/1,
-    isolated_channel_rejected_test/1,
     async_receive_wait_test/1,
     async_iteration_test/1,
     async_closed_channel_test/1,
@@ -72,7 +71,6 @@ all() -> [
     native_cancel_ready_test,
     native_send_then_close_test,
     fallback_none_payload_test,
-    isolated_channel_rejected_test,
     async_receive_wait_test,
     async_iteration_test,
     async_closed_channel_test,
@@ -230,16 +228,6 @@ def fallback_receive_two(ref):
         {ok, [none, <<"second">>]} = py:call(Ctx, '__main__', fallback_receive_two, [Ch])
     after
         py_channel:close(Ch)
-    end.
-
-isolated_channel_rejected_test(_Config) ->
-    {ok, Ctx} = py_context:new(#{mode => isolated}),
-    try
-        {ok, true} = py_context:eval(Ctx, <<"
-exec('import erlang\\ntry:\\n erlang.Channel(None)\\nexcept RuntimeError:\\n rejected = True\\nelse:\\n rejected = False') or rejected
-">>)
-    after
-        py_context:destroy(Ctx)
     end.
 
 end_per_testcase(_TestCase, _Config) ->

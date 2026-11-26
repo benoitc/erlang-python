@@ -30,7 +30,7 @@ exercised by suites). Guides are in `docs/`, suites in `test/`. Start with
 | `py_event_worker` | One process per running loop receiving `enif_select` readiness and timers | live | event_loop_architecture | `py_event_loop_SUITE`, `py_fd_ops_SUITE` |
 | `py_event_worker_sup`, `py_event_worker_registry` | Supervisor and name registry of the event workers | live | event_loop_architecture | `py_event_loop_SUITE` |
 | `py_reactor_context` | FD-owning context for the protocol-based reactor | live | reactor | `py_reactor_SUITE` |
-| `py_channel`, `py_byte_channel` | Term and byte queues between Erlang and Python coroutines (NIF resources); native term receives dequeue in the receiving task, not the readiness callback | live | channel | `py_channel_SUITE`, `py_byte_channel_SUITE` |
+| `py_channel`, `py_byte_channel` | Term and byte queues between Erlang and Python coroutines (NIF resources) | live | channel | `py_channel_SUITE`, `py_byte_channel_SUITE` |
 | `py_buffer` | Native streaming input buffer; shared variant delegates to `py_shm` | live | buffer, isolated | `py_buffer_SUITE`, `py_isolated_buffer_SUITE` |
 | `py_shm` | Shared memory regions over iommap and the ring behind shared buffers | live | isolated | `py_isolated_shm_SUITE` |
 | `py_import` | Registry of imports and `sys.path` entries applied to every interpreter | live | imports | `py_import_SUITE` |
