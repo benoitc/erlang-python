@@ -31,6 +31,13 @@
   only the variables named in `env`, and every child built with the same
   seed hashes strings and orders sets the same way.
 
+### Changed
+
+- **Erlang/OTP 28 or later is required** - OTP 27 is no longer supported
+  and rebar3 refuses to build on it; stay on 5.0.x if you need OTP 27.
+  From now on the two latest OTP releases are supported, and CI tests
+  OTP 28 and 29 on Linux, macOS and FreeBSD.
+
 ### Fixed
 
 - On an owngil context, the process-local environment of an Erlang process

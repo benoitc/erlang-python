@@ -11,7 +11,7 @@ call Python, and Python calls back into Erlang. Python runs in contexts:
 `worker` (a thread per context on the main interpreter), `owngil` (a thread
 and a subinterpreter with its own GIL, Python 3.14 and later) and `isolated`
 (a child OS process). Isolated sessions give each session a fresh child
-started from a prepared template. Requires Erlang/OTP 27 or later, Python
+started from a prepared template. Requires Erlang/OTP 28 or later, Python
 3.12 or later with headers, CMake and a C compiler.
 
 ## First principle: a NIF bug takes down the node

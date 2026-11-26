@@ -15,17 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux - OTP 27 (minimum supported)
-          - os: ubuntu-24.04
-            otp: "27"
-            python: "3.12"
-          - os: ubuntu-24.04
-            otp: "27"
-            python: "3.13"
-          - os: ubuntu-24.04
-            otp: "27"
-            python: "3.14"
-          # Linux - OTP 28
+          # Linux - OTP 28 (minimum supported)
           - os: ubuntu-24.04
             otp: "28"
             python: "3.12"
@@ -45,7 +35,8 @@ jobs:
           - os: ubuntu-24.04
             otp: "29"
             python: "3.14"
-          # macOS (brew installs the latest OTP)
+          # macOS (brew: the erlang formula is the latest OTP, erlang@28
+          # the versioned one)
           - os: macos-15
             otp: "29"
             python: "3.12"
@@ -55,6 +46,10 @@ jobs:
           - os: macos-15
             otp: "29"
             python: "3.14"
+          - os: macos-15
+            otp: "28"
+            python: "3.14"
+            brew_erlang: erlang@28
 
     steps:
       - name: Checkout
@@ -75,7 +70,10 @@ jobs:
       - name: Set up Erlang (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          brew install erlang rebar3
+          brew install ${{ matrix.brew_erlang || 'erlang' }} rebar3
+          if [ "${{ matrix.brew_erlang }}" = "erlang@28" ]; then
+            echo "$(brew --prefix erlang@28)/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Install numpy (for ML thread-affinity tests)
         run: |
@@ -117,7 +115,7 @@ jobs:
 
   # FreeBSD test using cross-platform action
   test-freebsd:
-    name: FreeBSD 14 / Python ${{ matrix.python }}
+    name: FreeBSD 14 / OTP ${{ matrix.otp }} / Python ${{ matrix.python }}
     runs-on: ubuntu-24.04
 
     strategy:
@@ -126,8 +124,12 @@ jobs:
         include:
           - python: "3.12"
             python_pkg: "python312"
+            otp: "28"
+            otp_pkg: "erlang-runtime28"
           - python: "3.13"
             python_pkg: "python313"
+            otp: "29"
+            otp_pkg: "erlang-runtime29"
 
     steps:
       - name: Checkout
@@ -140,8 +142,8 @@ jobs:
           usesh: true
           prepare: |
             # Stock `erlang` pkg lags at OTP 26; use the versioned runtime
-            # package so we test on a supported OTP (27+).
-            pkg install -y erlang-runtime28 ${{ matrix.python_pkg }} cmake
+            # package so we test on a supported OTP (28+).
+            pkg install -y ${{ matrix.otp_pkg }} ${{ matrix.python_pkg }} cmake
             # numpy package follows the py<noDot>-numpy convention.
             # Non-fatal: not every FreeBSD pkg snapshot ships numpy for
             # every Python flavor; the ML SUITE self-skips when numpy
@@ -152,8 +154,9 @@ jobs:
           run: |
             # Set up environment
             export PYTHON_CONFIG=python${{ matrix.python }}-config
-            # erlang-runtime28 installs outside the default PATH; add its bin dir.
-            ERL_BIN="$(dirname "$(pkg info -l erlang-runtime28 | tr -d '[:blank:]' | grep -E '/bin/erl$' | grep -v 'erts-' | head -1)")"
+            # The OTP runtime package installs outside the default PATH;
+            # add its bin dir.
+            ERL_BIN="$(dirname "$(pkg info -l ${{ matrix.otp_pkg }} | tr -d '[:blank:]' | grep -E '/bin/erl$' | grep -v 'erts-' | head -1)")"
             export PATH="$ERL_BIN:/usr/local/bin:$PATH"
 
             # Verify versions
