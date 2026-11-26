@@ -26,17 +26,18 @@
     scheduler_affinity_test/1
 ]).
 
-all() -> [
-    get_context_test,
-    get_specific_context_test,
-    state_persists_in_context_test,
-    contexts_are_isolated_test,
-    explicit_context_call_test,
-    explicit_context_eval_test,
-    explicit_context_exec_test,
-    implicit_routing_test,
-    scheduler_affinity_test
-].
+all() ->
+    [
+        get_context_test,
+        get_specific_context_test,
+        state_persists_in_context_test,
+        contexts_are_isolated_test,
+        explicit_context_call_test,
+        explicit_context_eval_test,
+        explicit_context_exec_test,
+        implicit_routing_test,
+        scheduler_affinity_test
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),

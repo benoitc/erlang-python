@@ -206,9 +206,12 @@ test_pool_sizes(_Config) ->
     IoSize = length(IoContexts),
 
     %% All contexts should be alive
-    lists:foreach(fun(Ctx) ->
-        true = is_process_alive(Ctx)
-    end, DefaultContexts ++ IoContexts).
+    lists:foreach(
+        fun(Ctx) ->
+            true = is_process_alive(Ctx)
+        end,
+        DefaultContexts ++ IoContexts
+    ).
 
 %% ============================================================================
 %% Registration tests

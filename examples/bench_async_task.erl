@@ -55,14 +55,10 @@ parse_args(Args) ->
     parse_args(Args, #{mode => standard}).
 
 parse_args([], Acc) -> Acc;
-parse_args(["--quick" | Rest], Acc) ->
-    parse_args(Rest, Acc#{mode => quick});
-parse_args(["--full" | Rest], Acc) ->
-    parse_args(Rest, Acc#{mode => full});
-parse_args(["--help" | _], Acc) ->
-    Acc#{help => true};
-parse_args([_ | Rest], Acc) ->
-    parse_args(Rest, Acc).
+parse_args(["--quick" | Rest], Acc) -> parse_args(Rest, Acc#{mode => quick});
+parse_args(["--full" | Rest], Acc) -> parse_args(Rest, Acc#{mode => full});
+parse_args(["--help" | _], Acc) -> Acc#{help => true};
+parse_args([_ | Rest], Acc) -> parse_args(Rest, Acc).
 
 print_help() ->
     io:format("Usage: escript examples/bench_async_task.erl [OPTIONS]~n~n"),
@@ -102,7 +98,6 @@ run_benchmarks(quick) ->
     bench_create_task_await(100),
     bench_concurrent_tasks(10, 10),
     bench_spawn_fire_forget(100);
-
 run_benchmarks(full) ->
     io:format("Running full benchmarks...~n~n"),
     bench_baseline(5000),
@@ -110,7 +105,6 @@ run_benchmarks(full) ->
     bench_concurrent_tasks(50, 100),
     bench_concurrent_tasks(100, 50),
     bench_spawn_fire_forget(1000);
-
 run_benchmarks(standard) ->
     io:format("Running standard benchmarks...~n~n"),
     bench_baseline(1000),
@@ -124,9 +118,12 @@ bench_baseline(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py:call(math, sqrt, [I])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py:call(math, sqrt, [I])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     print_results(Time, N, "calls").
@@ -137,10 +134,13 @@ bench_create_task_await(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            Ref = py_event_loop:create_task(math, sqrt, [float(I)]),
-            {ok, _} = py_event_loop:await(Ref)
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                Ref = py_event_loop:create_task(math, sqrt, [float(I)]),
+                {ok, _} = py_event_loop:await(Ref)
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     print_results(Time, N, "tasks").
@@ -149,21 +149,34 @@ bench_create_task_await(N) ->
 bench_concurrent_tasks(NumProcs, TasksPerProc) ->
     TotalTasks = NumProcs * TasksPerProc,
     io:format("Benchmark: Concurrent tasks (math.sqrt)~n"),
-    io:format("  Processes: ~p, Tasks/process: ~p, Total: ~p~n",
-              [NumProcs, TasksPerProc, TotalTasks]),
+    io:format(
+        "  Processes: ~p, Tasks/process: ~p, Total: ~p~n",
+        [NumProcs, TasksPerProc, TotalTasks]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                Ref = py_event_loop:create_task(math, sqrt, [float(I)]),
-                {ok, _} = py_event_loop:await(Ref)
-            end, lists:seq(1, TasksPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        Ref = py_event_loop:create_task(math, sqrt, [float(I)]),
+                        {ok, _} = py_event_loop:await(Ref)
+                    end,
+                    lists:seq(1, TasksPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     TimeMs = Time / 1000,
@@ -178,9 +191,12 @@ bench_spawn_fire_forget(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            ok = py_event_loop:spawn_task(math, sqrt, [float(I)])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                ok = py_event_loop:spawn_task(math, sqrt, [float(I)])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     print_results(Time, N, "spawns"),

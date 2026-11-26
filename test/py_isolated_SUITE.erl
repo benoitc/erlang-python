@@ -127,9 +127,11 @@ groups() ->
         test_bad_env_options,
         test_preload_option
     ],
-    [{worker, [], RoundTrip},
-     {isolated, [], RoundTrip},
-     {isolation, [], Isolation}].
+    [
+        {worker, [], RoundTrip},
+        {isolated, [], RoundTrip},
+        {isolation, [], Isolation}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -171,8 +173,10 @@ test_call_eval_exec(Config) ->
 test_state_persists(Config) ->
     C = new_ctx(Config),
     ok = py_context:exec(C, <<"counter = 0">>),
-    lists:foreach(fun(_) -> ok = py_context:exec(C, <<"counter += 1">>) end,
-                  lists:seq(1, 10)),
+    lists:foreach(
+        fun(_) -> ok = py_context:exec(C, <<"counter += 1">>) end,
+        lists:seq(1, 10)
+    ),
     {ok, 10} = py_context:eval(C, <<"counter">>),
     stop(C).
 
@@ -254,12 +258,15 @@ test_missing_module_and_function(Config) ->
 
 test_large_payloads(Config) ->
     C = new_ctx(Config),
-    lists:foreach(fun(Size) ->
-        Bin = crypto:strong_rand_bytes(Size),
-        {ok, Bin} = py_context:call(C, ?TEST_MOD, identity, [Bin]),
-        {ok, Out} = py_context:call(C, ?TEST_MOD, big_payload, [Size]),
-        Size = byte_size(Out)
-    end, [1024 * 1024, 16 * 1024 * 1024]),
+    lists:foreach(
+        fun(Size) ->
+            Bin = crypto:strong_rand_bytes(Size),
+            {ok, Bin} = py_context:call(C, ?TEST_MOD, identity, [Bin]),
+            {ok, Out} = py_context:call(C, ?TEST_MOD, big_payload, [Size]),
+            Size = byte_size(Out)
+        end,
+        [1024 * 1024, 16 * 1024 * 1024]
+    ),
     stop(C).
 
 test_callback_round_trip(Config) ->
@@ -303,33 +310,44 @@ test_callback_error(Config) ->
     C = new_ctx(Config),
     py_callback:register(<<"iso_crash">>, fun(_) -> error(deliberate) end),
     {ok, <<"RuntimeError">>} = py_context:call(C, ?TEST_MOD, callback_error_type, [<<"iso_crash">>]),
-    {ok, <<"RuntimeError">>} = py_context:call(C, ?TEST_MOD, callback_error_type, [<<"iso_not_registered">>]),
+    {ok, <<"RuntimeError">>} = py_context:call(C, ?TEST_MOD, callback_error_type, [
+        <<"iso_not_registered">>
+    ]),
     py_callback:unregister(<<"iso_crash">>),
     stop(C).
 
 test_send_to_pid(Config) ->
     C = new_ctx(Config),
     {ok, true} = py_context:call(C, ?TEST_MOD, send, [self(), {hello, 1}]),
-    receive {<<"hello">>, 1} -> ok after 2000 -> ct:fail(no_message) end,
+    receive
+        {<<"hello">>, 1} -> ok
+    after 2000 -> ct:fail(no_message)
+    end,
     stop(C).
 
 test_concurrent_callers(Config) ->
     C = new_ctx(Config),
     Self = self(),
     N = 20,
-    Pids = [spawn_link(fun() ->
-        Results = [py_context:call(C, ?TEST_MOD, add, [I, J]) || J <- lists:seq(1, 25)],
-        Self ! {done, I, Results}
-    end) || I <- lists:seq(1, N)],
-    lists:foreach(fun(I) ->
-        receive
-            {done, I, Results} ->
-                Expected = [{ok, I + J} || J <- lists:seq(1, 25)],
-                Expected = Results
-        after 30000 ->
-            ct:fail({timeout, I})
-        end
-    end, lists:seq(1, N)),
+    Pids = [
+        spawn_link(fun() ->
+            Results = [py_context:call(C, ?TEST_MOD, add, [I, J]) || J <- lists:seq(1, 25)],
+            Self ! {done, I, Results}
+        end)
+     || I <- lists:seq(1, N)
+    ],
+    lists:foreach(
+        fun(I) ->
+            receive
+                {done, I, Results} ->
+                    Expected = [{ok, I + J} || J <- lists:seq(1, 25)],
+                    Expected = Results
+            after 30000 ->
+                ct:fail({timeout, I})
+            end
+        end,
+        lists:seq(1, N)
+    ),
     _ = Pids,
     stop(C).
 
@@ -351,9 +369,13 @@ test_timeout_interrupts_sleep(Config) ->
 test_pool_of_isolated_contexts(_Config) ->
     {ok, Ctxs} = py_context_router:start_pool(iso_pool, 4, isolated),
     4 = length(Ctxs),
-    Pids = lists:usort([begin
-        {ok, #{os_pid := P}} = py_context:child_info(Cx), P
-    end || Cx <- Ctxs]),
+    Pids = lists:usort([
+        begin
+            {ok, #{os_pid := P}} = py_context:child_info(Cx),
+            P
+        end
+     || Cx <- Ctxs
+    ]),
     4 = length(Pids),
     [{ok, 4} = py_context:eval(Cx, <<"2+2">>) || Cx <- Ctxs],
     {ok, 4.0} = py:call(iso_pool, math, sqrt, [16]),
@@ -492,8 +514,10 @@ test_rlimit_as_1(Config) ->
     %% a limit that a regular build fits in keeps it from even importing
     %% the socket module.
     Probe = new_ctx(Config),
-    FreeThreaded = py_context:eval(Probe,
-        <<"hasattr(__import__('sys'), '_is_gil_enabled') and not __import__('sys')._is_gil_enabled()">>),
+    FreeThreaded = py_context:eval(
+        Probe,
+        <<"hasattr(__import__('sys'), '_is_gil_enabled') and not __import__('sys')._is_gil_enabled()">>
+    ),
     stop(Probe),
     case FreeThreaded of
         {ok, true} -> {skip, "free-threaded CPython needs an as limit far above test sizes"};
@@ -502,7 +526,9 @@ test_rlimit_as_1(Config) ->
 
 test_rlimit_as_2(Config) ->
     C = new_ctx(Config, #{rlimits => #{as => 1024 * 1024 * 1024}}),
-    Result = py_context:call(C, ?TEST_MOD, allocate_and_touch, [2 * 1024 * 1024 * 1024], #{}, 120000),
+    Result = py_context:call(
+        C, ?TEST_MOD, allocate_and_touch, [2 * 1024 * 1024 * 1024], #{}, 120000
+    ),
     ct:log("allocate past as limit: ~p", [Result]),
     case {Result, rlimit_as_enforced()} of
         {{error, {'MemoryError', _}}, _} -> ok;
@@ -525,7 +551,9 @@ test_rlimit_cpu(Config) ->
 
 test_rlimit_nofile(Config) ->
     C = new_ctx(Config, #{rlimits => #{nofile => 32}}),
-    {ok, 32} = py_context:eval(C, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_NOFILE)[0]">>),
+    {ok, 32} = py_context:eval(
+        C, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_NOFILE)[0]">>
+    ),
     stop(C).
 
 test_reaped_on_stop(Config) ->
@@ -541,7 +569,10 @@ test_reaped_on_crash(Config) ->
     unlink(C),
     Mon = erlang:monitor(process, C),
     _ = py_context:call(C, ?TEST_MOD, segfault, []),
-    receive {'DOWN', Mon, process, C, _} -> ok after 5000 -> ct:fail(context_survived) end,
+    receive
+        {'DOWN', Mon, process, C, _} -> ok
+    after 5000 -> ct:fail(context_survived)
+    end,
     wait_gone(Pid),
     ok.
 
@@ -613,15 +644,22 @@ test_restart_budget(Config) ->
     {ok, 4} = py_context:eval(C, <<"2+2">>),
     %% Third crash exceeds the budget
     _ = py_context:call(C, ?TEST_MOD, segfault, []),
-    receive {'DOWN', Mon, process, C, _} -> ok after 5000 -> ct:fail(budget_not_enforced) end,
+    receive
+        {'DOWN', Mon, process, C, _} -> ok
+    after 5000 -> ct:fail(budget_not_enforced)
+    end,
     ok.
 
 test_numpy_imports(Config) ->
     C = new_ctx(Config),
-    case py_context:eval(C, <<"__import__('importlib.util').util.find_spec('numpy') is not None">>) of
+    case
+        py_context:eval(C, <<"__import__('importlib.util').util.find_spec('numpy') is not None">>)
+    of
         {ok, true} ->
             {ok, 45} = py_context:call(C, ?TEST_MOD, numpy_sum, [10]),
-            {ok, [[1, 2], [3, 4]]} = py_context:eval(C, <<"__import__('numpy').array([[1,2],[3,4]])">>),
+            {ok, [[1, 2], [3, 4]]} = py_context:eval(
+                C, <<"__import__('numpy').array([[1,2],[3,4]])">>
+            ),
             stop(C);
         _ ->
             stop(C),
@@ -661,7 +699,10 @@ test_sys_state_reflects_activity(Config) ->
     timer:sleep(100),
     {{busy, Id}, _} = sys:get_state(C),
     true = is_integer(Id),
-    receive {done, {ok, <<"x">>}} -> ok after 5000 -> ct:fail(no_reply) end,
+    receive
+        {done, {ok, <<"x">>}} -> ok
+    after 5000 -> ct:fail(no_reply)
+    end,
     {idle, _} = sys:get_state(C),
     ok = py_context:start_loop(C),
     {looping, _} = sys:get_state(C),
@@ -681,7 +722,10 @@ test_requests_during_restart_are_served(Config) ->
         {crash, {error, {child_exited, {signal, Sig}}}} -> true = is_segfault_signal(Sig)
     after 10000 -> ct:fail(no_crash_report)
     end,
-    receive {next, {ok, 4}} -> ok after 10000 -> ct:fail(request_not_served_after_restart) end,
+    receive
+        {next, {ok, 4}} -> ok
+    after 10000 -> ct:fail(request_not_served_after_restart)
+    end,
     _ = Crasher,
     stop(C).
 
@@ -702,7 +746,9 @@ test_kill_reply_after_restart(Config) ->
 test_stop_while_busy_and_looping(Config) ->
     C1 = new_ctx(Config),
     Self = self(),
-    spawn_link(fun() -> Self ! {busy, py_context:call(C1, ?TEST_MOD, sleep_then, [5, x], #{}, 10000)} end),
+    spawn_link(fun() ->
+        Self ! {busy, py_context:call(C1, ?TEST_MOD, sleep_then, [5, x], #{}, 10000)}
+    end),
     timer:sleep(100),
     ok = py_context:stop(C1),
     receive
@@ -712,7 +758,10 @@ test_stop_while_busy_and_looping(Config) ->
     C2 = new_ctx(Config),
     ok = py_context:start_loop(C2),
     ok = py_context:stop(C2),
-    receive {py_loop_exit, C2, _} -> ok after 5000 -> ct:fail(no_loop_exit_on_stop) end,
+    receive
+        {py_loop_exit, C2, _} -> ok
+    after 5000 -> ct:fail(no_loop_exit_on_stop)
+    end,
     false = is_process_alive(C2),
     ok.
 
@@ -729,7 +778,11 @@ test_sys_get_status(Config) ->
 test_context_outlives_creator(Config) ->
     Self = self(),
     spawn(fun() -> Self ! {ctx, new_ctx(Config)} end),
-    C = receive {ctx, X} -> X after 15000 -> ct:fail(no_ctx) end,
+    C =
+        receive
+            {ctx, X} -> X
+        after 15000 -> ct:fail(no_ctx)
+        end,
     timer:sleep(100),
     true = is_process_alive(C),
     {ok, 4} = py_context:eval(C, <<"2+2">>),
@@ -761,11 +814,17 @@ test_startup_error_reported_1() ->
     %% child may report the failed setrlimit (startup_error), or the macOS
     %% watchdog may end it at once; all are loud.
     case py_context:new(#{mode => isolated, rlimits => #{as => 1}}) of
-        {error, {startup_error, _}} -> ok;
-        {error, {child_exited_at_start, _, _}} -> ok;
-        {error, {handshake_failed, _}} -> ok;
-        {ok, C} -> py_context:stop(C), ct:fail(limit_ignored);
-        Other -> ct:fail({unexpected, Other})
+        {error, {startup_error, _}} ->
+            ok;
+        {error, {child_exited_at_start, _, _}} ->
+            ok;
+        {error, {handshake_failed, _}} ->
+            ok;
+        {ok, C} ->
+            py_context:stop(C),
+            ct:fail(limit_ignored);
+        Other ->
+            ct:fail({unexpected, Other})
     end.
 
 %% @doc cgroups exist only on Linux: elsewhere the option is refused before
@@ -782,8 +841,12 @@ test_cgroup_option_platform(_Config) ->
                 py_context:new(#{mode => isolated, cgroup => "/sys/fs/cgroup/x"}),
             %% Limits still apply without cgroups
             {ok, C} = py_context:new(#{mode => isolated, rlimits => #{nofile => 48, cpu => 5}}),
-            {ok, 48} = py_context:eval(C, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_NOFILE)[0]">>),
-            {ok, 5} = py_context:eval(C, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_CPU)[0]">>),
+            {ok, 48} = py_context:eval(
+                C, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_NOFILE)[0]">>
+            ),
+            {ok, 5} = py_context:eval(
+                C, <<"__import__('resource').getrlimit(__import__('resource').RLIMIT_CPU)[0]">>
+            ),
             stop(C)
     end.
 
@@ -833,7 +896,9 @@ test_hash_seed_option(Config) ->
 
 test_bad_env_options(_Config) ->
     {error, {badarg, {hash_seed, -1}}} = py_context:new(#{mode => isolated, hash_seed => -1}),
-    {error, {badarg, {hash_seed, 1 bsl 32}}} = py_context:new(#{mode => isolated, hash_seed => 1 bsl 32}),
+    {error, {badarg, {hash_seed, 1 bsl 32}}} = py_context:new(#{
+        mode => isolated, hash_seed => 1 bsl 32
+    }),
     {error, {badarg, {clear_env, yes}}} = py_context:new(#{mode => isolated, clear_env => yes}),
     ok.
 
@@ -856,9 +921,15 @@ new_ctx(Config, Extra) ->
     {ok, C} = py_context:new(Opts),
     case Mode of
         worker ->
-            ok = py_context:exec(C, iolist_to_binary(io_lib:format(
-                "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')",
-                [TestDir, TestDir])));
+            ok = py_context:exec(
+                C,
+                iolist_to_binary(
+                    io_lib:format(
+                        "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')",
+                        [TestDir, TestDir]
+                    )
+                )
+            );
         _ ->
             ok
     end,
@@ -893,15 +964,22 @@ wait_gone(Pid, 0) ->
     ct:fail({child_still_present, Pid, os_pid_alive(Pid)});
 wait_gone(Pid, N) ->
     case os_pid_alive(Pid) of
-        false -> ok;
-        _ -> timer:sleep(100), wait_gone(Pid, N - 1)
+        false ->
+            ok;
+        _ ->
+            timer:sleep(100),
+            wait_gone(Pid, N - 1)
     end.
 
 %% A sanitizer runtime (LD_PRELOAD=libasan in the ASan job) is inherited
 %% by the child: it aborts on a segfault and reserves terabytes of address
 %% space, so rlimit cases cannot mean anything there.
 sanitized_child() ->
-    Pre = case os:getenv("LD_PRELOAD") of false -> ""; P -> P end,
+    Pre =
+        case os:getenv("LD_PRELOAD") of
+            false -> "";
+            P -> P
+        end,
     string:find(Pre, "asan") =/= nomatch orelse os:getenv("ASAN_OPTIONS") =/= false.
 
 is_segfault_signal(11) -> true;
@@ -922,4 +1000,7 @@ to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(L) when is_list(L) -> L.
 
 flush() ->
-    receive _ -> flush() after 0 -> ok end.
+    receive
+        _ -> flush()
+    after 0 -> ok
+    end.

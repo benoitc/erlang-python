@@ -64,9 +64,9 @@
 %%   writer_fds     — reverse map: WriterPid => WriteFd (fast lookup on
 %%                    'DOWN' messages).
 -record(state, {
-    handlers      = #{} :: #{non_neg_integer() => {pid(), integer()}},
+    handlers = #{} :: #{non_neg_integer() => {pid(), integer()}},
     async_writers = #{} :: #{integer() => {pid(), atomics:atomics_ref()}},
-    writer_fds    = #{} :: #{pid() => integer()}
+    writer_fds = #{} :: #{pid() => integer()}
 }).
 
 %% Bound on combined async in-flight + writer-mailbox depth. The
@@ -121,15 +121,18 @@ handle_info({thread_worker_spawn, WorkerId, WriteFd}, #state{handlers = Handlers
             {noreply, State#state{handlers = NewHandlers}};
         {error, Reason} ->
             %% The Python side times out and reports it; say why here
-            logger:error("py_thread_handler: ready signal for worker ~p (fd ~p) failed: ~p",
-                         [WorkerId, WriteFd, Reason]),
+            logger:error(
+                "py_thread_handler: ready signal for worker ~p (fd ~p) failed: ~p",
+                [WorkerId, WriteFd, Reason]
+            ),
             HandlerPid ! shutdown,
             {noreply, State}
     end;
-
 %% Handle callback request from Python thread
-handle_info({thread_callback, WorkerId, CallbackId, FuncName, Args},
-            #state{handlers = Handlers} = State) ->
+handle_info(
+    {thread_callback, WorkerId, CallbackId, FuncName, Args},
+    #state{handlers = Handlers} = State
+) ->
     case maps:get(WorkerId, Handlers, undefined) of
         {HandlerPid, _WriteFd} ->
             %% Forward to the handler process
@@ -139,7 +142,6 @@ handle_info({thread_callback, WorkerId, CallbackId, FuncName, Args},
             ok
     end,
     {noreply, State};
-
 %% Handle async callback request from Python async_call().
 %%
 %% Unlike thread_callback, this uses one shared per-interpreter pipe
@@ -170,29 +172,34 @@ handle_info({async_callback, CallbackId, FuncName, Args, WriteFd}, State0) ->
             end)
     end,
     {noreply, State1};
-
 %% Linked-process exit: covers both sync handlers and async writers.
 %% Both are spawn_link'd so a coordinator crash takes them with it
 %% (no leaked writer holding the async pipe fd after the gen_server
 %% restarts). When THEY die independently we trap the EXIT here and
 %% remove the dead pid from whichever map it lives in.
-handle_info({'EXIT', Pid, _Reason},
-            #state{handlers      = Handlers,
-                   async_writers = Writers,
-                   writer_fds    = WriterFds} = State) ->
+handle_info(
+    {'EXIT', Pid, _Reason},
+    #state{
+        handlers = Handlers,
+        async_writers = Writers,
+        writer_fds = WriterFds
+    } = State
+) ->
     NewHandlers = maps:filter(
         fun(_WorkerId, {HandlerPid, _Fd}) -> HandlerPid =/= Pid end,
-        Handlers),
+        Handlers
+    ),
     case maps:take(Pid, WriterFds) of
         {WriteFd, NewWriterFds} ->
             NewWriters = maps:remove(WriteFd, Writers),
-            {noreply, State#state{handlers      = NewHandlers,
-                                  async_writers = NewWriters,
-                                  writer_fds    = NewWriterFds}};
+            {noreply, State#state{
+                handlers = NewHandlers,
+                async_writers = NewWriters,
+                writer_fds = NewWriterFds
+            }};
         error ->
             {noreply, State#state{handlers = NewHandlers}}
     end;
-
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -214,14 +221,11 @@ handler_loop(WorkerId, WriteFd) ->
             %% clause removes us from its handler map.
             handle_thread_callback(WriteFd, CallbackId, FuncName, Args),
             handler_loop(WorkerId, WriteFd);
-
         {pipe_closed} ->
             %% Python thread exited, clean up
             ok;
-
         shutdown ->
             ok;
-
         _Other ->
             handler_loop(WorkerId, WriteFd)
     end.
@@ -229,32 +233,35 @@ handler_loop(WorkerId, WriteFd) ->
 %% Execute a callback and write the id-prefixed response to the pipe.
 handle_thread_callback(WriteFd, CallbackId, FuncName, Args) ->
     %% Convert Args from tuple to list if needed
-    ArgsList = case Args of
-        T when is_tuple(T) -> tuple_to_list(T);
-        L when is_list(L) -> L;
-        _ -> [Args]
-    end,
+    ArgsList =
+        case Args of
+            T when is_tuple(T) -> tuple_to_list(T);
+            L when is_list(L) -> L;
+            _ -> [Args]
+        end,
 
     %% Execute the registered function
-    Response = case py_callback:execute(FuncName, ArgsList) of
-        {ok, Result} ->
-            %% Format: status_byte (2=ok, ETF) + external term format
-            <<2, (term_to_binary(Result))/binary>>;
-        {error, {not_found, Name}} ->
-            ErrMsg = iolist_to_binary(
-                io_lib:format("Function '~s' not registered", [Name])),
-            <<1, ErrMsg/binary>>;
-        {error, {Class, Reason, _Stack}} ->
-            ErrMsg = iolist_to_binary(
-                io_lib:format("~p: ~p", [Class, Reason])),
-            <<1, ErrMsg/binary>>
-    end,
+    Response =
+        case py_callback:execute(FuncName, ArgsList) of
+            {ok, Result} ->
+                %% Format: status_byte (2=ok, ETF) + external term format
+                <<2, (term_to_binary(Result))/binary>>;
+            {error, {not_found, Name}} ->
+                ErrMsg = iolist_to_binary(
+                    io_lib:format("Function '~s' not registered", [Name])
+                ),
+                <<1, ErrMsg/binary>>;
+            {error, {Class, Reason, _Stack}} ->
+                ErrMsg = iolist_to_binary(
+                    io_lib:format("~p: ~p", [Class, Reason])
+                ),
+                <<1, ErrMsg/binary>>
+        end,
 
     %% Write response to pipe; exit on failure so we are reaped.
     case py_nif:thread_worker_write_with_id(WriteFd, CallbackId, Response) of
         ok -> ok;
-        {error, Reason1} ->
-            exit({thread_worker_write_failed, Reason1})
+        {error, Reason1} -> exit({thread_worker_write_failed, Reason1})
     end.
 
 %% Execute the user's registered function and encode the result as a
@@ -263,21 +270,24 @@ handle_thread_callback(WriteFd, CallbackId, FuncName, Args) ->
 %% via the same encoding shape — the sync path keeps its own copy
 %% close to the write call site).
 run_async_callback(FuncName, Args) ->
-    ArgsList = case Args of
-        T when is_tuple(T) -> tuple_to_list(T);
-        L when is_list(L) -> L;
-        _ -> [Args]
-    end,
+    ArgsList =
+        case Args of
+            T when is_tuple(T) -> tuple_to_list(T);
+            L when is_list(L) -> L;
+            _ -> [Args]
+        end,
     case py_callback:execute(FuncName, ArgsList) of
         {ok, Result} ->
             <<2, (term_to_binary(Result))/binary>>;
         {error, {not_found, Name}} ->
             ErrMsg = iolist_to_binary(
-                io_lib:format("Function '~s' not registered", [Name])),
+                io_lib:format("Function '~s' not registered", [Name])
+            ),
             <<1, ErrMsg/binary>>;
         {error, {Class, Reason, _Stack}} ->
             ErrMsg = iolist_to_binary(
-                io_lib:format("~p: ~p", [Class, Reason])),
+                io_lib:format("~p: ~p", [Class, Reason])
+            ),
             <<1, ErrMsg/binary>>
     end.
 
@@ -291,16 +301,21 @@ run_async_callback(FuncName, Args) ->
 %% the next callback. Each writer gets its own atomics counter that
 %% bounds total in-flight async callbacks (executors + queued
 %% responses) on that pipe.
-ensure_async_writer(WriteFd,
-                    #state{async_writers = Writers,
-                           writer_fds    = WriterFds} = State) ->
+ensure_async_writer(
+    WriteFd,
+    #state{
+        async_writers = Writers,
+        writer_fds = WriterFds
+    } = State
+) ->
     case maps:get(WriteFd, Writers, undefined) of
         undefined ->
             Counter = atomics:new(1, [{signed, false}]),
             Writer = spawn_link(fun() -> async_writer_loop(WriteFd) end),
             {Writer, Counter, State#state{
                 async_writers = Writers#{WriteFd => {Writer, Counter}},
-                writer_fds    = WriterFds#{Writer => WriteFd}}};
+                writer_fds = WriterFds#{Writer => WriteFd}
+            }};
         {Writer, Counter} ->
             {Writer, Counter, State}
     end.
@@ -334,15 +349,13 @@ async_writer_loop(WriteFd) ->
             atomics:sub(Counter, 1, 1),
             case R of
                 ok -> async_writer_loop(WriteFd);
-                {error, _} = Err ->
-                    exit({async_callback_response_failed, Err})
+                {error, _} = Err -> exit({async_callback_response_failed, Err})
             end;
         {overflow, CallbackId} ->
             Response = <<1, "async callback queue full">>,
             case py_nif:async_callback_response(WriteFd, CallbackId, Response) of
                 ok -> async_writer_loop(WriteFd);
-                {error, _} = Err ->
-                    exit({async_callback_response_failed, Err})
+                {error, _} = Err -> exit({async_callback_response_failed, Err})
             end;
         shutdown ->
             ok;

@@ -29,7 +29,6 @@
     stream_cancel/1
 ]).
 
-
 %% @doc Stream results from a Python generator.
 %% Returns a list of all yielded values.
 -spec stream(py:py_module(), py:py_func(), py:py_args()) -> py:py_result().
@@ -50,8 +49,14 @@ stream(Module, Func, Args, Kwargs) ->
     KwargsCode = format_kwargs(Kwargs),
     ArgsCode = format_args(Args),
     Code = iolist_to_binary([
-        <<"list(__import__('">>, ModuleBin, <<"').">>, FuncBin,
-        <<"(">>, ArgsCode, KwargsCode, <<"))">>
+        <<"list(__import__('">>,
+        ModuleBin,
+        <<"').">>,
+        FuncBin,
+        <<"(">>,
+        ArgsCode,
+        KwargsCode,
+        <<"))">>
     ]),
     py_context:eval(Ctx, Code, #{}).
 
@@ -69,7 +74,8 @@ collect_stream(Ref, Acc) ->
     end.
 
 %% @private Format arguments for Python code
-format_args([]) -> <<>>;
+format_args([]) ->
+    <<>>;
 format_args(Args) ->
     ArgStrs = [format_arg(A) || A <- Args],
     iolist_to_binary(lists:join(<<", ">>, ArgStrs)).
@@ -78,17 +84,28 @@ format_args(Args) ->
 format_arg(A) when is_integer(A) -> integer_to_binary(A);
 format_arg(A) when is_float(A) -> float_to_binary(A);
 format_arg(A) when is_binary(A) -> <<"'", (py_util:escape_py_literal(A))/binary, "'">>;
-format_arg(A) when is_atom(A) -> <<"'", (py_util:escape_py_literal(atom_to_binary(A)))/binary, "'">>;
+format_arg(A) when is_atom(A) ->
+    <<"'", (py_util:escape_py_literal(atom_to_binary(A)))/binary, "'">>;
 format_arg(A) when is_list(A) -> iolist_to_binary([<<"[">>, format_args(A), <<"]">>]);
-format_arg(_) -> <<"None">>.
+format_arg(_) ->
+    <<"None">>.
 
 %% @private Format kwargs for Python code
 format_kwargs(Kwargs) when map_size(Kwargs) == 0 -> <<>>;
 format_kwargs(Kwargs) ->
-    KwList = maps:fold(fun(K, V, Acc) ->
-        KB = py_util:valid_py_ident(if is_atom(K) -> atom_to_binary(K); is_binary(K) -> K end),
-        [<<KB/binary, "=", (format_arg(V))/binary>> | Acc]
-    end, [], Kwargs),
+    KwList = maps:fold(
+        fun(K, V, Acc) ->
+            KB = py_util:valid_py_ident(
+                if
+                    is_atom(K) -> atom_to_binary(K);
+                    is_binary(K) -> K
+                end
+            ),
+            [<<KB/binary, "=", (format_arg(V))/binary>> | Acc]
+        end,
+        [],
+        Kwargs
+    ),
     iolist_to_binary([<<", ">>, lists:join(<<", ">>, KwList)]).
 
 %% @doc Stream results from a Python generator expression.
@@ -184,13 +201,19 @@ stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
     %% Build Python code that streams values using callbacks
     Code = iolist_to_binary([
         <<"import erlang\n">>,
-        <<"_rh = ">>, RefHashBin, <<"\n">>,
+        <<"_rh = ">>,
+        RefHashBin,
+        <<"\n">>,
         <<"_args = erlang.call('state_get', ('stream_args', _rh))\n">>,
         <<"if _args is None:\n">>,
         <<"    _args = []\n">>,
         <<"try:\n">>,
-        <<"    _mod = __import__('">>, ModuleBin, <<"')\n">>,
-        <<"    _fn = getattr(_mod, '">>, FuncBin, <<"')\n">>,
+        <<"    _mod = __import__('">>,
+        ModuleBin,
+        <<"')\n">>,
+        <<"    _fn = getattr(_mod, '">>,
+        FuncBin,
+        <<"')\n">>,
         <<"    _gen = _fn(*_args) if _args else _fn()\n">>,
         %% Async generators are driven on a private event loop. erlang.call is
         %% a blocking pipe read, so it stalls that loop between yields, which
@@ -220,7 +243,8 @@ stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
     ]),
     %% Execute the streaming code
     case py:exec(Code) of
-        ok -> ok;
+        ok ->
+            ok;
         {error, Reason} ->
             %% Try to notify owner of error
             case py_state:fetch({<<"stream_owner">>, RefHash}) of
@@ -231,9 +255,11 @@ stream_run_python(ModuleBin0, FuncBin0, RefHash) ->
                             py_state:remove({<<"stream_owner">>, RefHash}),
                             py_state:remove({<<"stream_ref">>, RefHash}),
                             py_state:remove({<<"stream_args">>, RefHash});
-                        _ -> ok
+                        _ ->
+                            ok
                     end;
-                _ -> ok
+                _ ->
+                    ok
             end
     end.
 
@@ -252,4 +278,3 @@ stream_cancel(Ref) when is_reference(Ref) ->
     RefHash = erlang:phash2(Ref),
     py_state:store({<<"stream_cancelled_hash">>, RefHash}, true),
     ok.
-

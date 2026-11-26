@@ -32,26 +32,28 @@ main(_) ->
         timeout => 5000
     }),
     %% Python reads using idiomatic import syntax
-    ok = py:exec(<<"
-from erlang import state_get
-
-config = state_get('config')
-assert config['api_key'] == 'secret123'
-assert config['max_retries'] == 3
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_get\n"
+        "\n"
+        "config = state_get('config')\n"
+        "assert config['api_key'] == 'secret123'\n"
+        "assert config['max_retries'] == 3\n"
+    >>),
     io:format("   Python read config successfully~n"),
 
     %% Example 2: Set from Python, read from Erlang
     io:format("~n2. Python -> Erlang:~n"),
-    ok = py:exec(<<"
-from erlang import state_set
-
-state_set('computation_result', {
-    'status': 'complete',
-    'values': [1, 2, 3, 4, 5],
-    'metadata': {'source': 'python', 'timestamp': 1234567890}
-})
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_set\n"
+        "\n"
+        "state_set('computation_result', {\n"
+        "    'status': 'complete',\n"
+        "    'values': [1, 2, 3, 4, 5],\n"
+        "    'metadata': {'source': 'python', 'timestamp': 1234567890}\n"
+        "})\n"
+    >>),
     {ok, Result} = py:state_fetch(<<"computation_result">>),
     io:format("   Result in Erlang: ~p~n", [Result]),
 
@@ -65,38 +67,41 @@ state_set('computation_result', {
     io:format("   Erlang incr by 10: ~p~n", [Val2]),
 
     %% From Python
-    ok = py:exec(<<"
-from erlang import state_incr, state_decr
-
-val = state_incr('hits', 5)
-print(f'   Python incr by 5: {val}')
-
-val = state_decr('hits', 3)
-print(f'   Python decr by 3: {val}')
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_incr, state_decr\n"
+        "\n"
+        "val = state_incr('hits', 5)\n"
+        "print(f'   Python incr by 5: {val}')\n"
+        "\n"
+        "val = state_decr('hits', 3)\n"
+        "print(f'   Python decr by 3: {val}')\n"
+    >>),
 
     {ok, FinalCount} = py:state_fetch(<<"hits">>),
     io:format("   Final counter value: ~p~n", [FinalCount]),
 
     %% Example 4: List all keys from Python
     io:format("~n4. List keys from Python:~n"),
-    ok = py:exec(<<"
-from erlang import state_keys
-
-keys = state_keys()
-assert 'hits' in keys
-assert 'config' in keys
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_keys\n"
+        "\n"
+        "keys = state_keys()\n"
+        "assert 'hits' in keys\n"
+        "assert 'config' in keys\n"
+    >>),
     Keys = py:state_keys(),
     io:format("   Keys: ~p~n", [Keys]),
 
     %% Example 5: Delete from Python
     io:format("~n5. Delete from Python:~n"),
-    ok = py:exec(<<"
-from erlang import state_delete
-
-state_delete('computation_result')
-">>),
+    ok = py:exec(<<
+        "\n"
+        "from erlang import state_delete\n"
+        "\n"
+        "state_delete('computation_result')\n"
+    >>),
     case py:state_fetch(<<"computation_result">>) of
         {error, not_found} -> io:format("   Key deleted successfully~n");
         {ok, _} -> io:format("   ERROR: Key still exists~n")

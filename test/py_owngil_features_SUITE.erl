@@ -124,102 +124,106 @@
 ]).
 
 all() ->
-    [{group, channels},
-     {group, buffers},
-     {group, reentrant},
-     {group, pid_send},
-     {group, reactor},
-     {group, async_task},
-     {group, asyncio},
-     {group, local_env},
-     {group, erlang_api}].
+    [
+        {group, channels},
+        {group, buffers},
+        {group, reentrant},
+        {group, pid_send},
+        {group, reactor},
+        {group, async_task},
+        {group, asyncio},
+        {group, local_env},
+        {group, erlang_api}
+    ].
 
 groups() ->
-    [{channels, [sequence], [
-        owngil_channel_send_receive_test,
-        owngil_channel_sync_blocking_test,
-        owngil_channel_backpressure_test,
-        owngil_channel_async_receive_test,
-        owngil_channel_parallel_producers_test,
-        owngil_channel_parallel_consumers_test,
-        owngil_channel_cross_context_test,
-        owngil_channel_high_throughput_test
-    ]},
-     {buffers, [sequence], [
-        owngil_buffer_write_read_test,
-        owngil_buffer_pass_to_python_test,
-        owngil_buffer_async_read_test,
-        owngil_buffer_parallel_writers_test,
-        owngil_buffer_memoryview_test,
-        owngil_buffer_gc_test
-    ]},
-     {reentrant, [sequence], [
-        owngil_reentrant_basic_test,
-        owngil_reentrant_nested_test,
-        owngil_reentrant_concurrent_test,
-        owngil_reentrant_multi_stress_test,
-        owngil_reentrant_complex_types_test,
-        owngil_reentrant_thread_callback_test,
-        owngil_reentrant_try_except_test
-    ]},
-     {pid_send, [sequence], [
-        owngil_pid_roundtrip_test,
-        owngil_send_simple_test,
-        owngil_send_multiple_test,
-        owngil_send_complex_test,
-        owngil_suspension_not_caught_test,
-        owngil_send_from_coroutine_test,
-        owngil_send_nonblocking_test,
-        owngil_send_parallel_test
-    ]},
-     {reactor, [sequence], [
-        owngil_reactor_echo_protocol_test,
-        owngil_reactor_multiple_conn_test,
-        owngil_reactor_async_pending_test,
-        owngil_reactor_buffer_test,
-        owngil_reactor_isolation_test
-    ]},
-     {async_task, [sequence], [
-        owngil_async_create_await_test,
-        owngil_async_run_sync_test,
-        owngil_async_concurrent_test,
-        owngil_async_batch_test,
-        owngil_async_timeout_test,
-        owngil_async_error_test
-    ]},
-     {asyncio, [sequence], [
-        owngil_asyncio_basic_sleep_test,
-        owngil_asyncio_gather_test,
-        owngil_asyncio_parallel_loops_test
-    ]},
-     {local_env, [sequence], [
-        owngil_local_env_isolation_test,
-        owngil_local_env_call_test
-    ]},
-     {erlang_api, [sequence], [
-        owngil_whereis_basic_test,
-        owngil_whereis_nonexistent_test,
-        owngil_whereis_and_send_test,
-        owngil_whereis_parallel_test,
-        owngil_atom_basic_test,
-        owngil_atom_roundtrip_test,
-        owngil_atom_create_test,
-        owngil_atom_create_different_test,
-        owngil_atom_cache_test,
-        owngil_ref_roundtrip_test,
-        owngil_pid_operations_test,
-        %% Channel tests
-        owngil_channel_class_test,
-        owngil_channel_iteration_test,
-        owngil_channel_context_manager_test,
-        %% ByteChannel tests
-        owngil_bytechannel_send_receive_test,
-        owngil_bytechannel_try_receive_test,
-        owngil_bytechannel_iteration_test,
-        %% Buffer tests
-        owngil_buffer_read_methods_test,
-        owngil_buffer_at_eof_test
-    ]}].
+    [
+        {channels, [sequence], [
+            owngil_channel_send_receive_test,
+            owngil_channel_sync_blocking_test,
+            owngil_channel_backpressure_test,
+            owngil_channel_async_receive_test,
+            owngil_channel_parallel_producers_test,
+            owngil_channel_parallel_consumers_test,
+            owngil_channel_cross_context_test,
+            owngil_channel_high_throughput_test
+        ]},
+        {buffers, [sequence], [
+            owngil_buffer_write_read_test,
+            owngil_buffer_pass_to_python_test,
+            owngil_buffer_async_read_test,
+            owngil_buffer_parallel_writers_test,
+            owngil_buffer_memoryview_test,
+            owngil_buffer_gc_test
+        ]},
+        {reentrant, [sequence], [
+            owngil_reentrant_basic_test,
+            owngil_reentrant_nested_test,
+            owngil_reentrant_concurrent_test,
+            owngil_reentrant_multi_stress_test,
+            owngil_reentrant_complex_types_test,
+            owngil_reentrant_thread_callback_test,
+            owngil_reentrant_try_except_test
+        ]},
+        {pid_send, [sequence], [
+            owngil_pid_roundtrip_test,
+            owngil_send_simple_test,
+            owngil_send_multiple_test,
+            owngil_send_complex_test,
+            owngil_suspension_not_caught_test,
+            owngil_send_from_coroutine_test,
+            owngil_send_nonblocking_test,
+            owngil_send_parallel_test
+        ]},
+        {reactor, [sequence], [
+            owngil_reactor_echo_protocol_test,
+            owngil_reactor_multiple_conn_test,
+            owngil_reactor_async_pending_test,
+            owngil_reactor_buffer_test,
+            owngil_reactor_isolation_test
+        ]},
+        {async_task, [sequence], [
+            owngil_async_create_await_test,
+            owngil_async_run_sync_test,
+            owngil_async_concurrent_test,
+            owngil_async_batch_test,
+            owngil_async_timeout_test,
+            owngil_async_error_test
+        ]},
+        {asyncio, [sequence], [
+            owngil_asyncio_basic_sleep_test,
+            owngil_asyncio_gather_test,
+            owngil_asyncio_parallel_loops_test
+        ]},
+        {local_env, [sequence], [
+            owngil_local_env_isolation_test,
+            owngil_local_env_call_test
+        ]},
+        {erlang_api, [sequence], [
+            owngil_whereis_basic_test,
+            owngil_whereis_nonexistent_test,
+            owngil_whereis_and_send_test,
+            owngil_whereis_parallel_test,
+            owngil_atom_basic_test,
+            owngil_atom_roundtrip_test,
+            owngil_atom_create_test,
+            owngil_atom_create_different_test,
+            owngil_atom_cache_test,
+            owngil_ref_roundtrip_test,
+            owngil_pid_operations_test,
+            %% Channel tests
+            owngil_channel_class_test,
+            owngil_channel_iteration_test,
+            owngil_channel_context_manager_test,
+            %% ByteChannel tests
+            owngil_bytechannel_send_receive_test,
+            owngil_bytechannel_try_receive_test,
+            owngil_bytechannel_iteration_test,
+            %% Buffer tests
+            owngil_buffer_read_methods_test,
+            owngil_buffer_at_eof_test
+        ]}
+    ].
 
 init_per_suite(Config) ->
     case py_nif:owngil_supported() of
@@ -248,12 +252,36 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
     %% Cleanup registered functions
-    try py:unregister_function(owngil_double) catch _:_ -> ok end,
-    try py:unregister_function(owngil_triple) catch _:_ -> ok end,
-    try py:unregister_function(owngil_level) catch _:_ -> ok end,
-    try py:unregister_function(owngil_transform) catch _:_ -> ok end,
-    try py:unregister_function(owngil_get_value) catch _:_ -> ok end,
-    try py:unregister_function(owngil_echo) catch _:_ -> ok end,
+    try
+        py:unregister_function(owngil_double)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(owngil_triple)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(owngil_level)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(owngil_transform)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(owngil_get_value)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(owngil_echo)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%% ============================================================================
@@ -272,8 +300,11 @@ owngil_channel_send_receive_test(_Config) ->
     ok = py_channel:send(Ch, <<"hello_owngil">>),
 
     %% Receive in Python
-    {ok, <<"hello_owngil">>} = py_context:eval(Ctx,
-        <<"Channel(ch).try_receive()">>, #{<<"ch">> => Ch}),
+    {ok, <<"hello_owngil">>} = py_context:eval(
+        Ctx,
+        <<"Channel(ch).try_receive()">>,
+        #{<<"ch">> => Ch}
+    ),
 
     py_channel:close(Ch),
     py_context:stop(Ctx).
@@ -294,10 +325,16 @@ owngil_channel_sync_blocking_test(_Config) ->
     end),
 
     %% Blocking receive should wait for data
-    {ok, <<"delayed_data">>} = py_context:eval(Ctx,
-        <<"Channel(ch).receive()">>, #{<<"ch">> => Ch}),
+    {ok, <<"delayed_data">>} = py_context:eval(
+        Ctx,
+        <<"Channel(ch).receive()">>,
+        #{<<"ch">> => Ch}
+    ),
 
-    receive data_sent -> ok after 1000 -> ok end,
+    receive
+        data_sent -> ok
+    after 1000 -> ok
+    end,
 
     py_channel:close(Ch),
     py_context:stop(Ctx).
@@ -333,28 +370,32 @@ owngil_channel_async_receive_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     {ok, Ch} = py_channel:new(),
 
-    ok = py_context:exec(Ctx, <<"
-import asyncio
-from erlang import Channel
-
-async def async_receive(ch_ref):
-    ch = Channel(ch_ref)
-    return await ch.async_receive()
-
-def run_async(ch_ref):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(async_receive(ch_ref))
-    finally:
-        loop.close()
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "from erlang import Channel\n"
+        "\n"
+        "async def async_receive(ch_ref):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    return await ch.async_receive()\n"
+        "\n"
+        "def run_async(ch_ref):\n"
+        "    loop = asyncio.new_event_loop()\n"
+        "    try:\n"
+        "        return loop.run_until_complete(async_receive(ch_ref))\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
 
     %% Send data first
     ok = py_channel:send(Ch, <<"async_data">>),
 
     %% Async receive
-    {ok, <<"async_data">>} = py_context:eval(Ctx, <<"run_async(ch)">>,
-        #{<<"ch">> => Ch}),
+    {ok, <<"async_data">>} = py_context:eval(
+        Ctx,
+        <<"run_async(ch)">>,
+        #{<<"ch">> => Ch}
+    ),
 
     py_channel:close(Ch),
     py_context:stop(Ctx).
@@ -366,25 +407,39 @@ owngil_channel_parallel_producers_test(_Config) ->
     MessagesPerProducer = 10,
 
     %% Create producer contexts
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        ok = py_context:exec(Ctx, <<"from erlang import Channel">>),
-        Ctx
-    end || N <- lists:seq(1, NumProducers)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            ok = py_context:exec(Ctx, <<"from erlang import Channel">>),
+            Ctx
+        end
+     || N <- lists:seq(1, NumProducers)
+    ],
 
     Parent = self(),
 
     %% Start parallel producers
-    [spawn_link(fun() ->
-        lists:foreach(fun(MsgNum) ->
-            Msg = list_to_binary(io_lib:format("ctx~p_msg~p", [CtxNum, MsgNum])),
-            ok = py_channel:send(Ch, Msg)
-        end, lists:seq(1, MessagesPerProducer)),
-        Parent ! {producer_done, CtxNum}
-    end) || {CtxNum, _Ctx} <- lists:zip(lists:seq(1, NumProducers), Contexts)],
+    [
+        spawn_link(fun() ->
+            lists:foreach(
+                fun(MsgNum) ->
+                    Msg = list_to_binary(io_lib:format("ctx~p_msg~p", [CtxNum, MsgNum])),
+                    ok = py_channel:send(Ch, Msg)
+                end,
+                lists:seq(1, MessagesPerProducer)
+            ),
+            Parent ! {producer_done, CtxNum}
+        end)
+     || {CtxNum, _Ctx} <- lists:zip(lists:seq(1, NumProducers), Contexts)
+    ],
 
     %% Wait for all producers
-    [receive {producer_done, N} -> ok end || N <- lists:seq(1, NumProducers)],
+    [
+        receive
+            {producer_done, N} -> ok
+        end
+     || N <- lists:seq(1, NumProducers)
+    ],
 
     %% Verify all messages received
     TotalMessages = NumProducers * MessagesPerProducer,
@@ -402,27 +457,39 @@ owngil_channel_parallel_consumers_test(_Config) ->
     TotalMessages = 20,
 
     %% Create consumer contexts
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        ok = py_context:exec(Ctx, <<"from erlang import Channel">>),
-        Ctx
-    end || N <- lists:seq(1, NumConsumers)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            ok = py_context:exec(Ctx, <<"from erlang import Channel">>),
+            Ctx
+        end
+     || N <- lists:seq(1, NumConsumers)
+    ],
 
     %% Send all messages
-    [py_channel:send(Ch, list_to_binary(integer_to_list(N)))
-     || N <- lists:seq(1, TotalMessages)],
+    [
+        py_channel:send(Ch, list_to_binary(integer_to_list(N)))
+     || N <- lists:seq(1, TotalMessages)
+    ],
     py_channel:close(Ch),
 
     Parent = self(),
 
     %% Start parallel consumers
-    [spawn_link(fun() ->
-        consume_until_closed(Ctx, Ch, Parent, CtxNum)
-    end) || {CtxNum, Ctx} <- lists:zip(lists:seq(1, NumConsumers), Contexts)],
+    [
+        spawn_link(fun() ->
+            consume_until_closed(Ctx, Ch, Parent, CtxNum)
+        end)
+     || {CtxNum, Ctx} <- lists:zip(lists:seq(1, NumConsumers), Contexts)
+    ],
 
     %% Collect results
-    Results = [receive {consumer_result, N, Msgs} -> {N, Msgs} end
-               || N <- lists:seq(1, NumConsumers)],
+    Results = [
+        receive
+            {consumer_result, N, Msgs} -> {N, Msgs}
+        end
+     || N <- lists:seq(1, NumConsumers)
+    ],
 
     %% Verify total messages consumed
     TotalConsumed = lists:sum([length(Msgs) || {_, Msgs} <- Results]),
@@ -443,13 +510,19 @@ owngil_channel_cross_context_test(_Config) ->
 
     %% Ctx1 sends, Ctx2 receives
     ok = py_channel:send(Ch, <<"from_ctx1">>),
-    {ok, <<"from_ctx1">>} = py_context:eval(Ctx2,
-        <<"Channel(ch).try_receive()">>, #{<<"ch">> => Ch}),
+    {ok, <<"from_ctx1">>} = py_context:eval(
+        Ctx2,
+        <<"Channel(ch).try_receive()">>,
+        #{<<"ch">> => Ch}
+    ),
 
     %% Ctx2 sends (via Erlang), Ctx1 receives
     ok = py_channel:send(Ch, <<"from_erlang">>),
-    {ok, <<"from_erlang">>} = py_context:eval(Ctx1,
-        <<"Channel(ch).try_receive()">>, #{<<"ch">> => Ch}),
+    {ok, <<"from_erlang">>} = py_context:eval(
+        Ctx1,
+        <<"Channel(ch).try_receive()">>,
+        #{<<"ch">> => Ch}
+    ),
 
     py_channel:close(Ch),
     py_context:stop(Ctx1),
@@ -461,31 +534,48 @@ owngil_channel_high_throughput_test(_Config) ->
     NumContexts = 4,
     MessagesPerContext = 100,
 
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        ok = py_context:exec(Ctx, <<"from erlang import Channel">>),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            ok = py_context:exec(Ctx, <<"from erlang import Channel">>),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Parent = self(),
     Start = erlang:monotonic_time(millisecond),
 
     %% Start parallel senders
-    _ = [spawn_link(fun() ->
-        lists:foreach(fun(M) ->
-            py_channel:send(Ch, <<(integer_to_binary(N))/binary, "_",
-                                  (integer_to_binary(M))/binary>>)
-        end, lists:seq(1, MessagesPerContext)),
-        Parent ! {sender_done, N}
-    end) || {N, _Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+    _ = [
+        spawn_link(fun() ->
+            lists:foreach(
+                fun(M) ->
+                    py_channel:send(Ch, <<
+                        (integer_to_binary(N))/binary, "_", (integer_to_binary(M))/binary
+                    >>)
+                end,
+                lists:seq(1, MessagesPerContext)
+            ),
+            Parent ! {sender_done, N}
+        end)
+     || {N, _Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)
+    ],
 
     %% Wait for senders
-    [receive {sender_done, N} -> ok end || N <- lists:seq(1, NumContexts)],
+    [
+        receive
+            {sender_done, N} -> ok
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Elapsed = erlang:monotonic_time(millisecond) - Start,
     TotalMessages = NumContexts * MessagesPerContext,
-    ct:pal("Sent ~p messages in ~p ms (~.2f msgs/ms)",
-           [TotalMessages, Elapsed, TotalMessages / max(1, Elapsed)]),
+    ct:pal(
+        "Sent ~p messages in ~p ms (~.2f msgs/ms)",
+        [TotalMessages, Elapsed, TotalMessages / max(1, Elapsed)]
+    ),
 
     %% Drain messages
     Messages = drain_channel(Ch, TotalMessages),
@@ -509,8 +599,11 @@ owngil_buffer_write_read_test(_Config) ->
     ok = py_buffer:close(Buf),
 
     %% Read from Python
-    {ok, <<"hello owngil">>} = py_context:eval(Ctx,
-        <<"buf.read()">>, #{<<"buf">> => Buf}),
+    {ok, <<"hello owngil">>} = py_context:eval(
+        Ctx,
+        <<"buf.read()">>,
+        #{<<"buf">> => Buf}
+    ),
 
     py_context:stop(Ctx).
 
@@ -523,13 +616,17 @@ owngil_buffer_pass_to_python_test(_Config) ->
     ok = py_buffer:write(Buf, <<"chunk2">>),
     ok = py_buffer:close(Buf),
 
-    ok = py_context:exec(Ctx, <<"
-def process_buffer(buf):
-    return buf.read().upper()
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "def process_buffer(buf):\n"
+        "    return buf.read().upper()\n"
+    >>),
 
-    {ok, <<"CHUNK1:CHUNK2">>} = py_context:eval(Ctx,
-        <<"process_buffer(buf)">>, #{<<"buf">> => Buf}),
+    {ok, <<"CHUNK1:CHUNK2">>} = py_context:eval(
+        Ctx,
+        <<"process_buffer(buf)">>,
+        #{<<"buf">> => Buf}
+    ),
 
     py_context:stop(Ctx).
 
@@ -539,26 +636,27 @@ owngil_buffer_async_read_test(_Config) ->
     {ok, Buf} = py_buffer:new(),
     Self = self(),
 
-    ok = py_context:exec(Ctx, <<"
-import asyncio
-
-async def async_read(buf):
-    chunks = []
-    while not buf.at_eof():
-        available = buf.readable_amount()
-        if available > 0:
-            chunks.append(buf.read_nonblock(available))
-        else:
-            await asyncio.sleep(0.01)
-    return b''.join(chunks)
-
-def run_async_read(buf):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(async_read(buf))
-    finally:
-        loop.close()
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "\n"
+        "async def async_read(buf):\n"
+        "    chunks = []\n"
+        "    while not buf.at_eof():\n"
+        "        available = buf.readable_amount()\n"
+        "        if available > 0:\n"
+        "            chunks.append(buf.read_nonblock(available))\n"
+        "        else:\n"
+        "            await asyncio.sleep(0.01)\n"
+        "    return b''.join(chunks)\n"
+        "\n"
+        "def run_async_read(buf):\n"
+        "    loop = asyncio.new_event_loop()\n"
+        "    try:\n"
+        "        return loop.run_until_complete(async_read(buf))\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
 
     %% Spawn writer
     spawn_link(fun() ->
@@ -570,45 +668,72 @@ def run_async_read(buf):
         Self ! writer_done
     end),
 
-    {ok, <<"async1:async2">>} = py_context:eval(Ctx,
-        <<"run_async_read(buf)">>, #{<<"buf">> => Buf}),
+    {ok, <<"async1:async2">>} = py_context:eval(
+        Ctx,
+        <<"run_async_read(buf)">>,
+        #{<<"buf">> => Buf}
+    ),
 
-    receive writer_done -> ok after 1000 -> ok end,
+    receive
+        writer_done -> ok
+    after 1000 -> ok
+    end,
     py_context:stop(Ctx).
 
 %% @doc Multiple owngil contexts writing to buffers in parallel
 owngil_buffer_parallel_writers_test(_Config) ->
     NumContexts = 4,
-    Buffers = [begin {ok, B} = py_buffer:new(), B end
-               || _ <- lists:seq(1, NumContexts)],
+    Buffers = [
+        begin
+            {ok, B} = py_buffer:new(),
+            B
+        end
+     || _ <- lists:seq(1, NumContexts)
+    ],
 
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Parent = self(),
 
     %% Start parallel writers (each writes to own buffer from Erlang)
-    [spawn_link(fun() ->
-        ok = py_buffer:write(Buf, <<"parallel_">>),
-        ok = py_buffer:write(Buf, integer_to_binary(N)),
-        ok = py_buffer:close(Buf),
-        Parent ! {writer_done, N}
-    end) || {N, Buf} <- lists:zip(lists:seq(1, NumContexts), Buffers)],
+    [
+        spawn_link(fun() ->
+            ok = py_buffer:write(Buf, <<"parallel_">>),
+            ok = py_buffer:write(Buf, integer_to_binary(N)),
+            ok = py_buffer:close(Buf),
+            Parent ! {writer_done, N}
+        end)
+     || {N, Buf} <- lists:zip(lists:seq(1, NumContexts), Buffers)
+    ],
 
     %% Wait for writers
-    [receive {writer_done, N} -> ok end || N <- lists:seq(1, NumContexts)],
+    [
+        receive
+            {writer_done, N} -> ok
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     %% Read from each context
-    Results = [begin
-        {ok, Data} = py_context:eval(Ctx, <<"buf.read()">>, #{<<"buf">> => Buf}),
-        Data
-    end || {Ctx, Buf} <- lists:zip(Contexts, Buffers)],
+    Results = [
+        begin
+            {ok, Data} = py_context:eval(Ctx, <<"buf.read()">>, #{<<"buf">> => Buf}),
+            Data
+        end
+     || {Ctx, Buf} <- lists:zip(Contexts, Buffers)
+    ],
 
     %% Verify results
-    Expected = [<<"parallel_", (integer_to_binary(N))/binary>>
-                || N <- lists:seq(1, NumContexts)],
+    Expected = [
+        <<"parallel_", (integer_to_binary(N))/binary>>
+     || N <- lists:seq(1, NumContexts)
+    ],
     Expected = Results,
 
     [py_context:stop(Ctx) || Ctx <- Contexts],
@@ -622,16 +747,20 @@ owngil_buffer_memoryview_test(_Config) ->
     ok = py_buffer:write(Buf, <<"memoryview test">>),
     ok = py_buffer:close(Buf),
 
-    ok = py_context:exec(Ctx, <<"
-def test_memoryview(buf):
-    mv = memoryview(buf)
-    result = bytes(mv[:10])
-    mv.release()
-    return result
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "def test_memoryview(buf):\n"
+        "    mv = memoryview(buf)\n"
+        "    result = bytes(mv[:10])\n"
+        "    mv.release()\n"
+        "    return result\n"
+    >>),
 
-    {ok, <<"memoryview">>} = py_context:eval(Ctx,
-        <<"test_memoryview(buf)">>, #{<<"buf">> => Buf}),
+    {ok, <<"memoryview">>} = py_context:eval(
+        Ctx,
+        <<"test_memoryview(buf)">>,
+        #{<<"buf">> => Buf}
+    ),
 
     py_context:stop(Ctx).
 
@@ -640,14 +769,17 @@ owngil_buffer_gc_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
 
     %% Create many buffers from Erlang side and pass to Python
-    lists:foreach(fun(_) ->
-        {ok, Buf} = py_buffer:new(),
-        ok = py_buffer:write(Buf, binary:copy(<<$x>>, 100)),
-        ok = py_buffer:close(Buf),
-        %% Pass to Python for reading
-        {ok, Data} = py_context:eval(Ctx, <<"buf.read()">>, #{<<"buf">> => Buf}),
-        100 = byte_size(Data)
-    end, lists:seq(1, 50)),
+    lists:foreach(
+        fun(_) ->
+            {ok, Buf} = py_buffer:new(),
+            ok = py_buffer:write(Buf, binary:copy(<<$x>>, 100)),
+            ok = py_buffer:close(Buf),
+            %% Pass to Python for reading
+            {ok, Data} = py_context:eval(Ctx, <<"buf.read()">>, #{<<"buf">> => Buf}),
+            100 = byte_size(Data)
+        end,
+        lists:seq(1, 50)
+    ),
 
     %% Force Erlang GC
     erlang:garbage_collect(),
@@ -674,8 +806,11 @@ owngil_reentrant_basic_test(_Config) ->
     end),
 
     %% Test callback from owngil context
-    {ok, 21} = py_context:eval(Ctx,
-        <<"__import__('erlang').call('owngil_double', 10) + 1">>, #{}),
+    {ok, 21} = py_context:eval(
+        Ctx,
+        <<"__import__('erlang').call('owngil_double', 10) + 1">>,
+        #{}
+    ),
 
     py_context:stop(Ctx).
 
@@ -686,24 +821,34 @@ owngil_reentrant_nested_test(_Config) ->
 
     py:register_function(owngil_level, fun([Level, N]) ->
         case Level >= N of
-            true -> Level;
+            true ->
+                Level;
             false ->
                 %% Use py:eval to go through pool for re-entry
-                Code = iolist_to_binary(io_lib:format(
-                    "__import__('erlang').call('owngil_level', ~p, ~p)",
-                    [Level + 1, N])),
+                Code = iolist_to_binary(
+                    io_lib:format(
+                        "__import__('erlang').call('owngil_level', ~p, ~p)",
+                        [Level + 1, N]
+                    )
+                ),
                 {ok, Result} = py:eval(Code),
                 Result
         end
     end),
 
     %% Test 3 levels of nesting
-    {ok, 3} = py_context:eval(Ctx,
-        <<"__import__('erlang').call('owngil_level', 1, 3)">>, #{}),
+    {ok, 3} = py_context:eval(
+        Ctx,
+        <<"__import__('erlang').call('owngil_level', 1, 3)">>,
+        #{}
+    ),
 
     %% Test 5 levels
-    {ok, 5} = py_context:eval(Ctx,
-        <<"__import__('erlang').call('owngil_level', 1, 5)">>, #{}),
+    {ok, 5} = py_context:eval(
+        Ctx,
+        <<"__import__('erlang').call('owngil_level', 1, 5)">>,
+        #{}
+    ),
 
     py_context:stop(Ctx).
 
@@ -714,10 +859,14 @@ owngil_reentrant_nested_test(_Config) ->
 owngil_reentrant_multi_stress_test(_Config) ->
     py:register_function(owngil_level, fun([Level, N]) ->
         case Level >= N of
-            true -> Level;
+            true ->
+                Level;
             false ->
-                Code = iolist_to_binary(io_lib:format(
-                    "__import__('erlang').call('owngil_level', ~p, ~p)", [Level + 1, N])),
+                Code = iolist_to_binary(
+                    io_lib:format(
+                        "__import__('erlang').call('owngil_level', ~p, ~p)", [Level + 1, N]
+                    )
+                ),
                 {ok, R} = py:eval(Code),
                 R
         end
@@ -725,43 +874,73 @@ owngil_reentrant_multi_stress_test(_Config) ->
     %% Kept light so it stays fast and non-flaky on slow CI hosts while still
     %% driving concurrent reentrant suspend/resume across distinct subinterpreters.
     Parent = self(),
-    Pids = [spawn(fun() ->
-        {ok, Ctx} = py_context:start_link(CtxId, owngil),
-        Ok = lists:all(fun(_) ->
-            {ok, 4} =:= py_context:eval(Ctx,
-                <<"__import__('erlang').call('owngil_level', 1, 4)">>, #{})
-        end, lists:seq(1, 5)),
-        py_context:stop(Ctx),
-        Parent ! {self(), Ok}
-    end) || CtxId <- lists:seq(1, 2)],
-    [receive {P, true} -> ok after 120000 -> error({stress_failed, P}) end || P <- Pids],
+    Pids = [
+        spawn(fun() ->
+            {ok, Ctx} = py_context:start_link(CtxId, owngil),
+            Ok = lists:all(
+                fun(_) ->
+                    {ok, 4} =:=
+                        py_context:eval(
+                            Ctx,
+                            <<"__import__('erlang').call('owngil_level', 1, 4)">>,
+                            #{}
+                        )
+                end,
+                lists:seq(1, 5)
+            ),
+            py_context:stop(Ctx),
+            Parent ! {self(), Ok}
+        end)
+     || CtxId <- lists:seq(1, 2)
+    ],
+    [
+        receive
+            {P, true} -> ok
+        after 120000 -> error({stress_failed, P})
+        end
+     || P <- Pids
+    ],
     ok.
 
 %% @doc Concurrent callbacks from multiple owngil contexts
 owngil_reentrant_concurrent_test(_Config) ->
     NumContexts = 4,
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     py:register_function(owngil_triple, fun([X]) -> X * 3 end),
 
     Parent = self(),
 
     %% Concurrent callback calls
-    [spawn_link(fun() ->
-        Input = N * 10,
-        {ok, Result} = py_context:eval(Ctx, iolist_to_binary(
-            io_lib:format("__import__('erlang').call('owngil_triple', ~p)", [Input])), #{}),
-        Parent ! {done, N, Result, Input * 3}
-    end) || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+    [
+        spawn_link(fun() ->
+            Input = N * 10,
+            {ok, Result} = py_context:eval(
+                Ctx,
+                iolist_to_binary(
+                    io_lib:format("__import__('erlang').call('owngil_triple', ~p)", [Input])
+                ),
+                #{}
+            ),
+            Parent ! {done, N, Result, Input * 3}
+        end)
+     || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)
+    ],
 
     %% Verify results
-    [receive
-        {done, N, Result, Expected} ->
-            Expected = Result
-    end || N <- lists:seq(1, NumContexts)],
+    [
+        receive
+            {done, N, Result, Expected} ->
+                Expected = Result
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     [py_context:stop(Ctx) || Ctx <- Contexts],
     ok.
@@ -783,13 +962,20 @@ owngil_reentrant_complex_types_test(_Config) ->
         end
     end),
 
-    {ok, Result} = py_context:eval(Ctx,
-        <<"__import__('erlang').call('owngil_transform', "
-          "{'items': [1, 2, 3], 'count': 5})">>, #{}),
+    {ok, Result} = py_context:eval(
+        Ctx,
+        <<
+            "__import__('erlang').call('owngil_transform', "
+            "{'items': [1, 2, 3], 'count': 5})"
+        >>,
+        #{}
+    ),
 
-    #{<<"items">> := [3, 2, 1],
-      <<"count">> := 10,
-      <<"processed">> := true} = Result,
+    #{
+        <<"items">> := [3, 2, 1],
+        <<"count">> := 10,
+        <<"processed">> := true
+    } = Result,
 
     py_context:stop(Ctx).
 
@@ -799,13 +985,15 @@ owngil_reentrant_thread_callback_test(_Config) ->
 
     py:register_function(owngil_echo, fun([X]) -> X end),
 
-    Code = <<"(lambda cf, erlang: (lambda executor: (lambda future: "
-             "('success', future.result()) if not future.exception() "
-             "else ('error', str(future.exception())))"
-             "(executor.submit(lambda: erlang.call('owngil_echo', 42))))"
-             "(cf.ThreadPoolExecutor(max_workers=1).__enter__()))"
-             "(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), "
-             "__import__('erlang'))">>,
+    Code = <<
+        "(lambda cf, erlang: (lambda executor: (lambda future: "
+        "('success', future.result()) if not future.exception() "
+        "else ('error', str(future.exception())))"
+        "(executor.submit(lambda: erlang.call('owngil_echo', 42))))"
+        "(cf.ThreadPoolExecutor(max_workers=1).__enter__()))"
+        "(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), "
+        "__import__('erlang'))"
+    >>,
 
     {ok, Result} = py_context:eval(Ctx, Code, #{}),
 
@@ -825,16 +1013,17 @@ owngil_reentrant_try_except_test(_Config) ->
     py:register_function(owngil_callback, fun([X]) -> X * 2 end),
 
     %% Test callback in try/except
-    ok = py_context:exec(Ctx, <<"
-import erlang
-
-def call_with_try():
-    try:
-        result = erlang.call('owngil_callback', 21)
-        return ('ok', result)
-    except Exception as e:
-        return ('error', str(e))
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import erlang\n"
+        "\n"
+        "def call_with_try():\n"
+        "    try:\n"
+        "        result = erlang.call('owngil_callback', 21)\n"
+        "        return ('ok', result)\n"
+        "    except Exception as e:\n"
+        "        return ('error', str(e))\n"
+    >>),
 
     {ok, {<<"ok">>, 42}} = py_context:eval(Ctx, <<"call_with_try()">>, #{}),
 
@@ -849,8 +1038,14 @@ owngil_pid_roundtrip_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
     {ok, ReturnedPid} = py_context:call(Ctx, py_test_pid_send, round_trip_pid, [Pid], #{}),
@@ -863,13 +1058,20 @@ owngil_send_simple_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
     {ok, true} = py_context:call(Ctx, py_test_pid_send, send_message, [Pid, <<"hello">>], #{}),
 
-    receive <<"hello">> -> ok
+    receive
+        <<"hello">> -> ok
     after 5000 -> ct:fail(timeout)
     end,
 
@@ -880,16 +1082,36 @@ owngil_send_multiple_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
-    {ok, 3} = py_context:call(Ctx, py_test_pid_send, send_multiple,
-        [Pid, [<<"one">>, <<"two">>, <<"three">>]], #{}),
+    {ok, 3} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        send_multiple,
+        [Pid, [<<"one">>, <<"two">>, <<"three">>]],
+        #{}
+    ),
 
-    receive <<"one">> -> ok after 5000 -> ct:fail(timeout_1) end,
-    receive <<"two">> -> ok after 5000 -> ct:fail(timeout_2) end,
-    receive <<"three">> -> ok after 5000 -> ct:fail(timeout_3) end,
+    receive
+        <<"one">> -> ok
+    after 5000 -> ct:fail(timeout_1)
+    end,
+    receive
+        <<"two">> -> ok
+    after 5000 -> ct:fail(timeout_2)
+    end,
+    receive
+        <<"three">> -> ok
+    after 5000 -> ct:fail(timeout_3)
+    end,
 
     py_context:stop(Ctx).
 
@@ -898,8 +1120,14 @@ owngil_send_complex_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
     {ok, true} = py_context:call(Ctx, py_test_pid_send, send_complex_term, [Pid], #{}),
@@ -916,13 +1144,24 @@ owngil_suspension_not_caught_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     py:register_function(test_pid_echo, fun([X]) -> X end),
 
-    {ok, {<<"ok">>, 42}} = py_context:call(Ctx, py_test_pid_send,
-        suspension_not_caught_by_except_exception, [], #{}),
+    {ok, {<<"ok">>, 42}} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        suspension_not_caught_by_except_exception,
+        [],
+        #{}
+    ),
 
     py:unregister_function(test_pid_echo),
     py_context:stop(Ctx).
@@ -932,14 +1171,26 @@ owngil_send_from_coroutine_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
-    {ok, true} = py_context:call(Ctx, py_test_pid_send, send_from_coroutine,
-        [Pid, <<"async_hello">>], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        send_from_coroutine,
+        [Pid, <<"async_hello">>],
+        #{}
+    ),
 
-    receive <<"async_hello">> -> ok
+    receive
+        <<"async_hello">> -> ok
     after 5000 -> ct:fail(timeout)
     end,
 
@@ -950,13 +1201,24 @@ owngil_send_nonblocking_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
     Count = 100,
-    {ok, Elapsed} = py_context:call(Ctx, py_test_pid_send, send_is_nonblocking,
-        [Pid, Count], #{}),
+    {ok, Elapsed} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        send_is_nonblocking,
+        [Pid, Count],
+        #{}
+    ),
 
     ct:pal("Sent ~p messages in ~.6f seconds", [Count, Elapsed]),
     true = Elapsed < 1.0,
@@ -972,27 +1234,52 @@ owngil_send_parallel_test(Config) ->
     MessagesPerContext = 25,
     TestDir = proplists:get_value(test_dir, Config),
 
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-            "import sys; sys.path.insert(0, '~s')", [TestDir]))),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            ok = py_context:exec(
+                Ctx,
+                iolist_to_binary(
+                    io_lib:format(
+                        "import sys; sys.path.insert(0, '~s')", [TestDir]
+                    )
+                )
+            ),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Parent = self(),
     Pid = self(),
 
     %% Parallel senders
-    [spawn_link(fun() ->
-        lists:foreach(fun(M) ->
-            py_context:call(Ctx, py_test_pid_send, send_message,
-                [Pid, {N, M}], #{})
-        end, lists:seq(1, MessagesPerContext)),
-        Parent ! {sender_done, N}
-    end) || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+    [
+        spawn_link(fun() ->
+            lists:foreach(
+                fun(M) ->
+                    py_context:call(
+                        Ctx,
+                        py_test_pid_send,
+                        send_message,
+                        [Pid, {N, M}],
+                        #{}
+                    )
+                end,
+                lists:seq(1, MessagesPerContext)
+            ),
+            Parent ! {sender_done, N}
+        end)
+     || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)
+    ],
 
     %% Wait for senders
-    [receive {sender_done, N} -> ok end || N <- lists:seq(1, NumContexts)],
+    [
+        receive
+            {sender_done, N} -> ok
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     %% Count messages
     TotalMessages = NumContexts * MessagesPerContext,
@@ -1013,23 +1300,24 @@ owngil_reactor_echo_protocol_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
 
     %% Set up the protocol factory
-    ok = py_context:exec(Ctx, <<"
-import erlang.reactor as reactor
-
-class EchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'continue' if self.write_buffer else 'close'
-
-reactor.set_protocol_factory(EchoProtocol)
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class EchoProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'continue' if self.write_buffer else 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(EchoProtocol)\n"
+    >>),
 
     %% Verify protocol factory is set
     {ok, true} = py_context:eval(Ctx, <<"reactor._protocol_factory is not None">>, #{}),
@@ -1041,30 +1329,31 @@ reactor.set_protocol_factory(EchoProtocol)
 
 %% @doc Multiple connections in owngil reactor
 owngil_reactor_multiple_conn_test(_Config) ->
-    SetupCode = <<"
-import erlang.reactor as reactor
-
-class CounterProtocol(reactor.Protocol):
-    counter = 0
-
-    def connection_made(self, fd, client_info):
-        super().connection_made(fd, client_info)
-        CounterProtocol.counter += 1
-        self.my_id = CounterProtocol.counter
-
-    def data_received(self, data):
-        self.write_buffer.extend(str(self.my_id).encode() + b':' + data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'close'
-
-reactor.set_protocol_factory(CounterProtocol)
-">>,
+    SetupCode = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class CounterProtocol(reactor.Protocol):\n"
+        "    counter = 0\n"
+        "\n"
+        "    def connection_made(self, fd, client_info):\n"
+        "        super().connection_made(fd, client_info)\n"
+        "        CounterProtocol.counter += 1\n"
+        "        self.my_id = CounterProtocol.counter\n"
+        "\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(str(self.my_id).encode() + b':' + data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(CounterProtocol)\n"
+    >>,
 
     {ok, ReactorCtx} = py_reactor_context:start_link(1, owngil, #{
         setup_code => SetupCode
@@ -1074,52 +1363,62 @@ reactor.set_protocol_factory(CounterProtocol)
     Pairs = [create_socketpair() || _ <- lists:seq(1, 3)],
 
     %% Handoff all
-    [begin
-        {ok, {Server, _}} = Pair,
-        Fd = get_fd(Server),
-        ok = py_reactor_context:handoff(ReactorCtx, Fd, #{})
-    end || Pair <- Pairs],
+    [
+        begin
+            {ok, {Server, _}} = Pair,
+            Fd = get_fd(Server),
+            ok = py_reactor_context:handoff(ReactorCtx, Fd, #{})
+        end
+     || Pair <- Pairs
+    ],
     timer:sleep(100),
 
     %% Send and receive
-    Results = [begin
-        {ok, {_, Client}} = Pair,
-        ok = gen_tcp:send(Client, <<"test">>),
-        {ok, Data} = gen_tcp:recv(Client, 0, 2000),
-        Data
-    end || Pair <- Pairs],
+    Results = [
+        begin
+            {ok, {_, Client}} = Pair,
+            ok = gen_tcp:send(Client, <<"test">>),
+            {ok, Data} = gen_tcp:recv(Client, 0, 2000),
+            Data
+        end
+     || Pair <- Pairs
+    ],
 
     %% Verify unique IDs
     [<<"1:test">>, <<"2:test">>, <<"3:test">>] = lists:sort(Results),
 
     %% Cleanup
-    [begin
-        {ok, {Server, Client}} = Pair,
-        gen_tcp:close(Server),
-        gen_tcp:close(Client)
-    end || Pair <- Pairs],
+    [
+        begin
+            {ok, {Server, Client}} = Pair,
+            gen_tcp:close(Server),
+            gen_tcp:close(Client)
+        end
+     || Pair <- Pairs
+    ],
     py_reactor_context:stop(ReactorCtx).
 
 %% @doc async_pending pattern in owngil reactor
 owngil_reactor_async_pending_test(_Config) ->
-    SetupCode = <<"
-import erlang.reactor as reactor
-
-class AsyncPendingProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(b'ASYNC:' + data)
-        reactor.signal_write_ready(self.fd)
-        return 'async_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'close'
-
-reactor.set_protocol_factory(AsyncPendingProtocol)
-">>,
+    SetupCode = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class AsyncPendingProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(b'ASYNC:' + data)\n"
+        "        reactor.signal_write_ready(self.fd)\n"
+        "        return 'async_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(AsyncPendingProtocol)\n"
+    >>,
 
     {ok, ReactorCtx} = py_reactor_context:start_link(1, owngil, #{
         setup_code => SetupCode
@@ -1146,15 +1445,16 @@ owngil_reactor_buffer_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
 
     %% Test basic bytes operations that would be similar to ReactorBuffer
-    ok = py_context:exec(Ctx, <<"
-data = b'reactor buffer test'
-result = {
-    'len': len(data),
-    'startswith': data.startswith(b'reactor'),
-    'find': data.find(b'buffer'),
-    'slice': data[8:14]
-}
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "data = b'reactor buffer test'\n"
+        "result = {\n"
+        "    'len': len(data),\n"
+        "    'startswith': data.startswith(b'reactor'),\n"
+        "    'find': data.find(b'buffer'),\n"
+        "    'slice': data[8:14]\n"
+        "}\n"
+    >>),
 
     {ok, #{
         <<"len">> := 19,
@@ -1167,41 +1467,43 @@ result = {
 
 %% @doc Protocol factory isolation between owngil contexts
 owngil_reactor_isolation_test(_Config) ->
-    EchoSetup = <<"
-import erlang.reactor as reactor
+    EchoSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class EchoProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(data)\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(EchoProtocol)\n"
+    >>,
 
-class EchoProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(data)
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'close'
-
-reactor.set_protocol_factory(EchoProtocol)
-">>,
-
-    UpperSetup = <<"
-import erlang.reactor as reactor
-
-class UpperProtocol(reactor.Protocol):
-    def data_received(self, data):
-        self.write_buffer.extend(bytes(data).upper())
-        return 'write_pending'
-
-    def write_ready(self):
-        if not self.write_buffer:
-            return 'close'
-        written = self.write(bytes(self.write_buffer))
-        del self.write_buffer[:written]
-        return 'close'
-
-reactor.set_protocol_factory(UpperProtocol)
-">>,
+    UpperSetup = <<
+        "\n"
+        "import erlang.reactor as reactor\n"
+        "\n"
+        "class UpperProtocol(reactor.Protocol):\n"
+        "    def data_received(self, data):\n"
+        "        self.write_buffer.extend(bytes(data).upper())\n"
+        "        return 'write_pending'\n"
+        "\n"
+        "    def write_ready(self):\n"
+        "        if not self.write_buffer:\n"
+        "            return 'close'\n"
+        "        written = self.write(bytes(self.write_buffer))\n"
+        "        del self.write_buffer[:written]\n"
+        "        return 'close'\n"
+        "\n"
+        "reactor.set_protocol_factory(UpperProtocol)\n"
+    >>,
 
     {ok, Ctx1} = py_reactor_context:start_link(1, owngil, #{setup_code => EchoSetup}),
     {ok, Ctx2} = py_reactor_context:start_link(2, owngil, #{setup_code => UpperSetup}),
@@ -1219,8 +1521,10 @@ reactor.set_protocol_factory(UpperProtocol)
     {ok, R1} = gen_tcp:recv(S1b, 0, 2000),
     {ok, R2} = gen_tcp:recv(S2b, 0, 2000),
 
-    gen_tcp:close(S1a), gen_tcp:close(S1b),
-    gen_tcp:close(S2a), gen_tcp:close(S2b),
+    gen_tcp:close(S1a),
+    gen_tcp:close(S1b),
+    gen_tcp:close(S2a),
+    gen_tcp:close(S2b),
     py_reactor_context:stop(Ctx1),
     py_reactor_context:stop(Ctx2),
 
@@ -1252,26 +1556,35 @@ owngil_async_run_sync_test(_Config) ->
 %% @doc Concurrent tasks across owngil contexts
 owngil_async_concurrent_test(_Config) ->
     NumContexts = 4,
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Parent = self(),
 
     %% Submit concurrent tasks
-    [spawn_link(fun() ->
-        Ref = py_event_loop:create_task(math, sqrt, [float(N * N)]),
-        {ok, Result} = py_event_loop:await(Ref, 5000),
-        Parent ! {done, N, Result}
-    end) || {N, _Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+    [
+        spawn_link(fun() ->
+            Ref = py_event_loop:create_task(math, sqrt, [float(N * N)]),
+            {ok, Result} = py_event_loop:await(Ref, 5000),
+            Parent ! {done, N, Result}
+        end)
+     || {N, _Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)
+    ],
 
     %% Verify results
-    [receive
-        {done, N, Result} ->
-            Expected = float(N),
-            true = abs(Result - Expected) < 0.0001
-    end || N <- lists:seq(1, NumContexts)],
+    [
+        receive
+            {done, N, Result} ->
+                Expected = float(N),
+                true = abs(Result - Expected) < 0.0001
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     [py_context:stop(Ctx) || Ctx <- Contexts],
     ok.
@@ -1281,17 +1594,24 @@ owngil_async_batch_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     NumTasks = 50,
 
-    Refs = [py_event_loop:create_task(math, sqrt, [float(N)])
-            || N <- lists:seq(1, NumTasks)],
+    Refs = [
+        py_event_loop:create_task(math, sqrt, [float(N)])
+     || N <- lists:seq(1, NumTasks)
+    ],
 
-    Results = [{N, py_event_loop:await(Ref, 5000)}
-               || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)],
+    Results = [
+        {N, py_event_loop:await(Ref, 5000)}
+     || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)
+    ],
 
     %% Verify all succeeded
-    lists:foreach(fun({N, {ok, R}}) ->
-        Expected = math:sqrt(N),
-        true = abs(R - Expected) < 0.0001
-    end, Results),
+    lists:foreach(
+        fun({N, {ok, R}}) ->
+            Expected = math:sqrt(N),
+            true = abs(R - Expected) < 0.0001
+        end,
+        Results
+    ),
 
     py_context:stop(Ctx).
 
@@ -1299,12 +1619,13 @@ owngil_async_batch_test(_Config) ->
 owngil_async_timeout_test(_Config) ->
     {ok, _Ctx} = py_context:start_link(1, owngil),
 
-    ok = py:exec(<<"
-async def slow_async(seconds):
-    import asyncio
-    await asyncio.sleep(seconds)
-    return 'completed'
-">>),
+    ok = py:exec(<<
+        "\n"
+        "async def slow_async(seconds):\n"
+        "    import asyncio\n"
+        "    await asyncio.sleep(seconds)\n"
+        "    return 'completed'\n"
+    >>),
 
     Ref = py_event_loop:create_task('__main__', slow_async, [10.0]),
     {error, timeout} = py_event_loop:await(Ref, 100),
@@ -1315,12 +1636,13 @@ async def slow_async(seconds):
 owngil_async_error_test(_Config) ->
     {ok, _Ctx} = py_context:start_link(1, owngil),
 
-    ok = py:exec(<<"
-async def failing_async():
-    import asyncio
-    await asyncio.sleep(0.001)
-    raise ValueError('test_error')
-">>),
+    ok = py:exec(<<
+        "\n"
+        "async def failing_async():\n"
+        "    import asyncio\n"
+        "    await asyncio.sleep(0.001)\n"
+        "    raise ValueError('test_error')\n"
+    >>),
 
     Ref = py_event_loop:create_task('__main__', failing_async, []),
     Result = py_event_loop:await(Ref, 5000),
@@ -1338,20 +1660,21 @@ async def failing_async():
 owngil_asyncio_basic_sleep_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
 
-    ok = py_context:exec(Ctx, <<"
-import asyncio
-
-async def sleep_test():
-    await asyncio.sleep(0.01)
-    return 'slept'
-
-def run_sleep():
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(sleep_test())
-    finally:
-        loop.close()
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "\n"
+        "async def sleep_test():\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return 'slept'\n"
+        "\n"
+        "def run_sleep():\n"
+        "    loop = asyncio.new_event_loop()\n"
+        "    try:\n"
+        "        return loop.run_until_complete(sleep_test())\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
 
     {ok, <<"slept">>} = py_context:eval(Ctx, <<"run_sleep()">>, #{}),
 
@@ -1361,24 +1684,25 @@ def run_sleep():
 owngil_asyncio_gather_test(_Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
 
-    ok = py_context:exec(Ctx, <<"
-import asyncio
-
-async def task(n):
-    await asyncio.sleep(0.01)
-    return n * 2
-
-async def gather_test():
-    results = await asyncio.gather(task(1), task(2), task(3))
-    return results
-
-def run_gather():
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(gather_test())
-    finally:
-        loop.close()
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "\n"
+        "async def task(n):\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return n * 2\n"
+        "\n"
+        "async def gather_test():\n"
+        "    results = await asyncio.gather(task(1), task(2), task(3))\n"
+        "    return results\n"
+        "\n"
+        "def run_gather():\n"
+        "    loop = asyncio.new_event_loop()\n"
+        "    try:\n"
+        "        return loop.run_until_complete(gather_test())\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
 
     {ok, [2, 4, 6]} = py_context:eval(Ctx, <<"run_gather()">>, #{}),
 
@@ -1387,37 +1711,47 @@ def run_gather():
 %% @doc Independent event loops per owngil context
 owngil_asyncio_parallel_loops_test(_Config) ->
     NumContexts = 4,
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        ok = py_context:exec(Ctx, <<"
-import asyncio
-
-async def loop_task(ctx_id, n):
-    await asyncio.sleep(0.01)
-    return f'ctx{ctx_id}_task{n}'
-
-async def gather_tasks(ctx_id):
-    return await asyncio.gather(
-        loop_task(ctx_id, 1),
-        loop_task(ctx_id, 2)
-    )
-
-def run_tasks(ctx_id):
-    # Use asyncio.run for proper event loop management in Python 3.10+
-    return asyncio.run(gather_tasks(ctx_id))
-">>),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            ok = py_context:exec(Ctx, <<
+                "\n"
+                "import asyncio\n"
+                "\n"
+                "async def loop_task(ctx_id, n):\n"
+                "    await asyncio.sleep(0.01)\n"
+                "    return f'ctx{ctx_id}_task{n}'\n"
+                "\n"
+                "async def gather_tasks(ctx_id):\n"
+                "    return await asyncio.gather(\n"
+                "        loop_task(ctx_id, 1),\n"
+                "        loop_task(ctx_id, 2)\n"
+                "    )\n"
+                "\n"
+                "def run_tasks(ctx_id):\n"
+                "    # Use asyncio.run for proper event loop management in Python 3.10+\n"
+                "    return asyncio.run(gather_tasks(ctx_id))\n"
+            >>),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Start = erlang:monotonic_time(millisecond),
 
     %% Run each context sequentially from the main process
     %% Each owngil context has its own dedicated thread providing parallelism
-    AllResults = [begin
-        {ok, Results} = py_context:eval(Ctx,
-            iolist_to_binary(io_lib:format("run_tasks(~p)", [N])), #{}),
-        {N, Results}
-    end || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+    AllResults = [
+        begin
+            {ok, Results} = py_context:eval(
+                Ctx,
+                iolist_to_binary(io_lib:format("run_tasks(~p)", [N])),
+                #{}
+            ),
+            {N, Results}
+        end
+     || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)
+    ],
 
     Elapsed = erlang:monotonic_time(millisecond) - Start,
     ct:pal("Event loops completed in ~p ms", [Elapsed]),
@@ -1439,11 +1773,13 @@ drain_channel(_Ch, 0, Acc) ->
     lists:reverse(Acc);
 drain_channel(Ch, N, Acc) ->
     case py_nif:channel_try_receive(Ch) of
-        {ok, Msg} -> drain_channel(Ch, N - 1, [Msg | Acc]);
+        {ok, Msg} ->
+            drain_channel(Ch, N - 1, [Msg | Acc]);
         {error, empty} ->
             timer:sleep(10),
             drain_channel(Ch, N, Acc);
-        {error, closed} -> lists:reverse(Acc)
+        {error, closed} ->
+            lists:reverse(Acc)
     end.
 
 consume_until_closed(Ctx, Ch, Parent, CtxNum) ->
@@ -1455,7 +1791,8 @@ consume_until_closed(Ctx, Ch, Parent, CtxNum, Acc) ->
             %% Empty, check if closed
             Info = py_channel:info(Ch),
             case maps:get(closed, Info) of
-                true -> Parent ! {consumer_result, CtxNum, lists:reverse(Acc)};
+                true ->
+                    Parent ! {consumer_result, CtxNum, lists:reverse(Acc)};
                 false ->
                     timer:sleep(5),
                     consume_until_closed(Ctx, Ch, Parent, CtxNum, Acc)
@@ -1468,16 +1805,19 @@ consume_until_closed(Ctx, Ch, Parent, CtxNum, Acc) ->
             Parent ! {consumer_result, CtxNum, lists:reverse(Acc)}
     end.
 
-drain_pid_messages(0) -> ok;
+drain_pid_messages(0) ->
+    ok;
 drain_pid_messages(N) ->
     receive
         {<<"msg">>, _} -> drain_pid_messages(N - 1)
     after 1000 ->
         ct:pal("Drained ~p messages, ~p remaining", [100 - N, N]),
-        ok  %% Tolerate some loss in high-volume test
+        %% Tolerate some loss in high-volume test
+        ok
     end.
 
-drain_tuple_messages(0) -> ok;
+drain_tuple_messages(0) ->
+    ok;
 drain_tuple_messages(N) ->
     receive
         {_, _} -> drain_tuple_messages(N - 1)
@@ -1541,7 +1881,8 @@ owngil_local_env_isolation_test(_Config) ->
     %% y should not exist in Env2
     Result = py_nif:context_eval(CtxRef, <<"y">>, #{}, Env2),
     case Result of
-        {error, _} -> ok;  %% Expected: NameError
+        %% Expected: NameError
+        {error, _} -> ok;
         _ -> ct:fail({unexpected_result, Result})
     end,
 
@@ -1557,17 +1898,24 @@ owngil_local_env_call_test(_Config) ->
 
     %% Define a function in the local environment
     %% py_nif:context_exec/3 is the with_env variant (arity overload)
-    ok = py_nif:context_exec(CtxRef, <<"
-def double(x):
-    return x * 2
-
-def greet(name):
-    return f'Hello, {name}!'
-">>, Env),
+    ok = py_nif:context_exec(
+        CtxRef,
+        <<
+            "\n"
+            "def double(x):\n"
+            "    return x * 2\n"
+            "\n"
+            "def greet(name):\n"
+            "    return f'Hello, {name}!'\n"
+        >>,
+        Env
+    ),
 
     %% Call the function using call/6 (the with_env variant by arity)
     {ok, 42} = py_nif:context_call(CtxRef, <<"__main__">>, <<"double">>, [21], #{}, Env),
-    {ok, <<"Hello, World!">>} = py_nif:context_call(CtxRef, <<"__main__">>, <<"greet">>, [<<"World">>], #{}, Env),
+    {ok, <<"Hello, World!">>} = py_nif:context_call(
+        CtxRef, <<"__main__">>, <<"greet">>, [<<"World">>], #{}, Env
+    ),
 
     %% Test calling imported module function
     {ok, 2.0} = py_nif:context_call(CtxRef, <<"math">>, <<"sqrt">>, [4.0], #{}, Env),
@@ -1583,15 +1931,26 @@ owngil_whereis_basic_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Register self under a name
     true = register(owngil_whereis_test_proc, self()),
 
     %% Look up the process from Python
-    {ok, FoundPid} = py_context:call(Ctx, py_test_pid_send, whereis_basic,
-        [owngil_whereis_test_proc], #{}),
+    {ok, FoundPid} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        whereis_basic,
+        [owngil_whereis_test_proc],
+        #{}
+    ),
 
     %% Verify it matches
     Self = self(),
@@ -1605,12 +1964,23 @@ owngil_whereis_nonexistent_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Look up a name that doesn't exist
-    {ok, none} = py_context:call(Ctx, py_test_pid_send, whereis_basic,
-        [nonexistent_proc_name_xyz], #{}),
+    {ok, none} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        whereis_basic,
+        [nonexistent_proc_name_xyz],
+        #{}
+    ),
 
     py_context:stop(Ctx).
 
@@ -1619,18 +1989,30 @@ owngil_whereis_and_send_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Register self under a name
     true = register(owngil_whereis_send_test, self()),
 
     %% Use whereis_and_send from Python
-    {ok, true} = py_context:call(Ctx, py_test_pid_send, whereis_and_send,
-        [owngil_whereis_send_test, <<"hello_from_whereis">>], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        whereis_and_send,
+        [owngil_whereis_send_test, <<"hello_from_whereis">>],
+        #{}
+    ),
 
     %% Verify message received
-    receive <<"hello_from_whereis">> -> ok
+    receive
+        <<"hello_from_whereis">> -> ok
     after 5000 -> ct:fail(timeout)
     end,
 
@@ -1645,24 +2027,46 @@ owngil_whereis_parallel_test(Config) ->
     %% Register self
     true = register(owngil_parallel_whereis_test, self()),
 
-    Contexts = [begin
-        {ok, Ctx} = py_context:start_link(N, owngil),
-        ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-            "import sys; sys.path.insert(0, '~s')", [TestDir]))),
-        Ctx
-    end || N <- lists:seq(1, NumContexts)],
+    Contexts = [
+        begin
+            {ok, Ctx} = py_context:start_link(N, owngil),
+            ok = py_context:exec(
+                Ctx,
+                iolist_to_binary(
+                    io_lib:format(
+                        "import sys; sys.path.insert(0, '~s')", [TestDir]
+                    )
+                )
+            ),
+            Ctx
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     Parent = self(),
 
     %% Parallel whereis + send
-    [spawn_link(fun() ->
-        {ok, true} = py_context:call(Ctx, py_test_pid_send, whereis_and_send,
-            [owngil_parallel_whereis_test, {from_ctx, N}], #{}),
-        Parent ! {sender_done, N}
-    end) || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)],
+    [
+        spawn_link(fun() ->
+            {ok, true} = py_context:call(
+                Ctx,
+                py_test_pid_send,
+                whereis_and_send,
+                [owngil_parallel_whereis_test, {from_ctx, N}],
+                #{}
+            ),
+            Parent ! {sender_done, N}
+        end)
+     || {N, Ctx} <- lists:zip(lists:seq(1, NumContexts), Contexts)
+    ],
 
     %% Wait for senders to complete
-    [receive {sender_done, _} -> ok end || _ <- lists:seq(1, NumContexts)],
+    [
+        receive
+            {sender_done, _} -> ok
+        end
+     || _ <- lists:seq(1, NumContexts)
+    ],
 
     %% Verify all messages received (order may vary)
     Messages = collect_from_ctx_messages(NumContexts, []),
@@ -1681,21 +2085,42 @@ owngil_atom_basic_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Test atom type - get the actual type name for debugging
-    {ok, TypeName} = py_context:call(Ctx, py_test_pid_send, atom_type_check,
-        [test_atom], #{}),
+    {ok, TypeName} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        atom_type_check,
+        [test_atom],
+        #{}
+    ),
     ct:pal("Atom type name in OWN_GIL: ~p", [TypeName]),
 
     %% Test same atoms are equal
-    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_equality_test,
-        [hello, hello], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        atom_equality_test,
+        [hello, hello],
+        #{}
+    ),
 
     %% Test different atoms are not equal
-    {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_inequality_test,
-        [foo, bar], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        atom_inequality_test,
+        [foo, bar],
+        #{}
+    ),
 
     py_context:stop(Ctx).
 
@@ -1706,13 +2131,24 @@ owngil_atom_roundtrip_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Pass atom to Python and get it back
     TestAtom = test_atom_owngil,
-    {ok, ReturnedValue} = py_context:call(Ctx, py_test_pid_send, atom_roundtrip,
-        [TestAtom], #{}),
+    {ok, ReturnedValue} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        atom_roundtrip,
+        [TestAtom],
+        #{}
+    ),
 
     %% In OWN_GIL mode, atoms become strings, so we get a binary back
     ExpectedBinary = atom_to_binary(TestAtom),
@@ -1725,8 +2161,14 @@ owngil_atom_create_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Test that erlang.atom() creates equal atoms for same name
     {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_create_test, [], #{}),
@@ -1738,8 +2180,14 @@ owngil_atom_create_different_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Test that erlang.atom() creates different atoms for different names
     {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_create_different_test, [], #{}),
@@ -1751,8 +2199,14 @@ owngil_atom_cache_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Test atom caching - same object returned for same name
     {ok, true} = py_context:call(Ctx, py_test_pid_send, atom_cache_test, [], #{}),
@@ -1768,8 +2222,14 @@ owngil_ref_roundtrip_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     %% Create refs
     Ref1 = make_ref(),
@@ -1789,8 +2249,14 @@ owngil_pid_operations_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     Pid = self(),
 
@@ -1817,8 +2283,14 @@ owngil_channel_class_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Ch} = py_channel:new(),
 
@@ -1826,8 +2298,13 @@ owngil_channel_class_test(Config) ->
     ok = py_channel:send(Ch, <<"test_channel_class">>),
 
     %% Receive via Channel class in Python
-    {ok, <<"test_channel_class">>} = py_context:call(Ctx, py_test_pid_send,
-        channel_receive_test, [Ch], #{}),
+    {ok, <<"test_channel_class">>} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        channel_receive_test,
+        [Ch],
+        #{}
+    ),
 
     py_channel:close(Ch),
     py_context:stop(Ctx).
@@ -1837,8 +2314,14 @@ owngil_channel_iteration_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Ch} = py_channel:new(),
 
@@ -1848,8 +2331,13 @@ owngil_channel_iteration_test(Config) ->
     ok = py_channel:send(Ch, <<"msg3">>),
 
     %% Iterate in Python
-    {ok, 3} = py_context:call(Ctx, py_test_pid_send,
-        channel_iteration_test, [Ch, 3], #{}),
+    {ok, 3} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        channel_iteration_test,
+        [Ch, 3],
+        #{}
+    ),
 
     py_channel:close(Ch),
     py_context:stop(Ctx).
@@ -1859,8 +2347,14 @@ owngil_channel_context_manager_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Ch} = py_channel:new(),
 
@@ -1868,8 +2362,13 @@ owngil_channel_context_manager_test(Config) ->
     ok = py_channel:send(Ch, <<"context_msg">>),
 
     %% Test context manager usage
-    {ok, true} = py_context:call(Ctx, py_test_pid_send,
-        channel_context_manager_test, [Ch], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        channel_context_manager_test,
+        [Ch],
+        #{}
+    ),
 
     py_channel:close(Ch),
     py_context:stop(Ctx).
@@ -1883,14 +2382,25 @@ owngil_bytechannel_send_receive_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Ch} = py_byte_channel:new(),
 
     %% Send bytes from Python via ByteChannel
-    {ok, true} = py_context:call(Ctx, py_test_pid_send,
-        bytechannel_send_receive_test, [Ch], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        bytechannel_send_receive_test,
+        [Ch],
+        #{}
+    ),
 
     %% Receive raw bytes from Erlang using byte channel API
     {ok, <<"hello_owngil">>} = py_byte_channel:try_receive(Ch),
@@ -1903,8 +2413,14 @@ owngil_bytechannel_try_receive_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Ch} = py_byte_channel:new(),
 
@@ -1912,8 +2428,13 @@ owngil_bytechannel_try_receive_test(Config) ->
     ok = py_byte_channel:send(Ch, <<"bytes_data">>),
 
     %% Receive via ByteChannel in Python
-    {ok, <<"bytes_data">>} = py_context:call(Ctx, py_test_pid_send,
-        bytechannel_try_receive_test, [Ch], #{}),
+    {ok, <<"bytes_data">>} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        bytechannel_try_receive_test,
+        [Ch],
+        #{}
+    ),
 
     py_byte_channel:close(Ch),
     py_context:stop(Ctx).
@@ -1923,8 +2444,14 @@ owngil_bytechannel_iteration_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Ch} = py_byte_channel:new(),
 
@@ -1933,8 +2460,13 @@ owngil_bytechannel_iteration_test(Config) ->
     ok = py_byte_channel:send(Ch, <<"chunk2">>),
 
     %% Iterate in Python
-    {ok, 2} = py_context:call(Ctx, py_test_pid_send,
-        bytechannel_iteration_test, [Ch, 2], #{}),
+    {ok, 2} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        bytechannel_iteration_test,
+        [Ch, 2],
+        #{}
+    ),
 
     py_byte_channel:close(Ch),
     py_context:stop(Ctx).
@@ -1948,8 +2480,14 @@ owngil_buffer_read_methods_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Buf} = py_buffer:new(),
 
@@ -1957,8 +2495,13 @@ owngil_buffer_read_methods_test(Config) ->
     ok = py_buffer:write(Buf, <<"test_data">>),
 
     %% Test read methods from Python
-    {ok, Result} = py_context:call(Ctx, py_test_pid_send,
-        buffer_read_methods_test, [Buf], #{}),
+    {ok, Result} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        buffer_read_methods_test,
+        [Buf],
+        #{}
+    ),
 
     %% Verify readable amount and data
     #{<<"readable">> := Readable, <<"data">> := Data} = Result,
@@ -1973,20 +2516,36 @@ owngil_buffer_at_eof_test(Config) ->
     {ok, Ctx} = py_context:start_link(1, owngil),
     TestDir = proplists:get_value(test_dir, Config),
 
-    ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py_context:exec(
+        Ctx,
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
 
     {ok, Buf} = py_buffer:new(),
 
     %% Buffer not yet at EOF (not closed)
-    {ok, false} = py_context:call(Ctx, py_test_pid_send,
-        buffer_at_eof_test, [Buf], #{}),
+    {ok, false} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        buffer_at_eof_test,
+        [Buf],
+        #{}
+    ),
 
     %% Close buffer
     ok = py_buffer:close(Buf),
 
     %% Now at EOF
-    {ok, true} = py_context:call(Ctx, py_test_pid_send,
-        buffer_at_eof_test, [Buf], #{}),
+    {ok, true} = py_context:call(
+        Ctx,
+        py_test_pid_send,
+        buffer_at_eof_test,
+        [Buf],
+        #{}
+    ),
 
     py_context:stop(Ctx).

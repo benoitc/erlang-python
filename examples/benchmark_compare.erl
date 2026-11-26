@@ -58,9 +58,12 @@ bench_sync_call() ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py:call(math, sqrt, [I])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py:call(math, sqrt, [I])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -81,9 +84,12 @@ bench_sync_eval() ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py:eval(<<"x * x + y">>, #{x => I, y => I})
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py:eval(<<"x * x + y">>, #{x => I, y => I})
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -108,10 +114,13 @@ bench_cast_single() ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            Ref = py:spawn_call(math, sqrt, [I]),
-            {ok, _} = py:await(Ref, 5000)
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                Ref = py:spawn_call(math, sqrt, [I]),
+                {ok, _} = py:await(Ref, 5000)
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -132,13 +141,18 @@ bench_cast_multiple() ->
     io:format("  Batches: ~p (10 cast calls each)~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(Batch) ->
-            %% Start 10 cast calls
-            Refs = [py:spawn_call(math, sqrt, [Batch * 10 + I])
-                    || I <- lists:seq(1, 10)],
-            %% Await all
-            [{ok, _} = py:await(Ref, 5000) || Ref <- Refs]
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(Batch) ->
+                %% Start 10 cast calls
+                Refs = [
+                    py:spawn_call(math, sqrt, [Batch * 10 + I])
+                 || I <- lists:seq(1, 10)
+                ],
+                %% Await all
+                [{ok, _} = py:await(Ref, 5000) || Ref <- Refs]
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TotalCalls = N * 10,
@@ -160,13 +174,18 @@ bench_cast_parallel() ->
     io:format("  Batches: ~p (10 concurrent calls each)~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(Batch) ->
-            %% Start 10 cast calls in parallel
-            Refs = [py:spawn_call(math, factorial, [20 + (Batch rem 10)])
-                    || _ <- lists:seq(1, 10)],
-            %% Await all results
-            [py:await(Ref, 5000) || Ref <- Refs]
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(Batch) ->
+                %% Start 10 cast calls in parallel
+                Refs = [
+                    py:spawn_call(math, factorial, [20 + (Batch rem 10)])
+                 || _ <- lists:seq(1, 10)
+                ],
+                %% Await all results
+                [py:await(Ref, 5000) || Ref <- Refs]
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TotalCalls = N * 10,
@@ -191,20 +210,33 @@ bench_concurrent_sync() ->
     TotalCalls = NumProcs * CallsPerProc,
 
     io:format("▶ ~s~n", [Name]),
-    io:format("  Processes: ~p, Calls/proc: ~p, Total: ~p~n",
-              [NumProcs, CallsPerProc, TotalCalls]),
+    io:format(
+        "  Processes: ~p, Calls/proc: ~p, Total: ~p~n",
+        [NumProcs, CallsPerProc, TotalCalls]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                {ok, _} = py:call(math, sqrt, [I])
-            end, lists:seq(1, CallsPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        {ok, _} = py:call(math, sqrt, [I])
+                    end,
+                    lists:seq(1, CallsPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     TimeMs = Time / 1000,
@@ -222,21 +254,34 @@ bench_concurrent_cast() ->
     TotalCalls = NumProcs * CallsPerProc,
 
     io:format("▶ ~s~n", [Name]),
-    io:format("  Processes: ~p, Casts/proc: ~p, Total: ~p~n",
-              [NumProcs, CallsPerProc, TotalCalls]),
+    io:format(
+        "  Processes: ~p, Casts/proc: ~p, Total: ~p~n",
+        [NumProcs, CallsPerProc, TotalCalls]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                Ref = py:spawn_call(math, factorial, [20 + I]),
-                {ok, _} = py:await(Ref, 5000)
-            end, lists:seq(1, CallsPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        Ref = py:spawn_call(math, factorial, [20 + I]),
+                        {ok, _} = py:await(Ref, 5000)
+                    end,
+                    lists:seq(1, CallsPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     TimeMs = Time / 1000,
@@ -260,19 +305,26 @@ print_summary(Results) ->
     io:format("│ Benchmark                              │ Latency   │ Thru/sec  │~n"),
     io:format("├────────────────────────────────────────┼───────────┼───────────┤~n"),
 
-    lists:foreach(fun({Name, Latency, Throughput}) ->
-        LatStr = if
-            Latency < 0 -> "N/A";
-            Latency < 1000 -> io_lib:format("~.3f ms", [Latency]);
-            true -> io_lib:format("~.1f ms", [Latency])
+    lists:foreach(
+        fun({Name, Latency, Throughput}) ->
+            LatStr =
+                if
+                    Latency < 0 -> "N/A";
+                    Latency < 1000 -> io_lib:format("~.3f ms", [Latency]);
+                    true -> io_lib:format("~.1f ms", [Latency])
+                end,
+            ThrStr =
+                if
+                    Throughput =:= 0 -> "N/A";
+                    true -> integer_to_list(Throughput)
+                end,
+            io:format(
+                "│ ~-38s │ ~-9s │ ~-9s │~n",
+                [string:slice(Name, 0, 38), LatStr, ThrStr]
+            )
         end,
-        ThrStr = if
-            Throughput =:= 0 -> "N/A";
-            true -> integer_to_list(Throughput)
-        end,
-        io:format("│ ~-38s │ ~-9s │ ~-9s │~n",
-                  [string:slice(Name, 0, 38), LatStr, ThrStr])
-    end, Results),
+        Results
+    ),
 
     io:format("└────────────────────────────────────────┴───────────┴───────────┘~n~n"),
 

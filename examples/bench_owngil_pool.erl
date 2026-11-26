@@ -80,15 +80,18 @@ bench_sequential(Label, N) ->
     io:format("  ~s Sequential (~p calls): ", [Label, N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
-            {ok, _} = py_event_loop_pool:await(Ref)
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
+                {ok, _} = py_event_loop_pool:await(Ref)
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     Rate = round(N / (Time / 1000000)),
-    io:format("~.1f ms (~p calls/sec)~n", [Time/1000, Rate]),
-    #{time_ms => Time/1000, rate => Rate}.
+    io:format("~.1f ms (~p calls/sec)~n", [Time / 1000, Rate]),
+    #{time_ms => Time / 1000, rate => Rate}.
 
 %% Concurrent callers (each process gets own worker in OWN_GIL mode)
 bench_concurrent(Label, NumProcs, TasksPerProc, _Complexity) ->
@@ -97,20 +100,31 @@ bench_concurrent(Label, NumProcs, TasksPerProc, _Complexity) ->
 
     Parent = self(),
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
-                {ok, _} = py_event_loop_pool:await(Ref)
-            end, lists:seq(1, TasksPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
+                        {ok, _} = py_event_loop_pool:await(Ref)
+                    end,
+                    lists:seq(1, TasksPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     Rate = round(TotalTasks / (Time / 1000000)),
-    io:format("~.1f ms (~p calls/sec)~n", [Time/1000, Rate]),
-    #{time_ms => Time/1000, rate => Rate, total => TotalTasks}.
+    io:format("~.1f ms (~p calls/sec)~n", [Time / 1000, Rate]),
+    #{time_ms => Time / 1000, rate => Rate, total => TotalTasks}.
 
 %% CPU-bound parallel tasks (shows true GIL parallelism)
 bench_parallel_cpu(Label, NumProcs) ->
@@ -118,21 +132,30 @@ bench_parallel_cpu(Label, NumProcs) ->
 
     Parent = self(),
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            %% Use time.sleep as a proxy for CPU work
-            %% In OWN_GIL mode, these run truly in parallel
-            Ref = py_event_loop_pool:create_task(time, sleep, [0.1]),
-            Result = py_event_loop_pool:await(Ref, 5000),
-            Parent ! {done, self(), Result}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                %% Use time.sleep as a proxy for CPU work
+                %% In OWN_GIL mode, these run truly in parallel
+                Ref = py_event_loop_pool:create_task(time, sleep, [0.1]),
+                Result = py_event_loop_pool:await(Ref, 5000),
+                Parent ! {done, self(), Result}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        Results = [receive {done, Pid, R} -> R after 5000 -> timeout end || Pid <- Pids],
+        Results = [
+            receive
+                {done, Pid, R} -> R
+            after 5000 -> timeout
+            end
+         || Pid <- Pids
+        ],
         %% Count successes
         length([X || {ok, _} = X <- Results])
     end),
 
-    io:format("~.1f ms~n", [Time/1000]),
-    #{time_ms => Time/1000, num_procs => NumProcs}.
+    io:format("~.1f ms~n", [Time / 1000]),
+    #{time_ms => Time / 1000, num_procs => NumProcs}.
 
 print_comparison(Regular, Owngil) ->
     io:format("~n"),
@@ -141,38 +164,48 @@ print_comparison(Regular, Owngil) ->
     io:format("================================================================~n~n"),
 
     io:format("~-30s ~12s ~12s ~10s~n", ["Benchmark", "Regular", "OWN_GIL", "Speedup"]),
-    io:format("~-30s ~12s ~12s ~10s~n", [string:copies("-", 30),
-                                          string:copies("-", 12),
-                                          string:copies("-", 12),
-                                          string:copies("-", 10)]),
+    io:format("~-30s ~12s ~12s ~10s~n", [
+        string:copies("-", 30),
+        string:copies("-", 12),
+        string:copies("-", 12),
+        string:copies("-", 10)
+    ]),
 
     %% Sequential (should be similar)
     SeqR = maps:get(rate, maps:get(sequential, Regular)),
     SeqO = maps:get(rate, maps:get(sequential, Owngil)),
     SeqSpeedup = SeqO / max(1, SeqR),
-    io:format("~-30s ~10w/s ~10w/s ~8.2fx~n",
-              ["Sequential (single caller)", SeqR, SeqO, SeqSpeedup]),
+    io:format(
+        "~-30s ~10w/s ~10w/s ~8.2fx~n",
+        ["Sequential (single caller)", SeqR, SeqO, SeqSpeedup]
+    ),
 
     %% Concurrent light
     CL_R = maps:get(rate, maps:get(concurrent_light, Regular)),
     CL_O = maps:get(rate, maps:get(concurrent_light, Owngil)),
     CL_Speedup = CL_O / max(1, CL_R),
-    io:format("~-30s ~10w/s ~10w/s ~8.2fx~n",
-              ["Concurrent (4 procs x 100)", CL_R, CL_O, CL_Speedup]),
+    io:format(
+        "~-30s ~10w/s ~10w/s ~8.2fx~n",
+        ["Concurrent (4 procs x 100)", CL_R, CL_O, CL_Speedup]
+    ),
 
     %% Concurrent medium
     CM_R = maps:get(rate, maps:get(concurrent_medium, Regular)),
     CM_O = maps:get(rate, maps:get(concurrent_medium, Owngil)),
     CM_Speedup = CM_O / max(1, CM_R),
-    io:format("~-30s ~10w/s ~10w/s ~8.2fx~n",
-              ["Concurrent (8 procs x 50)", CM_R, CM_O, CM_Speedup]),
+    io:format(
+        "~-30s ~10w/s ~10w/s ~8.2fx~n",
+        ["Concurrent (8 procs x 50)", CM_R, CM_O, CM_Speedup]
+    ),
 
     %% CPU-bound
     CPU_R = maps:get(time_ms, maps:get(parallel_cpu, Regular)),
     CPU_O = maps:get(time_ms, maps:get(parallel_cpu, Owngil)),
     CPU_Speedup = CPU_R / max(1, CPU_O),
-    io:format("~-30s ~10.1f ms ~10.1f ms ~8.2fx~n",
-              ["CPU-bound (4 parallel)", CPU_R, CPU_O, CPU_Speedup]),
+    io:format(
+        "~-30s ~10.1f ms ~10.1f ms ~8.2fx~n",
+        ["CPU-bound (4 parallel)", CPU_R, CPU_O, CPU_Speedup]
+    ),
 
     io:format("~n"),
     io:format("Notes:~n"),

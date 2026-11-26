@@ -63,14 +63,46 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
     %% Cleanup any registered functions
-    try py:unregister_function(double_it) catch _:_ -> ok end,
-    try py:unregister_function(add_one) catch _:_ -> ok end,
-    try py:unregister_function(call_python_square) catch _:_ -> ok end,
-    try py:unregister_function(square_in_erlang) catch _:_ -> ok end,
-    try py:unregister_function(maybe_fail) catch _:_ -> ok end,
-    try py:unregister_function(get_id) catch _:_ -> ok end,
-    try py:unregister_function(async_double) catch _:_ -> ok end,
-    try py:unregister_function(async_blob) catch _:_ -> ok end,
+    try
+        py:unregister_function(double_it)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(add_one)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(call_python_square)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(square_in_erlang)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(maybe_fail)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(get_id)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(async_double)
+    catch
+        _:_ -> ok
+    end,
+    try
+        py:unregister_function(async_blob)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%% ============================================================================
@@ -83,7 +115,8 @@ threadpool_basic_test(_Config) ->
 
     %% Use a lambda that creates executor, submits task, gets result
     %% Need fromlist to properly import concurrent.futures submodule
-    Code = <<"(lambda cf, erl: cf.ThreadPoolExecutor(max_workers=1).__enter__().submit(lambda: erl.call('double_it', 5)).result())(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    Code =
+        <<"(lambda cf, erl: cf.ThreadPoolExecutor(max_workers=1).__enter__().submit(lambda: erl.call('double_it', 5)).result())(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
     {ok, Result} = py:eval(Code),
     10 = Result,
     ok.
@@ -93,7 +126,8 @@ threadpool_concurrent_test(_Config) ->
     py:register_function(double_it, fun([X]) -> X * 2 end),
 
     %% Use executor.map to run calls in parallel
-    Code = <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=4).__enter__().map(lambda x: erl.call('double_it', x), range(20))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    Code =
+        <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=4).__enter__().map(lambda x: erl.call('double_it', x), range(20))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
     {ok, Results} = py:eval(Code),
     Expected = [X * 2 || X <- lists:seq(0, 19)],
     Expected = Results,
@@ -104,7 +138,8 @@ threadpool_multiple_calls_test(_Config) ->
     py:register_function(add_one, fun([X]) -> X + 1 end),
 
     %% Lambda that makes 3 sequential calls
-    Code = <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda x: erl.call('add_one', erl.call('add_one', erl.call('add_one', x))), range(5))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    Code =
+        <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda x: erl.call('add_one', erl.call('add_one', erl.call('add_one', x))), range(5))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
     {ok, Results} = py:eval(Code),
     Expected = [X + 3 || X <- lists:seq(0, 4)],
     Expected = Results,
@@ -119,7 +154,8 @@ threadpool_nested_callback_test(_Config) ->
 
     %% Call from thread pool, then use result in Python computation
     %% This tests that the result is properly returned and usable
-    Code = <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda x: erl.call('square_in_erlang', x) + 1, range(5))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    Code =
+        <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda x: erl.call('square_in_erlang', x) + 1, range(5))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
     {ok, Results} = py:eval(Code),
     %% Results should be x^2 + 1 for x in 0..4
     Expected = [(X * X) + 1 || X <- lists:seq(0, 4)],
@@ -136,7 +172,8 @@ threadpool_error_handling_test(_Config) ->
     end),
 
     %% Lambda that catches exceptions - only calls maybe_fail for even numbers
-    Code = <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda x: erl.call('maybe_fail', x) if x % 2 == 0 else 'error', range(4))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
+    Code =
+        <<"(lambda cf, erl: list(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda x: erl.call('maybe_fail', x) if x % 2 == 0 else 'error', range(4))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('erlang'))">>,
     {ok, Results} = py:eval(Code),
     %% Even numbers succeed (doubled), odd numbers return 'error'
     [0, <<"error">>, 4, <<"error">>] = Results,
@@ -147,7 +184,8 @@ threadpool_thread_reuse_test(_Config) ->
     py:register_function(get_id, fun([]) -> erlang:unique_integer() end),
 
     %% Get thread IDs and check that we have <= 2 unique threads
-    Code = <<"(lambda cf, th: len(set(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda _: th.get_ident(), range(10)))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('threading'))">>,
+    Code =
+        <<"(lambda cf, th: len(set(cf.ThreadPoolExecutor(max_workers=2).__enter__().map(lambda _: th.get_ident(), range(10)))))(__import__('concurrent.futures', fromlist=['ThreadPoolExecutor']), __import__('threading'))">>,
     {ok, ThreadCount} = py:eval(Code),
     true = (ThreadCount =< 2),
     ok.
@@ -161,13 +199,14 @@ simple_thread_basic_test(_Config) ->
     py:register_function(double_it, fun([X]) -> X * 2 end),
 
     %% Create a threading.Thread subclass that stores its result
-    Code = <<"
-(lambda: (
-    __import__('threading').Thread(target=lambda: setattr(__import__('sys').modules[__name__], '_result', __import__('erlang').call('double_it', 5))).start() or
-    __import__('time').sleep(0.1) or
-    getattr(__import__('sys').modules[__name__], '_result', None)
-))()
-">>,
+    Code = <<
+        "\n"
+        "(lambda: (\n"
+        "    __import__('threading').Thread(target=lambda: setattr(__import__('sys').modules[__name__], '_result', __import__('erlang').call('double_it', 5))).start() or\n"
+        "    __import__('time').sleep(0.1) or\n"
+        "    getattr(__import__('sys').modules[__name__], '_result', None)\n"
+        "))()\n"
+    >>,
     {ok, Result} = py:eval(Code),
     10 = Result,
     ok.
@@ -177,18 +216,19 @@ simple_thread_multiple_calls_test(_Config) ->
     py:register_function(add_one, fun([X]) -> X + 1 end),
 
     %% Thread that makes 3 sequential calls: add_one(add_one(add_one(0)))
-    Code = <<"
-(lambda: (
-    __import__('threading').Thread(target=lambda: setattr(
-        __import__('sys').modules[__name__], '_result',
-        __import__('erlang').call('add_one',
-            __import__('erlang').call('add_one',
-                __import__('erlang').call('add_one', 0)))
-    )).start() or
-    __import__('time').sleep(0.1) or
-    getattr(__import__('sys').modules[__name__], '_result', None)
-))()
-">>,
+    Code = <<
+        "\n"
+        "(lambda: (\n"
+        "    __import__('threading').Thread(target=lambda: setattr(\n"
+        "        __import__('sys').modules[__name__], '_result',\n"
+        "        __import__('erlang').call('add_one',\n"
+        "            __import__('erlang').call('add_one',\n"
+        "                __import__('erlang').call('add_one', 0)))\n"
+        "    )).start() or\n"
+        "    __import__('time').sleep(0.1) or\n"
+        "    getattr(__import__('sys').modules[__name__], '_result', None)\n"
+        "))()\n"
+    >>,
     {ok, Result} = py:eval(Code),
     3 = Result,
     ok.
@@ -198,17 +238,18 @@ simple_thread_concurrent_test(_Config) ->
     py:register_function(double_it, fun([X]) -> X * 2 end),
 
     %% Create 5 threads, each calling double_it with different values
-    Code = <<"
-(lambda: (
-    (threads := [__import__('threading').Thread(target=lambda x=x: setattr(t, 'result', __import__('erlang').call('double_it', x))) for x in range(5) for t in [type('T', (), {'result': None})()]]),
-    [setattr(threads[i], 'obj', type('T', (), {'result': None})()) for i in range(5)],
-    (workers := []),
-    [workers.append(type('Worker', (__import__('threading').Thread,), {'result': None, 'run': lambda self, x=x: setattr(self, 'result', __import__('erlang').call('double_it', x))})()) for x in range(5)],
-    [w.start() for w in workers],
-    [w.join() for w in workers],
-    [w.result for w in workers]
-)[-1])()
-">>,
+    Code = <<
+        "\n"
+        "(lambda: (\n"
+        "    (threads := [__import__('threading').Thread(target=lambda x=x: setattr(t, 'result', __import__('erlang').call('double_it', x))) for x in range(5) for t in [type('T', (), {'result': None})()]]),\n"
+        "    [setattr(threads[i], 'obj', type('T', (), {'result': None})()) for i in range(5)],\n"
+        "    (workers := []),\n"
+        "    [workers.append(type('Worker', (__import__('threading').Thread,), {'result': None, 'run': lambda self, x=x: setattr(self, 'result', __import__('erlang').call('double_it', x))})()) for x in range(5)],\n"
+        "    [w.start() for w in workers],\n"
+        "    [w.join() for w in workers],\n"
+        "    [w.result for w in workers]\n"
+        ")[-1])()\n"
+    >>,
     {ok, Results} = py:eval(Code),
     [0, 2, 4, 6, 8] = Results,
     ok.
@@ -231,12 +272,12 @@ simple_thread_concurrent_test(_Config) ->
 threadpool_high_concurrency_test(_Config) ->
     py:register_function(add_one, fun([X]) -> X + 1 end),
     Code = <<
-      "(lambda cf, erl: list("
-      "cf.ThreadPoolExecutor(max_workers=8).__enter__().map("
-      "lambda x: erl.call('add_one', erl.call('add_one', "
-      "erl.call('add_one', erl.call('add_one', erl.call('add_one', x))))), "
-      "range(200))))(__import__('concurrent.futures', "
-      "fromlist=['ThreadPoolExecutor']), __import__('erlang'))"
+        "(lambda cf, erl: list("
+        "cf.ThreadPoolExecutor(max_workers=8).__enter__().map("
+        "lambda x: erl.call('add_one', erl.call('add_one', "
+        "erl.call('add_one', erl.call('add_one', erl.call('add_one', x))))), "
+        "range(200))))(__import__('concurrent.futures', "
+        "fromlist=['ThreadPoolExecutor']), __import__('erlang'))"
     >>,
     Expected = [X + 5 || X <- lists:seq(0, 199)],
     lists:foreach(
@@ -247,7 +288,8 @@ threadpool_high_concurrency_test(_Config) ->
                 _ -> ct:fail({wrong_results_iter, I, Results})
             end
         end,
-        lists:seq(1, 10)),
+        lists:seq(1, 10)
+    ),
     ok.
 
 %% @doc Stress the async thread-callback path (erlang.async_call from
@@ -260,8 +302,13 @@ async_callback_concurrent_test(_Config) ->
     %% Add the existing test/ directory to sys.path so the Python
     %% helper module is importable.
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
     %% Define a Python coroutine that gathers 50 erlang.async_call
     %% invocations and returns the result list.
     ok = py:exec(<<
@@ -295,8 +342,13 @@ async_callback_large_payload_test(_Config) ->
     Payload = list_to_binary([($a + (I rem 26)) || I <- lists:seq(1, Size)]),
     py:register_function(async_blob, fun([_]) -> Payload end),
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
     ok = py:exec(<<
         "import asyncio, erlang\n"
         "async def _gather_blobs():\n"

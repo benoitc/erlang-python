@@ -67,9 +67,12 @@ bench_resource_pool_sequential(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py_resource_pool:call(math, sqrt, [I])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py_resource_pool:call(math, sqrt, [I])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     print_results(Time, N).
@@ -77,20 +80,33 @@ bench_resource_pool_sequential(N) ->
 bench_resource_pool_concurrent(NumProcs, CallsPerProc) ->
     TotalCalls = NumProcs * CallsPerProc,
     io:format("Resource Pool: Concurrent calls~n"),
-    io:format("  Processes: ~p, Calls/process: ~p, Total: ~p~n",
-              [NumProcs, CallsPerProc, TotalCalls]),
+    io:format(
+        "  Processes: ~p, Calls/process: ~p, Total: ~p~n",
+        [NumProcs, CallsPerProc, TotalCalls]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                {ok, _} = py_resource_pool:call(math, sqrt, [I])
-            end, lists:seq(1, CallsPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        {ok, _} = py_resource_pool:call(math, sqrt, [I])
+                    end,
+                    lists:seq(1, CallsPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     print_results(Time, TotalCalls).
@@ -101,9 +117,12 @@ bench_old_pool_sequential(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py:call(math, sqrt, [I])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py:call(math, sqrt, [I])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     print_results(Time, N).
@@ -111,20 +130,33 @@ bench_old_pool_sequential(N) ->
 bench_old_pool_concurrent(NumProcs, CallsPerProc) ->
     TotalCalls = NumProcs * CallsPerProc,
     io:format("Old Pool (py:call): Concurrent calls~n"),
-    io:format("  Processes: ~p, Calls/process: ~p, Total: ~p~n",
-              [NumProcs, CallsPerProc, TotalCalls]),
+    io:format(
+        "  Processes: ~p, Calls/process: ~p, Total: ~p~n",
+        [NumProcs, CallsPerProc, TotalCalls]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                {ok, _} = py:call(math, sqrt, [I])
-            end, lists:seq(1, CallsPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        {ok, _} = py:call(math, sqrt, [I])
+                    end,
+                    lists:seq(1, CallsPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     print_results(Time, TotalCalls).

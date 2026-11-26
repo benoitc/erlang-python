@@ -21,32 +21,33 @@
 
 -define(HOST, {127, 0, 0, 1}).
 
--define(PY, <<"
-import asyncio, erlang, sys, types
-m = types.ModuleType('bench_wl'); sys.modules['bench_wl'] = m
-
-class Echo(asyncio.Protocol):
-    def connection_made(self, t): self.t = t
-    def data_received(self, d): self.t.write(d)
-
-class EchoClose(asyncio.Protocol):
-    def connection_made(self, t): self.t = t
-    def data_received(self, d): self.t.write(d); self.t.close()
-
-_servers = {}
-async def serve(fd, keepalive):
-    srv = await erlang.server.serve(fd, Echo if keepalive else EchoClose)
-    _servers[fd] = srv
-    return 'ok'
-async def adopt(fd):
-    await erlang.server.adopt(fd, EchoClose)
-    return 'ok'
-async def noop():
-    return 1
-def sync_noop():
-    return 1
-m.serve = serve; m.adopt = adopt; m.noop = noop; m.sync_noop = sync_noop
-">>).
+-define(PY, <<
+    "\n"
+    "import asyncio, erlang, sys, types\n"
+    "m = types.ModuleType('bench_wl'); sys.modules['bench_wl'] = m\n"
+    "\n"
+    "class Echo(asyncio.Protocol):\n"
+    "    def connection_made(self, t): self.t = t\n"
+    "    def data_received(self, d): self.t.write(d)\n"
+    "\n"
+    "class EchoClose(asyncio.Protocol):\n"
+    "    def connection_made(self, t): self.t = t\n"
+    "    def data_received(self, d): self.t.write(d); self.t.close()\n"
+    "\n"
+    "_servers = {}\n"
+    "async def serve(fd, keepalive):\n"
+    "    srv = await erlang.server.serve(fd, Echo if keepalive else EchoClose)\n"
+    "    _servers[fd] = srv\n"
+    "    return 'ok'\n"
+    "async def adopt(fd):\n"
+    "    await erlang.server.adopt(fd, EchoClose)\n"
+    "    return 'ok'\n"
+    "async def noop():\n"
+    "    return 1\n"
+    "def sync_noop():\n"
+    "    return 1\n"
+    "m.serve = serve; m.adopt = adopt; m.noop = noop; m.sync_noop = sync_noop\n"
+>>).
 
 main(_Args) ->
     io:format("~n"),
@@ -88,8 +89,10 @@ bench_single_worker() ->
     {ok, <<"ok">>} = py_context:submit_await(W, bench_wl, serve, [Dup, false]),
     N = 5000,
     {Ms, Fails} = timed(fun() -> parallel_conns(Port, N, 50) end),
-    io:format("   connect+echo+close: ~p conns in ~p ms = ~p conn/s (failed ~p)~n",
-              [N, Ms, N * 1000 div max(1, Ms), Fails]),
+    io:format(
+        "   connect+echo+close: ~p conns in ~p ms = ~p conn/s (failed ~p)~n",
+        [N, Ms, N * 1000 div max(1, Ms), Fails]
+    ),
     ok = py_context:stop_loop(W),
     py_context:stop(W),
     gen_tcp:close(LSock),
@@ -101,8 +104,10 @@ bench_single_worker() ->
     Conns = 50,
     Reqs = 20000,
     {Ms2, _} = timed(fun() -> keepalive_requests(Port2, Conns, Reqs div Conns) end),
-    io:format("   keep-alive echo:    ~p reqs on ~p conns in ~p ms = ~p req/s~n",
-              [Reqs, Conns, Ms2, Reqs * 1000 div max(1, Ms2)]),
+    io:format(
+        "   keep-alive echo:    ~p reqs on ~p conns in ~p ms = ~p req/s~n",
+        [Reqs, Conns, Ms2, Reqs * 1000 div max(1, Ms2)]
+    ),
     ok = py_context:stop_loop(W2),
     py_context:stop(W2),
     gen_tcp:close(LSock2),
@@ -116,19 +121,25 @@ bench_scaling() ->
     io:format("2. Scaling: connect+echo+close, workers accepting on one listen fd~n"),
     io:format("   ~-8s ~12s ~12s~n", ["workers", "conn/s", "ms"]),
     N = 8000,
-    lists:foreach(fun(Workers) ->
-        Ws = [worker() || _ <- lists:seq(1, Workers)],
-        {LSock, Port, LFd} = listen(),
-        [begin
-            {ok, Dup} = py:dup_fd(LFd),
-            {ok, <<"ok">>} = py_context:submit_await(W, bench_wl, serve, [Dup, false])
-         end || W <- Ws],
-        {Ms, _} = timed(fun() -> parallel_conns(Port, N, 100) end),
-        io:format("   ~-8w ~12w ~12w~n", [Workers, N * 1000 div max(1, Ms), Ms]),
-        [ok = py_context:stop_loop(W) || W <- Ws],
-        [py_context:stop(W) || W <- Ws],
-        gen_tcp:close(LSock)
-    end, [1, 2, 4, 8]),
+    lists:foreach(
+        fun(Workers) ->
+            Ws = [worker() || _ <- lists:seq(1, Workers)],
+            {LSock, Port, LFd} = listen(),
+            [
+                begin
+                    {ok, Dup} = py:dup_fd(LFd),
+                    {ok, <<"ok">>} = py_context:submit_await(W, bench_wl, serve, [Dup, false])
+                end
+             || W <- Ws
+            ],
+            {Ms, _} = timed(fun() -> parallel_conns(Port, N, 100) end),
+            io:format("   ~-8w ~12w ~12w~n", [Workers, N * 1000 div max(1, Ms), Ms]),
+            [ok = py_context:stop_loop(W) || W <- Ws],
+            [py_context:stop(W) || W <- Ws],
+            gen_tcp:close(LSock)
+        end,
+        [1, 2, 4, 8]
+    ),
     io:format("~n").
 
 %% ============================================================================
@@ -151,18 +162,32 @@ bench_submit_latency() ->
     py_context:stop(Idle),
 
     W = worker(),
-    lists:foreach(fun(Callers) ->
-        Per = N div Callers,
-        {Ms, _} = timed(fun() ->
-            Self = self(),
-            [spawn_link(fun() ->
-                [{ok, 1} = py_context:submit_await(W, bench_wl, noop, []) || _ <- lists:seq(1, Per)],
-                Self ! done
-             end) || _ <- lists:seq(1, Callers)],
-            [receive done -> ok end || _ <- lists:seq(1, Callers)]
-        end),
-        row(io_lib:format("submit_await coroutine, running loop, ~p callers", [Callers]), N, Ms)
-    end, [1, 10, 100]),
+    lists:foreach(
+        fun(Callers) ->
+            Per = N div Callers,
+            {Ms, _} = timed(fun() ->
+                Self = self(),
+                [
+                    spawn_link(fun() ->
+                        [
+                            {ok, 1} = py_context:submit_await(W, bench_wl, noop, [])
+                         || _ <- lists:seq(1, Per)
+                        ],
+                        Self ! done
+                    end)
+                 || _ <- lists:seq(1, Callers)
+                ],
+                [
+                    receive
+                        done -> ok
+                    end
+                 || _ <- lists:seq(1, Callers)
+                ]
+            end),
+            row(io_lib:format("submit_await coroutine, running loop, ~p callers", [Callers]), N, Ms)
+        end,
+        [1, 10, 100]
+    ),
     ok = py_context:stop_loop(W),
     py_context:stop(W),
     io:format("~n").
@@ -193,7 +218,8 @@ bench_adopt_vs_accept() ->
     Acceptor = spawn_link(fun() -> acceptor(LSock2, W2) end),
     {MsAd, _} = timed(fun() -> parallel_conns(Port2, N, 50) end),
     io:format("   Erlang accept+adopt:  ~p conn/s~n", [N * 1000 div max(1, MsAd)]),
-    unlink(Acceptor), exit(Acceptor, kill),
+    unlink(Acceptor),
+    exit(Acceptor, kill),
     ok = py_context:stop_loop(W2),
     py_context:stop(W2),
     gen_tcp:close(LSock2),
@@ -234,11 +260,20 @@ timed(Fun) ->
 parallel_conns(Port, N, Clients) ->
     Self = self(),
     Per = N div Clients,
-    [spawn_link(fun() ->
-        Fails = length([bad || _ <- lists:seq(1, Per), roundtrip(Port) =/= ok]),
-        Self ! {done, Fails}
-     end) || _ <- lists:seq(1, Clients)],
-    lists:sum([receive {done, F} -> F after 120000 -> Per end || _ <- lists:seq(1, Clients)]).
+    [
+        spawn_link(fun() ->
+            Fails = length([bad || _ <- lists:seq(1, Per), roundtrip(Port) =/= ok]),
+            Self ! {done, Fails}
+        end)
+     || _ <- lists:seq(1, Clients)
+    ],
+    lists:sum([
+        receive
+            {done, F} -> F
+        after 120000 -> Per
+        end
+     || _ <- lists:seq(1, Clients)
+    ]).
 
 roundtrip(Port) ->
     case gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000) of
@@ -246,19 +281,36 @@ roundtrip(Port) ->
             ok = gen_tcp:send(S, <<"x">>),
             R = gen_tcp:recv(S, 0, 5000),
             gen_tcp:close(S),
-            case R of {ok, <<"x">>} -> ok; _ -> bad end;
+            case R of
+                {ok, <<"x">>} -> ok;
+                _ -> bad
+            end;
         _ ->
             bad
     end.
 
 keepalive_requests(Port, Conns, PerConn) ->
     Self = self(),
-    [spawn_link(fun() ->
-        {ok, S} = gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000),
-        [begin ok = gen_tcp:send(S, <<"ping">>), {ok, <<"ping">>} = gen_tcp:recv(S, 4, 5000) end
-         || _ <- lists:seq(1, PerConn)],
-        gen_tcp:close(S),
-        Self ! done
-     end) || _ <- lists:seq(1, Conns)],
-    [receive done -> ok after 120000 -> ok end || _ <- lists:seq(1, Conns)],
+    [
+        spawn_link(fun() ->
+            {ok, S} = gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000),
+            [
+                begin
+                    ok = gen_tcp:send(S, <<"ping">>),
+                    {ok, <<"ping">>} = gen_tcp:recv(S, 4, 5000)
+                end
+             || _ <- lists:seq(1, PerConn)
+            ],
+            gen_tcp:close(S),
+            Self ! done
+        end)
+     || _ <- lists:seq(1, Conns)
+    ],
+    [
+        receive
+            done -> ok
+        after 120000 -> ok
+        end
+     || _ <- lists:seq(1, Conns)
+    ],
     ok.

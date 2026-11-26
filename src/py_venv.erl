@@ -29,7 +29,6 @@
     venv_info/0
 ]).
 
-
 %% @doc Ensure a virtual environment exists and activate it.
 %%
 %% Creates a venv at `Path' if it doesn't exist, installs dependencies from
@@ -73,12 +72,13 @@ ensure_venv(Path, RequirementsFile, Opts) ->
     ReqFileStr = to_string(RequirementsFile),
     Force = proplists:get_bool(force, Opts),
     %% Create venv if needed
-    VenvReady = case venv_exists(PathStr) of
-        true when not Force ->
-            ok;
-        _ ->
-            create_venv(PathStr, Opts)
-    end,
+    VenvReady =
+        case venv_exists(PathStr) of
+            true when not Force ->
+                ok;
+            _ ->
+                create_venv(PathStr, Opts)
+        end,
     case VenvReady of
         ok ->
             %% Always install/update dependencies (pip/uv skip existing)
@@ -101,10 +101,11 @@ venv_exists(Path) ->
 -spec create_venv(string(), list()) -> ok | {error, term()}.
 create_venv(Path, Opts) ->
     Installer = detect_installer(Opts),
-    Python = case proplists:get_value(python, Opts, undefined) of
-        undefined -> get_python_executable();
-        P -> P
-    end,
+    Python =
+        case proplists:get_value(python, Opts, undefined) of
+            undefined -> get_python_executable();
+            P -> P
+        end,
     case Installer of
         uv ->
             %% uv venv is faster, use --python to match the running interpreter
@@ -124,13 +125,13 @@ create_venv(Path, Opts) ->
 python_executable() ->
     get_python_executable().
 
-
 -spec get_python_executable() -> string().
 get_python_executable() ->
     %% Use a single expression to find the Python executable
     %% Searches for pythonX.Y, python3, python in sys.prefix/bin (Unix)
     %% or python.exe in sys.prefix (Windows)
-    Expr = <<"(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if __import__('sys').platform == 'win32' and __import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, 'python.exe')) else next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3')))()">>,
+    Expr =
+        <<"(lambda: (__import__('os').path.join(__import__('sys').prefix, 'python.exe') if __import__('sys').platform == 'win32' and __import__('os').path.isfile(__import__('os').path.join(__import__('sys').prefix, 'python.exe')) else next((p for p in [__import__('os').path.join(__import__('sys').prefix, 'bin', f'python{__import__(\"sys\").version_info.major}.{__import__(\"sys\").version_info.minor}'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python3'), __import__('os').path.join(__import__('sys').prefix, 'bin', 'python')] if __import__('os').path.isfile(p)), 'python3')))()">>,
     case py:eval(Expr) of
         {ok, Path} when is_binary(Path) -> binary_to_list(Path);
         _ -> "python3"
@@ -144,23 +145,24 @@ install_deps(Path, RequirementsFile, Opts) ->
     Extras = proplists:get_value(extras, Opts, []),
 
     %% Determine file type and build the install argument list (no shell).
-    Args = case filename:extension(RequirementsFile) of
-        ".txt" ->
-            BaseArgs ++ ["install", "-r", RequirementsFile];
-        ".toml" ->
-            %% pyproject.toml - install as editable.
-            %% filename:dirname returns "." for files without directory component
-            InstallPath = filename:dirname(RequirementsFile),
-            case Extras of
-                [] ->
-                    BaseArgs ++ ["install", "-e", InstallPath];
-                _ ->
-                    ExtrasStr = string:join(Extras, ","),
-                    BaseArgs ++ ["install", "-e", InstallPath ++ "[" ++ ExtrasStr ++ "]"]
-            end;
-        _ ->
-            BaseArgs ++ ["install", "-r", RequirementsFile]
-    end,
+    Args =
+        case filename:extension(RequirementsFile) of
+            ".txt" ->
+                BaseArgs ++ ["install", "-r", RequirementsFile];
+            ".toml" ->
+                %% pyproject.toml - install as editable.
+                %% filename:dirname returns "." for files without directory component
+                InstallPath = filename:dirname(RequirementsFile),
+                case Extras of
+                    [] ->
+                        BaseArgs ++ ["install", "-e", InstallPath];
+                    _ ->
+                        ExtrasStr = string:join(Extras, ","),
+                        BaseArgs ++ ["install", "-e", InstallPath ++ "[" ++ ExtrasStr ++ "]"]
+                end;
+            _ ->
+                BaseArgs ++ ["install", "-r", RequirementsFile]
+        end,
     run_cmd(Exe, Args, PortOpts).
 
 %% @private Detect which installer to use (uv or pip)
@@ -183,12 +185,13 @@ detect_installer(Opts) ->
 pip_command(VenvPath, uv) ->
     {uv_exe(), ["pip"], [{env, [{"VIRTUAL_ENV", VenvPath}]}]};
 pip_command(VenvPath, pip) ->
-    PipExe = case os:type() of
-        {win32, _} ->
-            filename:join([VenvPath, "Scripts", "pip"]);
-        _ ->
-            filename:join([VenvPath, "bin", "pip"])
-    end,
+    PipExe =
+        case os:type() of
+            {win32, _} ->
+                filename:join([VenvPath, "Scripts", "pip"]);
+            _ ->
+                filename:join([VenvPath, "bin", "pip"])
+        end,
     {PipExe, [], []}.
 
 %% @private Full path to the uv executable (falls back to the bare name).
@@ -206,8 +209,12 @@ run_cmd(Exe, Args, ExtraOpts) ->
         {error, _} = Err ->
             Err;
         ExeFull ->
-            try open_port({spawn_executable, ExeFull},
-                          [exit_status, stderr_to_stdout, binary, {args, Args} | ExtraOpts]) of
+            try
+                open_port(
+                    {spawn_executable, ExeFull},
+                    [exit_status, stderr_to_stdout, binary, {args, Args} | ExtraOpts]
+                )
+            of
                 Port -> collect_port(Port, [])
             catch
                 error:Reason -> {error, {spawn_failed, Exe, Reason}}
@@ -242,7 +249,11 @@ collect_port(Port, Acc) ->
         {Port, {exit_status, Code}} ->
             {error, {exit_code, Code, iolist_to_binary(lists:reverse(Acc))}}
     after 300000 ->
-        try port_close(Port) catch _:_ -> ok end,
+        try
+            port_close(Port)
+        catch
+            _:_ -> ok
+        end,
         {error, timeout}
     end.
 
@@ -270,7 +281,8 @@ activate_venv(VenvPath) ->
     VenvBin = py_util:to_binary(VenvPath),
     %% Find site-packages directory dynamically (venv may use different Python version)
     %% Uses a single expression to avoid multiline code issues
-    FindSitePackages = <<"(lambda vp: __import__('os').path.join(vp, 'Lib', 'site-packages') if __import__('os').path.exists(__import__('os').path.join(vp, 'Lib', 'site-packages')) else next((sp for name in (__import__('os').listdir(__import__('os').path.join(vp, 'lib')) if __import__('os').path.isdir(__import__('os').path.join(vp, 'lib')) else []) if name.startswith('python') for sp in [__import__('os').path.join(vp, 'lib', name, 'site-packages')] if __import__('os').path.isdir(sp)), None))(_venv_path)">>,
+    FindSitePackages =
+        <<"(lambda vp: __import__('os').path.join(vp, 'Lib', 'site-packages') if __import__('os').path.exists(__import__('os').path.join(vp, 'Lib', 'site-packages')) else next((sp for name in (__import__('os').listdir(__import__('os').path.join(vp, 'lib')) if __import__('os').path.isdir(__import__('os').path.join(vp, 'lib')) else []) if name.startswith('python') for sp in [__import__('os').path.join(vp, 'lib', name, 'site-packages')] if __import__('os').path.isdir(sp)), None))(_venv_path)">>,
     case py:eval(FindSitePackages, #{<<"_venv_path">> => VenvBin}) of
         {ok, SitePackages} when SitePackages =/= none, SitePackages =/= null ->
             activate_venv_with_site_packages(VenvBin, SitePackages);
@@ -286,17 +298,23 @@ activate_venv_with_site_packages(VenvBin, SitePackages) ->
     case py:eval(<<"__import__('os').path.isdir(sp)">>, #{sp => SitePackages}) of
         {ok, true} ->
             %% Save original path if not already saved
-            {ok, _} = py:eval(<<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>),
+            {ok, _} = py:eval(
+                <<"setattr(__import__('sys'), '_original_path', __import__('sys').path.copy()) if not hasattr(__import__('sys'), '_original_path') else None">>
+            ),
             %% Set venv info
             {ok, _} = py:eval(<<"setattr(__import__('sys'), '_active_venv', vp)">>, #{vp => VenvBin}),
-            {ok, _} = py:eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{sp => SitePackages}),
+            {ok, _} = py:eval(<<"setattr(__import__('sys'), '_venv_site_packages', sp)">>, #{
+                sp => SitePackages
+            }),
             %% Add site-packages and process .pth files (editable installs)
             %% Note: We embed the site-packages path directly since exec doesn't support
             %% variables and sys attributes may not persist across calls in subinterpreters
             SitePackagesStr = binary_to_list(SitePackages),
             ExecCode = iolist_to_binary([
                 <<"import site as _site, sys as _sys\n">>,
-                <<"_sp = '">>, escape_python_string(SitePackagesStr), <<"'\n">>,
+                <<"_sp = '">>,
+                escape_python_string(SitePackagesStr),
+                <<"'\n">>,
                 <<"_b = frozenset(_sys.path)\n">>,
                 <<"_site.addsitedir(_sp)\n">>,
                 <<"_sys.path[:] = [p for p in _sys.path if p not in _b] + [p for p in _sys.path if p in _b]\n">>,
@@ -312,13 +330,14 @@ activate_venv_with_site_packages(VenvBin, SitePackages) ->
 
 %% @private Escape a string for embedding in Python code
 escape_python_string(Str) ->
-    lists:flatmap(fun($') -> "\\'";
-                     ($\\) -> "\\\\";
-                     (C) -> [C]
-                  end, Str).
-
-
-
+    lists:flatmap(
+        fun
+            ($') -> "\\'";
+            ($\\) -> "\\\\";
+            (C) -> [C]
+        end,
+        Str
+    ).
 
 %% @doc Deactivate the current virtual environment.
 %% Restores sys.path to its original state.
@@ -326,12 +345,18 @@ escape_python_string(Str) ->
 deactivate_venv() ->
     case py:eval(<<"hasattr(__import__('sys'), '_original_path')">>) of
         {ok, true} ->
-            ok = py:exec(<<"import sys as _sys\n"
-                         "_sys.path[:] = _sys._original_path\n"
-                         "del _sys\n">>),
+            ok = py:exec(<<
+                "import sys as _sys\n"
+                "_sys.path[:] = _sys._original_path\n"
+                "del _sys\n"
+            >>),
             {ok, _} = py:eval(<<"delattr(__import__('sys'), '_original_path')">>),
-            {ok, _} = py:eval(<<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>),
-            {ok, _} = py:eval(<<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>),
+            {ok, _} = py:eval(
+                <<"delattr(__import__('sys'), '_active_venv') if hasattr(__import__('sys'), '_active_venv') else None">>
+            ),
+            {ok, _} = py:eval(
+                <<"delattr(__import__('sys'), '_venv_site_packages') if hasattr(__import__('sys'), '_venv_site_packages') else None">>
+            ),
             ok;
         {ok, false} ->
             ok;
@@ -344,7 +369,6 @@ deactivate_venv() ->
 -spec venv_info() -> {ok, map() | none} | {error, term()}.
 venv_info() ->
     %% Check both attributes exist to handle partial activation/deactivation state
-    Code = <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if (hasattr(__import__('sys'), '_active_venv') and hasattr(__import__('sys'), '_venv_site_packages')) else {'active': False})">>,
+    Code =
+        <<"({'active': True, 'venv_path': __import__('sys')._active_venv, 'site_packages': __import__('sys')._venv_site_packages, 'sys_path': __import__('sys').path} if (hasattr(__import__('sys'), '_active_venv') and hasattr(__import__('sys'), '_venv_site_packages')) else {'active': False})">>,
     py:eval(Code).
-
-

@@ -55,24 +55,27 @@ bench_single_latency() ->
     io:format("   ~-15s ~10s ~12s~n", ["Mode", "us/call", "calls/sec"]),
     io:format("   ~-15s ~10s ~12s~n", ["----", "-------", "---------"]),
 
-    lists:foreach(fun({Label, Mode}) ->
-        {ok, Ctx} = py_context:start_link(1, Mode),
+    lists:foreach(
+        fun({Label, Mode}) ->
+            {ok, Ctx} = py_context:start_link(1, Mode),
 
-        %% Warmup
-        [py_context:call(Ctx, math, sqrt, [N], #{}) || N <- lists:seq(1, 100)],
+            %% Warmup
+            [py_context:call(Ctx, math, sqrt, [N], #{}) || N <- lists:seq(1, 100)],
 
-        %% Benchmark
-        Iterations = 1000,
-        Start = erlang:monotonic_time(microsecond),
-        [py_context:call(Ctx, math, sqrt, [N], #{}) || N <- lists:seq(1, Iterations)],
-        Elapsed = erlang:monotonic_time(microsecond) - Start,
+            %% Benchmark
+            Iterations = 1000,
+            Start = erlang:monotonic_time(microsecond),
+            [py_context:call(Ctx, math, sqrt, [N], #{}) || N <- lists:seq(1, Iterations)],
+            Elapsed = erlang:monotonic_time(microsecond) - Start,
 
-        UsPerCall = Elapsed / Iterations,
-        CallsPerSec = round(Iterations * 1000000 / Elapsed),
-        io:format("   ~-15s ~10.1f ~12w~n", [Label, UsPerCall, CallsPerSec]),
+            UsPerCall = Elapsed / Iterations,
+            CallsPerSec = round(Iterations * 1000000 / Elapsed),
+            io:format("   ~-15s ~10.1f ~12w~n", [Label, UsPerCall, CallsPerSec]),
 
-        py_context:stop(Ctx)
-    end, [{worker, worker}, {owngil, owngil}]),
+            py_context:stop(Ctx)
+        end,
+        [{worker, worker}, {owngil, owngil}]
+    ),
     io:format("~n").
 
 %% ============================================================================
@@ -88,33 +91,49 @@ bench_parallel_throughput() ->
     CallsPerContext = 250,
     TotalCalls = NumContexts * CallsPerContext,
 
-    lists:foreach(fun({Label, Mode}) ->
-        Contexts = [begin
-            {ok, Ctx} = py_context:start_link(N, Mode),
-            Ctx
-        end || N <- lists:seq(1, NumContexts)],
+    lists:foreach(
+        fun({Label, Mode}) ->
+            Contexts = [
+                begin
+                    {ok, Ctx} = py_context:start_link(N, Mode),
+                    Ctx
+                end
+             || N <- lists:seq(1, NumContexts)
+            ],
 
-        %% Warmup
-        [py_context:call(Ctx, math, sqrt, [16], #{}) || Ctx <- Contexts],
+            %% Warmup
+            [py_context:call(Ctx, math, sqrt, [16], #{}) || Ctx <- Contexts],
 
-        %% Parallel benchmark
-        Parent = self(),
-        Start = erlang:monotonic_time(millisecond),
+            %% Parallel benchmark
+            Parent = self(),
+            Start = erlang:monotonic_time(millisecond),
 
-        Pids = [spawn(fun() ->
-            [py_context:call(Ctx, math, sqrt, [N], #{})
-             || N <- lists:seq(1, CallsPerContext)],
-            Parent ! {done, self()}
-        end) || Ctx <- Contexts],
+            Pids = [
+                spawn(fun() ->
+                    [
+                        py_context:call(Ctx, math, sqrt, [N], #{})
+                     || N <- lists:seq(1, CallsPerContext)
+                    ],
+                    Parent ! {done, self()}
+                end)
+             || Ctx <- Contexts
+            ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids],
+            [
+                receive
+                    {done, Pid} -> ok
+                end
+             || Pid <- Pids
+            ],
 
-        Elapsed = erlang:monotonic_time(millisecond) - Start,
-        CallsPerSec = round(TotalCalls * 1000 / max(1, Elapsed)),
-        io:format("   ~-15s ~10w ~12w~n", [Label, Elapsed, CallsPerSec]),
+            Elapsed = erlang:monotonic_time(millisecond) - Start,
+            CallsPerSec = round(TotalCalls * 1000 / max(1, Elapsed)),
+            io:format("   ~-15s ~10w ~12w~n", [Label, Elapsed, CallsPerSec]),
 
-        [py_context:stop(Ctx) || Ctx <- Contexts]
-    end, [{worker, worker}, {owngil, owngil}]),
+            [py_context:stop(Ctx) || Ctx <- Contexts]
+        end,
+        [{worker, worker}, {owngil, owngil}]
+    ),
     io:format("~n").
 
 %% ============================================================================
@@ -129,32 +148,46 @@ bench_cpu_speedup() ->
     NumContexts = 4,
     Code = <<"sum(range(500000))">>,
 
-    lists:foreach(fun({Label, Mode}) ->
-        Contexts = [begin
-            {ok, Ctx} = py_context:start_link(N, Mode),
-            Ctx
-        end || N <- lists:seq(1, NumContexts)],
+    lists:foreach(
+        fun({Label, Mode}) ->
+            Contexts = [
+                begin
+                    {ok, Ctx} = py_context:start_link(N, Mode),
+                    Ctx
+                end
+             || N <- lists:seq(1, NumContexts)
+            ],
 
-        %% Sequential execution
-        SeqStart = erlang:monotonic_time(millisecond),
-        [py_context:eval(Ctx, Code, #{}) || Ctx <- Contexts],
-        SeqTime = erlang:monotonic_time(millisecond) - SeqStart,
+            %% Sequential execution
+            SeqStart = erlang:monotonic_time(millisecond),
+            [py_context:eval(Ctx, Code, #{}) || Ctx <- Contexts],
+            SeqTime = erlang:monotonic_time(millisecond) - SeqStart,
 
-        %% Parallel execution
-        Parent = self(),
-        ParStart = erlang:monotonic_time(millisecond),
-        Pids = [spawn(fun() ->
-            py_context:eval(Ctx, Code, #{}),
-            Parent ! {done, self()}
-        end) || Ctx <- Contexts],
-        [receive {done, Pid} -> ok end || Pid <- Pids],
-        ParTime = erlang:monotonic_time(millisecond) - ParStart,
+            %% Parallel execution
+            Parent = self(),
+            ParStart = erlang:monotonic_time(millisecond),
+            Pids = [
+                spawn(fun() ->
+                    py_context:eval(Ctx, Code, #{}),
+                    Parent ! {done, self()}
+                end)
+             || Ctx <- Contexts
+            ],
+            [
+                receive
+                    {done, Pid} -> ok
+                end
+             || Pid <- Pids
+            ],
+            ParTime = erlang:monotonic_time(millisecond) - ParStart,
 
-        Speedup = SeqTime / max(1, ParTime),
-        io:format("   ~-15s ~10w ~10w ~10.2fx~n", [Label, SeqTime, ParTime, Speedup]),
+            Speedup = SeqTime / max(1, ParTime),
+            io:format("   ~-15s ~10w ~10w ~10.2fx~n", [Label, SeqTime, ParTime, Speedup]),
 
-        [py_context:stop(Ctx) || Ctx <- Contexts]
-    end, [{worker, worker}, {owngil, owngil}]),
+            [py_context:stop(Ctx) || Ctx <- Contexts]
+        end,
+        [{worker, worker}, {owngil, owngil}]
+    ),
 
     io:format("~n"),
     io:format("Notes:~n"),

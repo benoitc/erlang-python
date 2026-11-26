@@ -201,11 +201,23 @@ test_loop_helpers(Config) ->
         true ->
             PrivDir = ?config(priv_dir, Config),
             {ok, Ctx} = py_context:new(#{mode => owngil}),
-            ok = py_context:exec(Ctx, iolist_to_binary(io_lib:format(
-                "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n",
-                [PrivDir, PrivDir]))),
-            Result = py_context:call(Ctx, 'tests.ct_runner', run_tests,
-                                     [<<"tests.test_loop_helpers">>, <<"*">>], #{}, 120000),
+            ok = py_context:exec(
+                Ctx,
+                iolist_to_binary(
+                    io_lib:format(
+                        "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n",
+                        [PrivDir, PrivDir]
+                    )
+                )
+            ),
+            Result = py_context:call(
+                Ctx,
+                'tests.ct_runner',
+                run_tests,
+                [<<"tests.test_loop_helpers">>, <<"*">>],
+                #{},
+                120000
+            ),
             py_context:stop(Ctx),
             case Result of
                 {ok, Results} -> handle_test_results("tests.test_loop_helpers", <<"*">>, Results);
@@ -282,8 +294,9 @@ setup_python_path(PrivDir) ->
     ok = py:exec(Ctx, <<"import sys, os">>),
     {ok, _} = py:call(Ctx, os, chdir, [PrivDirBin]),
     %% Insert the priv directory at the front of sys.path if not present
-    Code = <<"sys.path.insert(0, '", PrivDirBin/binary, "') if '",
-             PrivDirBin/binary, "' not in sys.path else None">>,
+    Code =
+        <<"sys.path.insert(0, '", PrivDirBin/binary, "') if '", PrivDirBin/binary,
+            "' not in sys.path else None">>,
     {ok, _} = py:eval(Ctx, Code),
     ok.
 
@@ -306,7 +319,11 @@ run_python_tests(Module, Pattern, _Config) ->
     PerTestTimeout = 30.0,
 
     %% Use 10 minute timeout for overall test execution
-    case py:call(Ctx, 'tests.async_test_runner', run_tests, [ModuleBin, Pattern, PerTestTimeout], #{timeout => 600000}) of
+    case
+        py:call(Ctx, 'tests.async_test_runner', run_tests, [ModuleBin, Pattern, PerTestTimeout], #{
+            timeout => 600000
+        })
+    of
         {ok, Results} ->
             handle_test_results(Module, Pattern, Results);
         {error, Reason} ->
@@ -325,8 +342,10 @@ handle_test_results(Module, Pattern, Results) ->
     FailureDetails = maps:get(<<"failure_details">>, Results, []),
 
     %% Log the test output
-    ct:log("~s (~s): ~p tests run, ~p failures, ~p errors, ~p skipped~n~n~s",
-           [Module, Pattern, TestsRun, Failures, Errors, Skipped, Output]),
+    ct:log(
+        "~s (~s): ~p tests run, ~p failures, ~p errors, ~p skipped~n~n~s",
+        [Module, Pattern, TestsRun, Failures, Errors, Skipped, Output]
+    ),
 
     case Success of
         true ->
@@ -344,16 +363,19 @@ handle_test_results(Module, Pattern, Results) ->
                 FailureDetails
             ),
             %% Include first failure in the error for compact output
-            FirstFail = case FailureDetails of
-                [First|_] -> maps:get(<<"test">>, First, <<"unknown">>);
-                _ -> <<"unknown">>
-            end,
-            ct:fail({tests_failed, Module, Pattern, FirstFail, #{
-                tests_run => TestsRun,
-                failures => Failures,
-                errors => Errors,
-                skipped => Skipped
-            }})
+            FirstFail =
+                case FailureDetails of
+                    [First | _] -> maps:get(<<"test">>, First, <<"unknown">>);
+                    _ -> <<"unknown">>
+                end,
+            ct:fail(
+                {tests_failed, Module, Pattern, FirstFail, #{
+                    tests_run => TestsRun,
+                    failures => Failures,
+                    errors => Errors,
+                    skipped => Skipped
+                }}
+            )
     end.
 
 %% Convert to binary

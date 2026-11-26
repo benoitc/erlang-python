@@ -31,10 +31,11 @@ main(Args) ->
 
     io:format("~n=== AI Chat Example ===~n~n"),
 
-    VenvPath = case Args of
-        [Path | _] -> Path;
-        [] -> "/tmp/ai-venv"
-    end,
+    VenvPath =
+        case Args of
+            [Path | _] -> Path;
+            [] -> "/tmp/ai-venv"
+        end,
 
     case activate_venv(VenvPath) of
         ok -> ok;
@@ -75,8 +76,10 @@ activate_venv(VenvPath) ->
             ok;
         {error, VenvError} ->
             io:format("Error: ~p~n", [VenvError]),
-            io:format("~nSetup: python3.14 -m venv ~s && ~s/bin/pip install requests~n~n",
-                      [VenvPath, VenvPath]),
+            io:format(
+                "~nSetup: python3.14 -m venv ~s && ~s/bin/pip install requests~n~n",
+                [VenvPath, VenvPath]
+            ),
             error
     end.
 
@@ -85,7 +88,10 @@ init_ai_helpers() ->
     ScriptDir = filename:dirname(escript:script_name()),
     ProjectRoot = filename:dirname(ScriptDir),
     ExamplesDir = list_to_binary(filename:join(ProjectRoot, "examples")),
-    {ok, _} = py:eval(<<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>, #{path => ExamplesDir}),
+    {ok, _} = py:eval(
+        <<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>,
+        #{path => ExamplesDir}
+    ),
     ok.
 
 get_llm_type() ->

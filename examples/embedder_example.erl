@@ -28,10 +28,11 @@ main(Args) ->
     io:format("~n=== Sentence-Transformers Embedder Example ===~n~n"),
 
     %% Activate venv
-    VenvPath = case Args of
-        [Path | _] -> Path;
-        [] -> "/tmp/embedder-venv"
-    end,
+    VenvPath =
+        case Args of
+            [Path | _] -> Path;
+            [] -> "/tmp/embedder-venv"
+        end,
 
     io:format("Activating venv: ~s~n", [VenvPath]),
     case py:activate_venv(VenvPath) of
@@ -39,15 +40,20 @@ main(Args) ->
             io:format("Venv activated~n~n");
         {error, VenvError} ->
             io:format("Error: ~p~n", [VenvError]),
-            io:format("Run: python -m venv ~s && ~s/bin/pip install sentence-transformers~n", [VenvPath, VenvPath]),
+            io:format("Run: python -m venv ~s && ~s/bin/pip install sentence-transformers~n", [
+                VenvPath, VenvPath
+            ]),
             halt(1)
     end,
 
     %% Add examples directory to Python path and import module with reload
     ExamplesDir = filename:join(ProjectRoot, "examples"),
-    PathSetup = list_to_binary(io_lib:format(
-        "(lambda: (__import__('sys').path.insert(0, '~s') if '~s' not in __import__('sys').path else None, __import__('importlib').reload(__import__('embedding_helper'))))()[1]",
-        [ExamplesDir, ExamplesDir])),
+    PathSetup = list_to_binary(
+        io_lib:format(
+            "(lambda: (__import__('sys').path.insert(0, '~s') if '~s' not in __import__('sys').path else None, __import__('importlib').reload(__import__('embedding_helper'))))()[1]",
+            [ExamplesDir, ExamplesDir]
+        )
+    ),
 
     %% Get model info (this loads the model)
     io:format("Loading model...~n"),
@@ -67,8 +73,10 @@ main(Args) ->
     io:format("=== Embeddings ===~n"),
     lists:foreach(
         fun({Text, Emb}) ->
-            io:format("  ~s~n    -> [~.4f, ~.4f, ...] (dim=~p)~n",
-                      [Text, hd(Emb), lists:nth(2, Emb), length(Emb)])
+            io:format(
+                "  ~s~n    -> [~.4f, ~.4f, ...] (dim=~p)~n",
+                [Text, hd(Emb), lists:nth(2, Emb), length(Emb)]
+            )
         end,
         lists:zip(Texts, Embeddings)
     ),
@@ -80,8 +88,10 @@ main(Args) ->
 
     io:format("Query: ~s~n~n", [Query]),
 
-    Similarities = [{cosine_similarity(QueryEmb, Emb), Text}
-                    || {Text, Emb} <- lists:zip(Texts, Embeddings)],
+    Similarities = [
+        {cosine_similarity(QueryEmb, Emb), Text}
+     || {Text, Emb} <- lists:zip(Texts, Embeddings)
+    ],
     Sorted = lists:reverse(lists:keysort(1, Similarities)),
 
     lists:foreach(

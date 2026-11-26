@@ -39,7 +39,6 @@ handle_call({register, LoopId, WorkerPid, LoopRef}, _From, State) ->
     MonRef = erlang:monitor(process, WorkerPid),
     NewState = maps:put(WorkerPid, {LoopId, MonRef}, State),
     {reply, ok, NewState};
-
 handle_call({unregister, LoopId}, _From, State) ->
     case ets:lookup(?TAB, LoopId) of
         [{LoopId, WorkerPid, _}] ->
@@ -48,12 +47,14 @@ handle_call({unregister, LoopId}, _From, State) ->
                 {LoopId, MonRef} ->
                     erlang:demonitor(MonRef, [flush]),
                     {reply, ok, maps:remove(WorkerPid, State)};
-                _ -> {reply, ok, State}
+                _ ->
+                    {reply, ok, State}
             end;
-        [] -> {reply, ok, State}
+        [] ->
+            {reply, ok, State}
     end;
-
-handle_call(_, _, State) -> {reply, {error, unknown_request}, State}.
+handle_call(_, _, State) ->
+    {reply, {error, unknown_request}, State}.
 
 handle_cast(_, State) -> {noreply, State}.
 
@@ -62,9 +63,11 @@ handle_info({'DOWN', MonRef, process, WorkerPid, _Reason}, State) ->
         {LoopId, MonRef} ->
             true = ets:delete(?TAB, LoopId),
             {noreply, maps:remove(WorkerPid, State)};
-        _ -> {noreply, State}
+        _ ->
+            {noreply, State}
     end;
-handle_info(_, State) -> {noreply, State}.
+handle_info(_, State) ->
+    {noreply, State}.
 
 terminate(_, _) -> ok.
 code_change(_, State, _) -> {ok, State}.

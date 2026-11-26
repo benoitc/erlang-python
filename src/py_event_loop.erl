@@ -120,8 +120,16 @@ register_callbacks() ->
 %%   {async_result, Ref, {ok, Result}} - on success
 %%   {async_result, Ref, {error, Reason}} - on failure
 -spec run_async(reference(), map()) -> ok | {error, term()}.
-run_async(LoopRef, #{ref := Ref, caller := Caller, module := Module,
-                     func := Func, args := Args} = Request) ->
+run_async(
+    LoopRef,
+    #{
+        ref := Ref,
+        caller := Caller,
+        module := Module,
+        func := Func,
+        args := Args
+    } = Request
+) ->
     Kwargs = maps:get(kwargs, Request, #{}),
     ModuleBin = py_util:to_binary(Module),
     FuncBin = py_util:to_binary(Func),
@@ -143,8 +151,12 @@ run_async(LoopRef, #{ref := Ref, caller := Caller, module := Module,
 run(Module, Func, Args) ->
     run(Module, Func, Args, #{}).
 
--spec run(Module :: atom() | binary(), Func :: atom() | binary(),
-          Args :: list(), Opts :: map()) -> {ok, term()} | {error, term()}.
+-spec run(
+    Module :: atom() | binary(),
+    Func :: atom() | binary(),
+    Args :: list(),
+    Opts :: map()
+) -> {ok, term()} | {error, term()}.
 run(Module, Func, Args, Opts) ->
     Timeout = maps:get(timeout, Opts, 5000),
     Kwargs = maps:get(kwargs, Opts, #{}),
@@ -161,13 +173,20 @@ run(Module, Func, Args, Opts) ->
 %%   Ref = py_event_loop:create_task(my_module, my_async_func, [arg1]),
 %%   %% ... do other work ...
 %%   {ok, Result} = py_event_loop:await(Ref)
--spec create_task(Module :: atom() | binary(), Func :: atom() | binary(),
-                  Args :: list()) -> reference().
+-spec create_task(
+    Module :: atom() | binary(),
+    Func :: atom() | binary(),
+    Args :: list()
+) -> reference().
 create_task(Module, Func, Args) ->
     create_task(Module, Func, Args, #{}).
 
--spec create_task(Module :: atom() | binary(), Func :: atom() | binary(),
-                  Args :: list(), Kwargs :: map()) -> reference().
+-spec create_task(
+    Module :: atom() | binary(),
+    Func :: atom() | binary(),
+    Args :: list(),
+    Kwargs :: map()
+) -> reference().
 create_task(Module, Func, Args, Kwargs) ->
     {ok, LoopRef} = get_loop(),
     Ref = make_ref(),
@@ -175,12 +194,15 @@ create_task(Module, Func, Args, Kwargs) ->
     ModuleBin = py_util:to_binary(Module),
     FuncBin = py_util:to_binary(Func),
     %% Check if there's a process-local env (from py:exec) and use it
-    ok = case get_process_env() of
-        undefined ->
-            py_nif:submit_task(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs);
-        EnvRef ->
-            py_nif:submit_task_with_env(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef)
-    end,
+    ok =
+        case get_process_env() of
+            undefined ->
+                py_nif:submit_task(LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs);
+            EnvRef ->
+                py_nif:submit_task_with_env(
+                    LoopRef, Caller, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef
+                )
+        end,
     Ref.
 
 %% @doc Get the process-local env reference if available.
@@ -188,7 +210,8 @@ create_task(Module, Func, Args, Kwargs) ->
 -spec get_process_env() -> reference() | undefined.
 get_process_env() ->
     case get(py_local_env) of
-        undefined -> undefined;
+        undefined ->
+            undefined;
         Envs when is_map(Envs) ->
             %% Return any env (for __main__ lookup, any env works)
             case maps:values(Envs) of
@@ -228,13 +251,20 @@ await(Ref, Timeout) ->
 %%
 %% Example:
 %%   ok = py_event_loop:spawn_task(logger, log_event, [event_data])
--spec spawn_task(Module :: atom() | binary(), Func :: atom() | binary(),
-                 Args :: list()) -> ok.
+-spec spawn_task(
+    Module :: atom() | binary(),
+    Func :: atom() | binary(),
+    Args :: list()
+) -> ok.
 spawn_task(Module, Func, Args) ->
     spawn_task(Module, Func, Args, #{}).
 
--spec spawn_task(Module :: atom() | binary(), Func :: atom() | binary(),
-                 Args :: list(), Kwargs :: map()) -> ok.
+-spec spawn_task(
+    Module :: atom() | binary(),
+    Func :: atom() | binary(),
+    Args :: list(),
+    Kwargs :: map()
+) -> ok.
 spawn_task(Module, Func, Args, Kwargs) ->
     {ok, LoopRef} = get_loop(),
     Ref = make_ref(),
@@ -252,12 +282,15 @@ spawn_task(Module, Func, Args, Kwargs) ->
     ModuleBin = py_util:to_binary(Module),
     FuncBin = py_util:to_binary(Func),
     %% Submit task with caller's env if available
-    ok = case CallerEnv of
-        undefined ->
-            py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs);
-        EnvRef ->
-            py_nif:submit_task_with_env(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef)
-    end,
+    ok =
+        case CallerEnv of
+            undefined ->
+                py_nif:submit_task(LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs);
+            EnvRef ->
+                py_nif:submit_task_with_env(
+                    LoopRef, Receiver, Ref, ModuleBin, FuncBin, Args, Kwargs, EnvRef
+                )
+        end,
     ok.
 
 %% ============================================================================
@@ -362,7 +395,9 @@ set_default_policy() ->
     %% Then set the event loop policy (only on Python < 3.14)
     Code = iolist_to_binary([
         "import sys\n",
-        "priv_dir = '", PrivDir, "'\n",
+        "priv_dir = '",
+        PrivDir,
+        "'\n",
         "if priv_dir not in sys.path:\n",
         "    sys.path.insert(0, priv_dir)\n",
         "import asyncio\n",
@@ -371,10 +406,12 @@ set_default_policy() ->
         "    asyncio.set_event_loop_policy(get_event_loop_policy())\n"
     ]),
     case py:exec(Code) of
-        ok -> ok;
+        ok ->
+            ok;
         {error, Reason} ->
             error_logger:warning_msg("Failed to set ErlangEventLoop policy: ~p~n", [Reason]),
-            ok  %% Non-fatal
+            %% Non-fatal
+            ok
     end.
 
 %% @doc Extend the C 'erlang' module with Python event loop exports.
@@ -382,15 +419,19 @@ set_default_policy() ->
 extend_erlang_module(PrivDir) ->
     Code = iolist_to_binary([
         "import erlang\n",
-        "priv_dir = '", PrivDir, "'\n",
+        "priv_dir = '",
+        PrivDir,
+        "'\n",
         "if hasattr(erlang, '_extend_erlang_module'):\n",
         "    erlang._extend_erlang_module(priv_dir)\n"
     ]),
     case py:exec(Code) of
-        ok -> ok;
+        ok ->
+            ok;
         {error, Reason} ->
             error_logger:warning_msg("Failed to extend erlang module: ~p~n", [Reason]),
-            ok  %% Non-fatal
+            %% Non-fatal
+            ok
     end.
 
 handle_call(get_loop, _From, #state{loop_ref = undefined} = State) ->
@@ -412,10 +453,8 @@ handle_call(get_loop, _From, #state{loop_ref = undefined} = State) ->
         {error, _} = Error ->
             {reply, Error, State}
     end;
-
 handle_call(get_loop, _From, #state{loop_ref = LoopRef} = State) ->
     {reply, {ok, LoopRef}, State};
-
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -444,12 +483,17 @@ terminate(_Reason, #state{loop_ref = LoopRef, worker_pid = WorkerPid}) ->
 %% Skipped on Python 3.14+ since we never installed one (see
 %% set_default_policy/0).
 reset_default_policy() ->
-    Code = <<"
-import sys, asyncio
-if sys.version_info < (3, 14):
-    asyncio.set_event_loop_policy(None)
-">>,
-    try py:exec(Code) catch _:_ -> ok end,
+    Code = <<
+        "\n"
+        "import sys, asyncio\n"
+        "if sys.version_info < (3, 14):\n"
+        "    asyncio.set_event_loop_policy(None)\n"
+    >>,
+    try
+        py:exec(Code)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -508,7 +552,9 @@ cb_dispatch_timer([LoopRef, CallbackId]) ->
 %% Args: [Seconds] - number of seconds (converted to non-negative ms internally)
 cb_sleep([Seconds]) when is_number(Seconds) ->
     Ms = max(0, round(Seconds * 1000)),
-    receive after Ms -> ok end;
+    receive
+    after Ms -> ok
+    end;
 cb_sleep(_Args) ->
     ok.
 
@@ -520,19 +566,21 @@ cb_sleep(_Args) ->
 %% - Args: list | none - Positional arguments
 %% - Kwargs: map | none - Keyword arguments
 cb_execute_py([Module, Func, Args, Kwargs]) ->
-    CallArgs = case Args of
-        none -> [];
-        undefined -> [];
-        List when is_list(List) -> List;
-        Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
-        _ -> [Args]
-    end,
-    CallKwargs = case Kwargs of
-        none -> #{};
-        undefined -> #{};
-        Map when is_map(Map) -> Map;
-        _ -> #{}
-    end,
+    CallArgs =
+        case Args of
+            none -> [];
+            undefined -> [];
+            List when is_list(List) -> List;
+            Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
+            _ -> [Args]
+        end,
+    CallKwargs =
+        case Kwargs of
+            none -> #{};
+            undefined -> #{};
+            Map when is_map(Map) -> Map;
+            _ -> #{}
+        end,
     %% Use default pool via py:call
     case py:call(Module, Func, CallArgs, CallKwargs) of
         {ok, Result} -> Result;

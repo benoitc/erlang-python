@@ -24,8 +24,10 @@
     %% TimerRef => {ErlTimerRef, LoopRef, CallbackId}. The loop is the one
     %% named in the start_timer message: a loop without a worker of its own
     %% borrows this one, so an expiry is dispatched to the loop that set it.
-    timers = #{} :: #{reference() | non_neg_integer() =>
-                      {reference(), reference(), non_neg_integer()}},
+    timers = #{} :: #{
+        reference() | non_neg_integer() =>
+            {reference(), reference(), non_neg_integer()}
+    },
     stats = #{select_count => 0, timer_count => 0, dispatch_count => 0} :: map()
 }).
 
@@ -59,39 +61,36 @@ handle_info({select, FdRes, _Ref, ready_input}, State) ->
     %% Trigger event processing after FD event dispatch
     maybe_send_task_ready(),
     {noreply, State};
-
 handle_info({select, FdRes, _Ref, ready_output}, State) ->
     py_nif:handle_fd_event_and_reselect(FdRes, write),
     %% Trigger event processing after FD event dispatch
     maybe_send_task_ready(),
     {noreply, State};
-
 handle_info({start_timer, LoopRef, DelayMs, CallbackId, TimerRef}, State) ->
     #state{timers = Timers} = State,
     ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
     NewTimers = maps:put(TimerRef, {ErlTimerRef, LoopRef, CallbackId}, Timers),
     {noreply, State#state{timers = NewTimers}};
-
 handle_info({start_timer, DelayMs, CallbackId, TimerRef}, State) ->
     #state{loop_ref = LoopRef, timers = Timers} = State,
     ErlTimerRef = erlang:send_after(DelayMs, self(), {timeout, TimerRef}),
     NewTimers = maps:put(TimerRef, {ErlTimerRef, LoopRef, CallbackId}, Timers),
     {noreply, State#state{timers = NewTimers}};
-
 handle_info({cancel_timer, TimerRef}, State) ->
     #state{timers = Timers} = State,
     case maps:get(TimerRef, Timers, undefined) of
-        undefined -> {noreply, State};
+        undefined ->
+            {noreply, State};
         {ErlTimerRef, _LoopRef, _CallbackId} ->
             erlang:cancel_timer(ErlTimerRef),
             NewTimers = maps:remove(TimerRef, Timers),
             {noreply, State#state{timers = NewTimers}}
     end;
-
 handle_info({timeout, TimerRef}, State) ->
     #state{loop_ref = OwnLoopRef, timers = Timers} = State,
     case maps:get(TimerRef, Timers, undefined) of
-        undefined -> {noreply, State};
+        undefined ->
+            {noreply, State};
         {_ErlTimerRef, LoopRef, CallbackId} ->
             py_nif:dispatch_timer(LoopRef, CallbackId),
             NewTimers = maps:remove(TimerRef, Timers),
@@ -104,14 +103,12 @@ handle_info({timeout, TimerRef}, State) ->
             end,
             {noreply, State#state{timers = NewTimers}}
     end;
-
-handle_info({select, _FdRes, _Ref, cancelled}, State) -> {noreply, State};
-
+handle_info({select, _FdRes, _Ref, cancelled}, State) ->
+    {noreply, State};
 %% Re-arm request from the Python loop (see py_nif:fd_arm/2)
 handle_info({fd_arm, FdRes, Mode}, State) ->
     _ = py_nif:fd_arm(FdRes, Mode),
     {noreply, State};
-
 %% Handle task_ready wakeup from submit_task NIF.
 %% This is sent via enif_send when a new async task is submitted.
 %% Uses a drain-until-empty loop to handle tasks submitted during processing.
@@ -120,13 +117,16 @@ handle_info(task_ready, #state{loop_ref = LoopRef} = State) ->
     put(task_ready_pending, false),
     drain_tasks_loop(LoopRef),
     {noreply, State};
-
-handle_info(_Info, State) -> {noreply, State}.
+handle_info(_Info, State) ->
+    {noreply, State}.
 
 terminate(_Reason, #state{timers = Timers}) ->
-    maps:foreach(fun(_TimerRef, {ErlTimerRef, _LoopRef, _CallbackId}) ->
-        erlang:cancel_timer(ErlTimerRef)
-    end, Timers),
+    maps:foreach(
+        fun(_TimerRef, {ErlTimerRef, _LoopRef, _CallbackId}) ->
+            erlang:cancel_timer(ErlTimerRef)
+        end,
+        Timers
+    ),
     ok.
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.

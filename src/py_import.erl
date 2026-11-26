@@ -185,7 +185,8 @@ is_imported(Module, Func) ->
     ModuleBin = ensure_binary(Module),
     FuncBin = ensure_binary(Func),
     case ets:info(?IMPORT_REGISTRY) of
-        undefined -> false;
+        undefined ->
+            false;
         _ ->
             case ets:lookup(?IMPORT_REGISTRY, ModuleBin) of
                 [{_, all}] -> true;
@@ -249,17 +250,21 @@ clear_imports() ->
 import_list() ->
     Imports = all_imports(),
     %% Group by module
-    Map = lists:foldl(fun({Module, FuncOrAll}, Acc) ->
-        Existing = maps:get(Module, Acc, []),
-        case FuncOrAll of
-            all ->
-                %% Module-level import, don't add to function list
-                maps:put(Module, Existing, Acc);
-            Func ->
-                %% Function-level import
-                maps:put(Module, [Func | Existing], Acc)
-        end
-    end, #{}, Imports),
+    Map = lists:foldl(
+        fun({Module, FuncOrAll}, Acc) ->
+            Existing = maps:get(Module, Acc, []),
+            case FuncOrAll of
+                all ->
+                    %% Module-level import, don't add to function list
+                    maps:put(Module, Existing, Acc);
+                Func ->
+                    %% Function-level import
+                    maps:put(Module, [Func | Existing], Acc)
+            end
+        end,
+        #{},
+        Imports
+    ),
     {ok, Map}.
 
 %%% ============================================================================
@@ -319,7 +324,8 @@ add_paths(Paths) when is_list(Paths) ->
 -spec all_paths() -> [binary()].
 all_paths() ->
     case ets:info(?PATH_REGISTRY) of
-        undefined -> [];
+        undefined ->
+            [];
         _ ->
             %% ordered_set returns in key order (monotonic time = insertion order)
             [Path || {_Key, Path} <- ets:tab2list(?PATH_REGISTRY)]
@@ -347,7 +353,8 @@ clear_paths() ->
 is_path_added(Path) ->
     PathBin = ensure_binary(Path),
     case ets:info(?PATH_REGISTRY) of
-        undefined -> false;
+        undefined ->
+            false;
         _ ->
             case ets:match(?PATH_REGISTRY, {'_', PathBin}) of
                 [] -> false;
@@ -396,7 +403,8 @@ apply_import_to_interpreters(ModuleBin) ->
             try
                 Ref = py_context:get_nif_ref(Ctx),
                 py_nif:interp_apply_imports(Ref, Imports)
-            catch _:_ -> ok
+            catch
+                _:_ -> ok
             end
         end,
         get_all_contexts()
@@ -404,26 +412,40 @@ apply_import_to_interpreters(ModuleBin) ->
     %% Apply to main event loop
     case py_event_loop:get_loop() of
         {ok, LoopRef} ->
-            try py_nif:interp_apply_imports(LoopRef, Imports) catch _:_ -> ok end;
-        _ -> ok
+            try
+                py_nif:interp_apply_imports(LoopRef, Imports)
+            catch
+                _:_ -> ok
+            end;
+        _ ->
+            ok
     end,
     %% Apply to all pool event loops
     case py_event_loop_pool:get_all_loops() of
         {ok, Loops} ->
             lists:foreach(
                 fun({LoopRef, _WorkerPid}) ->
-                    try py_nif:interp_apply_imports(LoopRef, Imports) catch _:_ -> ok end
+                    try
+                        py_nif:interp_apply_imports(LoopRef, Imports)
+                    catch
+                        _:_ -> ok
+                    end
                 end,
                 Loops
             );
-        _ -> ok
+        _ ->
+            ok
     end,
     %% Apply to all OWN_GIL sessions (if enabled)
     case py_event_loop_pool:is_owngil_enabled() of
         true ->
             lists:foreach(
                 fun({WorkerId, HandleId}) ->
-                    try py_nif:owngil_apply_imports(WorkerId, HandleId, Imports) catch _:_ -> ok end
+                    try
+                        py_nif:owngil_apply_imports(WorkerId, HandleId, Imports)
+                    catch
+                        _:_ -> ok
+                    end
                 end,
                 py_event_loop_pool:get_all_sessions()
             );
@@ -441,7 +463,8 @@ apply_path_to_interpreters(PathBin) ->
             try
                 Ref = py_context:get_nif_ref(Ctx),
                 py_nif:interp_apply_paths(Ref, Paths)
-            catch _:_ -> ok
+            catch
+                _:_ -> ok
             end
         end,
         get_all_contexts()
@@ -449,26 +472,40 @@ apply_path_to_interpreters(PathBin) ->
     %% Apply to main event loop
     case py_event_loop:get_loop() of
         {ok, LoopRef} ->
-            try py_nif:interp_apply_paths(LoopRef, Paths) catch _:_ -> ok end;
-        _ -> ok
+            try
+                py_nif:interp_apply_paths(LoopRef, Paths)
+            catch
+                _:_ -> ok
+            end;
+        _ ->
+            ok
     end,
     %% Apply to all pool event loops
     case py_event_loop_pool:get_all_loops() of
         {ok, Loops} ->
             lists:foreach(
                 fun({LoopRef, _WorkerPid}) ->
-                    try py_nif:interp_apply_paths(LoopRef, Paths) catch _:_ -> ok end
+                    try
+                        py_nif:interp_apply_paths(LoopRef, Paths)
+                    catch
+                        _:_ -> ok
+                    end
                 end,
                 Loops
             );
-        _ -> ok
+        _ ->
+            ok
     end,
     %% Apply to all OWN_GIL sessions (if enabled)
     case py_event_loop_pool:is_owngil_enabled() of
         true ->
             lists:foreach(
                 fun({WorkerId, HandleId}) ->
-                    try py_nif:owngil_apply_paths(WorkerId, HandleId, Paths) catch _:_ -> ok end
+                    try
+                        py_nif:owngil_apply_paths(WorkerId, HandleId, Paths)
+                    catch
+                        _:_ -> ok
+                    end
                 end,
                 py_event_loop_pool:get_all_sessions()
             );
@@ -479,6 +516,11 @@ apply_path_to_interpreters(PathBin) ->
 
 %% @private Get all context pids from all pools
 get_all_contexts() ->
-    DefaultCtxs = try py_context_router:contexts() catch _:_ -> [] end,
+    DefaultCtxs =
+        try
+            py_context_router:contexts()
+        catch
+            _:_ -> []
+        end,
     %% Could add other pools here if needed
     DefaultCtxs.

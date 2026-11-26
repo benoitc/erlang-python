@@ -32,24 +32,25 @@
     asyncio_read_test/1
 ]).
 
-all() -> [
-    create_buffer_test,
-    create_buffer_with_size_test,
-    write_read_test,
-    readline_test,
-    readlines_test,
-    seek_tell_test,
-    find_test,
-    memoryview_test,
-    buffer_grow_pinned_test,
-    iterator_test,
-    closed_buffer_test,
-    empty_buffer_test,
-    pass_to_python_test,
-    gc_refcount_test,
-    nonblock_read_test,
-    asyncio_read_test
-].
+all() ->
+    [
+        create_buffer_test,
+        create_buffer_with_size_test,
+        write_read_test,
+        readline_test,
+        readlines_test,
+        seek_tell_test,
+        find_test,
+        memoryview_test,
+        buffer_grow_pinned_test,
+        iterator_test,
+        closed_buffer_test,
+        empty_buffer_test,
+        pass_to_python_test,
+        gc_refcount_test,
+        nonblock_read_test,
+        asyncio_read_test
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
@@ -105,10 +106,11 @@ readline_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Create buffer with multiple lines and close it
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'line1\\nline2\\nline3\\n')
-buf.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'line1\\nline2\\nline3\\n')\n"
+        "buf.close()\n"
+    >>),
 
     {ok, Line1} = py:eval(Ctx, <<"buf.readline()">>),
     <<"line1\n">> = Line1,
@@ -129,10 +131,11 @@ readlines_test(_Config) ->
     Ctx = py:context(1),
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'a\\nb\\nc\\n')
-buf.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'a\\nb\\nc\\n')\n"
+        "buf.close()\n"
+    >>),
     {ok, Lines} = py:eval(Ctx, <<"buf.readlines()">>),
     [<<"a\n">>, <<"b\n">>, <<"c\n">>] = Lines,
 
@@ -144,10 +147,11 @@ seek_tell_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Create buffer, close it, and check initial position
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'0123456789')
-buf.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'0123456789')\n"
+        "buf.close()\n"
+    >>),
     {ok, 0} = py:eval(Ctx, <<"buf.tell()">>),
 
     %% Read 5 bytes, position should advance
@@ -202,10 +206,11 @@ memoryview_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Create buffer and get memoryview
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'test data')
-mv = memoryview(buf)
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'test data')\n"
+        "mv = memoryview(buf)\n"
+    >>),
 
     %% Check memoryview properties
     {ok, 9} = py:eval(Ctx, <<"len(mv)">>),
@@ -230,10 +235,11 @@ iterator_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Create buffer and iterate
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'line1\\nline2\\nline3\\n')
-buf.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'line1\\nline2\\nline3\\n')\n"
+        "buf.close()\n"
+    >>),
     {ok, Lines} = py:eval(Ctx, <<"list(buf)">>),
     [<<"line1\n">>, <<"line2\n">>, <<"line3\n">>] = Lines,
 
@@ -245,10 +251,11 @@ closed_buffer_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Create buffer and close it
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'data')
-buf.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'data')\n"
+        "buf.close()\n"
+    >>),
 
     %% Check closed property
     {ok, true} = py:eval(Ctx, <<"buf.closed">>),
@@ -265,10 +272,11 @@ empty_buffer_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Create empty buffer and close immediately
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'')
-buf.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'')\n"
+        "buf.close()\n"
+    >>),
 
     %% Read should return empty
     {ok, <<>>} = py:eval(Ctx, <<"buf.read()">>),
@@ -298,10 +306,11 @@ pass_to_python_test(_Config) ->
     Ctx = py:context(1),
 
     %% Define a function that reads from a buffer
-    ok = py:exec(Ctx, <<"
-def read_buffer(buf):
-    return buf.read()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def read_buffer(buf):\n"
+        "    return buf.read()\n"
+    >>),
 
     %% Call with buffer ref - py_convert.c should wrap it as PyBuffer
     {ok, <<"chunk1chunk2">>} = py:eval(Ctx, <<"read_buffer(buf)">>, #{<<"buf">> => Buf}),
@@ -312,14 +321,18 @@ def read_buffer(buf):
 %% memoryview pins it (relocating the storage would dangle the view -> UAF).
 %% Regression for the zero-copy view_count guard in py_buffer_write.
 buffer_grow_pinned_test(_Config) ->
-    {ok, Buf} = py_buffer:new(8),           %% capacity 8 bytes
-    ok = py_buffer:write(Buf, <<"ab">>),    %% write_pos 2, within capacity
+    %% capacity 8 bytes
+    {ok, Buf} = py_buffer:new(8),
+    %% write_pos 2, within capacity
+    ok = py_buffer:write(Buf, <<"ab">>),
     Ctx = py:context(1),
 
     %% Python holds a memoryview pinning the buffer (kept in a persistent global).
-    {ok, <<"pinned">>} = py:eval(Ctx,
+    {ok, <<"pinned">>} = py:eval(
+        Ctx,
         <<"globals().setdefault('_keep', []).append(memoryview(buf)) or 'pinned'">>,
-        #{<<"buf">> => Buf}),
+        #{<<"buf">> => Buf}
+    ),
 
     %% Growing the buffer now would relocate buf->data and dangle the memoryview,
     %% so the write is refused (no crash) while the view is pinned.
@@ -338,52 +351,53 @@ buffer_grow_pinned_test(_Config) ->
 %% Verifies reference counting between Erlang and Python
 gc_refcount_test(_Config) ->
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import gc
-from erlang import PyBuffer
-
-# Track if we can create many buffers without memory issues
-def create_and_release_buffers(count):
-    '''Create many buffers and let them be GC'd.'''
-    for i in range(count):
-        buf = PyBuffer._test_create(b'x' * 1000)
-        buf.close()
-        # buf goes out of scope, should be released
-    gc.collect()
-    return True
-
-def test_memoryview_refcount():
-    '''Test that memoryview keeps buffer alive.'''
-    buf = PyBuffer._test_create(b'test data')
-    mv = memoryview(buf)
-
-    # Buffer should stay alive while memoryview exists
-    data = bytes(mv[:4])
-
-    # Release memoryview
-    mv.release()
-
-    # Buffer should still be usable after memoryview release
-    buf.close()
-    remaining = buf.read()
-
-    return data == b'test' and remaining == b'test data'
-
-def test_multiple_views():
-    '''Test multiple memoryviews on same buffer.'''
-    buf = PyBuffer._test_create(b'hello world')
-    mv1 = memoryview(buf)
-    mv2 = memoryview(buf)
-
-    result1 = bytes(mv1[:5])
-    result2 = bytes(mv2[6:])
-
-    mv1.release()
-    mv2.release()
-    buf.close()
-
-    return result1 == b'hello' and result2 == b'world'
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import gc\n"
+        "from erlang import PyBuffer\n"
+        "\n"
+        "# Track if we can create many buffers without memory issues\n"
+        "def create_and_release_buffers(count):\n"
+        "    '''Create many buffers and let them be GC'd.'''\n"
+        "    for i in range(count):\n"
+        "        buf = PyBuffer._test_create(b'x' * 1000)\n"
+        "        buf.close()\n"
+        "        # buf goes out of scope, should be released\n"
+        "    gc.collect()\n"
+        "    return True\n"
+        "\n"
+        "def test_memoryview_refcount():\n"
+        "    '''Test that memoryview keeps buffer alive.'''\n"
+        "    buf = PyBuffer._test_create(b'test data')\n"
+        "    mv = memoryview(buf)\n"
+        "\n"
+        "    # Buffer should stay alive while memoryview exists\n"
+        "    data = bytes(mv[:4])\n"
+        "\n"
+        "    # Release memoryview\n"
+        "    mv.release()\n"
+        "\n"
+        "    # Buffer should still be usable after memoryview release\n"
+        "    buf.close()\n"
+        "    remaining = buf.read()\n"
+        "\n"
+        "    return data == b'test' and remaining == b'test data'\n"
+        "\n"
+        "def test_multiple_views():\n"
+        "    '''Test multiple memoryviews on same buffer.'''\n"
+        "    buf = PyBuffer._test_create(b'hello world')\n"
+        "    mv1 = memoryview(buf)\n"
+        "    mv2 = memoryview(buf)\n"
+        "\n"
+        "    result1 = bytes(mv1[:5])\n"
+        "    result2 = bytes(mv2[6:])\n"
+        "\n"
+        "    mv1.release()\n"
+        "    mv2.release()\n"
+        "    buf.close()\n"
+        "\n"
+        "    return result1 == b'hello' and result2 == b'world'\n"
+    >>),
 
     %% Test 1: Create and release many buffers
     {ok, true} = py:eval(Ctx, <<"create_and_release_buffers(100)">>),
@@ -420,9 +434,10 @@ nonblock_read_test(_Config) ->
     ok = py:exec(Ctx, <<"from erlang import PyBuffer">>),
 
     %% Test read_nonblock returns available data immediately
-    ok = py:exec(Ctx, <<"
-buf = PyBuffer._test_create(b'hello world')
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "buf = PyBuffer._test_create(b'hello world')\n"
+    >>),
 
     %% readable_amount should return 11 (length of 'hello world')
     {ok, 11} = py:eval(Ctx, <<"buf.readable_amount()">>),
@@ -450,25 +465,26 @@ buf = PyBuffer._test_create(b'hello world')
     {ok, true} = py:eval(Ctx, <<"buf.at_eof()">>),
 
     %% Test async I/O pattern simulation
-    ok = py:exec(Ctx, <<"
-def async_read_simulation():
-    '''Simulate async I/O read pattern.'''
-    buf = PyBuffer._test_create(b'chunk1chunk2chunk3')
-    buf.close()  # EOF
-
-    chunks = []
-    while not buf.at_eof():
-        available = buf.readable_amount()
-        if available > 0:
-            # Read in chunks of 6
-            chunk = buf.read_nonblock(6)
-            chunks.append(chunk)
-        else:
-            # Would yield to event loop here in real async code
-            break
-
-    return chunks
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def async_read_simulation():\n"
+        "    '''Simulate async I/O read pattern.'''\n"
+        "    buf = PyBuffer._test_create(b'chunk1chunk2chunk3')\n"
+        "    buf.close()  # EOF\n"
+        "\n"
+        "    chunks = []\n"
+        "    while not buf.at_eof():\n"
+        "        available = buf.readable_amount()\n"
+        "        if available > 0:\n"
+        "            # Read in chunks of 6\n"
+        "            chunk = buf.read_nonblock(6)\n"
+        "            chunks.append(chunk)\n"
+        "        else:\n"
+        "            # Would yield to event loop here in real async code\n"
+        "            break\n"
+        "\n"
+        "    return chunks\n"
+    >>),
 
     {ok, [<<"chunk1">>, <<"chunk2">>, <<"chunk3">>]} =
         py:eval(Ctx, <<"async_read_simulation()">>),
@@ -484,32 +500,33 @@ asyncio_read_test(_Config) ->
     Self = self(),
 
     %% Define async reader in Python
-    ok = py:exec(Ctx, <<"
-import asyncio
-
-async def async_buffer_reader(buf):
-    '''Read from buffer asynchronously as Erlang fills it.'''
-    chunks = []
-
-    while not buf.at_eof():
-        available = buf.readable_amount()
-        if available > 0:
-            chunk = buf.read_nonblock(available)
-            chunks.append(chunk)
-        else:
-            # Yield to event loop - Erlang is still writing
-            await asyncio.sleep(0.005)
-
-    return b''.join(chunks)
-
-def run_async_reader(buf):
-    '''Run async reader.'''
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(async_buffer_reader(buf))
-    finally:
-        loop.close()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "\n"
+        "async def async_buffer_reader(buf):\n"
+        "    '''Read from buffer asynchronously as Erlang fills it.'''\n"
+        "    chunks = []\n"
+        "\n"
+        "    while not buf.at_eof():\n"
+        "        available = buf.readable_amount()\n"
+        "        if available > 0:\n"
+        "            chunk = buf.read_nonblock(available)\n"
+        "            chunks.append(chunk)\n"
+        "        else:\n"
+        "            # Yield to event loop - Erlang is still writing\n"
+        "            await asyncio.sleep(0.005)\n"
+        "\n"
+        "    return b''.join(chunks)\n"
+        "\n"
+        "def run_async_reader(buf):\n"
+        "    '''Run async reader.'''\n"
+        "    loop = asyncio.new_event_loop()\n"
+        "    try:\n"
+        "        return loop.run_until_complete(async_buffer_reader(buf))\n"
+        "    finally:\n"
+        "        loop.close()\n"
+    >>),
 
     %% Spawn a process to write data with delays (simulating streaming)
     spawn_link(fun() ->
@@ -528,7 +545,10 @@ def run_async_reader(buf):
     {ok, Result} = py:eval(Ctx, <<"run_async_reader(buf)">>, #{<<"buf">> => Buf}),
 
     %% Wait for writer to finish
-    receive writer_done -> ok after 1000 -> ok end,
+    receive
+        writer_done -> ok
+    after 1000 -> ok
+    end,
 
     %% Verify we got all the data
     <<"chunk1:chunk2:chunk3">> = Result,

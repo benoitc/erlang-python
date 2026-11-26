@@ -27,10 +27,11 @@ main(Args) ->
     io:format("~n=== Semantic Search Example ===~n~n"),
 
     %% Activate venv
-    VenvPath = case Args of
-        [Path | _] -> Path;
-        [] -> "/tmp/ai-venv"
-    end,
+    VenvPath =
+        case Args of
+            [Path | _] -> Path;
+            [] -> "/tmp/ai-venv"
+        end,
 
     case activate_venv(VenvPath) of
         ok -> ok;
@@ -48,14 +49,22 @@ main(Args) ->
 
     %% Sample documents
     Documents = [
-        {<<"doc1">>, <<"Erlang is a programming language used to build massively scalable soft real-time systems with requirements on high availability.">>},
-        {<<"doc2">>, <<"Python is widely used for machine learning, data science, and artificial intelligence applications.">>},
-        {<<"doc3">>, <<"The BEAM virtual machine executes Erlang and Elixir code with lightweight processes and message passing.">>},
-        {<<"doc4">>, <<"Neural networks are computing systems inspired by biological neural networks that constitute animal brains.">>},
-        {<<"doc5">>, <<"Distributed systems are systems whose components are located on different networked computers.">>},
-        {<<"doc6">>, <<"Natural language processing enables computers to understand, interpret, and generate human language.">>},
-        {<<"doc7">>, <<"Fault tolerance is the property that enables a system to continue operating properly in the event of failure.">>},
-        {<<"doc8">>, <<"Deep learning is part of machine learning based on artificial neural networks with representation learning.">>}
+        {<<"doc1">>,
+            <<"Erlang is a programming language used to build massively scalable soft real-time systems with requirements on high availability.">>},
+        {<<"doc2">>,
+            <<"Python is widely used for machine learning, data science, and artificial intelligence applications.">>},
+        {<<"doc3">>,
+            <<"The BEAM virtual machine executes Erlang and Elixir code with lightweight processes and message passing.">>},
+        {<<"doc4">>,
+            <<"Neural networks are computing systems inspired by biological neural networks that constitute animal brains.">>},
+        {<<"doc5">>,
+            <<"Distributed systems are systems whose components are located on different networked computers.">>},
+        {<<"doc6">>,
+            <<"Natural language processing enables computers to understand, interpret, and generate human language.">>},
+        {<<"doc7">>,
+            <<"Fault tolerance is the property that enables a system to continue operating properly in the event of failure.">>},
+        {<<"doc8">>,
+            <<"Deep learning is part of machine learning based on artificial neural networks with representation learning.">>}
     ],
 
     %% Build index
@@ -71,14 +80,20 @@ main(Args) ->
         <<"understanding human text">>
     ],
 
-    lists:foreach(fun(Query) ->
-        io:format("~n--- Query: ~s ---~n", [Query]),
-        Results = search(Query, Index, 3),
-        lists:foreach(fun({Score, Id, Text}) ->
-            ShortText = truncate(Text, 60),
-            io:format("  [~.3f] ~s: ~s~n", [Score, Id, ShortText])
-        end, Results)
-    end, Queries),
+    lists:foreach(
+        fun(Query) ->
+            io:format("~n--- Query: ~s ---~n", [Query]),
+            Results = search(Query, Index, 3),
+            lists:foreach(
+                fun({Score, Id, Text}) ->
+                    ShortText = truncate(Text, 60),
+                    io:format("  [~.3f] ~s: ~s~n", [Score, Id, ShortText])
+                end,
+                Results
+            )
+        end,
+        Queries
+    ),
 
     io:format("~n=== Done ===~n~n"),
     cleanup().
@@ -109,7 +124,10 @@ activate_venv(VenvPath) ->
     end.
 
 add_to_python_path(Dir) ->
-    {ok, _} = py:eval(<<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>, #{path => Dir}),
+    {ok, _} = py:eval(
+        <<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>,
+        #{path => Dir}
+    ),
     ok.
 
 build_index(Documents) ->
@@ -119,8 +137,10 @@ build_index(Documents) ->
 
 search(Query, Index, TopK) ->
     {ok, QueryEmb} = py:call(ai_helpers, embed_single, [Query]),
-    Scored = [{cosine_similarity(QueryEmb, Emb), Id, Text}
-              || {Id, Text, Emb} <- Index],
+    Scored = [
+        {cosine_similarity(QueryEmb, Emb), Id, Text}
+     || {Id, Text, Emb} <- Index
+    ],
     Sorted = lists:reverse(lists:sort(Scored)),
     lists:sublist(Sorted, TopK).
 

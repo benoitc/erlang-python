@@ -22,7 +22,8 @@ main(_Args) ->
 
     %% Verify pool is ready
     case py_event_loop_pool:get_loop() of
-        {ok, _} -> ok;
+        {ok, _} ->
+            ok;
         {error, R} ->
             io:format("Pool not available: ~p~n", [R]),
             halt(1)
@@ -54,48 +55,71 @@ bench_single_vs_pool_sequential(N) ->
 
     %% Single event loop
     {T1, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            Ref = py_event_loop:create_task(math, sqrt, [float(I)]),
-            {ok, _} = py_event_loop:await(Ref)
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                Ref = py_event_loop:create_task(math, sqrt, [float(I)]),
+                {ok, _} = py_event_loop:await(Ref)
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     %% Pool (should be similar since same caller = same loop)
     {T2, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
-            {ok, _} = py_event_loop_pool:await(Ref)
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
+                {ok, _} = py_event_loop_pool:await(Ref)
+            end,
+            lists:seq(1, N)
+        )
     end),
 
-    io:format("  py_event_loop:     ~.2f ms (~p tasks/sec)~n",
-              [T1/1000, round(N / (T1/1000000))]),
-    io:format("  py_event_loop_pool: ~.2f ms (~p tasks/sec)~n~n",
-              [T2/1000, round(N / (T2/1000000))]).
+    io:format(
+        "  py_event_loop:     ~.2f ms (~p tasks/sec)~n",
+        [T1 / 1000, round(N / (T1 / 1000000))]
+    ),
+    io:format(
+        "  py_event_loop_pool: ~.2f ms (~p tasks/sec)~n~n",
+        [T2 / 1000, round(N / (T2 / 1000000))]
+    ).
 
 %% Pool with concurrent callers (each gets own loop = parallel)
 bench_pool_concurrent(NumProcs, TasksPerProc) ->
     TotalTasks = NumProcs * TasksPerProc,
     io:format("Benchmark: Concurrent callers via pool~n"),
-    io:format("  Processes: ~p, Tasks/process: ~p, Total: ~p~n",
-              [NumProcs, TasksPerProc, TotalTasks]),
+    io:format(
+        "  Processes: ~p, Tasks/process: ~p, Total: ~p~n",
+        [NumProcs, TasksPerProc, TotalTasks]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
-                {ok, _} = py_event_loop_pool:await(Ref)
-            end, lists:seq(1, TasksPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        Ref = py_event_loop_pool:create_task(math, sqrt, [float(I)]),
+                        {ok, _} = py_event_loop_pool:await(Ref)
+                    end,
+                    lists:seq(1, TasksPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
-    io:format("  Total time: ~.2f ms~n", [Time/1000]),
-    io:format("  Throughput: ~p tasks/sec~n~n", [round(TotalTasks / (Time/1000000))]).
+    io:format("  Total time: ~.2f ms~n", [Time / 1000]),
+    io:format("  Throughput: ~p tasks/sec~n~n", [round(TotalTasks / (Time / 1000000))]).
 
 %% High throughput test
 bench_pool_throughput(N) ->
@@ -104,10 +128,12 @@ bench_pool_throughput(N) ->
 
     %% Submit all tasks first, then await all
     {Time, _} = timer:tc(fun() ->
-        Refs = [py_event_loop_pool:create_task(math, sqrt, [float(I)])
-                || I <- lists:seq(1, N)],
+        Refs = [
+            py_event_loop_pool:create_task(math, sqrt, [float(I)])
+         || I <- lists:seq(1, N)
+        ],
         [py_event_loop_pool:await(Ref) || Ref <- Refs]
     end),
 
-    io:format("  Total time: ~.2f ms~n", [Time/1000]),
-    io:format("  Throughput: ~p tasks/sec~n~n", [round(N / (Time/1000000))]).
+    io:format("  Total time: ~.2f ms~n", [Time / 1000]),
+    io:format("  Throughput: ~p tasks/sec~n~n", [round(N / (Time / 1000000))]).

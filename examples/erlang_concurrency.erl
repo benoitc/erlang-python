@@ -54,15 +54,30 @@ examples_dir() ->
     list_to_binary(filename:join(ProjectRoot, "examples")).
 
 add_to_python_path(Dir) ->
-    {ok, _} = py:eval(<<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>, #{path => Dir}),
+    {ok, _} = py:eval(
+        <<"(__import__('sys').path.insert(0, path) if path not in __import__('sys').path else None, True)[1]">>,
+        #{path => Dir}
+    ),
     ok.
 
 cleanup() ->
     %% Unregister all functions
-    lists:foreach(fun(Name) ->
-        py:unregister_function(Name)
-    end, [slow_compute, fast_compute, spawn_workers, parallel_fetch,
-          parallel_map, fib, prime_check, process_item, echo]),
+    lists:foreach(
+        fun(Name) ->
+            py:unregister_function(Name)
+        end,
+        [
+            slow_compute,
+            fast_compute,
+            spawn_workers,
+            parallel_fetch,
+            parallel_map,
+            fib,
+            prime_check,
+            process_item,
+            echo
+        ]
+    ),
     ok = application:stop(erlang_python).
 
 %%% ============================================================================
@@ -75,7 +90,8 @@ register_functions() ->
 
     %% Simulated slow computation (sleeps to simulate I/O or heavy work)
     py:register_function(slow_compute, fun([N]) ->
-        timer:sleep(100),  % 100ms delay
+        % 100ms delay
+        timer:sleep(100),
         N * N
     end),
 
@@ -120,45 +136,57 @@ register_functions() ->
     %% Spawn multiple Erlang workers and collect results
     py:register_function(spawn_workers, fun([Tasks]) ->
         Parent = self(),
-        Refs = lists:map(fun(Task) ->
-            Ref = make_ref(),
-            spawn(fun() ->
-                Result = execute_task(Task),
-                Parent ! {Ref, Result}
-            end),
-            Ref
-        end, Tasks),
+        Refs = lists:map(
+            fun(Task) ->
+                Ref = make_ref(),
+                spawn(fun() ->
+                    Result = execute_task(Task),
+                    Parent ! {Ref, Result}
+                end),
+                Ref
+            end,
+            Tasks
+        ),
         %% Collect all results
-        lists:map(fun(Ref) ->
-            receive
-                {Ref, Result} -> Result
-            after 5000 ->
-                {error, timeout}
-            end
-        end, Refs)
+        lists:map(
+            fun(Ref) ->
+                receive
+                    {Ref, Result} -> Result
+                after 5000 ->
+                    {error, timeout}
+                end
+            end,
+            Refs
+        )
     end),
 
     %% Parallel fetch simulation using Erlang processes
     py:register_function(parallel_fetch, fun([Urls]) ->
         Parent = self(),
-        Refs = lists:map(fun(Url) ->
-            Ref = make_ref(),
-            spawn(fun() ->
-                %% Simulate HTTP fetch with variable latency
-                Latency = rand:uniform(100) + 50,
-                timer:sleep(Latency),
-                Result = #{url => Url, status => 200, latency_ms => Latency},
-                Parent ! {Ref, Result}
-            end),
-            Ref
-        end, Urls),
-        lists:map(fun(Ref) ->
-            receive
-                {Ref, Result} -> Result
-            after 5000 ->
-                {error, timeout}
-            end
-        end, Refs)
+        Refs = lists:map(
+            fun(Url) ->
+                Ref = make_ref(),
+                spawn(fun() ->
+                    %% Simulate HTTP fetch with variable latency
+                    Latency = rand:uniform(100) + 50,
+                    timer:sleep(Latency),
+                    Result = #{url => Url, status => 200, latency_ms => Latency},
+                    Parent ! {Ref, Result}
+                end),
+                Ref
+            end,
+            Urls
+        ),
+        lists:map(
+            fun(Ref) ->
+                receive
+                    {Ref, Result} -> Result
+                after 5000 ->
+                    {error, timeout}
+                end
+            end,
+            Refs
+        )
     end),
 
     io:format("  Registered: echo, slow_compute, fast_compute, fib, prime_check~n"),
@@ -171,23 +199,29 @@ parallel_map_impl(FuncName, Items) when is_binary(FuncName) ->
 parallel_map_impl(FuncName, Items) ->
     Parent = self(),
     %% Spawn a process for each item
-    RefsAndItems = lists:map(fun(Item) ->
-        Ref = make_ref(),
-        spawn(fun() ->
-            %% Execute the named function
-            Result = execute_function(FuncName, Item),
-            Parent ! {Ref, Result}
-        end),
-        {Ref, Item}
-    end, Items),
+    RefsAndItems = lists:map(
+        fun(Item) ->
+            Ref = make_ref(),
+            spawn(fun() ->
+                %% Execute the named function
+                Result = execute_function(FuncName, Item),
+                Parent ! {Ref, Result}
+            end),
+            {Ref, Item}
+        end,
+        Items
+    ),
     %% Collect results in order
-    lists:map(fun({Ref, _Item}) ->
-        receive
-            {Ref, Result} -> Result
-        after 5000 ->
-            {error, timeout}
-        end
-    end, RefsAndItems).
+    lists:map(
+        fun({Ref, _Item}) ->
+            receive
+                {Ref, Result} -> Result
+            after 5000 ->
+                {error, timeout}
+            end
+        end,
+        RefsAndItems
+    ).
 
 %% Execute a registered function by name
 execute_function(slow_compute, N) ->
@@ -221,7 +255,9 @@ demo_basic_callbacks() ->
     io:format("~n--- Demo 1: Basic Erlang Callbacks ---~n"),
 
     %% Test echo
-    {ok, Echo} = py:eval(<<"__import__('erlang_concurrency').call_erlang('echo', 'Hello from Python!')">>),
+    {ok, Echo} = py:eval(
+        <<"__import__('erlang_concurrency').call_erlang('echo', 'Hello from Python!')">>
+    ),
     io:format("  Echo result: ~s~n", [Echo]),
 
     %% Test computation
@@ -280,12 +316,17 @@ demo_erlang_processes() ->
     ),
     EndTime = erlang:monotonic_time(millisecond),
 
-    io:format("  Completed ~p items in ~p ms (each takes 50ms, parallel!)~n",
-              [length(Items), EndTime - StartTime]),
+    io:format(
+        "  Completed ~p items in ~p ms (each takes 50ms, parallel!)~n",
+        [length(Items), EndTime - StartTime]
+    ),
     io:format("  Results:~n"),
-    lists:foreach(fun(R) ->
-        io:format("    ~p~n", [R])
-    end, Results),
+    lists:foreach(
+        fun(R) ->
+            io:format("    ~p~n", [R])
+        end,
+        Results
+    ),
 
     ok.
 
@@ -312,9 +353,12 @@ demo_distributed_work() ->
 
     io:format("  Completed in ~p ms~n", [EndTime - StartTime]),
     io:format("  Results:~n"),
-    lists:foreach(fun(R) ->
-        io:format("    ~p~n", [R])
-    end, Results),
+    lists:foreach(
+        fun(R) ->
+            io:format("    ~p~n", [R])
+        end,
+        Results
+    ),
 
     %% Demonstrate parallel_fetch
     io:format("~n  Simulating parallel HTTP fetches via Erlang processes...~n"),
@@ -335,12 +379,19 @@ demo_distributed_work() ->
 
     %% Calculate total latency if sequential
     TotalLatency = lists:sum([maps:get(<<"latency_ms">>, R, 0) || R <- FetchResults]),
-    io:format("  Fetched ~p URLs in ~p ms (would be ~p ms sequential):~n",
-              [length(Urls), EndTime2 - StartTime2, TotalLatency]),
-    lists:foreach(fun(R) ->
-        io:format("    ~s: ~p ms~n",
-                  [maps:get(<<"url">>, R), maps:get(<<"latency_ms">>, R)])
-    end, FetchResults),
+    io:format(
+        "  Fetched ~p URLs in ~p ms (would be ~p ms sequential):~n",
+        [length(Urls), EndTime2 - StartTime2, TotalLatency]
+    ),
+    lists:foreach(
+        fun(R) ->
+            io:format(
+                "    ~s: ~p ms~n",
+                [maps:get(<<"url">>, R), maps:get(<<"latency_ms">>, R)]
+            )
+        end,
+        FetchResults
+    ),
 
     ok.
 
@@ -350,7 +401,7 @@ demo_distributed_work() ->
 
 fib(0) -> 0;
 fib(1) -> 1;
-fib(N) when N > 1 -> fib(N-1) + fib(N-2).
+fib(N) when N > 1 -> fib(N - 1) + fib(N - 2).
 
 is_prime(N) when N < 2 -> false;
 is_prime(2) -> true;
@@ -372,10 +423,12 @@ process_data(Item) ->
     #{original => Item, processed => Item}.
 
 execute_task(#{<<"type">> := <<"compute">>, <<"value">> := V}) ->
-    timer:sleep(50),  % Simulate computation
+    % Simulate computation
+    timer:sleep(50),
     #{result => V * 2, type => compute};
 execute_task(#{<<"type">> := <<"io">>, <<"value">> := V}) ->
-    timer:sleep(rand:uniform(100)),  % Simulate I/O with variable latency
+    % Simulate I/O with variable latency
+    timer:sleep(rand:uniform(100)),
     #{result => V, type => io};
 execute_task(Task) ->
     #{result => Task, type => unknown}.

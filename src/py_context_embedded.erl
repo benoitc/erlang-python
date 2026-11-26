@@ -42,8 +42,10 @@
     ref :: reference(),
     id :: pos_integer(),
     interp_id :: non_neg_integer(),
-    event_state = #{} :: map(),  %% #{loop_ref => ref(), worker_pid => pid()}
-    callback_handler :: pid() | undefined,  %% For thread-model callback handling
+    %% #{loop_ref => ref(), worker_pid => pid()}
+    event_state = #{} :: map(),
+    %% For thread-model callback handling
+    callback_handler :: pid() | undefined,
     %% Worker loop (start_loop/1): request id of the run_forever exec, the
     %% owner that gets {py_loop_exit, Ctx, Result}, its monitor, and the
     %% callers waiting in stop_loop/2
@@ -69,7 +71,11 @@ init(Parent, Id, Mode, Opts) ->
                     init_started(Parent, Id, Ref, InterpId, Opts);
                 {error, LimitError} ->
                     py_context:unregister_nif_ref(),
-                    try py_nif:context_destroy(Ref) catch _:_ -> ok end,
+                    try
+                        py_nif:context_destroy(Ref)
+                    catch
+                        _:_ -> ok
+                    end,
                     Parent ! {self(), {error, LimitError}}
             end;
         {error, Reason} ->
@@ -96,27 +102,31 @@ init_started(Parent, Id, Ref, InterpId, Opts) ->
     apply_preload(Ref),
     %% Per-context preload from new/1 (imports the app once per worker)
     case maps:get(preload, Opts, undefined) of
-        undefined -> ok;
+        undefined ->
+            ok;
         PreCode when is_binary(PreCode); is_list(PreCode) ->
             case handle_exec_with_async(Ref, iolist_to_binary(PreCode)) of
-                ok -> ok;
+                ok ->
+                    ok;
                 {error, PreErr} ->
                     error_logger:warning_msg(
-                        "py_context ~p: preload failed: ~p~n", [InterpId, PreErr])
+                        "py_context ~p: preload failed: ~p~n", [InterpId, PreErr]
+                    )
             end
     end,
     %% For subinterpreters, create a dedicated event worker
     EventState = setup_event_worker(Ref, InterpId),
     %% For thread-model subinterpreters, spawn a dedicated callback handler
     %% because the main context process will be blocked in the NIF
-    CallbackHandler = case maps:get(mode, EventState, normal) of
-        thread_model ->
-            Handler = spawn_callback_handler(Ref),
-            ok = py_nif:context_set_callback_handler(Ref, Handler),
-            Handler;
-        _ ->
-            undefined
-    end,
+    CallbackHandler =
+        case maps:get(mode, EventState, normal) of
+            thread_model ->
+                Handler = spawn_callback_handler(Ref),
+                ok = py_nif:context_set_callback_handler(Ref, Handler),
+                Handler;
+            _ ->
+                undefined
+        end,
     Parent ! {self(), started},
     State = #state{
         ref = Ref,
@@ -142,7 +152,8 @@ setup_event_worker(Ref, InterpId) ->
                 {error, WorkerError} ->
                     error_logger:warning_msg(
                         "py_context ~p: Failed to start event worker: ~p~n",
-                        [InterpId, WorkerError]),
+                        [InterpId, WorkerError]
+                    ),
                     #{}
             end;
         {error, not_subinterp} ->
@@ -155,7 +166,8 @@ setup_event_worker(Ref, InterpId) ->
         {error, Reason} ->
             error_logger:warning_msg(
                 "py_context ~p: Failed to get event loop: ~p~n",
-                [InterpId, Reason]),
+                [InterpId, Reason]
+            ),
             #{}
     end.
 
@@ -164,7 +176,9 @@ extend_erlang_module_in_context(Ref) ->
     PrivDir = code:priv_dir(erlang_python),
     Code = iolist_to_binary([
         "import sys\n",
-        "priv_dir = '", PrivDir, "'\n",
+        "priv_dir = '",
+        PrivDir,
+        "'\n",
         "if priv_dir not in sys.path:\n",
         "    sys.path.insert(0, priv_dir)\n",
         "import erlang\n",
@@ -172,10 +186,12 @@ extend_erlang_module_in_context(Ref) ->
         "    erlang._extend_erlang_module(priv_dir)\n"
     ]),
     case py_nif:context_exec(Ref, Code) of
-        ok -> ok;
+        ok ->
+            ok;
         {error, Reason} ->
             error_logger:warning_msg(
-                "py_context: Failed to extend erlang module: ~p~n", [Reason]),
+                "py_context: Failed to extend erlang module: ~p~n", [Reason]
+            ),
             ok
     end.
 
@@ -224,123 +240,120 @@ loop(#state{ref = Ref, interp_id = InterpId, loop_req = LoopReq} = State) ->
         {start_loop, From, MRef, _Owner} when LoopReq =/= undefined ->
             From ! {MRef, {error, already_running}},
             loop(State);
-
         {start_loop, From, MRef, Owner} ->
             {Reply, NewState} = do_start_loop(Owner, State),
             From ! {MRef, Reply},
             loop(NewState);
-
         {stop_loop, From, MRef, _GraceMs} when LoopReq =:= undefined ->
             From ! {MRef, {error, no_loop}},
             loop(State);
-
         {stop_loop, From, MRef, GraceMs} ->
             loop(begin_stop_loop(From, MRef, GraceMs, State));
-
         {loop_ref, From, MRef} ->
             From ! {MRef, context_loop_ref(State)},
             loop(State);
-
         {py_result, LoopReq, Result} when LoopReq =/= undefined ->
             loop(loop_exited(Result, State));
-
         {loop_stop_deadline, LoopReq} when LoopReq =/= undefined ->
             %% Cooperative stop did not land: interrupt the thread
             _ = py_nif:context_interrupt(Ref),
-            erlang:send_after(?LOOP_INTERRUPT_GRACE_MS, self(),
-                              {loop_interrupt_deadline, LoopReq}),
+            erlang:send_after(
+                ?LOOP_INTERRUPT_GRACE_MS,
+                self(),
+                {loop_interrupt_deadline, LoopReq}
+            ),
             loop(State);
-
         {loop_interrupt_deadline, LoopReq} when LoopReq =/= undefined ->
             [W ! {M, {error, timeout}} || {W, M} <- State#state.loop_stop_waiters],
             loop(State#state{loop_stop_waiters = []});
-
         {loop_stop_deadline, _} ->
             loop(State);
         {loop_interrupt_deadline, _} ->
             loop(State);
-
-        {'DOWN', Mon, process, _Owner, _Reason}
-                when Mon =:= State#state.loop_owner_mon, LoopReq =/= undefined ->
+        {'DOWN', Mon, process, _Owner, _Reason} when
+            Mon =:= State#state.loop_owner_mon, LoopReq =/= undefined
+        ->
             %% Owner is gone: nobody will hear the exit, stop the loop
-            loop(begin_stop_loop(undefined, undefined, 5000,
-                                 State#state{loop_owner_mon = undefined}));
-
+            loop(
+                begin_stop_loop(
+                    undefined,
+                    undefined,
+                    5000,
+                    State#state{loop_owner_mon = undefined}
+                )
+            );
         {async_result, _TaskRef, _} ->
             %% Result of a coroutine this process submitted (loop stop) - drop
             loop(State);
-
         %% ---- while a worker loop runs, the thread is not available ----
         {call, From, MRef, _, _, _, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {call, From, MRef, _, _, _, _, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {eval, From, MRef, _, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {eval, From, MRef, _, _, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {exec, From, MRef, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {exec, From, MRef, _, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {call_method, From, MRef, _, _, _} when LoopReq =/= undefined ->
-            From ! {MRef, {error, loop_running}}, loop(State);
-
+            From ! {MRef, {error, loop_running}},
+            loop(State);
         {stop, From, MRef} when LoopReq =/= undefined ->
             %% Get the thread out of the loop before destroying the context,
             %% otherwise context_destroy waits for a thread that never returns
             terminate(normal, stop_running_loop(State)),
             From ! {MRef, ok};
-
-        {'EXIT', _Pid, Reason} = Exit when LoopReq =/= undefined,
-                                            (Reason =:= shutdown orelse Reason =:= kill orelse
-                                             (is_tuple(Reason) andalso element(1, Reason) =:= shutdown)) ->
+        {'EXIT', _Pid, Reason} = Exit when
+            LoopReq =/= undefined,
+            (Reason =:= shutdown orelse Reason =:= kill orelse
+                (is_tuple(Reason) andalso element(1, Reason) =:= shutdown))
+        ->
             self() ! Exit,
             loop(stop_running_loop(State));
-
         {call, From, MRef, Module, Func, Args, Kwargs} ->
             Result = handle_call_with_suspension(Ref, Module, Func, Args, Kwargs),
             From ! {MRef, Result},
             loop(State);
-
         %% Call with process-local environment (worker mode)
         {call, From, MRef, Module, Func, Args, Kwargs, EnvRef} ->
             Result = handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef),
             From ! {MRef, Result},
             loop(State);
-
         {eval, From, MRef, Code, Locals} ->
             Result = handle_eval_with_suspension(Ref, Code, Locals),
             From ! {MRef, Result},
             loop(State);
-
         %% Eval with process-local environment (worker mode)
         {eval, From, MRef, Code, Locals, EnvRef} ->
             Result = handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef),
             From ! {MRef, Result},
             loop(State);
-
         {exec, From, MRef, Code} ->
             Result = handle_exec_with_async(Ref, Code),
             From ! {MRef, Result},
             loop(State);
-
         %% Exec with process-local environment (worker mode).
         %% Async dispatch with sync fallback (mirrors call/eval).
         {exec, From, MRef, Code, EnvRef} ->
             Result = handle_exec_with_async_and_env(Ref, Code, EnvRef),
             From ! {MRef, Result},
             loop(State);
-
         {call_method, From, MRef, ObjRef, Method, Args} ->
             Result = py_nif:context_call_method(Ref, ObjRef, Method, Args),
             From ! {MRef, Result},
             loop(State);
-
         {get_interp_id, From, MRef} ->
             From ! {MRef, {ok, InterpId}},
             loop(State);
-
         {is_subinterp, From, MRef} ->
             %% Check the interp_id to determine if this is a subinterpreter
             %% Subinterpreters have interp_id > 0 (main interpreter is 0)
@@ -348,21 +361,17 @@ loop(#state{ref = Ref, interp_id = InterpId, loop_req = LoopReq} = State) ->
             IsSubinterp = is_context_subinterp(Ref),
             From ! {MRef, IsSubinterp},
             loop(State);
-
         {create_local_env, From, MRef} ->
             %% Create env inside this context's interpreter
             Result = py_nif:create_local_env(Ref),
             From ! {MRef, Result},
             loop(State);
-
         {get_nif_ref, From, MRef} ->
             From ! {MRef, Ref},
             loop(State);
-
         {stop, From, MRef} ->
             terminate(normal, State),
             From ! {MRef, ok};
-
         {'EXIT', Pid, Reason} ->
             %% Handle EXIT from linked processes
             case State#state.callback_handler of
@@ -370,7 +379,8 @@ loop(#state{ref = Ref, interp_id = InterpId, loop_req = LoopReq} = State) ->
                     %% Callback handler died - restart it for thread-model contexts
                     error_logger:warning_msg(
                         "py_context ~p: Callback handler died: ~p, restarting~n",
-                        [InterpId, Reason]),
+                        [InterpId, Reason]
+                    ),
                     NewHandler = spawn_callback_handler(Ref),
                     ok = py_nif:context_set_callback_handler(Ref, NewHandler),
                     NewState = State#state{callback_handler = NewHandler},
@@ -381,7 +391,8 @@ loop(#state{ref = Ref, interp_id = InterpId, loop_req = LoopReq} = State) ->
                             %% Event worker died - log and continue (degraded asyncio support)
                             error_logger:warning_msg(
                                 "py_context ~p: Event worker died: ~p~n",
-                                [InterpId, Reason]),
+                                [InterpId, Reason]
+                            ),
                             NewState = State#state{event_state = #{}},
                             loop(NewState);
                         _ when Reason =:= shutdown; Reason =:= kill ->
@@ -415,19 +426,33 @@ do_start_loop(Owner, #state{ref = Ref} = State) ->
     case context_loop_ref(State) of
         {ok, _} ->
             LoopReq = make_ref(),
-            case py_nif:context_call_async(Ref, self(), LoopReq, <<"erlang">>,
-                                           <<"_run_loop_forever">>, [self()], #{}) of
+            case
+                py_nif:context_call_async(
+                    Ref,
+                    self(),
+                    LoopReq,
+                    <<"erlang">>,
+                    <<"_run_loop_forever">>,
+                    [self()],
+                    #{}
+                )
+            of
                 {enqueued, LoopReq} ->
                     %% Wait for the loop to actually run before answering, so
                     %% a submit right after start_loop finds it
                     receive
                         {py_loop_started} ->
-                            Mon = case is_pid(Owner) of
-                                true -> erlang:monitor(process, Owner);
-                                false -> undefined
-                            end,
-                            {ok, State#state{loop_req = LoopReq, loop_owner = Owner,
-                                             loop_owner_mon = Mon, loop_stop_waiters = []}};
+                            Mon =
+                                case is_pid(Owner) of
+                                    true -> erlang:monitor(process, Owner);
+                                    false -> undefined
+                                end,
+                            {ok, State#state{
+                                loop_req = LoopReq,
+                                loop_owner = Owner,
+                                loop_owner_mon = Mon,
+                                loop_stop_waiters = []
+                            }};
                         {py_result, LoopReq, {error, Reason}} ->
                             {{error, Reason}, State};
                         {py_result, LoopReq, Other} ->
@@ -445,14 +470,22 @@ do_start_loop(Owner, #state{ref = Ref} = State) ->
 %% @private Ask the running loop to stop from inside, arm the interrupt
 %% deadline, and remember who to answer once it has exited.
 begin_stop_loop(From, MRef, GraceMs, #state{loop_req = LoopReq} = State) ->
-    Waiters = case From of
-        undefined -> State#state.loop_stop_waiters;
-        _ -> [{From, MRef} | State#state.loop_stop_waiters]
-    end,
+    Waiters =
+        case From of
+            undefined -> State#state.loop_stop_waiters;
+            _ -> [{From, MRef} | State#state.loop_stop_waiters]
+        end,
     case context_loop_ref(State) of
         {ok, LoopRef} ->
-            _ = py_nif:submit_task(LoopRef, self(), make_ref(),
-                                   <<"erlang">>, <<"_stop_loop">>, [], #{});
+            _ = py_nif:submit_task(
+                LoopRef,
+                self(),
+                make_ref(),
+                <<"erlang">>,
+                <<"_stop_loop">>,
+                [],
+                #{}
+            );
         _ ->
             ok
     end,
@@ -461,8 +494,14 @@ begin_stop_loop(From, MRef, GraceMs, #state{loop_req = LoopReq} = State) ->
 
 %% @private The exec running the loop returned: tell the owner and the
 %% stop_loop callers, clear the loop state.
-loop_exited(Result, #state{loop_owner = Owner, loop_owner_mon = Mon,
-                           loop_stop_waiters = Waiters} = State) ->
+loop_exited(
+    Result,
+    #state{
+        loop_owner = Owner,
+        loop_owner_mon = Mon,
+        loop_stop_waiters = Waiters
+    } = State
+) ->
     case Mon of
         undefined -> ok;
         _ -> erlang:demonitor(Mon, [flush])
@@ -472,8 +511,12 @@ loop_exited(Result, #state{loop_owner = Owner, loop_owner_mon = Mon,
         false -> ok
     end,
     [W ! {M, ok} || {W, M} <- Waiters],
-    State#state{loop_req = undefined, loop_owner = undefined,
-                loop_owner_mon = undefined, loop_stop_waiters = []}.
+    State#state{
+        loop_req = undefined,
+        loop_owner = undefined,
+        loop_owner_mon = undefined,
+        loop_stop_waiters = []
+    }.
 
 %% @private Synchronous stop used before terminate: interrupt and wait a
 %% bounded time for the exec to return.
@@ -499,12 +542,20 @@ terminate(_Reason, #state{ref = Ref, event_state = EventState, callback_handler 
     %% Stop the event worker first (if it exists and is still alive)
     case EventState of
         #{worker_pid := WorkerPid} ->
-            try gen_server:stop(WorkerPid, normal, 5000) catch _:_ -> ok end;
+            try
+                gen_server:stop(WorkerPid, normal, 5000)
+            catch
+                _:_ -> ok
+            end;
         _ ->
             ok
     end,
     %% Destroy the Python context
-    try py_nif:context_destroy(Ref) catch _:_ -> ok end,
+    try
+        py_nif:context_destroy(Ref)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %% ============================================================================
@@ -539,25 +590,29 @@ callback_handler_loop(Ref) ->
 %% Executes the callback and writes the response to the callback pipe.
 handle_blocking_callback(Ref, FuncName, Args) ->
     %% Convert Args from tuple to list if needed
-    ArgsList = case Args of
-        T when is_tuple(T) -> tuple_to_list(T);
-        L when is_list(L) -> L;
-        _ -> [Args]
-    end,
+    ArgsList =
+        case Args of
+            T when is_tuple(T) -> tuple_to_list(T);
+            L when is_list(L) -> L;
+            _ -> [Args]
+        end,
     %% Execute the registered function
-    Response = case py_callback:execute(FuncName, ArgsList) of
-        {ok, Result} ->
-            %% Format: status_byte (2=ok, ETF) + external term format
-            <<2, (term_to_binary(Result))/binary>>;
-        {error, {not_found, Name}} ->
-            ErrMsg = iolist_to_binary(
-                io_lib:format("Function '~s' not registered", [Name])),
-            <<1, ErrMsg/binary>>;
-        {error, {Class, Reason, _Stack}} ->
-            ErrMsg = iolist_to_binary(
-                io_lib:format("~p: ~p", [Class, Reason])),
-            <<1, ErrMsg/binary>>
-    end,
+    Response =
+        case py_callback:execute(FuncName, ArgsList) of
+            {ok, Result} ->
+                %% Format: status_byte (2=ok, ETF) + external term format
+                <<2, (term_to_binary(Result))/binary>>;
+            {error, {not_found, Name}} ->
+                ErrMsg = iolist_to_binary(
+                    io_lib:format("Function '~s' not registered", [Name])
+                ),
+                <<1, ErrMsg/binary>>;
+            {error, {Class, Reason, _Stack}} ->
+                ErrMsg = iolist_to_binary(
+                    io_lib:format("~p: ~p", [Class, Reason])
+                ),
+                <<1, ErrMsg/binary>>
+        end,
     %% Write response to context's callback pipe
     py_nif:context_write_callback_response(Ref, Response).
 
@@ -581,7 +636,6 @@ handle_call_with_suspension(Ref, Module, Func, Args, Kwargs) ->
             {error, Reason}
     end.
 
-
 %% @private
 %% Handle eval with potential suspension for callbacks
 handle_eval_with_suspension(Ref, Code, Locals) ->
@@ -604,7 +658,6 @@ handle_exec_with_async(Ref, Code) ->
         {error, Reason} ->
             {error, Reason}
     end.
-
 
 %% @private
 %% Wait for async result from worker thread
@@ -636,10 +689,13 @@ wait_for_async_result(Ref, RequestId, EnvRef) ->
         {py_result, RequestId, Result} ->
             process_async_result(Ref, Result, EnvRef);
         {py_callback, CallbackId, FuncName, CallbackArgs} ->
-            CallbackResult = handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs, EnvRef),
+            CallbackResult = handle_callback_with_nested_receive(
+                Ref, FuncName, CallbackArgs, EnvRef
+            ),
             reply_inline_callback(Ref, CallbackId, CallbackResult),
             wait_for_async_result(Ref, RequestId, EnvRef)
-    after 300000 ->  %% 5 minute timeout
+        %% 5 minute timeout
+    after 300000 ->
         {error, async_timeout}
     end.
 
@@ -676,36 +732,58 @@ process_async_result(_Ref, Result, _EnvRef) ->
 %% Handle call with process-local environment.
 handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef) ->
     RequestId = make_ref(),
-    case py_nif:context_call_with_env_async(Ref, self(), RequestId,
-                                              Module, Func, Args, Kwargs,
-                                              EnvRef) of
+    case
+        py_nif:context_call_with_env_async(
+            Ref,
+            self(),
+            RequestId,
+            Module,
+            Func,
+            Args,
+            Kwargs,
+            EnvRef
+        )
+    of
         {enqueued, RequestId} ->
             wait_for_async_result(Ref, RequestId, EnvRef);
         {error, Reason} ->
             {error, Reason}
     end.
-
 
 %% @private
 %% Handle eval with process-local environment.
 handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef) ->
     RequestId = make_ref(),
-    case py_nif:context_eval_with_env_async(Ref, self(), RequestId,
-                                              Code, Locals, EnvRef) of
+    case
+        py_nif:context_eval_with_env_async(
+            Ref,
+            self(),
+            RequestId,
+            Code,
+            Locals,
+            EnvRef
+        )
+    of
         {enqueued, RequestId} ->
             wait_for_async_result(Ref, RequestId, EnvRef);
         {error, Reason} ->
             {error, Reason}
     end.
-
 
 %% @private
 %% Handle exec with process-local environment via the same async-first
 %% path used for call/eval.
 handle_exec_with_async_and_env(Ref, Code, EnvRef) ->
     RequestId = make_ref(),
-    case py_nif:context_exec_with_env_async(Ref, self(), RequestId,
-                                              Code, EnvRef) of
+    case
+        py_nif:context_exec_with_env_async(
+            Ref,
+            self(),
+            RequestId,
+            Code,
+            EnvRef
+        )
+    of
         {enqueued, RequestId} ->
             wait_for_async_result(Ref, RequestId, EnvRef);
         {error, Reason} ->
@@ -726,19 +804,21 @@ is_context_subinterp(Ref) ->
 %% using context_call to avoid recursion through py:call.
 handle_schedule(Ref, <<"_execute_py">>, {Module, Func, Args, Kwargs}) ->
     %% schedule_py callback: call Python function via context
-    CallArgs = case Args of
-        none -> [];
-        undefined -> [];
-        List when is_list(List) -> List;
-        Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
-        _ -> [Args]
-    end,
-    CallKwargs = case Kwargs of
-        none -> #{};
-        undefined -> #{};
-        Map when is_map(Map) -> Map;
-        _ -> #{}
-    end,
+    CallArgs =
+        case Args of
+            none -> [];
+            undefined -> [];
+            List when is_list(List) -> List;
+            Tuple when is_tuple(Tuple) -> tuple_to_list(Tuple);
+            _ -> [Args]
+        end,
+    CallKwargs =
+        case Kwargs of
+            none -> #{};
+            undefined -> #{};
+            Map when is_map(Map) -> Map;
+            _ -> #{}
+        end,
     handle_call_with_suspension(Ref, Module, Func, CallArgs, CallKwargs);
 handle_schedule(_Ref, CallbackName, CallbackArgs) when is_binary(CallbackName) ->
     %% Regular callback: execute via py_callback:execute
@@ -769,21 +849,26 @@ handle_callback_with_nested_receive(Ref, FuncName, CallbackArgs, EnvRef) ->
             undefined -> ok;
             _ -> ok = py:put_local_env(InterpId, EnvRef)
         end,
-        Result = try
-            ArgsList = tuple_to_list(CallbackArgs),
-            case py_callback:execute(FuncName, ArgsList) of
-                {ok, Value} ->
-                    {ok, <<2, (term_to_binary(Value))/binary>>};
-                {error, Reason} ->
-                    ErrMsg = iolist_to_binary(io_lib:format("~p", [Reason])),
-                    {ok, <<1, ErrMsg/binary>>}
-            end
-        catch
-            Class:ExcReason:Stacktrace ->
-                ErrorMsg = iolist_to_binary(io_lib:format("~p:~p~n~p",
-                    [Class, ExcReason, Stacktrace])),
-                {ok, <<1, ErrorMsg/binary>>}
-        end,
+        Result =
+            try
+                ArgsList = tuple_to_list(CallbackArgs),
+                case py_callback:execute(FuncName, ArgsList) of
+                    {ok, Value} ->
+                        {ok, <<2, (term_to_binary(Value))/binary>>};
+                    {error, Reason} ->
+                        ErrMsg = iolist_to_binary(io_lib:format("~p", [Reason])),
+                        {ok, <<1, ErrMsg/binary>>}
+                end
+            catch
+                Class:ExcReason:Stacktrace ->
+                    ErrorMsg = iolist_to_binary(
+                        io_lib:format(
+                            "~p:~p~n~p",
+                            [Class, ExcReason, Stacktrace]
+                        )
+                    ),
+                    {ok, <<1, ErrorMsg/binary>>}
+            end,
         Parent ! {callback_result, self(), Result}
     end),
     %% Wait for callback, processing nested requests
@@ -796,61 +881,53 @@ wait_for_callback(Ref, CallbackPid) ->
     receive
         {callback_result, CallbackPid, Result} ->
             Result;
-
         %% Handle nested py:call while waiting for callback
         {call, From, MRef, Module, Func, Args, Kwargs} ->
             NestedResult = handle_call_with_suspension(Ref, Module, Func, Args, Kwargs),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle nested py:call while waiting for callback (with EnvRef)
         {call, From, MRef, Module, Func, Args, Kwargs, EnvRef} ->
-            NestedResult = handle_call_with_suspension_and_env(Ref, Module, Func, Args, Kwargs, EnvRef),
+            NestedResult = handle_call_with_suspension_and_env(
+                Ref, Module, Func, Args, Kwargs, EnvRef
+            ),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle nested py:eval while waiting for callback (without EnvRef)
         {eval, From, MRef, Code, Locals} ->
             NestedResult = handle_eval_with_suspension(Ref, Code, Locals),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle nested py:eval while waiting for callback (with EnvRef)
         {eval, From, MRef, Code, Locals, EnvRef} ->
             NestedResult = handle_eval_with_suspension_and_env(Ref, Code, Locals, EnvRef),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle nested py:exec while waiting for callback
         {exec, From, MRef, Code} ->
             NestedResult = py_nif:context_exec(Ref, Code),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle nested py:exec while waiting for callback (with EnvRef)
         {exec, From, MRef, Code, EnvRef} ->
             NestedResult = py_nif:context_exec(Ref, Code, EnvRef),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle nested call_method while waiting for callback
         {call_method, From, MRef, ObjRef, Method, Args} ->
             NestedResult = py_nif:context_call_method(Ref, ObjRef, Method, Args),
             From ! {MRef, NestedResult},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle get_interp_id while waiting
         {get_interp_id, From, MRef} ->
             InterpId = py_nif:context_interp_id(Ref),
             From ! {MRef, {ok, InterpId}},
             wait_for_callback(Ref, CallbackPid);
-
         %% Handle create_local_env while waiting
         {create_local_env, From, MRef} ->
             Result = py_nif:create_local_env(Ref),
             From ! {MRef, Result},
             wait_for_callback(Ref, CallbackPid);
-
         {get_nif_ref, From, MRef} ->
             From ! {MRef, Ref},
             wait_for_callback(Ref, CallbackPid)

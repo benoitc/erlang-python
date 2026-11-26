@@ -34,14 +34,15 @@
 
 -define(HOST, {127, 0, 0, 1}).
 
-all() -> [
-    test_churn_four_workers,
-    test_keepalive_connections_held,
-    test_start_stop_cycles,
-    test_submit_storm_under_traffic,
-    test_memory_cap_in_handler,
-    test_interrupt_wedged_loop
-].
+all() ->
+    [
+        test_churn_four_workers,
+        test_keepalive_connections_held,
+        test_start_stop_cycles,
+        test_submit_storm_under_traffic,
+        test_memory_cap_in_handler,
+        test_interrupt_wedged_loop
+    ].
 
 init_per_suite(Config) ->
     case os:getenv("STRESS") of
@@ -50,7 +51,8 @@ init_per_suite(Config) ->
         _ ->
             {ok, _} = application:ensure_all_started(erlang_python),
             case py_nif:owngil_supported() of
-                false -> {skip, "worker loops need OWN_GIL (Python 3.14+)"};
+                false ->
+                    {skip, "worker loops need OWN_GIL (Python 3.14+)"};
                 true ->
                     TestDir = filename:dirname(code:which(?MODULE)),
                     [{test_dir, TestDir} | Config]
@@ -80,12 +82,15 @@ test_churn_four_workers(Config) ->
     Baseline = fd_count(),
     Ctxs = [new_ctx(Config) || _ <- lists:seq(1, 4)],
     {LSock, Port, LFd} = listen(),
-    lists:foreach(fun({I, C}) ->
-        ok = py_context:start_loop(C),
-        {ok, Dup} = py:dup_fd(LFd),
-        Tag = list_to_binary("w" ++ integer_to_list(I) ++ ":"),
-        {ok, <<"serving">>} = py_context:submit_await(C, py_test_workerloop, serve, [Dup, Tag])
-    end, lists:zip(lists:seq(1, 4), Ctxs)),
+    lists:foreach(
+        fun({I, C}) ->
+            ok = py_context:start_loop(C),
+            {ok, Dup} = py:dup_fd(LFd),
+            Tag = list_to_binary("w" ++ integer_to_list(I) ++ ":"),
+            {ok, <<"serving">>} = py_context:submit_await(C, py_test_workerloop, serve, [Dup, Tag])
+        end,
+        lists:zip(lists:seq(1, 4), Ctxs)
+    ),
     N = 10000,
     Clients = 50,
     T0 = erlang:monotonic_time(millisecond),
@@ -93,8 +98,10 @@ test_churn_four_workers(Config) ->
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     Failed = length([R || R <- Replies, not is_binary(R)]),
     Tags = lists:usort([binary:part(R, 0, 3) || R <- Replies, is_binary(R)]),
-    ct:log("~p connections in ~p ms (~p conn/s), failed ~p, workers ~p",
-           [N, Elapsed, N * 1000 div max(1, Elapsed), Failed, Tags]),
+    ct:log(
+        "~p connections in ~p ms (~p conn/s), failed ~p, workers ~p",
+        [N, Elapsed, N * 1000 div max(1, Elapsed), Failed, Tags]
+    ),
     0 = Failed,
     4 = length(Tags),
     [ok = py_context:stop_loop(C) || C <- Ctxs],
@@ -117,16 +124,22 @@ test_keepalive_connections_held(Config) ->
     {ok, <<"serving">>} = py_context:submit_await(C, py_test_workerloop, serve_keepalive, [Dup]),
     Ref = py_context:get_nif_ref(C),
     {ok, Mem0, _} = py_nif:context_memory_usage(Ref),
-    Socks = [begin
-        {ok, S} = gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000),
-        S
-    end || _ <- lists:seq(1, 1000)],
+    Socks = [
+        begin
+            {ok, S} = gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000),
+            S
+        end
+     || _ <- lists:seq(1, 1000)
+    ],
     Rounds = 10,
-    lists:foreach(fun(_) ->
-        [ok = gen_tcp:send(S, <<"ping">>) || S <- Socks],
-        [{ok, <<"pong">>} = gen_tcp:recv(S, 4, 10000) || S <- Socks],
-        timer:sleep(2000)
-    end, lists:seq(1, Rounds)),
+    lists:foreach(
+        fun(_) ->
+            [ok = gen_tcp:send(S, <<"ping">>) || S <- Socks],
+            [{ok, <<"pong">>} = gen_tcp:recv(S, 4, 10000) || S <- Socks],
+            timer:sleep(2000)
+        end,
+        lists:seq(1, Rounds)
+    ),
     {ok, Mem1, _} = py_nif:context_memory_usage(Ref),
     ct:log("memory ~p -> ~p bytes with 1000 held connections", [Mem0, Mem1]),
     true = Mem1 < Mem0 + 256 * 1024 * 1024,
@@ -146,17 +159,22 @@ test_start_stop_cycles(Config) ->
     Workers0 = length(supervisor:which_children(py_event_worker_sup)),
     Procs0 = erlang:system_info(process_count),
     {ok, Mem0, _} = py_nif:context_memory_usage(Ref),
-    lists:foreach(fun(I) ->
-        ok = py_context:start_loop(C),
-        {ok, I} = py_context:submit_await(C, py_test_workerloop, add, [I, 0]),
-        ok = py_context:stop_loop(C)
-    end, lists:seq(1, 200)),
+    lists:foreach(
+        fun(I) ->
+            ok = py_context:start_loop(C),
+            {ok, I} = py_context:submit_await(C, py_test_workerloop, add, [I, 0]),
+            ok = py_context:stop_loop(C)
+        end,
+        lists:seq(1, 200)
+    ),
     {ok, 4} = py_context:eval(C, <<"2+2">>, #{}, 5000),
     {ok, Mem1, _} = py_nif:context_memory_usage(Ref),
     Workers1 = length(supervisor:which_children(py_event_worker_sup)),
     Procs1 = erlang:system_info(process_count),
-    ct:log("workers ~p -> ~p, processes ~p -> ~p, memory ~p -> ~p",
-           [Workers0, Workers1, Procs0, Procs1, Mem0, Mem1]),
+    ct:log(
+        "workers ~p -> ~p, processes ~p -> ~p, memory ~p -> ~p",
+        [Workers0, Workers1, Procs0, Procs1, Mem0, Mem1]
+    ),
     Workers0 = Workers1,
     true = Procs1 =< Procs0 + 5,
     true = Mem1 < Mem0 + 64 * 1024 * 1024,
@@ -173,23 +191,40 @@ test_submit_storm_under_traffic(Config) ->
     {ok, <<"serving">>} = py_context:submit_await(C, py_test_workerloop, serve_keepalive, [Dup]),
     Self = self(),
     Traffic = spawn_link(fun() ->
-        Socks = [element(2, gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000))
-                 || _ <- lists:seq(1, 100)],
+        Socks = [
+            element(2, gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000))
+         || _ <- lists:seq(1, 100)
+        ],
         traffic_loop(Socks, Self)
     end),
     Callers = 10,
     PerCaller = 1000,
-    [spawn_link(fun() ->
-        Refs = [element(2, py_context:submit(C, py_test_workerloop, add, [I, 0]))
-                || I <- lists:seq(1, PerCaller)],
-        Results = [py_event_loop:await(R, 30000) || R <- Refs],
-        Self ! {storm, Results}
-     end) || _ <- lists:seq(1, Callers)],
-    AllOk = lists:all(fun(Results) ->
-        Results =:= [{ok, I} || I <- lists:seq(1, PerCaller)]
-    end, [receive {storm, Rs} -> Rs after 120000 -> [] end || _ <- lists:seq(1, Callers)]),
+    [
+        spawn_link(fun() ->
+            Refs = [
+                element(2, py_context:submit(C, py_test_workerloop, add, [I, 0]))
+             || I <- lists:seq(1, PerCaller)
+            ],
+            Results = [py_event_loop:await(R, 30000) || R <- Refs],
+            Self ! {storm, Results}
+        end)
+     || _ <- lists:seq(1, Callers)
+    ],
+    AllOk = lists:all(
+        fun(Results) ->
+            Results =:= [{ok, I} || I <- lists:seq(1, PerCaller)]
+        end,
+        [
+            receive
+                {storm, Rs} -> Rs
+            after 120000 -> []
+            end
+         || _ <- lists:seq(1, Callers)
+        ]
+    ),
     Traffic ! stop,
-    receive {traffic_done, Exchanged} -> ct:log("traffic exchanged ~p messages", [Exchanged])
+    receive
+        {traffic_done, Exchanged} -> ct:log("traffic exchanged ~p messages", [Exchanged])
     after 30000 -> ct:fail(traffic_did_not_stop)
     end,
     true = AllOk,
@@ -238,10 +273,11 @@ test_interrupt_wedged_loop(Config) ->
     timer:sleep(200),
     T0 = erlang:monotonic_time(millisecond),
     ok = py_context:interrupt(C),
-    receive {py_loop_exit, C, {error, interrupted}} ->
-        Elapsed = erlang:monotonic_time(millisecond) - T0,
-        ct:log("wedged loop interrupted after ~p ms", [Elapsed]),
-        true = Elapsed < 6000
+    receive
+        {py_loop_exit, C, {error, interrupted}} ->
+            Elapsed = erlang:monotonic_time(millisecond) - T0,
+            ct:log("wedged loop interrupted after ~p ms", [Elapsed]),
+            true = Elapsed < 6000
     after 10000 -> ct:fail(loop_not_interrupted)
     end,
     {ok, 4} = py_context:eval(C, <<"2+2">>, #{}, 5000),
@@ -259,13 +295,21 @@ new_ctx(Config) ->
 
 setup_ctx(C, Config) ->
     TestDir = ?config(test_dir, Config),
-    Code = iolist_to_binary(io_lib:format(
-        "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n"
-        "import py_test_workerloop\n", [TestDir, TestDir])),
+    Code = iolist_to_binary(
+        io_lib:format(
+            "import sys\nif '~s' not in sys.path:\n    sys.path.insert(0, '~s')\n"
+            "import py_test_workerloop\n",
+            [TestDir, TestDir]
+        )
+    ),
     ok = py_context:exec(C, Code).
 
 stop_ctx(C) ->
-    try py_context:stop(C) catch _:_ -> ok end,
+    try
+        py_context:stop(C)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 listen() ->
@@ -278,10 +322,11 @@ roundtrip(Port, Data) ->
     case gen_tcp:connect(?HOST, Port, [binary, {active, false}], 5000) of
         {ok, S} ->
             ok = gen_tcp:send(S, Data),
-            R = case gen_tcp:recv(S, 0, 5000) of
-                {ok, Bin} -> Bin;
-                Other -> Other
-            end,
+            R =
+                case gen_tcp:recv(S, 0, 5000) of
+                    {ok, Bin} -> Bin;
+                    Other -> Other
+                end,
             gen_tcp:close(S),
             R;
         Error ->
@@ -291,10 +336,19 @@ roundtrip(Port, Data) ->
 parallel_roundtrips(Port, N, Clients) ->
     Self = self(),
     Per = N div Clients,
-    [spawn_link(fun() ->
-        Self ! {rt, [roundtrip(Port, <<"x">>) || _ <- lists:seq(1, Per)]}
-     end) || _ <- lists:seq(1, Clients)],
-    lists:append([receive {rt, L} -> L after 300000 -> [] end || _ <- lists:seq(1, Clients)]).
+    [
+        spawn_link(fun() ->
+            Self ! {rt, [roundtrip(Port, <<"x">>) || _ <- lists:seq(1, Per)]}
+        end)
+     || _ <- lists:seq(1, Clients)
+    ],
+    lists:append([
+        receive
+            {rt, L} -> L
+        after 300000 -> []
+        end
+     || _ <- lists:seq(1, Clients)
+    ]).
 
 traffic_loop(Socks, Parent) ->
     traffic_loop(Socks, Parent, 0).
@@ -330,11 +384,12 @@ fd_count() ->
     end.
 
 log(#{msg := Msg}, #{config := Pid}) ->
-    Text = case Msg of
-        {string, S} -> unicode:characters_to_binary(S);
-        {report, R} -> unicode:characters_to_binary(io_lib:format("~p", [R]));
-        {Fmt, Args} -> unicode:characters_to_binary(io_lib:format(Fmt, Args))
-    end,
+    Text =
+        case Msg of
+            {string, S} -> unicode:characters_to_binary(S);
+            {report, R} -> unicode:characters_to_binary(io_lib:format("~p", [R]));
+            {Fmt, Args} -> unicode:characters_to_binary(io_lib:format(Fmt, Args))
+        end,
     case binary:match(Text, [<<"erts_poll">>, <<"stealing control">>]) of
         nomatch -> ok;
         _ -> Pid ! {poll_report, Text}
@@ -342,9 +397,13 @@ log(#{msg := Msg}, #{config := Pid}) ->
     ok.
 
 collect_reports() ->
-    receive {poll_report, T} -> [T | collect_reports()]
+    receive
+        {poll_report, T} -> [T | collect_reports()]
     after 200 -> []
     end.
 
 flush() ->
-    receive _ -> flush() after 0 -> ok end.
+    receive
+        _ -> flush()
+    after 0 -> ok
+    end.

@@ -57,43 +57,45 @@ all() ->
     [{group, import_tests}].
 
 groups() ->
-    [{import_tests, [sequence], [
-        import_module_test,
-        import_function_test,
-        import_main_rejected_test,
-        import_nonexistent_module_test,
-        import_nonexistent_function_test,
-        import_idempotent_test,
-        import_list_test,
-        import_speeds_up_calls_test,
-        import_multiprocess_test,
-        import_concurrent_stress_test,
-        %% Import registry tests
-        import_registry_test,
-        import_applied_to_new_context_test,
-        clear_imports_test,
-        get_imports_test,
-        %% Per-interpreter sharing tests
-        shared_interpreter_import_test,
-        event_loop_pool_import_test,
-        spawn_task_uses_import_test,
-        subinterp_isolation_test,
-        registry_applied_to_subinterp_test,
-        %% sys.modules verification tests
-        import_in_sys_modules_test,
-        registry_import_in_sys_modules_test,
-        context_import_in_sys_modules_test,
-        %% Path registry tests
-        add_path_test,
-        %% Immediate application tests
-        import_applies_to_running_interpreter_test,
-        path_applies_to_running_interpreter_test,
-        %% OWN_GIL session tests
-        owngil_session_import_test,
-        owngil_session_path_test,
-        %% Config initialization tests
-        init_from_config_test
-    ]}].
+    [
+        {import_tests, [sequence], [
+            import_module_test,
+            import_function_test,
+            import_main_rejected_test,
+            import_nonexistent_module_test,
+            import_nonexistent_function_test,
+            import_idempotent_test,
+            import_list_test,
+            import_speeds_up_calls_test,
+            import_multiprocess_test,
+            import_concurrent_stress_test,
+            %% Import registry tests
+            import_registry_test,
+            import_applied_to_new_context_test,
+            clear_imports_test,
+            get_imports_test,
+            %% Per-interpreter sharing tests
+            shared_interpreter_import_test,
+            event_loop_pool_import_test,
+            spawn_task_uses_import_test,
+            subinterp_isolation_test,
+            registry_applied_to_subinterp_test,
+            %% sys.modules verification tests
+            import_in_sys_modules_test,
+            registry_import_in_sys_modules_test,
+            context_import_in_sys_modules_test,
+            %% Path registry tests
+            add_path_test,
+            %% Immediate application tests
+            import_applies_to_running_interpreter_test,
+            path_applies_to_running_interpreter_test,
+            %% OWN_GIL session tests
+            owngil_session_import_test,
+            owngil_session_path_test,
+            %% Config initialization tests
+            init_from_config_test
+        ]}
+    ].
 
 init_per_suite(Config) ->
     application:ensure_all_started(erlang_python),
@@ -168,7 +170,9 @@ import_nonexistent_module_test(_Config) ->
     %% But trying to use it fails
     %% Error format is {error, {ExceptionType, Message}} or {error, atom()}
     {error, Reason} = py:call(nonexistent_module_xyz, some_func, []),
-    ?assert(is_tuple(Reason) orelse is_list(Reason) orelse is_binary(Reason) orelse is_atom(Reason)),
+    ?assert(
+        is_tuple(Reason) orelse is_list(Reason) orelse is_binary(Reason) orelse is_atom(Reason)
+    ),
 
     ct:pal("Nonexistent module error at call time: ~p", [Reason]).
 
@@ -246,7 +250,7 @@ import_speeds_up_calls_test(_Config) ->
     %% Time a cold call (module not imported)
     %% Using json.dumps since hashlib.md5 needs bytes encoding
     {ColdTime, {ok, _}} = timer:tc(fun() ->
-        py:call(json, dumps, [[1,2,3,4,5]])
+        py:call(json, dumps, [[1, 2, 3, 4, 5]])
     end),
 
     %% Pre-import the module and function
@@ -255,7 +259,7 @@ import_speeds_up_calls_test(_Config) ->
 
     %% Time a warm call (module already imported)
     {WarmTime, {ok, _}} = timer:tc(fun() ->
-        py:call(json, dumps, [[1,2,3,4,5]])
+        py:call(json, dumps, [[1, 2, 3, 4, 5]])
     end),
 
     ct:pal("Cold call time: ~p us, Warm call time: ~p us", [ColdTime, WarmTime]),
@@ -280,7 +284,7 @@ import_multiprocess_test(_Config) ->
         ok = py_import:ensure_imported(json),
         ok = py_import:ensure_imported(json, dumps),
         %% Verify we can use the import
-        {ok, _} = py:call(json, dumps, [[1,2,3]]),
+        {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
         Parent ! {self(), done}
     end),
 
@@ -303,8 +307,13 @@ import_multiprocess_test(_Config) ->
     end),
 
     %% Collect results from all 3 processes
-    Results = [receive {Pid, Result} -> Result after 5000 -> timeout end
-               || Pid <- [Pid1, Pid2, Pid3]],
+    Results = [
+        receive
+            {Pid, Result} -> Result
+        after 5000 -> timeout
+        end
+     || Pid <- [Pid1, Pid2, Pid3]
+    ],
 
     %% Verify no timeouts
     ?assertEqual(false, lists:member(timeout, Results)),
@@ -345,31 +354,43 @@ import_concurrent_stress_test(_Config) ->
     ok = py_import:clear_imports(),
 
     %% Spawn many processes that all try to import at the same time
-    Pids = [spawn_link(fun() ->
-        %% Each process imports a random subset of modules
-        MyModules = lists:sublist(Modules, 1 + (N rem length(Modules))),
-        Results = [{M, py_import:ensure_imported(M)} || M <- MyModules],
+    Pids = [
+        spawn_link(fun() ->
+            %% Each process imports a random subset of modules
+            MyModules = lists:sublist(Modules, 1 + (N rem length(Modules))),
+            Results = [{M, py_import:ensure_imported(M)} || M <- MyModules],
 
-        %% All imports should succeed
-        AllOk = lists:all(fun({_, R}) -> R =:= ok end, Results),
+            %% All imports should succeed
+            AllOk = lists:all(fun({_, R}) -> R =:= ok end, Results),
 
-        %% Make a call to verify imports work
-        CallResult = py:call(json, dumps, [[N]]),
+            %% Make a call to verify imports work
+            CallResult = py:call(json, dumps, [[N]]),
 
-        Parent ! {self(), {AllOk, CallResult}}
-    end) || N <- lists:seq(1, NumProcesses)],
+            Parent ! {self(), {AllOk, CallResult}}
+        end)
+     || N <- lists:seq(1, NumProcesses)
+    ],
 
     %% Collect all results
-    Results = [receive {Pid, Result} -> Result after 10000 -> timeout end || Pid <- Pids],
+    Results = [
+        receive
+            {Pid, Result} -> Result
+        after 10000 -> timeout
+        end
+     || Pid <- Pids
+    ],
 
     %% Verify no timeouts
     ?assertEqual(false, lists:member(timeout, Results)),
 
     %% Verify all processes succeeded
-    lists:foreach(fun({AllOk, CallResult}) ->
-        ?assertEqual(true, AllOk),
-        ?assertMatch({ok, _}, CallResult)
-    end, Results),
+    lists:foreach(
+        fun({AllOk, CallResult}) ->
+            ?assertEqual(true, AllOk),
+            ?assertMatch({ok, _}, CallResult)
+        end,
+        Results
+    ),
 
     %% Verify the global registry has all modules
     Count = length(py_import:all_imports()),
@@ -531,11 +552,12 @@ spawn_task_uses_import_test(_Config) ->
     ok = py_import:ensure_imported(base64),
 
     %% Define a simple function that uses base64
-    Code = <<"
-def encode_test(data):
-    import base64
-    return base64.b64encode(data.encode()).decode()
-">>,
+    Code = <<
+        "\n"
+        "def encode_test(data):\n"
+        "    import base64\n"
+        "    return base64.b64encode(data.encode()).decode()\n"
+    >>,
     ok = py:exec(Code),
 
     %% Use spawn_task to call our function
@@ -642,10 +664,11 @@ import_in_sys_modules_test(_Config) ->
 
     %% Now check sys.modules using the same process (important!)
     %% We use exec to define a helper, then eval to check
-    ok = py:exec(<<"
-import sys
-_test_textwrap_in_sys = 'textwrap' in sys.modules
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import sys\n"
+        "_test_textwrap_in_sys = 'textwrap' in sys.modules\n"
+    >>),
     {ok, InSysModules} = py:eval(<<"_test_textwrap_in_sys">>),
     ?assertEqual(true, InSysModules),
 
@@ -677,12 +700,13 @@ registry_import_in_sys_modules_test(_Config) ->
     {ok, _} = py:call(json, dumps, [[1, 2, 3]]),
 
     %% Verify both are in sys.modules by checking from Python
-    ok = py:exec(<<"
-import sys
-_fractions_in_sys = 'fractions' in sys.modules
-_json_in_sys = 'json' in sys.modules
-_sys_modules_keys = list(sys.modules.keys())
-">>),
+    ok = py:exec(<<
+        "\n"
+        "import sys\n"
+        "_fractions_in_sys = 'fractions' in sys.modules\n"
+        "_json_in_sys = 'json' in sys.modules\n"
+        "_sys_modules_keys = list(sys.modules.keys())\n"
+    >>),
 
     {ok, FractionsInSys} = py:eval(<<"_fractions_in_sys">>),
     {ok, JsonInSys} = py:eval(<<"_json_in_sys">>),
@@ -712,11 +736,12 @@ context_import_in_sys_modules_test(_Config) ->
 
     %% Check if textwrap is in sys.modules of this interpreter
     %% Use exec then eval pattern for reliable checking
-    ok = py_context:exec(Ctx, <<"
-import sys
-_textwrap_in_sys = 'textwrap' in sys.modules
-_sys_keys = list(sys.modules.keys())
-">>),
+    ok = py_context:exec(Ctx, <<
+        "\n"
+        "import sys\n"
+        "_textwrap_in_sys = 'textwrap' in sys.modules\n"
+        "_sys_keys = list(sys.modules.keys())\n"
+    >>),
 
     {ok, InSysModules} = py_context:eval(Ctx, <<"_textwrap_in_sys">>),
     ?assertEqual(true, InSysModules),
@@ -749,13 +774,15 @@ add_path_test(Config) ->
 
     %% Write a simple Python module
     ModulePath = filename:join(ModuleDir, "sample_module.py"),
-    ModuleContent = <<"def greet(name):\n"
-                      "    return f\"Hello, {name}!\"\n"
-                      "\n"
-                      "def add(a, b):\n"
-                      "    return a + b\n"
-                      "\n"
-                      "VERSION = \"1.0.0\"\n">>,
+    ModuleContent = <<
+        "def greet(name):\n"
+        "    return f\"Hello, {name}!\"\n"
+        "\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "\n"
+        "VERSION = \"1.0.0\"\n"
+    >>,
     ok = file:write_file(ModulePath, ModuleContent),
 
     %% Add path

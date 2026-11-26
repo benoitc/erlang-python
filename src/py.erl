@@ -169,12 +169,13 @@
 -spec get_local_env(pid()) -> reference().
 get_local_env(Ctx) when is_pid(Ctx) ->
     {ok, InterpId} = py_context:get_interp_id(Ctx),
-    Envs = case get(?LOCAL_ENV_KEY) of
-        undefined -> #{};
-        M when is_map(M) -> M;
-        %% Handle legacy single-ref format (shouldn't happen but be safe)
-        _OldRef -> #{}
-    end,
+    Envs =
+        case get(?LOCAL_ENV_KEY) of
+            undefined -> #{};
+            M when is_map(M) -> M;
+            %% Handle legacy single-ref format (shouldn't happen but be safe)
+            _OldRef -> #{}
+        end,
     case maps:get(InterpId, Envs, undefined) of
         undefined ->
             {ok, Ref} = py_context:create_local_env(Ctx),
@@ -191,10 +192,11 @@ get_local_env(Ctx) when is_pid(Ctx) ->
 %% namespace instead of starting from an empty one.
 -spec put_local_env(non_neg_integer(), reference()) -> ok.
 put_local_env(InterpId, EnvRef) ->
-    Envs = case get(?LOCAL_ENV_KEY) of
-        M when is_map(M) -> M;
-        _ -> #{}
-    end,
+    Envs =
+        case get(?LOCAL_ENV_KEY) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
     put(?LOCAL_ENV_KEY, Envs#{InterpId => EnvRef}),
     ok.
 
@@ -223,9 +225,10 @@ call(Module, Func, Args) ->
 %% @param ModuleOrFunc Python module or function name
 %% @param FuncOrArgs Function name or arguments list
 %% @param ArgsOrKwargs Arguments list or keyword arguments
--spec call(pid(), py_module(), py_func(), py_args()) -> py_result()
-    ; (py_context_router:pool_name(), py_module(), py_func(), py_args()) -> py_result()
-    ; (py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
+-spec call
+    (pid(), py_module(), py_func(), py_args()) -> py_result();
+    (py_context_router:pool_name(), py_module(), py_func(), py_args()) -> py_result();
+    (py_module(), py_func(), py_args(), py_kwargs()) -> py_result().
 call(Ctx, Module, Func, Args) when is_pid(Ctx) ->
     EnvRef = get_local_env(Ctx),
     py_context:call(Ctx, Module, Func, Args, #{}, infinity, EnvRef);
@@ -244,9 +247,10 @@ call(Module, Func, Args, Kwargs) ->
 %%
 %% Timeout is in milliseconds. Use `infinity' for no timeout.
 %% Rate limited via ETS-based semaphore to prevent overload.
--spec call(pid(), py_module(), py_func(), py_args(), map()) -> py_result()
-    ; (py_context_router:pool_name(), py_module(), py_func(), py_args(), py_kwargs()) -> py_result()
-    ; (py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
+-spec call
+    (pid(), py_module(), py_func(), py_args(), map()) -> py_result();
+    (py_context_router:pool_name(), py_module(), py_func(), py_args(), py_kwargs()) -> py_result();
+    (py_module(), py_func(), py_args(), py_kwargs(), timeout()) -> py_result().
 call(Ctx, Module, Func, Args, Opts) when is_pid(Ctx), is_map(Opts) ->
     Kwargs = maps:get(kwargs, Opts, #{}),
     Timeout = maps:get(timeout, Opts, infinity),
@@ -289,8 +293,9 @@ eval(Code) ->
 %%
 %% When the first argument is a pid (context), evaluates using the new
 %% process-per-context architecture with process-local environment.
--spec eval(pid(), string() | binary()) -> py_result()
-    ; (string() | binary(), map()) -> py_result().
+-spec eval
+    (pid(), string() | binary()) -> py_result();
+    (string() | binary(), map()) -> py_result().
 eval(Ctx, Code) when is_pid(Ctx) ->
     EnvRef = get_local_env(Ctx),
     py_context:eval(Ctx, Code, #{}, infinity, EnvRef);
@@ -303,8 +308,9 @@ eval(Code, Locals) ->
 %% process-per-context architecture with process-local environment.
 %%
 %% Timeout is in milliseconds. Use `infinity' for no timeout.
--spec eval(pid(), string() | binary(), map()) -> py_result()
-    ; (string() | binary(), map(), timeout()) -> py_result().
+-spec eval
+    (pid(), string() | binary(), map()) -> py_result();
+    (string() | binary(), map(), timeout()) -> py_result().
 eval(Ctx, Code, Locals) when is_pid(Ctx), is_map(Locals) ->
     EnvRef = get_local_env(Ctx),
     py_context:eval(Ctx, Code, Locals, infinity, EnvRef);
@@ -347,8 +353,9 @@ cast(Module, Func, Args) ->
     cast(Module, Func, Args, #{}).
 
 %% @doc Fire-and-forget Python function call with context or kwargs.
--spec cast(pid(), py_module(), py_func(), py_args()) -> ok;
-          (py_module(), py_func(), py_args(), py_kwargs()) -> ok.
+-spec cast
+    (pid(), py_module(), py_func(), py_args()) -> ok;
+    (py_module(), py_func(), py_args(), py_kwargs()) -> ok.
 cast(Ctx, Module, Func, Args) when is_pid(Ctx) ->
     cast(Ctx, Module, Func, Args, #{});
 cast(Module, Func, Args, Kwargs) ->
@@ -372,8 +379,9 @@ spawn_call(Module, Func, Args) ->
     spawn_call(Module, Func, Args, #{}).
 
 %% @doc Spawn a Python function call with context or kwargs.
--spec spawn_call(pid(), py_module(), py_func(), py_args()) -> py_ref();
-                (py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
+-spec spawn_call
+    (pid(), py_module(), py_func(), py_args()) -> py_ref();
+    (py_module(), py_func(), py_args(), py_kwargs()) -> py_ref().
 spawn_call(Ctx, Module, Func, Args) when is_pid(Ctx) ->
     spawn_call(Ctx, Module, Func, Args, #{});
 spawn_call(Module, Func, Args, Kwargs) ->
@@ -640,8 +648,10 @@ async_gather(Calls) ->
 async_gather(Calls, Timeout) when is_list(Calls) ->
     Refs = [async_call(M, F, A) || {M, F, A} <- Calls],
     Results = [async_await(R, Timeout) || R <- Refs],
-    Errors = [{Idx, Reason}
-              || {Idx, {error, Reason}} <- lists:zip(lists:seq(1, length(Results)), Results)],
+    Errors = [
+        {Idx, Reason}
+     || {Idx, {error, Reason}} <- lists:zip(lists:seq(1, length(Results)), Results)
+    ],
     case Errors of
         [] ->
             Values = [V || {ok, V} <- Results],
@@ -686,26 +696,40 @@ parallel(Calls) when is_list(Calls) ->
 
     %% Spawn processes to execute calls in parallel
     CallsWithIdx = lists:zip(lists:seq(1, length(Calls)), Calls),
-    _ = [spawn(fun() ->
-        %% Distribute calls round-robin across contexts
-        CtxIdx = ((Idx - 1) rem NumContexts) + 1,
-        Ctx = py_context_router:get_context(CtxIdx),
-        Result = py_context:call(Ctx, M, F, A, #{}),
-        Parent ! {Ref, Idx, Result}
-    end) || {Idx, {M, F, A}} <- CallsWithIdx],
+    _ = [
+        spawn(fun() ->
+            %% Distribute calls round-robin across contexts
+            CtxIdx = ((Idx - 1) rem NumContexts) + 1,
+            Ctx = py_context_router:get_context(CtxIdx),
+            Result = py_context:call(Ctx, M, F, A, #{}),
+            Parent ! {Ref, Idx, Result}
+        end)
+     || {Idx, {M, F, A}} <- CallsWithIdx
+    ],
 
     %% Collect results in order
-    Results = [receive
-        {Ref, Idx, Result} -> {Idx, Result}
-    after ?DEFAULT_TIMEOUT ->
-        {Idx, {error, timeout}}
-    end || {Idx, _} <- CallsWithIdx],
+    Results = [
+        receive
+            {Ref, Idx, Result} -> {Idx, Result}
+        after ?DEFAULT_TIMEOUT ->
+            {Idx, {error, timeout}}
+        end
+     || {Idx, _} <- CallsWithIdx
+    ],
 
     %% Sort by index and extract results
     SortedResults = [R || {_, R} <- lists:keysort(1, Results)],
 
     %% Check if all succeeded
-    case lists:all(fun({ok, _}) -> true; (_) -> false end, SortedResults) of
+    case
+        lists:all(
+            fun
+                ({ok, _}) -> true;
+                (_) -> false
+            end,
+            SortedResults
+        )
+    of
         true ->
             {ok, [V || {ok, V} <- SortedResults]};
         false ->
@@ -906,20 +930,26 @@ reload(Module) ->
     %% 1. Checks if module is loaded in sys.modules
     %% 2. If yes, reloads it with importlib.reload()
     %% 3. Returns the module name or None if not loaded
-    Code = <<"__import__('importlib').reload(__import__('sys').modules['",
-             ModuleBin/binary,
-             "']) if '", ModuleBin/binary, "' in __import__('sys').modules else None">>,
+    Code =
+        <<"__import__('importlib').reload(__import__('sys').modules['", ModuleBin/binary,
+            "']) if '", ModuleBin/binary, "' in __import__('sys').modules else None">>,
     %% Broadcast to all contexts
     NumContexts = py_context_router:num_contexts(),
-    Results = [begin
-        Ctx = py_context_router:get_context(N),
-        py_context:eval(Ctx, Code, #{})
-    end || N <- lists:seq(1, NumContexts)],
+    Results = [
+        begin
+            Ctx = py_context_router:get_context(N),
+            py_context:eval(Ctx, Code, #{})
+        end
+     || N <- lists:seq(1, NumContexts)
+    ],
     %% Check if any failed
-    Errors = lists:filtermap(fun
-        ({ok, _}) -> false;
-        ({error, Reason}) -> {true, Reason}
-    end, Results),
+    Errors = lists:filtermap(
+        fun
+            ({ok, _}) -> false;
+            ({error, Reason}) -> {true, Reason}
+        end,
+        Results
+    ),
     case Errors of
         [] -> ok;
         _ -> {error, [{context, E} || E <- Errors]}
@@ -947,36 +977,42 @@ configure_logging() ->
 -spec configure_logging(map()) -> ok | {error, term()}.
 configure_logging(Opts) ->
     Level = maps:get(level, Opts, debug),
-    LevelInt = case Level of
-        debug -> 10;
-        info -> 20;
-        warning -> 30;
-        error -> 40;
-        critical -> 50;
-        _ -> 10
-    end,
+    LevelInt =
+        case Level of
+            debug -> 10;
+            info -> 20;
+            warning -> 30;
+            error -> 40;
+            critical -> 50;
+            _ -> 10
+        end,
     Format = maps:get(format, Opts, undefined),
     %% Use __import__ for single-expression evaluation
-    Code = case Format of
-        undefined ->
-            iolist_to_binary([
-                "__import__('erlang').setup_logging(",
-                integer_to_binary(LevelInt),
-                ")"
-            ]);
-        F when is_binary(F) ->
-            iolist_to_binary([
-                "__import__('erlang').setup_logging(",
-                integer_to_binary(LevelInt),
-                ", '", py_util:escape_py_literal(F), "')"
-            ]);
-        F when is_list(F) ->
-            iolist_to_binary([
-                "__import__('erlang').setup_logging(",
-                integer_to_binary(LevelInt),
-                ", '", py_util:escape_py_literal(iolist_to_binary(F)), "')"
-            ])
-    end,
+    Code =
+        case Format of
+            undefined ->
+                iolist_to_binary([
+                    "__import__('erlang').setup_logging(",
+                    integer_to_binary(LevelInt),
+                    ")"
+                ]);
+            F when is_binary(F) ->
+                iolist_to_binary([
+                    "__import__('erlang').setup_logging(",
+                    integer_to_binary(LevelInt),
+                    ", '",
+                    py_util:escape_py_literal(F),
+                    "')"
+                ]);
+            F when is_list(F) ->
+                iolist_to_binary([
+                    "__import__('erlang').setup_logging(",
+                    integer_to_binary(LevelInt),
+                    ", '",
+                    py_util:escape_py_literal(iolist_to_binary(F)),
+                    "')"
+                ])
+        end,
     case eval(Code) of
         {ok, _} -> ok;
         Error -> Error

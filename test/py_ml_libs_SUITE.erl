@@ -56,10 +56,11 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(TC, Config) ->
-    Mode = case TC of
-        numpy_owngil_basic -> owngil;
-        _                  -> worker
-    end,
+    Mode =
+        case TC of
+            numpy_owngil_basic -> owngil;
+            _ -> worker
+        end,
     case Mode of
         owngil ->
             case py_nif:owngil_supported() of
@@ -96,11 +97,11 @@ setup_case(TC, Mode, Config) ->
             ct:fail({context_create_failed, Mode, Reason})
     end.
 
-required_module(numpy_basic_ops)              -> "numpy";
-required_module(numpy_call_thread_affinity)   -> "numpy";
-required_module(numpy_parallel_processes)     -> "numpy";
-required_module(numpy_owngil_basic)           -> "numpy";
-required_module(tensorflow_basic_ops)         -> "tensorflow";
+required_module(numpy_basic_ops) -> "numpy";
+required_module(numpy_call_thread_affinity) -> "numpy";
+required_module(numpy_parallel_processes) -> "numpy";
+required_module(numpy_owngil_basic) -> "numpy";
+required_module(tensorflow_basic_ops) -> "tensorflow";
 required_module(tensorflow_call_thread_affinity) -> "tensorflow".
 
 %% Reflect the import status into a Python variable so we can
@@ -110,7 +111,9 @@ required_module(tensorflow_call_thread_affinity) -> "tensorflow".
 require_module(Ctx, Mod) ->
     Code = iolist_to_binary([
         "try:\n",
-        "    import ", Mod, "\n",
+        "    import ",
+        Mod,
+        "\n",
         "    _import_status = 'ok'\n",
         "except ImportError:\n",
         "    _import_status = 'not_found'\n"
@@ -125,8 +128,11 @@ require_module(Ctx, Mod) ->
     end.
 
 native_id(Ctx) ->
-    {ok, Tid} = py_context:eval(Ctx,
-        <<"__import__('threading').get_native_id()">>, #{}),
+    {ok, Tid} = py_context:eval(
+        Ctx,
+        <<"__import__('threading').get_native_id()">>,
+        #{}
+    ),
     Tid.
 
 %%% ---------------------------------------------------------------------------
@@ -143,10 +149,16 @@ numpy_basic_ops(Config) ->
         "    v = np.array(xs, dtype=np.float64)\n"
         "    return float(np.dot(v, v))\n"
     >>),
-    {ok, 30.0} = py_context:call(Ctx, '__main__', vec_dot_self,
-                                  [[1.0, 2.0, 3.0, 4.0]]),
-    ok = py_context:exec(Ctx,
-        <<"_w = vec_dot_self([10.0, 0.0, 0.0])">>),
+    {ok, 30.0} = py_context:call(
+        Ctx,
+        '__main__',
+        vec_dot_self,
+        [[1.0, 2.0, 3.0, 4.0]]
+    ),
+    ok = py_context:exec(
+        Ctx,
+        <<"_w = vec_dot_self([10.0, 0.0, 0.0])">>
+    ),
     {ok, 100.0} = py_context:eval(Ctx, <<"_w">>, #{}),
     ok.
 
@@ -159,9 +171,15 @@ numpy_call_thread_affinity(Config) ->
         "    v = np.array(xs, dtype=np.float64)\n"
         "    return (threading.get_native_id(), float(np.sum(v)))\n"
     >>),
-    Results = [py_context:call(Ctx, '__main__', numpy_with_tid,
-                                [[float(I), float(I + 1), float(I + 2)]])
-               || I <- lists:seq(1, 50)],
+    Results = [
+        py_context:call(
+            Ctx,
+            '__main__',
+            numpy_with_tid,
+            [[float(I), float(I + 1), float(I + 2)]]
+        )
+     || I <- lists:seq(1, 50)
+    ],
     Tids = [Tid || {ok, {Tid, _Sum}} <- Results],
     Sums = [Sum || {ok, {_Tid, Sum}} <- Results],
     50 = length(Tids),
@@ -184,27 +202,42 @@ numpy_parallel_processes(Config) ->
     >>),
     Parent = self(),
     N = 8,
-    Pids = [spawn_link(fun() ->
-                  Xs = [float(K * J) || J <- lists:seq(1, 4)],
-                  Ys = [float(K + J) || J <- lists:seq(1, 4)],
-                  R = py_context:call(Ctx, '__main__', numpy_dot_with_tid,
-                                       [Xs, Ys]),
-                  Parent ! {result, K, R}
-              end) || K <- lists:seq(1, N)],
-    Results = [receive {result, K, R} -> {K, R} after 5000 -> ct:fail(timeout) end
-               || _ <- Pids],
+    Pids = [
+        spawn_link(fun() ->
+            Xs = [float(K * J) || J <- lists:seq(1, 4)],
+            Ys = [float(K + J) || J <- lists:seq(1, 4)],
+            R = py_context:call(
+                Ctx,
+                '__main__',
+                numpy_dot_with_tid,
+                [Xs, Ys]
+            ),
+            Parent ! {result, K, R}
+        end)
+     || K <- lists:seq(1, N)
+    ],
+    Results = [
+        receive
+            {result, K, R} -> {K, R}
+        after 5000 -> ct:fail(timeout)
+        end
+     || _ <- Pids
+    ],
     %% All calls converged on one thread.
     Tids = [Tid || {_K, {ok, {Tid, _Sum}}} <- Results],
     N = length(Tids),
     [SingleTid] = lists:usort(Tids),
     true = is_integer(SingleTid),
     %% Each result matches the expected dot product.
-    lists:foreach(fun({K, {ok, {_Tid, Got}}}) ->
-                    Xs = [float(K * J) || J <- lists:seq(1, 4)],
-                    Ys = [float(K + J) || J <- lists:seq(1, 4)],
-                    Expected = lists:sum([X * Y || {X, Y} <- lists:zip(Xs, Ys)]),
-                    true = abs(Got - Expected) < 1.0e-9
-                  end, Results),
+    lists:foreach(
+        fun({K, {ok, {_Tid, Got}}}) ->
+            Xs = [float(K * J) || J <- lists:seq(1, 4)],
+            Ys = [float(K + J) || J <- lists:seq(1, 4)],
+            Expected = lists:sum([X * Y || {X, Y} <- lists:zip(Xs, Ys)]),
+            true = abs(Got - Expected) < 1.0e-9
+        end,
+        Results
+    ),
     %% Drain time + mailbox sanity (no orphan results).
     timer:sleep(50),
     {messages, []} = erlang:process_info(self(), messages),
@@ -220,8 +253,12 @@ numpy_owngil_basic(Config) ->
         "    v = np.array(xs, dtype=np.float64)\n"
         "    return float(np.dot(v, v))\n"
     >>),
-    {ok, 30.0} = py_context:call(Ctx, '__main__', vec_dot_self,
-                                  [[1.0, 2.0, 3.0, 4.0]]),
+    {ok, 30.0} = py_context:call(
+        Ctx,
+        '__main__',
+        vec_dot_self,
+        [[1.0, 2.0, 3.0, 4.0]]
+    ),
     {ok, 25.0} = py_context:call(Ctx, '__main__', vec_dot_self, [[5.0]]),
     %% Confirm the thread is stable across owngil calls.
     Tid1 = native_id(Ctx),
@@ -255,9 +292,15 @@ tensorflow_call_thread_affinity(Config) ->
         "    return (threading.get_native_id(),\n"
         "            float(tf.math.reduce_sum(t).numpy()))\n"
     >>),
-    Results = [py_context:call(Ctx, '__main__', tf_sum_with_tid,
-                                [[float(I), float(I + 1)]])
-               || I <- lists:seq(1, 20)],
+    Results = [
+        py_context:call(
+            Ctx,
+            '__main__',
+            tf_sum_with_tid,
+            [[float(I), float(I + 1)]]
+        )
+     || I <- lists:seq(1, 20)
+    ],
     Tids = [Tid || {ok, {Tid, _Sum}} <- Results],
     20 = length(Tids),
     [SingleTid] = lists:usort(Tids),

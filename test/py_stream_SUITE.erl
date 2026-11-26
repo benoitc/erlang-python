@@ -48,8 +48,13 @@ init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(erlang_python),
     %% Make test/py_test_agen.py importable for the async generator cases
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
     Config.
 
 end_per_suite(_Config) ->

@@ -93,8 +93,10 @@
     id :: pos_integer(),
     handle :: term(),
     ring :: pos_integer(),
-    wpos = 0 :: non_neg_integer(),      %% total bytes written
-    rpos = 0 :: non_neg_integer(),      %% total bytes consumed
+    %% total bytes written
+    wpos = 0 :: non_neg_integer(),
+    %% total bytes consumed
+    rpos = 0 :: non_neg_integer(),
     closed = false :: boolean(),
     readers = [] :: [{gen_server:from(), non_neg_integer()}],
     %% Writers waiting for room: {From, Rest, TimerRef}
@@ -144,7 +146,8 @@ read_only({Tag, Id, Path, Size}) when ?IS_SHM(Tag) ->
 -spec write(shm(), non_neg_integer(), binary()) -> ok | {error, term()}.
 write({Tag, Id, _, Size}, Offset, Data) when ?IS_SHM(Tag), is_binary(Data) ->
     case Offset + byte_size(Data) > Size of
-        true -> {error, out_of_bounds};
+        true ->
+            {error, out_of_bounds};
         false ->
             case lookup(Id) of
                 {ok, Handle} -> iommap(pwrite, [Handle, Offset, Data]);
@@ -156,7 +159,8 @@ write({Tag, Id, _, Size}, Offset, Data) when ?IS_SHM(Tag), is_binary(Data) ->
 -spec read(shm(), non_neg_integer(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 read({Tag, Id, _, Size}, Offset, Len) when ?IS_SHM(Tag) ->
     case Offset + Len > Size of
-        true -> {error, out_of_bounds};
+        true ->
+            {error, out_of_bounds};
         false ->
             case lookup(Id) of
                 {ok, Handle} -> iommap(pread, [Handle, Offset, Len]);
@@ -252,14 +256,16 @@ handle_buffer_state([Id]) ->
 %% (memory backed), else a 0700 directory under `TMPDIR'.
 -spec private_dir() -> string().
 private_dir() ->
-    Base = case filelib:is_dir("/dev/shm") of
-        true -> "/dev/shm";
-        false ->
-            case os:getenv("TMPDIR") of
-                false -> "/tmp";
-                T -> T
-            end
-    end,
+    Base =
+        case filelib:is_dir("/dev/shm") of
+            true ->
+                "/dev/shm";
+            false ->
+                case os:getenv("TMPDIR") of
+                    false -> "/tmp";
+                    T -> T
+                end
+        end,
     Dir = filename:join(Base, "erlang_python_" ++ os:getpid()),
     ok = filelib:ensure_dir(filename:join(Dir, "x")),
     _ = file:change_mode(Dir, 8#700),
@@ -275,11 +281,9 @@ init([]) ->
 
 handle_call({new, Size, Owner}, _From, State) ->
     {reply, create_region(Size, Owner), State};
-
 handle_call({close, Id}, _From, State) ->
     close_region(Id),
     {reply, ok, State};
-
 handle_call({buffer_new, Ring, Owner}, _From, #state{buffers = Bufs} = State) ->
     case create_region(?HEADER + Ring, Owner) of
         {ok, {'$py_shm', Id, Path, _}} ->
@@ -290,7 +294,6 @@ handle_call({buffer_new, Ring, Owner}, _From, #state{buffers = Bufs} = State) ->
         {error, _} = Err ->
             {reply, Err, State}
     end;
-
 handle_call({buffer_write, Id, Data, Timeout}, From, #state{buffers = Bufs} = State) ->
     case Bufs of
         #{Id := #buf{closed = true}} ->
@@ -307,7 +310,6 @@ handle_call({buffer_write, Id, Data, Timeout}, From, #state{buffers = Bufs} = St
         _ ->
             {reply, {error, closed}, State}
     end;
-
 handle_call({buffer_close, Id}, _From, #state{buffers = Bufs} = State) ->
     case Bufs of
         #{Id := Buf} ->
@@ -315,13 +317,17 @@ handle_call({buffer_close, Id}, _From, #state{buffers = Bufs} = State) ->
             ok = write_header(Buf1),
             %% Readers learn about EOF; writers still waiting fail
             [gen_server:reply(R, {Buf1#buf.wpos, true}) || {R, _} <- Buf1#buf.readers],
-            [begin erlang:cancel_timer(T), gen_server:reply(W, {error, closed}) end
-             || {W, _, T} <- Buf1#buf.writers],
+            [
+                begin
+                    erlang:cancel_timer(T),
+                    gen_server:reply(W, {error, closed})
+                end
+             || {W, _, T} <- Buf1#buf.writers
+            ],
             {reply, ok, State#state{buffers = Bufs#{Id => Buf1#buf{readers = [], writers = []}}}};
         _ ->
             {reply, ok, State}
     end;
-
 handle_call({buffer_wait, Id, ReadPos}, From, #state{buffers = Bufs} = State) ->
     case Bufs of
         #{Id := #buf{wpos = W, closed = C}} when W > ReadPos; C ->
@@ -332,7 +338,6 @@ handle_call({buffer_wait, Id, ReadPos}, From, #state{buffers = Bufs} = State) ->
         _ ->
             {reply, {error, closed}, State}
     end;
-
 handle_call({buffer_consumed, Id, N}, _From, #state{buffers = Bufs} = State) ->
     case Bufs of
         #{Id := Buf} ->
@@ -342,22 +347,26 @@ handle_call({buffer_consumed, Id, N}, _From, #state{buffers = Bufs} = State) ->
         _ ->
             {reply, {error, closed}, State}
     end;
-
 handle_call({buffer_state, Id}, _From, #state{buffers = Bufs} = State) ->
     case Bufs of
         #{Id := #buf{wpos = W, closed = C}} -> {reply, {W, C}, State};
         _ -> {reply, {error, closed}, State}
     end;
-
 handle_call({buffer_info, Id}, _From, #state{buffers = Bufs} = State) ->
     case Bufs of
         #{Id := #buf{wpos = W, rpos = R, closed = C, ring = Ring}} ->
-            {reply, {ok, #{written => W, consumed => R, closed => C, ring => Ring,
-                           pending_writers => length((maps:get(Id, Bufs))#buf.writers)}}, State};
+            {reply,
+                {ok, #{
+                    written => W,
+                    consumed => R,
+                    closed => C,
+                    ring => Ring,
+                    pending_writers => length((maps:get(Id, Bufs))#buf.writers)
+                }},
+                State};
         _ ->
             {reply, {error, closed}, State}
     end;
-
 handle_call(_Req, _From, State) ->
     {reply, {error, badarg}, State}.
 
@@ -436,7 +445,11 @@ close_region(Id) ->
 
 %% Header page: <<WPos:64/native, Closed:8, Ring:64/native>>
 write_header(#buf{handle = H, wpos = W, closed = C, ring = Ring}) ->
-    Flag = case C of true -> 1; false -> 0 end,
+    Flag =
+        case C of
+            true -> 1;
+            false -> 0
+        end,
     iommap(pwrite, [H, 0, <<W:64/native, Flag:8, Ring:64/native>>]).
 
 %% Copy as much of Data as fits, advance wpos, wake readers.
@@ -444,18 +457,20 @@ do_write(#buf{ring = Ring, wpos = W, rpos = R} = Buf, Data) ->
     Free = Ring - (W - R),
     Size = byte_size(Data),
     Take = min(Free, Size),
-    Buf1 = case Take > 0 of
-        true ->
-            <<Chunk:Take/binary, _/binary>> = Data,
-            ok = ring_write(Buf, W, Chunk),
-            B = Buf#buf{wpos = W + Take},
-            ok = write_header(B),
-            wake_readers(B);
-        false ->
-            Buf
-    end,
+    Buf1 =
+        case Take > 0 of
+            true ->
+                <<Chunk:Take/binary, _/binary>> = Data,
+                ok = ring_write(Buf, W, Chunk),
+                B = Buf#buf{wpos = W + Take},
+                ok = write_header(B),
+                wake_readers(B);
+            false ->
+                Buf
+        end,
     case Take =:= Size of
-        true -> {ok, Buf1};
+        true ->
+            {ok, Buf1};
         false ->
             <<_:Take/binary, Rest/binary>> = Data,
             {partial, Buf1, Rest}

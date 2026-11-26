@@ -47,48 +47,66 @@ run_erlang_send_bench() ->
     Sizes = [64, 256, 1024, 4096, 16384],
     Iterations = 10000,
 
-    io:format("~8s | ~14s | ~14s | ~14s~n",
-              ["Size", "Channel", "ByteChannel", "PyBuffer"]),
-    io:format("~8s | ~14s | ~14s | ~14s~n",
-              ["(bytes)", "(msg/sec)", "(msg/sec)", "(writes/sec)"]),
+    io:format(
+        "~8s | ~14s | ~14s | ~14s~n",
+        ["Size", "Channel", "ByteChannel", "PyBuffer"]
+    ),
+    io:format(
+        "~8s | ~14s | ~14s | ~14s~n",
+        ["(bytes)", "(msg/sec)", "(msg/sec)", "(writes/sec)"]
+    ),
     io:format("~s~n", [string:copies("-", 58)]),
 
-    lists:foreach(fun(Size) ->
-        Data = binary:copy(<<0>>, Size),
+    lists:foreach(
+        fun(Size) ->
+            Data = binary:copy(<<0>>, Size),
 
-        %% Channel (term-based)
-        {ok, Ch} = py_channel:new(),
-        ChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data)
-        end, lists:seq(1, Iterations)),
-        ChEnd = erlang:monotonic_time(microsecond),
-        ChRate = Iterations / ((ChEnd - ChStart) / 1000000),
-        py_channel:close(Ch),
+            %% Channel (term-based)
+            {ok, Ch} = py_channel:new(),
+            ChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            ChEnd = erlang:monotonic_time(microsecond),
+            ChRate = Iterations / ((ChEnd - ChStart) / 1000000),
+            py_channel:close(Ch),
 
-        %% ByteChannel (raw bytes)
-        {ok, BCh} = py_byte_channel:new(),
-        BChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_byte_channel:send(BCh, Data)
-        end, lists:seq(1, Iterations)),
-        BChEnd = erlang:monotonic_time(microsecond),
-        BChRate = Iterations / ((BChEnd - BChStart) / 1000000),
-        py_byte_channel:close(BCh),
+            %% ByteChannel (raw bytes)
+            {ok, BCh} = py_byte_channel:new(),
+            BChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_byte_channel:send(BCh, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            BChEnd = erlang:monotonic_time(microsecond),
+            BChRate = Iterations / ((BChEnd - BChStart) / 1000000),
+            py_byte_channel:close(BCh),
 
-        %% PyBuffer
-        {ok, Buf} = py_buffer:new(),
-        BufStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_buffer:write(Buf, Data)
-        end, lists:seq(1, Iterations)),
-        BufEnd = erlang:monotonic_time(microsecond),
-        BufRate = Iterations / ((BufEnd - BufStart) / 1000000),
-        py_buffer:close(Buf),
+            %% PyBuffer
+            {ok, Buf} = py_buffer:new(),
+            BufStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_buffer:write(Buf, Data)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            BufEnd = erlang:monotonic_time(microsecond),
+            BufRate = Iterations / ((BufEnd - BufStart) / 1000000),
+            py_buffer:close(Buf),
 
-        io:format("~8B | ~14w | ~14w | ~14w~n",
-                  [Size, round(ChRate), round(BChRate), round(BufRate)])
-    end, Sizes),
+            io:format(
+                "~8B | ~14w | ~14w | ~14w~n",
+                [Size, round(ChRate), round(BChRate), round(BufRate)]
+            )
+        end,
+        Sizes
+    ),
     ok.
 
 %% Benchmark Erlang-side roundtrip (send + receive, no Python)
@@ -99,40 +117,55 @@ run_erlang_roundtrip_bench() ->
     Sizes = [64, 256, 1024, 4096, 16384],
     Iterations = 10000,
 
-    io:format("~8s | ~14s | ~14s~n",
-              ["Size", "Channel", "ByteChannel"]),
-    io:format("~8s | ~14s | ~14s~n",
-              ["(bytes)", "(roundtrip/s)", "(roundtrip/s)"]),
+    io:format(
+        "~8s | ~14s | ~14s~n",
+        ["Size", "Channel", "ByteChannel"]
+    ),
+    io:format(
+        "~8s | ~14s | ~14s~n",
+        ["(bytes)", "(roundtrip/s)", "(roundtrip/s)"]
+    ),
     io:format("~s~n", [string:copies("-", 42)]),
 
-    lists:foreach(fun(Size) ->
-        Data = binary:copy(<<0>>, Size),
+    lists:foreach(
+        fun(Size) ->
+            Data = binary:copy(<<0>>, Size),
 
-        %% Channel roundtrip
-        {ok, Ch} = py_channel:new(),
-        ChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data),
-            {ok, _} = py_nif:channel_try_receive(Ch)
-        end, lists:seq(1, Iterations)),
-        ChEnd = erlang:monotonic_time(microsecond),
-        ChRate = Iterations / ((ChEnd - ChStart) / 1000000),
-        py_channel:close(Ch),
+            %% Channel roundtrip
+            {ok, Ch} = py_channel:new(),
+            ChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data),
+                    {ok, _} = py_nif:channel_try_receive(Ch)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            ChEnd = erlang:monotonic_time(microsecond),
+            ChRate = Iterations / ((ChEnd - ChStart) / 1000000),
+            py_channel:close(Ch),
 
-        %% ByteChannel roundtrip
-        {ok, BCh} = py_byte_channel:new(),
-        BChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_byte_channel:send(BCh, Data),
-            {ok, _} = py_byte_channel:try_receive(BCh)
-        end, lists:seq(1, Iterations)),
-        BChEnd = erlang:monotonic_time(microsecond),
-        BChRate = Iterations / ((BChEnd - BChStart) / 1000000),
-        py_byte_channel:close(BCh),
+            %% ByteChannel roundtrip
+            {ok, BCh} = py_byte_channel:new(),
+            BChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_byte_channel:send(BCh, Data),
+                    {ok, _} = py_byte_channel:try_receive(BCh)
+                end,
+                lists:seq(1, Iterations)
+            ),
+            BChEnd = erlang:monotonic_time(microsecond),
+            BChRate = Iterations / ((BChEnd - BChStart) / 1000000),
+            py_byte_channel:close(BCh),
 
-        io:format("~8B | ~14w | ~14w~n",
-                  [Size, round(ChRate), round(BChRate)])
-    end, Sizes),
+            io:format(
+                "~8B | ~14w | ~14w~n",
+                [Size, round(ChRate), round(BChRate)]
+            )
+        end,
+        Sizes
+    ),
     ok.
 
 %% Benchmark Python receive performance
@@ -142,69 +175,88 @@ run_python_receive_bench() ->
     io:format("Iterations: 1000~n~n"),
 
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-from erlang import Channel, ByteChannel
-
-def recv_channel(ch_ref):
-    ch = Channel(ch_ref)
-    return ch.try_receive()
-
-def recv_byte_channel(ch_ref):
-    ch = ByteChannel(ch_ref)
-    return ch.try_receive_bytes()
-
-def read_buffer(buf):
-    return buf.read()
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "from erlang import Channel, ByteChannel\n"
+        "\n"
+        "def recv_channel(ch_ref):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    return ch.try_receive()\n"
+        "\n"
+        "def recv_byte_channel(ch_ref):\n"
+        "    ch = ByteChannel(ch_ref)\n"
+        "    return ch.try_receive_bytes()\n"
+        "\n"
+        "def read_buffer(buf):\n"
+        "    return buf.read()\n"
+    >>),
 
     Sizes = [64, 256, 1024, 4096, 16384],
     Iterations = 1000,
 
-    io:format("~8s | ~12s | ~12s | ~12s~n",
-              ["Size", "Channel", "ByteChannel", "PyBuffer"]),
-    io:format("~8s | ~12s | ~12s | ~12s~n",
-              ["(bytes)", "(ops/sec)", "(ops/sec)", "(ops/sec)"]),
+    io:format(
+        "~8s | ~12s | ~12s | ~12s~n",
+        ["Size", "Channel", "ByteChannel", "PyBuffer"]
+    ),
+    io:format(
+        "~8s | ~12s | ~12s | ~12s~n",
+        ["(bytes)", "(ops/sec)", "(ops/sec)", "(ops/sec)"]
+    ),
     io:format("~s~n", [string:copies("-", 54)]),
 
-    lists:foreach(fun(Size) ->
-        Data = binary:copy(<<0>>, Size),
+    lists:foreach(
+        fun(Size) ->
+            Data = binary:copy(<<0>>, Size),
 
-        %% Channel: Erlang send -> Python receive
-        {ok, Ch} = py_channel:new(),
-        ChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Data),
-            {ok, _} = py:eval(Ctx, <<"recv_channel(ch)">>, #{<<"ch">> => Ch})
-        end, lists:seq(1, Iterations)),
-        ChEnd = erlang:monotonic_time(microsecond),
-        ChRate = Iterations / ((ChEnd - ChStart) / 1000000),
-        py_channel:close(Ch),
+            %% Channel: Erlang send -> Python receive
+            {ok, Ch} = py_channel:new(),
+            ChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Data),
+                    {ok, _} = py:eval(Ctx, <<"recv_channel(ch)">>, #{<<"ch">> => Ch})
+                end,
+                lists:seq(1, Iterations)
+            ),
+            ChEnd = erlang:monotonic_time(microsecond),
+            ChRate = Iterations / ((ChEnd - ChStart) / 1000000),
+            py_channel:close(Ch),
 
-        %% ByteChannel: Erlang send -> Python receive
-        {ok, BCh} = py_byte_channel:new(),
-        BChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_byte_channel:send(BCh, Data),
-            {ok, _} = py:eval(Ctx, <<"recv_byte_channel(ch)">>, #{<<"ch">> => BCh})
-        end, lists:seq(1, Iterations)),
-        BChEnd = erlang:monotonic_time(microsecond),
-        BChRate = Iterations / ((BChEnd - BChStart) / 1000000),
-        py_byte_channel:close(BCh),
+            %% ByteChannel: Erlang send -> Python receive
+            {ok, BCh} = py_byte_channel:new(),
+            BChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_byte_channel:send(BCh, Data),
+                    {ok, _} = py:eval(Ctx, <<"recv_byte_channel(ch)">>, #{<<"ch">> => BCh})
+                end,
+                lists:seq(1, Iterations)
+            ),
+            BChEnd = erlang:monotonic_time(microsecond),
+            BChRate = Iterations / ((BChEnd - BChStart) / 1000000),
+            py_byte_channel:close(BCh),
 
-        %% PyBuffer: Erlang write -> Python read
-        BufStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            {ok, Buf} = py_buffer:new(Size),
-            ok = py_buffer:write(Buf, Data),
-            ok = py_buffer:close(Buf),
-            {ok, _} = py:eval(Ctx, <<"read_buffer(buf)">>, #{<<"buf">> => Buf})
-        end, lists:seq(1, Iterations)),
-        BufEnd = erlang:monotonic_time(microsecond),
-        BufRate = Iterations / ((BufEnd - BufStart) / 1000000),
+            %% PyBuffer: Erlang write -> Python read
+            BufStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    {ok, Buf} = py_buffer:new(Size),
+                    ok = py_buffer:write(Buf, Data),
+                    ok = py_buffer:close(Buf),
+                    {ok, _} = py:eval(Ctx, <<"read_buffer(buf)">>, #{<<"buf">> => Buf})
+                end,
+                lists:seq(1, Iterations)
+            ),
+            BufEnd = erlang:monotonic_time(microsecond),
+            BufRate = Iterations / ((BufEnd - BufStart) / 1000000),
 
-        io:format("~8B | ~12w | ~12w | ~12w~n",
-                  [Size, round(ChRate), round(BChRate), round(BufRate)])
-    end, Sizes),
+            io:format(
+                "~8B | ~12w | ~12w | ~12w~n",
+                [Size, round(ChRate), round(BChRate), round(BufRate)]
+            )
+        end,
+        Sizes
+    ),
     ok.
 
 %% Benchmark streaming (1MB transfer with varying chunk sizes)
@@ -213,88 +265,114 @@ run_streaming_bench() ->
     io:format("Pattern: Erlang sends chunks -> Python receives all~n~n"),
 
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-from erlang import Channel, ByteChannel
-
-def stream_channel(ch_ref, num_chunks):
-    ch = Channel(ch_ref)
-    total = 0
-    for _ in range(num_chunks):
-        msg = ch.try_receive()
-        if msg is None:
-            break
-        total += len(msg)
-    return total
-
-def stream_byte_channel(ch_ref, num_chunks):
-    ch = ByteChannel(ch_ref)
-    total = 0
-    for _ in range(num_chunks):
-        data = ch.try_receive_bytes()
-        if data is None:
-            break
-        total += len(data)
-    return total
-
-def stream_buffer(buf):
-    total = 0
-    while True:
-        chunk = buf.read(8192)
-        if not chunk:
-            break
-        total += len(chunk)
-    return total
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "from erlang import Channel, ByteChannel\n"
+        "\n"
+        "def stream_channel(ch_ref, num_chunks):\n"
+        "    ch = Channel(ch_ref)\n"
+        "    total = 0\n"
+        "    for _ in range(num_chunks):\n"
+        "        msg = ch.try_receive()\n"
+        "        if msg is None:\n"
+        "            break\n"
+        "        total += len(msg)\n"
+        "    return total\n"
+        "\n"
+        "def stream_byte_channel(ch_ref, num_chunks):\n"
+        "    ch = ByteChannel(ch_ref)\n"
+        "    total = 0\n"
+        "    for _ in range(num_chunks):\n"
+        "        data = ch.try_receive_bytes()\n"
+        "        if data is None:\n"
+        "            break\n"
+        "        total += len(data)\n"
+        "    return total\n"
+        "\n"
+        "def stream_buffer(buf):\n"
+        "    total = 0\n"
+        "    while True:\n"
+        "        chunk = buf.read(8192)\n"
+        "        if not chunk:\n"
+        "            break\n"
+        "        total += len(chunk)\n"
+        "    return total\n"
+    >>),
 
     ChunkSizes = [1024, 4096, 16384, 65536],
-    TotalBytes = 1048576,  % 1MB
+    % 1MB
+    TotalBytes = 1048576,
 
-    io:format("~10s | ~12s | ~12s | ~12s~n",
-              ["Chunk", "Channel", "ByteChannel", "PyBuffer"]),
-    io:format("~10s | ~12s | ~12s | ~12s~n",
-              ["(bytes)", "(MB/sec)", "(MB/sec)", "(MB/sec)"]),
+    io:format(
+        "~10s | ~12s | ~12s | ~12s~n",
+        ["Chunk", "Channel", "ByteChannel", "PyBuffer"]
+    ),
+    io:format(
+        "~10s | ~12s | ~12s | ~12s~n",
+        ["(bytes)", "(MB/sec)", "(MB/sec)", "(MB/sec)"]
+    ),
     io:format("~s~n", [string:copies("-", 54)]),
 
-    lists:foreach(fun(ChunkSize) ->
-        NumChunks = TotalBytes div ChunkSize,
-        Chunk = binary:copy(<<0>>, ChunkSize),
+    lists:foreach(
+        fun(ChunkSize) ->
+            NumChunks = TotalBytes div ChunkSize,
+            Chunk = binary:copy(<<0>>, ChunkSize),
 
-        %% Channel streaming
-        {ok, Ch} = py_channel:new(),
-        ChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_channel:send(Ch, Chunk)
-        end, lists:seq(1, NumChunks)),
-        {ok, _} = py:eval(Ctx, <<"stream_channel(ch, n)">>,
-                          #{<<"ch">> => Ch, <<"n">> => NumChunks}),
-        ChEnd = erlang:monotonic_time(microsecond),
-        ChMBps = (TotalBytes / 1048576) / ((ChEnd - ChStart) / 1000000),
-        py_channel:close(Ch),
+            %% Channel streaming
+            {ok, Ch} = py_channel:new(),
+            ChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_channel:send(Ch, Chunk)
+                end,
+                lists:seq(1, NumChunks)
+            ),
+            {ok, _} = py:eval(
+                Ctx,
+                <<"stream_channel(ch, n)">>,
+                #{<<"ch">> => Ch, <<"n">> => NumChunks}
+            ),
+            ChEnd = erlang:monotonic_time(microsecond),
+            ChMBps = (TotalBytes / 1048576) / ((ChEnd - ChStart) / 1000000),
+            py_channel:close(Ch),
 
-        %% ByteChannel streaming
-        {ok, BCh} = py_byte_channel:new(),
-        BChStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_byte_channel:send(BCh, Chunk)
-        end, lists:seq(1, NumChunks)),
-        {ok, _} = py:eval(Ctx, <<"stream_byte_channel(ch, n)">>,
-                          #{<<"ch">> => BCh, <<"n">> => NumChunks}),
-        BChEnd = erlang:monotonic_time(microsecond),
-        BChMBps = (TotalBytes / 1048576) / ((BChEnd - BChStart) / 1000000),
-        py_byte_channel:close(BCh),
+            %% ByteChannel streaming
+            {ok, BCh} = py_byte_channel:new(),
+            BChStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_byte_channel:send(BCh, Chunk)
+                end,
+                lists:seq(1, NumChunks)
+            ),
+            {ok, _} = py:eval(
+                Ctx,
+                <<"stream_byte_channel(ch, n)">>,
+                #{<<"ch">> => BCh, <<"n">> => NumChunks}
+            ),
+            BChEnd = erlang:monotonic_time(microsecond),
+            BChMBps = (TotalBytes / 1048576) / ((BChEnd - BChStart) / 1000000),
+            py_byte_channel:close(BCh),
 
-        %% PyBuffer streaming
-        {ok, Buf} = py_buffer:new(TotalBytes),
-        BufStart = erlang:monotonic_time(microsecond),
-        lists:foreach(fun(_) ->
-            ok = py_buffer:write(Buf, Chunk)
-        end, lists:seq(1, NumChunks)),
-        ok = py_buffer:close(Buf),
-        {ok, _} = py:eval(Ctx, <<"stream_buffer(buf)">>, #{<<"buf">> => Buf}),
-        BufEnd = erlang:monotonic_time(microsecond),
-        BufMBps = (TotalBytes / 1048576) / ((BufEnd - BufStart) / 1000000),
+            %% PyBuffer streaming
+            {ok, Buf} = py_buffer:new(TotalBytes),
+            BufStart = erlang:monotonic_time(microsecond),
+            lists:foreach(
+                fun(_) ->
+                    ok = py_buffer:write(Buf, Chunk)
+                end,
+                lists:seq(1, NumChunks)
+            ),
+            ok = py_buffer:close(Buf),
+            {ok, _} = py:eval(Ctx, <<"stream_buffer(buf)">>, #{<<"buf">> => Buf}),
+            BufEnd = erlang:monotonic_time(microsecond),
+            BufMBps = (TotalBytes / 1048576) / ((BufEnd - BufStart) / 1000000),
 
-        io:format("~10B | ~12.2f | ~12.2f | ~12.2f~n",
-                  [ChunkSize, ChMBps, BChMBps, BufMBps])
-    end, ChunkSizes),
+            io:format(
+                "~10B | ~12.2f | ~12.2f | ~12.2f~n",
+                [ChunkSize, ChMBps, BChMBps, BufMBps]
+            )
+        end,
+        ChunkSizes
+    ),
     ok.

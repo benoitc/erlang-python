@@ -46,16 +46,11 @@ parse_args(Args) ->
     parse_args(Args, #{mode => standard}).
 
 parse_args([], Acc) -> Acc;
-parse_args(["--quick" | Rest], Acc) ->
-    parse_args(Rest, Acc#{mode => quick});
-parse_args(["--full" | Rest], Acc) ->
-    parse_args(Rest, Acc#{mode => full});
-parse_args(["--concurrent" | Rest], Acc) ->
-    parse_args(Rest, Acc#{mode => concurrent});
-parse_args(["--help" | _], Acc) ->
-    Acc#{help => true};
-parse_args([_ | Rest], Acc) ->
-    parse_args(Rest, Acc).
+parse_args(["--quick" | Rest], Acc) -> parse_args(Rest, Acc#{mode => quick});
+parse_args(["--full" | Rest], Acc) -> parse_args(Rest, Acc#{mode => full});
+parse_args(["--concurrent" | Rest], Acc) -> parse_args(Rest, Acc#{mode => concurrent});
+parse_args(["--help" | _], Acc) -> Acc#{help => true};
+parse_args([_ | Rest], Acc) -> parse_args(Rest, Acc).
 
 print_help() ->
     io:format("Usage: escript examples/benchmark.erl [OPTIONS]~n~n"),
@@ -84,7 +79,6 @@ run_benchmarks(quick) ->
     bench_concurrent(10, 10),
     bench_streaming(100),
     bench_schedule_inline(20);
-
 run_benchmarks(full) ->
     io:format("Running full benchmarks...~n~n"),
     bench_simple_call(10000),
@@ -95,7 +89,6 @@ run_benchmarks(full) ->
     bench_type_conversion(1000),
     bench_semaphore(10000),
     bench_schedule_inline(500);
-
 run_benchmarks(concurrent) ->
     io:format("Running concurrency benchmarks...~n~n"),
     bench_concurrent(10, 10),
@@ -104,7 +97,6 @@ run_benchmarks(concurrent) ->
     bench_concurrent(200, 100),
     bench_concurrent(500, 100),
     bench_concurrent(1000, 50);
-
 run_benchmarks(standard) ->
     io:format("Running standard benchmarks...~n~n"),
     bench_simple_call(1000),
@@ -121,9 +113,12 @@ bench_simple_call(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py:call(math, sqrt, [I])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py:call(math, sqrt, [I])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -140,9 +135,12 @@ bench_eval(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(I) ->
-            {ok, _} = py:eval(<<"x * x">>, #{x => I})
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(I) ->
+                {ok, _} = py:eval(<<"x * x">>, #{x => I})
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -157,20 +155,33 @@ bench_eval(N) ->
 bench_concurrent(NumProcs, CallsPerProc) ->
     TotalCalls = NumProcs * CallsPerProc,
     io:format("Benchmark: Concurrent calls~n"),
-    io:format("  Processes: ~p, Calls/process: ~p, Total: ~p~n",
-              [NumProcs, CallsPerProc, TotalCalls]),
+    io:format(
+        "  Processes: ~p, Calls/process: ~p, Total: ~p~n",
+        [NumProcs, CallsPerProc, TotalCalls]
+    ),
 
     Parent = self(),
 
     {Time, _} = timer:tc(fun() ->
-        Pids = [spawn_link(fun() ->
-            lists:foreach(fun(I) ->
-                {ok, _} = py:call(math, sqrt, [I])
-            end, lists:seq(1, CallsPerProc)),
-            Parent ! {done, self()}
-        end) || _ <- lists:seq(1, NumProcs)],
+        Pids = [
+            spawn_link(fun() ->
+                lists:foreach(
+                    fun(I) ->
+                        {ok, _} = py:call(math, sqrt, [I])
+                    end,
+                    lists:seq(1, CallsPerProc)
+                ),
+                Parent ! {done, self()}
+            end)
+         || _ <- lists:seq(1, NumProcs)
+        ],
 
-        [receive {done, Pid} -> ok end || Pid <- Pids]
+        [
+            receive
+                {done, Pid} -> ok
+            end
+         || Pid <- Pids
+        ]
     end),
 
     TimeMs = Time / 1000,
@@ -185,9 +196,12 @@ bench_streaming(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(_) ->
-            {ok, _} = py:stream_eval(<<"(x**2 for x in range(100))">>)
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(_) ->
+                {ok, _} = py:stream_eval(<<"(x**2 for x in range(100))">>)
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -210,9 +224,12 @@ bench_type_conversion(N) ->
     },
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(_) ->
-            {ok, _} = py:call(json, dumps, [ComplexData])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(_) ->
+                {ok, _} = py:call(json, dumps, [ComplexData])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -229,10 +246,13 @@ bench_semaphore(N) ->
     io:format("  Iterations: ~p~n", [N]),
 
     {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(_) ->
-            ok = py_semaphore:acquire(1000),
-            ok = py_semaphore:release()
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(_) ->
+                ok = py_semaphore:acquire(1000),
+                ok = py_semaphore:release()
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TimeMs = Time / 1000,
@@ -250,48 +270,55 @@ bench_schedule_inline(N) ->
 
     %% Set up test functions
     Ctx = py:context(),
-    ok = py:exec(Ctx, <<"
-import __main__
-import erlang
-
-def increment(x):
-    return x + 1
-
-__main__.increment = increment
-
-# Chain using schedule_py (messaging overhead)
-def chain_schedule_py(x, count):
-    if count <= 0:
-        return x
-    x = erlang.schedule_py('__main__', 'increment', [x])
-    return erlang.schedule_py('__main__', 'chain_schedule_py', [x, count - 1])
-
-__main__.chain_schedule_py = chain_schedule_py
-
-# Chain using schedule_inline (no messaging)
-def chain_schedule_inline(x, count):
-    if count <= 0:
-        return x
-    x = increment(x)
-    return erlang.schedule_inline('__main__', 'chain_schedule_inline', [x, count - 1])
-
-__main__.chain_schedule_inline = chain_schedule_inline
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import __main__\n"
+        "import erlang\n"
+        "\n"
+        "def increment(x):\n"
+        "    return x + 1\n"
+        "\n"
+        "__main__.increment = increment\n"
+        "\n"
+        "# Chain using schedule_py (messaging overhead)\n"
+        "def chain_schedule_py(x, count):\n"
+        "    if count <= 0:\n"
+        "        return x\n"
+        "    x = erlang.schedule_py('__main__', 'increment', [x])\n"
+        "    return erlang.schedule_py('__main__', 'chain_schedule_py', [x, count - 1])\n"
+        "\n"
+        "__main__.chain_schedule_py = chain_schedule_py\n"
+        "\n"
+        "# Chain using schedule_inline (no messaging)\n"
+        "def chain_schedule_inline(x, count):\n"
+        "    if count <= 0:\n"
+        "        return x\n"
+        "    x = increment(x)\n"
+        "    return erlang.schedule_inline('__main__', 'chain_schedule_inline', [x, count - 1])\n"
+        "\n"
+        "__main__.chain_schedule_inline = chain_schedule_inline\n"
+    >>),
 
     ChainLen = 10,
 
     %% Benchmark schedule_py
     {TimePy, _} = timer:tc(fun() ->
-        lists:foreach(fun(_) ->
-            {ok, _} = py:call(Ctx, '__main__', chain_schedule_py, [0, ChainLen])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(_) ->
+                {ok, _} = py:call(Ctx, '__main__', chain_schedule_py, [0, ChainLen])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     %% Benchmark schedule_inline
     {TimeInline, _} = timer:tc(fun() ->
-        lists:foreach(fun(_) ->
-            {ok, _} = py:call(Ctx, '__main__', chain_schedule_inline, [0, ChainLen])
-        end, lists:seq(1, N))
+        lists:foreach(
+            fun(_) ->
+                {ok, _} = py:call(Ctx, '__main__', chain_schedule_inline, [0, ChainLen])
+            end,
+            lists:seq(1, N)
+        )
     end),
 
     TotalCalls = N * ChainLen,

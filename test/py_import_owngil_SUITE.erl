@@ -41,25 +41,29 @@
 ]).
 
 all() ->
-    [{group, basic_imports},
-     {group, isolation},
-     {group, stress}].
+    [
+        {group, basic_imports},
+        {group, isolation},
+        {group, stress}
+    ].
 
 groups() ->
-    [{basic_imports, [sequence], [
-        owngil_import_module_test,
-        owngil_import_function_test,
-        owngil_import_main_rejected_test,
-        owngil_import_stats_test,
-        owngil_import_list_test
-    ]},
-     {isolation, [sequence], [
-        owngil_import_isolation_test,
-        owngil_import_parallel_contexts_test
-    ]},
-     {stress, [sequence], [
-        owngil_import_concurrent_test
-    ]}].
+    [
+        {basic_imports, [sequence], [
+            owngil_import_module_test,
+            owngil_import_function_test,
+            owngil_import_main_rejected_test,
+            owngil_import_stats_test,
+            owngil_import_list_test
+        ]},
+        {isolation, [sequence], [
+            owngil_import_isolation_test,
+            owngil_import_parallel_contexts_test
+        ]},
+        {stress, [sequence], [
+            owngil_import_concurrent_test
+        ]}
+    ].
 
 init_per_suite(Config) ->
     %% Start application first (loads NIF)
@@ -147,10 +151,11 @@ owngil_import_main_rejected_test(_Config) ->
     Ctx = create_owngil_context(),
     try
         %% Define a function in __main__
-        ok = py_context:exec(Ctx, <<"
-def my_func(x):
-    return x * 2
-">>),
+        ok = py_context:exec(Ctx, <<
+            "\n"
+            "def my_func(x):\n"
+            "    return x * 2\n"
+        >>),
 
         %% Call the function defined in __main__
         {ok, Result} = py_context:call(Ctx, '__main__', my_func, [21]),
@@ -202,16 +207,18 @@ owngil_import_isolation_test(_Config) ->
     Ctx2 = create_owngil_context(),
     try
         %% Define a variable in Ctx1
-        ok = py_context:exec(Ctx1, <<"
-import json
-MY_VAR = 'context1'
-">>),
+        ok = py_context:exec(Ctx1, <<
+            "\n"
+            "import json\n"
+            "MY_VAR = 'context1'\n"
+        >>),
 
         %% Define a different variable in Ctx2
-        ok = py_context:exec(Ctx2, <<"
-import math
-MY_VAR = 'context2'
-">>),
+        ok = py_context:exec(Ctx2, <<
+            "\n"
+            "import math\n"
+            "MY_VAR = 'context2'\n"
+        >>),
 
         %% Verify isolation - Ctx1 has json but not math imported the same way
         {ok, R1} = py_context:eval(Ctx1, <<"MY_VAR">>),
@@ -234,53 +241,69 @@ owngil_import_parallel_contexts_test(_Config) ->
     NumContexts = 3,
 
     %% Spawn processes, each with its own OWN_GIL context
-    Pids = [spawn_link(fun() ->
-        Ctx = create_owngil_context(),
-        try
-            %% Each context imports different modules
-            Modules = case N rem 3 of
-                0 -> [<<"json">>, <<"base64">>];
-                1 -> [<<"math">>, <<"string">>];
-                2 -> [<<"os">>, <<"re">>]
-            end,
+    Pids = [
+        spawn_link(fun() ->
+            Ctx = create_owngil_context(),
+            try
+                %% Each context imports different modules
+                Modules =
+                    case N rem 3 of
+                        0 -> [<<"json">>, <<"base64">>];
+                        1 -> [<<"math">>, <<"string">>];
+                        2 -> [<<"os">>, <<"re">>]
+                    end,
 
-            %% Import modules
-            lists:foreach(fun(Mod) ->
-                Code = <<"import ", Mod/binary>>,
-                ok = py_context:exec(Ctx, Code)
-            end, Modules),
+                %% Import modules
+                lists:foreach(
+                    fun(Mod) ->
+                        Code = <<"import ", Mod/binary>>,
+                        ok = py_context:exec(Ctx, Code)
+                    end,
+                    Modules
+                ),
 
-            %% Define context-specific state
-            StateCode = list_to_binary(io_lib:format("CTX_ID = ~p", [N])),
-            ok = py_context:exec(Ctx, StateCode),
+                %% Define context-specific state
+                StateCode = list_to_binary(io_lib:format("CTX_ID = ~p", [N])),
+                ok = py_context:exec(Ctx, StateCode),
 
-            %% Verify state
-            {ok, CtxId} = py_context:eval(Ctx, <<"CTX_ID">>),
+                %% Verify state
+                {ok, CtxId} = py_context:eval(Ctx, <<"CTX_ID">>),
 
-            Parent ! {self(), {ok, N, CtxId, Modules}}
-        catch
-            E:R ->
-                Parent ! {self(), {error, N, E, R}}
-        after
-            py_context:destroy(Ctx)
-        end
-    end) || N <- lists:seq(1, NumContexts)],
+                Parent ! {self(), {ok, N, CtxId, Modules}}
+            catch
+                E:R ->
+                    Parent ! {self(), {error, N, E, R}}
+            after
+                py_context:destroy(Ctx)
+            end
+        end)
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     %% Collect results
-    Results = [receive {Pid, Result} -> Result after 10000 -> timeout end || Pid <- Pids],
+    Results = [
+        receive
+            {Pid, Result} -> Result
+        after 10000 -> timeout
+        end
+     || Pid <- Pids
+    ],
 
     %% Verify all succeeded
-    lists:foreach(fun(Result) ->
-        case Result of
-            {ok, N, CtxId, _Modules} ->
-                ?assertEqual(N, CtxId),
-                ct:pal("Context ~p: OK", [N]);
-            {error, N, E, R} ->
-                ct:fail("Context ~p failed: ~p:~p", [N, E, R]);
-            timeout ->
-                ct:fail("Timeout waiting for context")
-        end
-    end, Results).
+    lists:foreach(
+        fun(Result) ->
+            case Result of
+                {ok, N, CtxId, _Modules} ->
+                    ?assertEqual(N, CtxId),
+                    ct:pal("Context ~p: OK", [N]);
+                {error, N, E, R} ->
+                    ct:fail("Context ~p failed: ~p:~p", [N, E, R]);
+                timeout ->
+                    ct:fail("Timeout waiting for context")
+            end
+        end,
+        Results
+    ).
 
 %% ============================================================================
 %% Stress Tests
@@ -293,62 +316,96 @@ owngil_import_concurrent_test(_Config) ->
     Modules = [<<"json">>, <<"math">>, <<"os">>, <<"string">>, <<"re">>],
 
     %% Spawn many processes with OWN_GIL contexts
-    Pids = [spawn_link(fun() ->
-        Ctx = create_owngil_context(),
-        try
-            %% Import a subset of modules
-            MyModules = lists:sublist(Modules, 1 + (N rem length(Modules))),
+    Pids = [
+        spawn_link(fun() ->
+            Ctx = create_owngil_context(),
+            try
+                %% Import a subset of modules
+                MyModules = lists:sublist(Modules, 1 + (N rem length(Modules))),
 
-            lists:foreach(fun(Mod) ->
-                Code = <<"import ", Mod/binary>>,
-                ok = py_context:exec(Ctx, Code)
-            end, MyModules),
+                lists:foreach(
+                    fun(Mod) ->
+                        Code = <<"import ", Mod/binary>>,
+                        ok = py_context:exec(Ctx, Code)
+                    end,
+                    MyModules
+                ),
 
-            %% Make calls to verify imports work
-            CallResults = lists:map(fun(Mod) ->
-                case Mod of
-                    <<"json">> -> py_context:call(Ctx, json, dumps, [[N]]);
-                    <<"math">> -> py_context:call(Ctx, math, sqrt, [float(N)]);
-                    <<"os">> -> py_context:call(Ctx, os, getcwd, []);
-                    <<"string">> -> py_context:call(Ctx, string, capwords, [<<"hello world">>]);
-                    <<"re">> -> py_context:call(Ctx, re, escape, [<<"test">>])
-                end
-            end, MyModules),
+                %% Make calls to verify imports work
+                CallResults = lists:map(
+                    fun(Mod) ->
+                        case Mod of
+                            <<"json">> ->
+                                py_context:call(Ctx, json, dumps, [[N]]);
+                            <<"math">> ->
+                                py_context:call(Ctx, math, sqrt, [float(N)]);
+                            <<"os">> ->
+                                py_context:call(Ctx, os, getcwd, []);
+                            <<"string">> ->
+                                py_context:call(Ctx, string, capwords, [<<"hello world">>]);
+                            <<"re">> ->
+                                py_context:call(Ctx, re, escape, [<<"test">>])
+                        end
+                    end,
+                    MyModules
+                ),
 
-            AllOk = lists:all(fun({ok, _}) -> true; (_) -> false end, CallResults),
+                AllOk = lists:all(
+                    fun
+                        ({ok, _}) -> true;
+                        (_) -> false
+                    end,
+                    CallResults
+                ),
 
-            Parent ! {self(), {ok, N, AllOk, length(MyModules)}}
-        catch
-            E:R:St ->
-                Parent ! {self(), {error, N, E, R, St}}
-        after
-            py_context:destroy(Ctx)
-        end
-    end) || N <- lists:seq(1, NumContexts)],
+                Parent ! {self(), {ok, N, AllOk, length(MyModules)}}
+            catch
+                E:R:St ->
+                    Parent ! {self(), {error, N, E, R, St}}
+            after
+                py_context:destroy(Ctx)
+            end
+        end)
+     || N <- lists:seq(1, NumContexts)
+    ],
 
     %% Collect results
-    Results = [receive {Pid, Result} -> Result after 30000 -> timeout end || Pid <- Pids],
+    Results = [
+        receive
+            {Pid, Result} -> Result
+        after 30000 -> timeout
+        end
+     || Pid <- Pids
+    ],
 
     %% Count successes and failures
-    {Successes, Failures} = lists:partition(fun
-        ({ok, _, true, _}) -> true;
-        (_) -> false
-    end, Results),
+    {Successes, Failures} = lists:partition(
+        fun
+            ({ok, _, true, _}) -> true;
+            (_) -> false
+        end,
+        Results
+    ),
 
-    ct:pal("OWN_GIL concurrent import test: ~p successes, ~p failures",
-           [length(Successes), length(Failures)]),
+    ct:pal(
+        "OWN_GIL concurrent import test: ~p successes, ~p failures",
+        [length(Successes), length(Failures)]
+    ),
 
     %% Log any failures
-    lists:foreach(fun
-        ({error, N, E, R, _St}) ->
-            ct:pal("Context ~p failed: ~p:~p", [N, E, R]);
-        ({ok, N, false, _}) ->
-            ct:pal("Context ~p: calls failed", [N]);
-        (timeout) ->
-            ct:pal("Timeout");
-        (_) ->
-            ok
-    end, Failures),
+    lists:foreach(
+        fun
+            ({error, N, E, R, _St}) ->
+                ct:pal("Context ~p failed: ~p:~p", [N, E, R]);
+            ({ok, N, false, _}) ->
+                ct:pal("Context ~p: calls failed", [N]);
+            (timeout) ->
+                ct:pal("Timeout");
+            (_) ->
+                ok
+        end,
+        Failures
+    ),
 
     ?assertEqual(NumContexts, length(Successes)),
     ?assertEqual(0, length(Failures)).

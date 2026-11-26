@@ -86,12 +86,20 @@ multi_process_share_context_thread(_Config) ->
     setup_helper(Ctx),
     Parent = self(),
     N = 8,
-    Pids = [spawn(fun() ->
-                  Tid = native_id(Ctx),
-                  Parent ! {tid, self(), Tid}
-              end) || _ <- lists:seq(1, N)],
-    Tids = [receive {tid, Pid, T} -> T after 5000 -> ct:fail(timeout) end
-            || Pid <- Pids],
+    Pids = [
+        spawn(fun() ->
+            Tid = native_id(Ctx),
+            Parent ! {tid, self(), Tid}
+        end)
+     || _ <- lists:seq(1, N)
+    ],
+    Tids = [
+        receive
+            {tid, Pid, T} -> T
+        after 5000 -> ct:fail(timeout)
+        end
+     || Pid <- Pids
+    ],
     ct:pal("tids = ~p", [Tids]),
     [Single] = lists:usort(Tids),
     true = is_integer(Single),
@@ -130,25 +138,40 @@ owngil_thread_affinity(_Config) ->
                             "import threading\n"
                             "_pta_exec_tid = threading.get_native_id()\n"
                         >>),
-                        {ok, ExecTid} = py_context:eval(Ctx,
-                                                          <<"_pta_exec_tid">>, #{}),
+                        {ok, ExecTid} = py_context:eval(
+                            Ctx,
+                            <<"_pta_exec_tid">>,
+                            #{}
+                        ),
                         EvalTid = native_id(Ctx),
-                        {ok, CallTid} = py_context:call(Ctx,
-                                                          '__main__',
-                                                          '_pta_get_tid', []),
-                        ct:pal("owngil exec=~p eval=~p call=~p",
-                               [ExecTid, EvalTid, CallTid]),
+                        {ok, CallTid} = py_context:call(
+                            Ctx,
+                            '__main__',
+                            '_pta_get_tid',
+                            []
+                        ),
+                        ct:pal(
+                            "owngil exec=~p eval=~p call=~p",
+                            [ExecTid, EvalTid, CallTid]
+                        ),
                         ExecTid = EvalTid,
                         EvalTid = CallTid,
 
                         Parent = self(),
-                        Pids = [spawn(fun() ->
-                                          Tid = native_id(Ctx),
-                                          Parent ! {tid, self(), Tid}
-                                      end) || _ <- lists:seq(1, 4)],
-                        Tids = [receive {tid, Pid, T} -> T
-                                after 5000 -> ct:fail(timeout)
-                                end || Pid <- Pids],
+                        Pids = [
+                            spawn(fun() ->
+                                Tid = native_id(Ctx),
+                                Parent ! {tid, self(), Tid}
+                            end)
+                         || _ <- lists:seq(1, 4)
+                        ],
+                        Tids = [
+                            receive
+                                {tid, Pid, T} -> T
+                            after 5000 -> ct:fail(timeout)
+                            end
+                         || Pid <- Pids
+                        ],
                         ct:pal("owngil multi-proc tids = ~p", [Tids]),
                         [Single] = lists:usort(Tids),
                         Single = ExecTid,

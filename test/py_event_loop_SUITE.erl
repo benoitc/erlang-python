@@ -328,7 +328,8 @@ test_poll_events_timeout(_Config) ->
     %% Should have 0 events and taken ~50ms
     0 = NumEvents,
     Elapsed = T2 - T1,
-    true = Elapsed >= 40,  %% Allow some tolerance
+    %% Allow some tolerance
+    true = Elapsed >= 40,
 
     py_event_worker:stop(WorkerPid),
     py_nif:event_loop_destroy(LoopRef),
@@ -357,7 +358,8 @@ test_event_loop_wakeup(_Config) ->
     %% Should receive quickly (not 5 seconds)
     receive
         {poll_done, Elapsed} ->
-            true = Elapsed < 1000  %% Should be much less than 5000ms
+            %% Should be much less than 5000ms
+            true = Elapsed < 1000
     after 2000 ->
         ct:fail(poll_not_woken_up)
     end,

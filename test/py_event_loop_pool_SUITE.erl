@@ -147,8 +147,10 @@ test_spawn_task(_Config) ->
 
 test_concurrent_tasks(_Config) ->
     NumTasks = 50,
-    Refs = [py_event_loop_pool:create_task(math, sqrt, [float(I * I)])
-            || I <- lists:seq(1, NumTasks)],
+    Refs = [
+        py_event_loop_pool:create_task(math, sqrt, [float(I * I)])
+     || I <- lists:seq(1, NumTasks)
+    ],
     ct:log("Created ~p tasks", [length(Refs)]),
 
     Results = [py_event_loop_pool:await(Ref, 5000) || Ref <- Refs],
@@ -166,8 +168,10 @@ test_concurrent_tasks(_Config) ->
 
 test_tasks_execute_in_order(_Config) ->
     %% All tasks from this process go to the same loop, so they execute in order
-    Refs = [py_event_loop_pool:create_task(math, sqrt, [float(I)])
-            || I <- [1, 4, 9, 16, 25]],
+    Refs = [
+        py_event_loop_pool:create_task(math, sqrt, [float(I)])
+     || I <- [1, 4, 9, 16, 25]
+    ],
 
     Results = [py_event_loop_pool:await(Ref, 5000) || Ref <- Refs],
     ct:log("Results: ~p", [Results]),
@@ -189,21 +193,45 @@ test_tasks_execute_in_order(_Config) ->
 %% long enough to go through erlang:send_after.
 test_concurrent_sleeps_complete(_Config) ->
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    ok = py:exec(iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir]))),
+    ok = py:exec(
+        iolist_to_binary(
+            io_lib:format(
+                "import sys; sys.path.insert(0, '~s')", [TestDir]
+            )
+        )
+    ),
     N = 32,
     SleepMs = 100,
     Self = self(),
     %% One process per task: get_loop/0 binds a loop per calling process
-    Pids = [spawn_link(fun() ->
-        {ok, Loop} = py_event_loop_pool:get_loop(),
-        Ref = make_ref(),
-        ok = py_nif:submit_task(Loop, self(), Ref, <<"py_test_pool_sleep">>,
-                                <<"nap">>, [SleepMs], #{}),
-        R = receive {async_result, Ref, X} -> X after 5000 -> timeout end,
-        Self ! {done, self(), Loop, R}
-    end) || _ <- lists:seq(1, N)],
-    Results = [receive {done, Pid, Loop, R} -> {Loop, R} end || Pid <- Pids],
+    Pids = [
+        spawn_link(fun() ->
+            {ok, Loop} = py_event_loop_pool:get_loop(),
+            Ref = make_ref(),
+            ok = py_nif:submit_task(
+                Loop,
+                self(),
+                Ref,
+                <<"py_test_pool_sleep">>,
+                <<"nap">>,
+                [SleepMs],
+                #{}
+            ),
+            R =
+                receive
+                    {async_result, Ref, X} -> X
+                after 5000 -> timeout
+                end,
+            Self ! {done, self(), Loop, R}
+        end)
+     || _ <- lists:seq(1, N)
+    ],
+    Results = [
+        receive
+            {done, Pid, Loop, R} -> {Loop, R}
+        end
+     || Pid <- Pids
+    ],
     Timeouts = [x || {_, timeout} <- Results],
     ct:log("results: ~p", [Results]),
     [] = Timeouts,
@@ -240,10 +268,11 @@ test_exec_eval_namespace(_Config) ->
 
 test_exec_define_function(_Config) ->
     %% Define a function via exec and call it via create_task
-    ok = py_event_loop_pool:exec(<<"
-def pool_test_multiply(a, b):
-    return a * b
-">>),
+    ok = py_event_loop_pool:exec(<<
+        "\n"
+        "def pool_test_multiply(a, b):\n"
+        "    return a * b\n"
+    >>),
 
     %% Call the function via create_task
     Ref = py_event_loop_pool:create_task('__main__', pool_test_multiply, [7, 6]),

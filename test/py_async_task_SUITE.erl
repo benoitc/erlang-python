@@ -91,7 +91,8 @@ groups() -> [].
 
 init_per_suite(Config) ->
     application:ensure_all_started(erlang_python),
-    timer:sleep(500),  % Allow event loop to initialize
+    % Allow event loop to initialize
+    timer:sleep(500),
     Config.
 
 end_per_suite(_Config) ->
@@ -176,15 +177,21 @@ test_async_with_args(_Config) ->
 test_async_sleep(_Config) ->
     %% Test multiple quick operations in sequence
     %% (asyncio.sleep coroutines may need special loop driving)
-    Results = lists:map(fun(N) ->
-        Ref = py_event_loop:create_task(math, sqrt, [float(N * N)]),
-        {N, py_event_loop:await(Ref, 5000)}
-    end, lists:seq(1, 10)),
+    Results = lists:map(
+        fun(N) ->
+            Ref = py_event_loop:create_task(math, sqrt, [float(N * N)]),
+            {N, py_event_loop:await(Ref, 5000)}
+        end,
+        lists:seq(1, 10)
+    ),
     ct:log("Sequential sqrt results: ~p", [Results]),
     %% Verify all succeeded
-    lists:foreach(fun({N, {ok, R}}) ->
-        true = abs(R - float(N)) < 0.0001
-    end, Results).
+    lists:foreach(
+        fun({N, {ok, R}}) ->
+            true = abs(R - float(N)) < 0.0001
+        end,
+        Results
+    ).
 
 test_timer_event_triggering(_Config) ->
     %% Test that timer events properly trigger event loop processing.
@@ -214,8 +221,10 @@ test_timer_event_triggering(_Config) ->
 
     %% Test concurrent async tasks with sleep
     ct:log("Testing concurrent async tasks with asyncio.sleep..."),
-    Refs = [py_event_loop:create_task(test_async_task, task_with_args, [N, N])
-            || N <- lists:seq(1, 5)],
+    Refs = [
+        py_event_loop:create_task(test_async_task, task_with_args, [N, N])
+     || N <- lists:seq(1, 5)
+    ],
     Results = [py_event_loop:await(Ref, 5000) || Ref <- Refs],
     ct:log("Concurrent results: ~p", [Results]),
 
@@ -280,45 +289,69 @@ test_concurrent_tasks(_Config) ->
     TasksPerProc = 5,
 
     %% Spawn processes that each submit tasks
-    Pids = [spawn_link(fun() ->
-        Results = [begin
-            Ref = py_event_loop:create_task(math, sqrt, [float(N * N)]),
-            {N, py_event_loop:await(Ref, 5000)}
-        end || N <- lists:seq(1, TasksPerProc)],
-        Parent ! {self(), Results}
-    end) || _ <- lists:seq(1, NumProcs)],
+    Pids = [
+        spawn_link(fun() ->
+            Results = [
+                begin
+                    Ref = py_event_loop:create_task(math, sqrt, [float(N * N)]),
+                    {N, py_event_loop:await(Ref, 5000)}
+                end
+             || N <- lists:seq(1, TasksPerProc)
+            ],
+            Parent ! {self(), Results}
+        end)
+     || _ <- lists:seq(1, NumProcs)
+    ],
 
     %% Collect all results
-    AllResults = [receive {Pid, R} -> R end || Pid <- Pids],
+    AllResults = [
+        receive
+            {Pid, R} -> R
+        end
+     || Pid <- Pids
+    ],
     ct:log("Concurrent results count: ~p", [length(lists:flatten(AllResults))]),
 
     %% Verify all succeeded
-    lists:foreach(fun(Results) ->
-        lists:foreach(fun({N, {ok, R}}) ->
-            Expected = float(N),
-            true = abs(R - Expected) < 0.0001
-        end, Results)
-    end, AllResults).
+    lists:foreach(
+        fun(Results) ->
+            lists:foreach(
+                fun({N, {ok, R}}) ->
+                    Expected = float(N),
+                    true = abs(R - Expected) < 0.0001
+                end,
+                Results
+            )
+        end,
+        AllResults
+    ).
 
 test_batch_tasks(_Config) ->
     %% Test submitting many tasks at once (tests batching)
     NumTasks = 100,
 
     %% Submit all tasks
-    Refs = [py_event_loop:create_task(math, sqrt, [float(N)])
-            || N <- lists:seq(1, NumTasks)],
+    Refs = [
+        py_event_loop:create_task(math, sqrt, [float(N)])
+     || N <- lists:seq(1, NumTasks)
+    ],
 
     %% Await all results
-    Results = [{N, py_event_loop:await(Ref, 5000)}
-               || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)],
+    Results = [
+        {N, py_event_loop:await(Ref, 5000)}
+     || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)
+    ],
 
     ct:log("Batch tasks completed: ~p", [length(Results)]),
 
     %% Verify all succeeded
-    lists:foreach(fun({N, {ok, R}}) ->
-        Expected = math:sqrt(N),
-        true = abs(R - Expected) < 0.0001
-    end, Results).
+    lists:foreach(
+        fun({N, {ok, R}}) ->
+            Expected = math:sqrt(N),
+            true = abs(R - Expected) < 0.0001
+        end,
+        Results
+    ).
 
 test_interleaved_sync_async(_Config) ->
     %% Test mixing different stdlib calls
@@ -388,20 +421,27 @@ test_thread_local_event_loop(_Config) ->
     %% We verify this by running multiple concurrent async tasks - if the
     %% running loop context weren't set, task creation would fail.
     NumTasks = 20,
-    Refs = [py_event_loop:create_task(math, sqrt, [float(N * N)])
-            || N <- lists:seq(1, NumTasks)],
+    Refs = [
+        py_event_loop:create_task(math, sqrt, [float(N * N)])
+     || N <- lists:seq(1, NumTasks)
+    ],
 
     %% Await all results - this exercises the event loop processing
-    Results = [{N, py_event_loop:await(Ref, 5000)}
-               || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)],
+    Results = [
+        {N, py_event_loop:await(Ref, 5000)}
+     || {N, Ref} <- lists:zip(lists:seq(1, NumTasks), Refs)
+    ],
 
     ct:log("Thread-local context test: ~p tasks completed", [length(Results)]),
 
     %% Verify all succeeded with correct results
-    lists:foreach(fun({N, {ok, R}}) ->
-        Expected = float(N),
-        true = abs(R - Expected) < 0.0001
-    end, Results).
+    lists:foreach(
+        fun({N, {ok, R}}) ->
+            Expected = float(N),
+            true = abs(R - Expected) < 0.0001
+        end,
+        Results
+    ).
 
 %% ============================================================================
 %% Per-process namespace tests
@@ -424,13 +464,14 @@ test_process_namespace_eval(_Config) ->
 
 test_process_namespace_async_func(_Config) ->
     %% Test defining an async function and calling it via create_task
-    ok = py_event_loop:exec(<<"
-def double(x):
-    return x * 2
-
-def add(a, b):
-    return a + b
-">>),
+    ok = py_event_loop:exec(<<
+        "\n"
+        "def double(x):\n"
+        "    return x * 2\n"
+        "\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+    >>),
 
     %% Call the sync function via create_task with __main__ module
     Ref1 = py_event_loop:create_task('__main__', double, [21]),
@@ -492,13 +533,14 @@ test_process_namespace_reentrant(_Config) ->
     %% This verifies the thread-local namespace is set correctly
 
     %% Define a variable and a function that uses it
-    ok = py_event_loop:exec(<<"
-shared_value = 100
-
-def use_shared():
-    # Access shared_value from namespace
-    return shared_value + 23
-">>),
+    ok = py_event_loop:exec(<<
+        "\n"
+        "shared_value = 100\n"
+        "\n"
+        "def use_shared():\n"
+        "    # Access shared_value from namespace\n"
+        "    return shared_value + 23\n"
+    >>),
 
     %% Call the function via create_task - it should access the namespace
     Ref = py_event_loop:create_task('__main__', use_shared, []),
@@ -507,12 +549,13 @@ def use_shared():
     123 = Result,
 
     %% Test with a function that modifies namespace
-    ok = py_event_loop:exec(<<"
-def increment_shared():
-    global shared_value
-    shared_value += 1
-    return shared_value
-">>),
+    ok = py_event_loop:exec(<<
+        "\n"
+        "def increment_shared():\n"
+        "    global shared_value\n"
+        "    shared_value += 1\n"
+        "    return shared_value\n"
+    >>),
 
     Ref2 = py_event_loop:create_task('__main__', increment_shared, []),
     {ok, 101} = py_event_loop:await(Ref2, 5000),
@@ -536,13 +579,14 @@ test_env_reuse_with_exec(_Config) ->
 
     %% Create a context and define a sync function via py:exec
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-def multiply(a, b):
-    return a * b
-
-def greet(name):
-    return f'Hello, {name}!'
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def multiply(a, b):\n"
+        "    return a * b\n"
+        "\n"
+        "def greet(name):\n"
+        "    return f'Hello, {name}!'\n"
+    >>),
 
     %% Call the functions via py_event_loop:run - should find them automatically
     {ok, Result1} = py_event_loop:run('__main__', multiply, [6, 7]),
@@ -561,22 +605,23 @@ test_env_reuse_async_function(_Config) ->
 
     %% Create a context and define an async function
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-import asyncio
-
-async def async_add(a, b):
-    await asyncio.sleep(0.01)
-    return a + b
-
-async def async_process(data):
-    # Simulate chunked processing
-    chunks = []
-    for i in range(0, len(data), 4):
-        chunk = data[i:i+4]
-        await asyncio.sleep(0.001)
-        chunks.append(chunk)
-    return chunks
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "import asyncio\n"
+        "\n"
+        "async def async_add(a, b):\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return a + b\n"
+        "\n"
+        "async def async_process(data):\n"
+        "    # Simulate chunked processing\n"
+        "    chunks = []\n"
+        "    for i in range(0, len(data), 4):\n"
+        "        chunk = data[i:i+4]\n"
+        "        await asyncio.sleep(0.001)\n"
+        "        chunks.append(chunk)\n"
+        "    return chunks\n"
+    >>),
 
     %% Call async function via py_event_loop:run
     {ok, Sum} = py_event_loop:run('__main__', async_add, [10, 32]),
@@ -599,16 +644,17 @@ test_env_reuse_spawn_task(_Config) ->
 
     %% Create a context and define a function that writes to a shared variable
     Ctx = py:context(1),
-    ok = py:exec(Ctx, <<"
-spawn_test_results = []
-
-def record_value(x):
-    spawn_test_results.append(x)
-    return x
-
-def get_results():
-    return list(spawn_test_results)
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "spawn_test_results = []\n"
+        "\n"
+        "def record_value(x):\n"
+        "    spawn_test_results.append(x)\n"
+        "    return x\n"
+        "\n"
+        "def get_results():\n"
+        "    return list(spawn_test_results)\n"
+    >>),
 
     %% Use spawn_task to call the function (fire and forget)
     ok = py_event_loop:spawn_task('__main__', record_value, [42]),

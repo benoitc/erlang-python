@@ -25,29 +25,31 @@
 %%% Never: keeps state between calls.
 -module(py_child).
 
--export([python_executable/1,
-         priv_dir/0,
-         sock_dir/0,
-         new_sock_path/1,
-         delete_file/1,
-         make_scratch_dir/1,
-         remove_tree/1,
-         listen/1,
-         accept/3,
-         tune_socket/1,
-         port_env/1,
-         check_env_opts/1,
-         rlimit_args/1,
-         cgroup_args/1,
-         frame/3,
-         send_frame/4,
-         parse_frame/1,
-         exit_reason/1,
-         code_reason/1,
-         os_pid_alive/1,
-         kill_os_pid/1,
-         to_bin/1,
-         to_list/1]).
+-export([
+    python_executable/1,
+    priv_dir/0,
+    sock_dir/0,
+    new_sock_path/1,
+    delete_file/1,
+    make_scratch_dir/1,
+    remove_tree/1,
+    listen/1,
+    accept/3,
+    tune_socket/1,
+    port_env/1,
+    check_env_opts/1,
+    rlimit_args/1,
+    cgroup_args/1,
+    frame/3,
+    send_frame/4,
+    parse_frame/1,
+    exit_reason/1,
+    code_reason/1,
+    os_pid_alive/1,
+    kill_os_pid/1,
+    to_bin/1,
+    to_list/1
+]).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -58,20 +60,27 @@
 %% embedded runtime, then `python3' from PATH.
 -spec python_executable(map()) -> string() | {error, term()}.
 python_executable(Opts) ->
-    Candidate = case maps:get(python, Opts, undefined) of
-        undefined ->
-            case application:get_env(erlang_python, isolated_python) of
-                {ok, P} -> P;
-                undefined -> default_python()
-            end;
-        P -> P
-    end,
+    Candidate =
+        case maps:get(python, Opts, undefined) of
+            undefined ->
+                case application:get_env(erlang_python, isolated_python) of
+                    {ok, P} -> P;
+                    undefined -> default_python()
+                end;
+            P ->
+                P
+        end,
     resolve_exe(to_list(Candidate)).
 
 default_python() ->
     case persistent_term:get({?MODULE, python}, undefined) of
         undefined ->
-            Exe = try py:python_executable() catch _:_ -> "python3" end,
+            Exe =
+                try
+                    py:python_executable()
+                catch
+                    _:_ -> "python3"
+                end,
             persistent_term:put({?MODULE, python}, Exe),
             Exe;
         Exe ->
@@ -96,12 +105,13 @@ resolve_exe(Exe) ->
 %% relative to the VM's cwd (code added with -pa _build/...) would not resolve.
 -spec priv_dir() -> file:filename().
 priv_dir() ->
-    Dir = case code:priv_dir(erlang_python) of
-        {error, bad_name} ->
-            filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
-        D ->
-            D
-    end,
+    Dir =
+        case code:priv_dir(erlang_python) of
+            {error, bad_name} ->
+                filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
+            D ->
+                D
+        end,
     filename:absname(Dir).
 
 %% @doc Private directory for the sockets of this node (mode 0700). Kept
@@ -111,10 +121,11 @@ priv_dir() ->
 sock_dir() ->
     case persistent_term:get({?MODULE, sock_dir}, undefined) of
         undefined ->
-            Base = case os:getenv("TMPDIR") of
-                false -> "/tmp";
-                T -> T
-            end,
+            Base =
+                case os:getenv("TMPDIR") of
+                    false -> "/tmp";
+                    T -> T
+                end,
             Dir = filename:join(Base, "erlang_python_" ++ os:getpid()),
             ok = filelib:ensure_dir(filename:join(Dir, "x")),
             _ = file:change_mode(Dir, 8#700),
@@ -173,8 +184,10 @@ remove_tree(Path) ->
 
 -spec new_sock_path(string()) -> file:filename().
 new_sock_path(Prefix) ->
-    filename:join(sock_dir(),
-                  Prefix ++ integer_to_list(erlang:unique_integer([positive])) ++ ".sock").
+    filename:join(
+        sock_dir(),
+        Prefix ++ integer_to_list(erlang:unique_integer([positive])) ++ ".sock"
+    ).
 
 %% @doc Listening socket at Path, for one child to connect to.
 -spec listen(file:filename()) -> {ok, socket:socket()} | {error, term()}.
@@ -185,11 +198,15 @@ listen(Path) ->
             case socket:bind(L, #{family => local, path => Path}) of
                 ok ->
                     case socket:listen(L) of
-                        ok -> {ok, L};
-                        {error, _} = Err -> socket:close(L), Err
+                        ok ->
+                            {ok, L};
+                        {error, _} = Err ->
+                            socket:close(L),
+                            Err
                     end;
                 {error, _} = Err ->
-                    socket:close(L), Err
+                    socket:close(L),
+                    Err
             end;
         {error, Reason} ->
             {error, {socket_open_failed, Reason}}
@@ -219,8 +236,8 @@ accept(L, Watch, Deadline, Out) ->
                     accept(L, Watch, Deadline, Out);
                 {Port, {exit_status, Status}} when Watch =:= {port, Port} ->
                     _ = socket:cancel(L, {select_info, accept, Handle}),
-                    {error, {child_exited_at_start, exit_reason(Status),
-                             drain_port_output(Port, Out)}};
+                    {error,
+                        {child_exited_at_start, exit_reason(Status), drain_port_output(Port, Out)}};
                 {Port, {data, D}} when Watch =:= {port, Port} ->
                     %% Keep it here, not in the mailbox: re-sending it would
                     %% make this receive return at once and never time out
@@ -230,10 +247,11 @@ accept(L, Watch, Deadline, Out) ->
                     {error, {child_exited_at_start, code_reason(Code), <<>>}}
             after Left ->
                 _ = socket:cancel(L, {select_info, accept, Handle}),
-                Output = case Watch of
-                    {port, Port} -> drain_port_output(Port, Out);
-                    _ -> <<>>
-                end,
+                Output =
+                    case Watch of
+                        {port, Port} -> drain_port_output(Port, Out);
+                        _ -> <<>>
+                    end,
                 {error, {start_timeout, Output}}
             end;
         {error, Reason} ->
@@ -265,28 +283,36 @@ tune_socket(S) ->
 -spec port_env(map()) -> [{string(), string() | false}].
 port_env(Opts) ->
     Env = [{to_list(K), to_list(V)} || {K, V} <- maps:to_list(maps:get(env, Opts, #{}))],
-    Seed = case maps:get(hash_seed, Opts, random) of
-        random -> [];
-        N -> [{"PYTHONHASHSEED", integer_to_list(N)}]
-    end,
+    Seed =
+        case maps:get(hash_seed, Opts, random) of
+            random -> [];
+            N -> [{"PYTHONHASHSEED", integer_to_list(N)}]
+        end,
     Set = Env ++ Seed,
-    Clear = case maps:get(clear_env, Opts, false) of
-        true ->
-            Keep = [K || {K, _} <- Set],
-            lists:usort([{K, false} || KV <- os:getenv(),
-                                       K <- [hd(string:split(KV, "="))],
-                                       K =/= "", not lists:member(K, Keep)]);
-        false ->
-            []
-    end,
+    Clear =
+        case maps:get(clear_env, Opts, false) of
+            true ->
+                Keep = [K || {K, _} <- Set],
+                lists:usort([
+                    {K, false}
+                 || KV <- os:getenv(),
+                    K <- [hd(string:split(KV, "="))],
+                    K =/= "",
+                    not lists:member(K, Keep)
+                ]);
+            false ->
+                []
+        end,
     Clear ++ Set.
 
 %% @doc Check the options port_env/1 reads.
 -spec check_env_opts(map()) -> ok | {error, term()}.
 check_env_opts(Opts) ->
     case {maps:get(hash_seed, Opts, random), maps:get(clear_env, Opts, false)} of
-        {Seed, _} when Seed =/= random,
-                       not (is_integer(Seed) andalso Seed >= 0 andalso Seed =< 4294967295) ->
+        {Seed, _} when
+            Seed =/= random,
+            not (is_integer(Seed) andalso Seed >= 0 andalso Seed =< 4294967295)
+        ->
             {error, {badarg, {hash_seed, Seed}}};
         {_, Clear} when not is_boolean(Clear) ->
             {error, {badarg, {clear_env, Clear}}};
@@ -297,10 +323,13 @@ check_env_opts(Opts) ->
 -spec rlimit_args(map()) -> [string()].
 rlimit_args(Opts) ->
     Limits = maps:get(rlimits, Opts, #{}),
-    lists:append([case maps:get(K, Limits, undefined) of
-                      undefined -> [];
-                      V when is_integer(V), V >= 0 -> ["--rlimit-" ++ atom_to_list(K), integer_to_list(V)]
-                  end || K <- [as, cpu, nofile]]).
+    lists:append([
+        case maps:get(K, Limits, undefined) of
+            undefined -> [];
+            V when is_integer(V), V >= 0 -> ["--rlimit-" ++ atom_to_list(K), integer_to_list(V)]
+        end
+     || K <- [as, cpu, nofile]
+    ]).
 
 -spec cgroup_args(map()) -> [string()].
 cgroup_args(Opts) ->
@@ -328,10 +357,11 @@ parse_frame(<<Id:64/native, Len:32/native, Body:Len/binary, Rest/binary>>) ->
     case Body of
         <<Status:8, Payload/binary>> ->
             try
-                Term = case Payload of
-                    <<>> -> undefined;
-                    _ -> binary_to_term(Payload)
-                end,
+                Term =
+                    case Payload of
+                        <<>> -> undefined;
+                        _ -> binary_to_term(Payload)
+                    end,
                 {ok, {Id, Status, Term}, Rest}
             catch
                 error:badarg -> {error, bad_etf}

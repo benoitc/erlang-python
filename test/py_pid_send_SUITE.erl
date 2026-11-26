@@ -85,13 +85,19 @@ init_per_suite(Config) ->
     %% Add test directory to Python path on ALL contexts
     %% (subinterpreters have isolated sys.path)
     TestDir = filename:join(code:lib_dir(erlang_python), "test"),
-    PathCmd = iolist_to_binary(io_lib:format(
-        "import sys; sys.path.insert(0, '~s')", [TestDir])),
+    PathCmd = iolist_to_binary(
+        io_lib:format(
+            "import sys; sys.path.insert(0, '~s')", [TestDir]
+        )
+    ),
     NumContexts = py_context_router:num_contexts(),
-    lists:foreach(fun(I) ->
-        Ctx = py_context_router:get_context(I),
-        ok = py_context:exec(Ctx, PathCmd)
-    end, lists:seq(1, NumContexts)),
+    lists:foreach(
+        fun(I) ->
+            Ctx = py_context_router:get_context(I),
+            ok = py_context:exec(Ctx, PathCmd)
+        end,
+        lists:seq(1, NumContexts)
+    ),
     Config.
 
 end_per_suite(_Config) ->
@@ -102,7 +108,11 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    try py:unregister_function(test_pid_echo) catch _:_ -> ok end,
+    try
+        py:unregister_function(test_pid_echo)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%% ============================================================================
@@ -141,7 +151,11 @@ test_pid_hash(_Config) ->
 %% @doc Verify two different PIDs are not equal.
 test_pid_inequality(_Config) ->
     Pid1 = self(),
-    Pid2 = spawn(fun() -> receive stop -> ok end end),
+    Pid2 = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
     {ok, true} = py:call(py_test_pid_send, pid_inequality, [Pid1, Pid2]),
     Pid2 ! stop,
     ok.
@@ -163,11 +177,23 @@ test_send_simple_message(_Config) ->
 %% @doc Test sending multiple messages in sequence.
 test_send_multiple_messages(_Config) ->
     Pid = self(),
-    {ok, 3} = py:call(py_test_pid_send, send_multiple,
-                       [Pid, [<<"one">>, <<"two">>, <<"three">>]]),
-    receive <<"one">> -> ok after 5000 -> ct:fail(timeout_msg_1) end,
-    receive <<"two">> -> ok after 5000 -> ct:fail(timeout_msg_2) end,
-    receive <<"three">> -> ok after 5000 -> ct:fail(timeout_msg_3) end.
+    {ok, 3} = py:call(
+        py_test_pid_send,
+        send_multiple,
+        [Pid, [<<"one">>, <<"two">>, <<"three">>]]
+    ),
+    receive
+        <<"one">> -> ok
+    after 5000 -> ct:fail(timeout_msg_1)
+    end,
+    receive
+        <<"two">> -> ok
+    after 5000 -> ct:fail(timeout_msg_2)
+    end,
+    receive
+        <<"three">> -> ok
+    after 5000 -> ct:fail(timeout_msg_3)
+    end.
 
 %% @doc Test sending a complex compound term.
 test_send_complex_term(_Config) ->
@@ -188,7 +214,8 @@ test_send_bad_pid_raises(_Config) ->
 test_send_to_dead_process(_Config) ->
     %% Spawn a process that exits immediately
     Pid = spawn(fun() -> ok end),
-    timer:sleep(100), %% ensure it's dead
+    %% ensure it's dead
+    timer:sleep(100),
     %% erlang.send() to a dead PID should fail (enif_send returns 0)
     {error, _} = py:call(py_test_pid_send, send_message, [Pid, <<"dead">>]),
     ok.
@@ -216,8 +243,11 @@ test_pid_in_complex_structure(_Config) ->
     {ok, [ReturnedPid]} = py:call(py_test_pid_send, round_trip_pid, [[Pid]]),
     Pid = ReturnedPid,
     %% Pass PID inside a map
-    {ok, #{<<"pid">> := ReturnedPid2}} = py:call(py_test_pid_send,
-        round_trip_pid, [#{<<"pid">> => Pid}]),
+    {ok, #{<<"pid">> := ReturnedPid2}} = py:call(
+        py_test_pid_send,
+        round_trip_pid,
+        [#{<<"pid">> => Pid}]
+    ),
     Pid = ReturnedPid2,
     ok.
 
@@ -232,8 +262,11 @@ test_suspension_not_caught_by_except(_Config) ->
     %% Register a simple callback
     py:register_function(test_pid_echo, fun([X]) -> X end),
     %% Call Python function that wraps erlang.call in try/except Exception
-    {ok, {<<"ok">>, 42}} = py:call(py_test_pid_send,
-                                    suspension_not_caught_by_except_exception, []),
+    {ok, {<<"ok">>, 42}} = py:call(
+        py_test_pid_send,
+        suspension_not_caught_by_except_exception,
+        []
+    ),
     ok.
 
 %% @doc Verify SuspensionRequired IS a subclass of BaseException.
@@ -265,9 +298,18 @@ test_send_multiple_from_coroutine(_Config) ->
     Pid = self(),
     Messages = [<<"async_1">>, <<"async_2">>, <<"async_3">>],
     {ok, 3} = py:call(py_test_pid_send, send_multiple_from_coroutine, [Pid, Messages]),
-    receive <<"async_1">> -> ok after 5000 -> ct:fail(timeout_async_1) end,
-    receive <<"async_2">> -> ok after 5000 -> ct:fail(timeout_async_2) end,
-    receive <<"async_3">> -> ok after 5000 -> ct:fail(timeout_async_3) end.
+    receive
+        <<"async_1">> -> ok
+    after 5000 -> ct:fail(timeout_async_1)
+    end,
+    receive
+        <<"async_2">> -> ok
+    after 5000 -> ct:fail(timeout_async_2)
+    end,
+    receive
+        <<"async_3">> -> ok
+    after 5000 -> ct:fail(timeout_async_3)
+    end.
 
 %% @doc Test that erlang.send() is non-blocking by sending many messages quickly.
 %% The function returns elapsed time - it should complete in under 100ms for 1000 messages.
@@ -286,9 +328,18 @@ test_send_interleaved_with_async(_Config) ->
     Pid = self(),
     Messages = [<<"interleaved_1">>, <<"interleaved_2">>, <<"interleaved_3">>],
     {ok, [0, 1, 2]} = py:call(py_test_pid_send, send_interleaved_with_async, [Pid, Messages]),
-    receive <<"interleaved_1">> -> ok after 5000 -> ct:fail(timeout_interleaved_1) end,
-    receive <<"interleaved_2">> -> ok after 5000 -> ct:fail(timeout_interleaved_2) end,
-    receive <<"interleaved_3">> -> ok after 5000 -> ct:fail(timeout_interleaved_3) end.
+    receive
+        <<"interleaved_1">> -> ok
+    after 5000 -> ct:fail(timeout_interleaved_1)
+    end,
+    receive
+        <<"interleaved_2">> -> ok
+    after 5000 -> ct:fail(timeout_interleaved_2)
+    end,
+    receive
+        <<"interleaved_3">> -> ok
+    after 5000 -> ct:fail(timeout_interleaved_3)
+    end.
 
 %%% ============================================================================
 %%% erlang.whereis() Tests
@@ -354,8 +405,11 @@ test_whereis_and_send(_Config) ->
     erlang:register(py_whereis_send_test, Self),
     try
         %% Use Python helper to look up process and send message
-        {ok, true} = py:call(py_test_pid_send, whereis_and_send,
-                              [<<"py_whereis_send_test">>, {<<"hello_from_whereis">>, 42}]),
+        {ok, true} = py:call(
+            py_test_pid_send,
+            whereis_and_send,
+            [<<"py_whereis_send_test">>, {<<"hello_from_whereis">>, 42}]
+        ),
         %% Verify we received the message
         receive
             {<<"hello_from_whereis">>, 42} -> ok
@@ -371,7 +425,8 @@ test_whereis_and_send(_Config) ->
 %%% Helper Functions
 %%% ============================================================================
 
-drain_messages(0) -> ok;
+drain_messages(0) ->
+    ok;
 drain_messages(N) ->
     receive
         {<<"msg">>, _} -> drain_messages(N - 1)

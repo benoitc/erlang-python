@@ -133,7 +133,11 @@ test_pid_is_pid(Config) ->
 test_pid_equality_and_hash(Config) ->
     C = new_ctx(Config),
     Self = self(),
-    Other = spawn(fun() -> receive stop -> ok end end),
+    Other = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
     {ok, true} = py_context:call(C, ?TEST_MOD, pid_equal, [Self, Self]),
     {ok, false} = py_context:call(C, ?TEST_MOD, pid_equal, [Self, Other]),
     {ok, true} = py_context:call(C, ?TEST_MOD, pid_hash_equal, [Self, Self]),
@@ -150,7 +154,10 @@ test_pid_in_structure(Config) ->
 test_send_simple(Config) ->
     C = new_ctx(Config),
     {ok, true} = py_context:call(C, ?TEST_MOD, send, [self(), <<"hello">>]),
-    receive <<"hello">> -> ok after 2000 -> ct:fail(no_message) end,
+    receive
+        <<"hello">> -> ok
+    after 2000 -> ct:fail(no_message)
+    end,
     stop(C).
 
 test_send_multiple_ordered(Config) ->
@@ -175,7 +182,11 @@ test_send_complex_term(Config) ->
 
 test_send_is_nonblocking(Config) ->
     C = new_ctx(Config),
-    Sink = spawn(fun() -> receive stop -> ok end end),
+    Sink = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
     {ok, Ms} = py_context:call(C, ?TEST_MOD, send_timing, [Sink, 1000]),
     ct:log("1000 erlang.send took ~.1f ms (~.1f us each)", [Ms, Ms]),
     true = Ms < 5000,
@@ -198,7 +209,10 @@ test_send_bad_pid(Config) ->
 test_send_from_coroutine(Config) ->
     C = new_ctx(Config),
     {ok, <<"sent">>} = py_context:call(C, ?TEST_MOD, send_from_coroutine, [self(), from_coro]),
-    receive <<"from_coro">> -> ok after 2000 -> ct:fail(no_message) end,
+    receive
+        <<"from_coro">> -> ok
+    after 2000 -> ct:fail(no_message)
+    end,
     stop(C).
 
 test_whereis(Config) ->
@@ -219,7 +233,9 @@ test_suspension_is_base_exception(Config) ->
 test_callback_inside_except_exception(Config) ->
     C = new_ctx(Config),
     py_callback:register(<<"vm_echo">>, fun([X]) -> X end),
-    {ok, {<<"ok">>, 42}} = py_context:call(C, ?TEST_MOD, call_inside_except_exception, [<<"vm_echo">>, 42]),
+    {ok, {<<"ok">>, 42}} = py_context:call(C, ?TEST_MOD, call_inside_except_exception, [
+        <<"vm_echo">>, 42
+    ]),
     py_callback:unregister(<<"vm_echo">>),
     stop(C).
 
@@ -287,8 +303,10 @@ test_encoding_pid_and_ref(Config) ->
 
 test_encoding_floats(Config) ->
     C = new_ctx(Config),
-    lists:foreach(fun(F) -> F = probe(C, F) end,
-                  [3.14159265358979, 1.0e-300, 1.7976931348623157e308, -0.0]),
+    lists:foreach(
+        fun(F) -> F = probe(C, F) end,
+        [3.14159265358979, 1.0e-300, 1.7976931348623157e308, -0.0]
+    ),
     stop(C).
 
 test_encoding_booleans_and_none(Config) ->
@@ -296,10 +314,13 @@ test_encoding_booleans_and_none(Config) ->
     true = probe(C, true),
     false = probe(C, false),
     <<"bool">> = probe_type(C, true),
-    lists:foreach(fun(A) ->
-        none = probe(C, A),
-        <<"NoneType">> = probe_type(C, A)
-    end, [undefined, nil, none]),
+    lists:foreach(
+        fun(A) ->
+            none = probe(C, A),
+            <<"NoneType">> = probe_type(C, A)
+        end,
+        [undefined, nil, none]
+    ),
     stop(C).
 
 test_encoding_python_types(Config) ->
@@ -316,7 +337,9 @@ test_encoding_python_types(Config) ->
 test_threads_call_erlang(Config) ->
     C = new_ctx(Config),
     py_callback:register(<<"vm_tid">>, fun([T, I]) -> T * 1000 + I end),
-    {ok, {<<"ok">>, true, 40}} = py_context:call(C, ?TEST_MOD, thread_calls, [<<"vm_tid">>, 4, 10], #{}, 30000),
+    {ok, {<<"ok">>, true, 40}} = py_context:call(
+        C, ?TEST_MOD, thread_calls, [<<"vm_tid">>, 4, 10], #{}, 30000
+    ),
     py_callback:unregister(<<"vm_tid">>),
     stop(C).
 
@@ -347,7 +370,9 @@ test_threadpool_nested(Config) ->
 test_threads_high_concurrency(Config) ->
     C = new_ctx(Config),
     py_callback:register(<<"vm_tid">>, fun([T, I]) -> T * 1000 + I end),
-    {ok, {<<"ok">>, true, 1600}} = py_context:call(C, ?TEST_MOD, thread_calls, [<<"vm_tid">>, 32, 50], #{}, 60000),
+    {ok, {<<"ok">>, true, 1600}} = py_context:call(
+        C, ?TEST_MOD, thread_calls, [<<"vm_tid">>, 32, 50], #{}, 60000
+    ),
     py_callback:unregister(<<"vm_tid">>),
     stop(C).
 
@@ -357,9 +382,12 @@ test_threads_high_concurrency(Config) ->
 
 test_counter_actor(Config) ->
     C = new_ctx(Config),
-    lists:foreach(fun(I) ->
-        {ok, I} = py_context:call(C, ?TEST_MOD, counter_increment, [])
-    end, lists:seq(1, 100)),
+    lists:foreach(
+        fun(I) ->
+            {ok, I} = py_context:call(C, ?TEST_MOD, counter_increment, [])
+        end,
+        lists:seq(1, 100)
+    ),
     {ok, 110} = py_context:call(C, ?TEST_MOD, counter_increment, [10]),
     {ok, 110} = py_context:call(C, ?TEST_MOD, counter_value, []),
     stop(C).
@@ -403,7 +431,10 @@ test_ping_pong(Config) ->
     py_callback:register(<<"vm_incr">>, fun([X]) -> X + 1 end),
     {ok, 1000} = py_context:call(C, ?TEST_MOD, ping_pong, [<<"vm_incr">>, 1000], #{}, 60000),
     py_callback:unregister(<<"vm_incr">>),
-    receive Any -> ct:fail({unexpected_message, Any}) after 0 -> ok end,
+    receive
+        Any -> ct:fail({unexpected_message, Any})
+    after 0 -> ok
+    end,
     stop(C).
 
 %% @doc Erlang feeds terms to the child through a callback it polls.
@@ -412,7 +443,10 @@ test_feed_through_callback(Config) ->
     Feeder = spawn_link(fun() -> feeder(lists:seq(1, 200)) end),
     py_callback:register(<<"vm_next">>, fun([]) ->
         Feeder ! {next, self()},
-        receive {item, I} -> I after 5000 -> none end
+        receive
+            {item, I} -> I
+        after 5000 -> none
+        end
     end),
     {ok, Items} = py_context:call(C, ?TEST_MOD, poll_feed, [<<"vm_next">>, 200], #{}, 60000),
     Expected = lists:seq(1, 200),
@@ -422,11 +456,20 @@ test_feed_through_callback(Config) ->
     stop(C).
 
 feeder([]) ->
-    receive stop -> ok; {next, From} -> From ! {item, none}, feeder([]) end;
+    receive
+        stop ->
+            ok;
+        {next, From} ->
+            From ! {item, none},
+            feeder([])
+    end;
 feeder([H | T] = L) ->
     receive
-        stop -> ok;
-        {next, From} -> From ! {item, H}, feeder(T)
+        stop ->
+            ok;
+        {next, From} ->
+            From ! {item, H},
+            feeder(T)
     after 10000 ->
         feeder(L)
     end.
@@ -461,9 +504,15 @@ new_ctx(Config) ->
     {ok, C} = py_context:new(#{mode => Mode, paths => [TestDir]}),
     case Mode of
         worker ->
-            ok = py_context:exec(C, iolist_to_binary(io_lib:format(
-                "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')",
-                [TestDir, TestDir])));
+            ok = py_context:exec(
+                C,
+                iolist_to_binary(
+                    io_lib:format(
+                        "import sys\nif '~s' not in sys.path: sys.path.insert(0, '~s')",
+                        [TestDir, TestDir]
+                    )
+                )
+            );
         _ ->
             ok
     end,
@@ -474,4 +523,7 @@ stop(C) ->
     ok.
 
 flush() ->
-    receive _ -> flush() after 0 -> ok end.
+    receive
+        _ -> flush()
+    after 0 -> ok
+    end.

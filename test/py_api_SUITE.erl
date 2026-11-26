@@ -68,13 +68,21 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TestCase, Config) ->
     %% Ensure fresh contexts are available for each test
-    try py:stop_contexts() catch _:_ -> ok end,
+    try
+        py:stop_contexts()
+    catch
+        _:_ -> ok
+    end,
     {ok, _} = py:start_contexts(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
     %% Clean up after each test
-    try py:stop_contexts() catch _:_ -> ok end,
+    try
+        py:stop_contexts()
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %% ============================================================================
@@ -190,18 +198,24 @@ test_start_stop_contexts(_Config) ->
     true = length(Contexts1) > 0,
 
     %% All contexts should be alive
-    lists:foreach(fun(Ctx) ->
-        true = is_process_alive(Ctx)
-    end, Contexts1),
+    lists:foreach(
+        fun(Ctx) ->
+            true = is_process_alive(Ctx)
+        end,
+        Contexts1
+    ),
 
     %% Stop
     ok = py:stop_contexts(),
 
     %% Wait for contexts to die
     timer:sleep(100),
-    lists:foreach(fun(Ctx) ->
-        false = is_process_alive(Ctx)
-    end, Contexts1),
+    lists:foreach(
+        fun(Ctx) ->
+            false = is_process_alive(Ctx)
+        end,
+        Contexts1
+    ),
 
     %% Start with custom settings
     {ok, Contexts2} = py:start_contexts(#{contexts => 2}),
@@ -237,13 +251,14 @@ test_explicit_bytes(_Config) ->
     Ctx = py:context(1),
 
     %% Define test functions
-    ok = py:exec(Ctx, <<"
-def check_type(val):
-    return type(val).__name__
-
-def check_bytes_value(val):
-    return val == b'hello'
-">>),
+    ok = py:exec(Ctx, <<
+        "\n"
+        "def check_type(val):\n"
+        "    return type(val).__name__\n"
+        "\n"
+        "def check_bytes_value(val):\n"
+        "    return val == b'hello'\n"
+    >>),
 
     %% Regular binary -> str (default UTF-8 decoding)
     {ok, <<"str">>} = py:eval(Ctx, <<"check_type(val)">>, #{<<"val">> => <<"hello">>}),

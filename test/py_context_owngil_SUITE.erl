@@ -59,41 +59,45 @@
 ]).
 
 all() ->
-    [{group, lifecycle},
-     {group, basic_ops},
-     {group, ipc},
-     {group, isolation},
-     {group, parallelism},
-     {group, features}].
+    [
+        {group, lifecycle},
+        {group, basic_ops},
+        {group, ipc},
+        {group, isolation},
+        {group, parallelism},
+        {group, features}
+    ].
 
 groups() ->
-    [{lifecycle, [sequence], [
-        test_owngil_context_create,
-        test_owngil_thread_init,
-        test_owngil_context_destroy
-    ]},
-     {basic_ops, [sequence], [
-        test_owngil_basic_call,
-        test_owngil_eval,
-        test_owngil_exec
-    ]},
-     {ipc, [sequence], [
-        test_owngil_type_conversions,
-        test_owngil_large_data,
-        test_owngil_binary_data
-    ]},
-     {isolation, [sequence], [
-        test_owngil_isolation,
-        test_owngil_interp_id
-    ]},
-     {parallelism, [parallel], [
-        test_owngil_parallel_execution,
-        test_owngil_concurrent_sleep
-    ]},
-     {features, [sequence], [
-        test_owngil_state_persistence,
-        test_owngil_module_import
-    ]}].
+    [
+        {lifecycle, [sequence], [
+            test_owngil_context_create,
+            test_owngil_thread_init,
+            test_owngil_context_destroy
+        ]},
+        {basic_ops, [sequence], [
+            test_owngil_basic_call,
+            test_owngil_eval,
+            test_owngil_exec
+        ]},
+        {ipc, [sequence], [
+            test_owngil_type_conversions,
+            test_owngil_large_data,
+            test_owngil_binary_data
+        ]},
+        {isolation, [sequence], [
+            test_owngil_isolation,
+            test_owngil_interp_id
+        ]},
+        {parallelism, [parallel], [
+            test_owngil_parallel_execution,
+            test_owngil_concurrent_sleep
+        ]},
+        {features, [sequence], [
+            test_owngil_state_persistence,
+            test_owngil_module_import
+        ]}
+    ].
 
 init_per_suite(Config) ->
     case py_nif:owngil_supported() of
@@ -256,7 +260,9 @@ test_owngil_parallel_execution(_Config) ->
         NumContexts ->
             run_parallel_test(Contexts);
         N when N >= 2 ->
-            ct:pal("Only ~p of ~p contexts created, running with reduced parallelism", [N, NumContexts]),
+            ct:pal("Only ~p of ~p contexts created, running with reduced parallelism", [
+                N, NumContexts
+            ]),
             run_parallel_test(Contexts);
         _ ->
             [py_context:stop(Ctx) || Ctx <- Contexts],
@@ -266,7 +272,8 @@ test_owngil_parallel_execution(_Config) ->
 create_owngil_contexts(0, Acc) ->
     lists:reverse(Acc);
 create_owngil_contexts(N, Acc) ->
-    timer:sleep(50),  %% Small delay between context creations
+    %% Small delay between context creations
+    timer:sleep(50),
     case py_context:start_link(N, owngil) of
         {ok, Ctx} ->
             create_owngil_contexts(N - 1, [Ctx | Acc]);
@@ -287,15 +294,25 @@ run_parallel_test(Contexts) ->
 
     %% Parallel execution timing
     ParStart = erlang:monotonic_time(millisecond),
-    Pids = [spawn(fun() ->
-        Result = py_context:eval(Ctx, Code, #{}),
-        Parent ! {done, self(), Result}
-    end) || Ctx <- Contexts],
-    [receive {done, Pid, _Result} -> ok end || Pid <- Pids],
+    Pids = [
+        spawn(fun() ->
+            Result = py_context:eval(Ctx, Code, #{}),
+            Parent ! {done, self(), Result}
+        end)
+     || Ctx <- Contexts
+    ],
+    [
+        receive
+            {done, Pid, _Result} -> ok
+        end
+     || Pid <- Pids
+    ],
     ParTime = erlang:monotonic_time(millisecond) - ParStart,
 
-    ct:pal("Sequential: ~p ms, Parallel: ~p ms, Speedup: ~.2fx",
-           [SeqTime, ParTime, SeqTime / max(1, ParTime)]),
+    ct:pal(
+        "Sequential: ~p ms, Parallel: ~p ms, Speedup: ~.2fx",
+        [SeqTime, ParTime, SeqTime / max(1, ParTime)]
+    ),
 
     %% With OWN_GIL, parallel should be significantly faster
     %% Use a conservative check - parallel should be at least 1.3x faster
@@ -321,8 +338,12 @@ test_owngil_concurrent_sleep(_Config) ->
         Parent ! {done, 2}
     end),
 
-    receive {done, _} -> ok end,
-    receive {done, _} -> ok end,
+    receive
+        {done, _} -> ok
+    end,
+    receive
+        {done, _} -> ok
+    end,
 
     Elapsed = erlang:monotonic_time(millisecond) - Start,
     ct:pal("Two 100ms sleeps completed in ~p ms", [Elapsed]),

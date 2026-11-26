@@ -76,7 +76,8 @@ acquire(Timeout) when is_integer(Timeout), Timeout > 0 ->
     StartTime = erlang:monotonic_time(millisecond),
     acquire_loop(Timeout, StartTime, ?BACKOFF_MS);
 acquire(_) ->
-    acquire(30000). % Default 30s timeout
+    % Default 30s timeout
+    acquire(30000).
 
 %% @doc Release a slot in the semaphore.
 %% Must be called after acquire/1 completes, typically in an after clause.
