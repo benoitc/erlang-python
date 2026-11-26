@@ -164,19 +164,17 @@ class Channel:
         """
         import asyncio
 
+        # Non-blocking first. receive(0) raises TimeoutError when the channel
+        # is empty, so a queued None comes back like any other message, which
+        # try_receive() cannot tell apart from an empty channel.
+        try:
+            return self.receive(0)
+        except TimeoutError:
+            pass
+
         loop = asyncio.get_running_loop()
         if hasattr(loop, '_loop_capsule') and hasattr(loop, '_timers'):
             return await self._async_receive_event_driven(loop)
-
-        # Try non-blocking first (direct NIF - fast)
-        result = self.try_receive()
-        if result is not None:
-            return result
-
-        # Check if closed
-        if self._is_closed():
-            raise ChannelClosed("Channel has been closed")
-
         return await self._async_receive_polling()
 
     async def _async_receive_event_driven(self, loop):

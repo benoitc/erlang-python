@@ -29,6 +29,8 @@
     async_receive_immediate_test/1,
     native_none_payload_test/1,
     native_cancel_ready_test/1,
+    native_send_then_close_test/1,
+    fallback_none_payload_test/1,
     isolated_channel_rejected_test/1,
     async_receive_wait_test/1,
     async_iteration_test/1,
@@ -68,6 +70,8 @@ all() -> [
     async_receive_immediate_test,
     native_none_payload_test,
     native_cancel_ready_test,
+    native_send_then_close_test,
+    fallback_none_payload_test,
     isolated_channel_rejected_test,
     async_receive_wait_test,
     async_iteration_test,
@@ -167,6 +171,64 @@ def run_cancel_ready(ref):
         {ok, true} = py:call(Ctx, '__main__', run_cancel_ready, [Ch])
     after
         py:unregister_function(channel_regression_send),
+        py_channel:close(Ch)
+    end.
+
+%% A message sent just before a close, while the receiver waits, is
+%% delivered: the woken receiver takes it before it sees the close.
+native_send_then_close_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    ok = py:register_function(channel_regression_send_close, fun([]) ->
+        ok = py_channel:send(Ch, 42),
+        py_channel:close(Ch)
+    end),
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import erlang
+async def send_then_close(ref):
+    channel = erlang.Channel(ref)
+    receiver = asyncio.create_task(channel.async_receive())
+    await asyncio.sleep(0)
+    erlang.call('channel_regression_send_close')
+    assert await asyncio.wait_for(receiver, 1) == 42
+    try:
+        await asyncio.wait_for(channel.async_receive(), 1)
+    except erlang.ChannelClosed:
+        return True
+    return False
+def run_send_then_close(ref):
+    return erlang.run(send_then_close(ref))
+">>),
+    try
+        {ok, true} = py:call(Ctx, '__main__', run_send_then_close, [Ch])
+    after
+        py:unregister_function(channel_regression_send_close)
+    end.
+
+%% On a plain asyncio loop a queued none is received as None, not taken
+%% for an empty channel.
+fallback_none_payload_test(_Config) ->
+    {ok, Ch} = py_channel:new(),
+    ok = py_channel:send(Ch, none),
+    ok = py_channel:send(Ch, second),
+    Ctx = py:context(1),
+    ok = py:exec(Ctx, <<"
+import asyncio
+import erlang
+def fallback_receive_two(ref):
+    channel = erlang.Channel(ref)
+    loop = asyncio.SelectorEventLoop()
+    try:
+        first = loop.run_until_complete(asyncio.wait_for(channel.async_receive(), 1))
+        second = loop.run_until_complete(asyncio.wait_for(channel.async_receive(), 1))
+        return [first, second]
+    finally:
+        loop.close()
+">>),
+    try
+        {ok, [none, <<"second">>]} = py:call(Ctx, '__main__', fallback_receive_two, [Ch])
+    after
         py_channel:close(Ch)
     end.
 
