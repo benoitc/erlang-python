@@ -140,7 +140,7 @@ rchurn(T, Deadline, N, Errs) ->
                         {ok, S} = py_session:new(T),
                         %% Keep the operation far beyond the deadline so ASan
                         %% scheduler overhead cannot let it finish first.
-                        R = py_context:call(S, py_test_reimport, sleep, [10], #{}, 50),
+                        R = py_context:call(S, py_test_reimport, sleep, [1], #{}, 50),
                         {ok, 1} = py_context:call(S, py_test_reimport, bump, []),
                         ok = py_session:close(S),
                         expect({error, timeout}, R);
