@@ -40,6 +40,14 @@
 
 ### Fixed
 
+- Shared dictionaries could deadlock the node when Erlang and Python used
+  one at the same time, or when pickling a value accessed the same dictionary.
+  Their stored values are now independent of any Python interpreter, so they
+  also work safely from `owngil` contexts. Native buffers, channels and event
+  loops now clean up safely when construction stops partway through instead
+  of freeing or destroying the same resource state twice. Oversized buffers,
+  callback frames and internal tables now fail instead of wrapping their
+  lengths or growing forever.
 - On an owngil context, the process-local environment of an Erlang process
   (`py:call/eval/exec` on the context) was kept until the context stopped:
   300 short-lived processes each leaving 1 MB grew the node by 300 MB. The

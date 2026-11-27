@@ -255,6 +255,15 @@ static inline bool runtime_is_shutting_down(void) {
  * to help detect resource leaks and imbalanced operations. At shutdown,
  * paired counters should be equal.
  */
+typedef struct py_shared_dict_entry {
+    struct py_shared_dict_entry *next;
+    size_t key_len;
+    size_t value_len;
+    unsigned char data[];
+} py_shared_dict_entry_t;
+
+#define PY_SHARED_DICT_BUCKETS 64
+
 typedef struct {
     /* GIL operations */
     _Atomic uint64_t gil_ensure_count;      /**< PyGILState_Ensure calls */
@@ -1346,11 +1355,17 @@ typedef struct {
     /** @brief Whether the monitor is currently active */
     bool monitor_active;
 
-    /** @brief Mutex for thread-safe dict operations */
+    /** @brief Mutex for thread-safe native table operations */
     pthread_mutex_t mutex;
 
-    /** @brief Python dict storing keys -> pickled bytes */
-    PyObject *dict;
+    /** @brief Whether mutex was initialized (partial-construction guard) */
+    bool mutex_initialized;
+
+    /** @brief Native table storing byte keys -> pickled byte values */
+    py_shared_dict_entry_t *buckets[PY_SHARED_DICT_BUCKETS];
+
+    /** @brief Number of entries in buckets */
+    size_t size;
 
     /** @brief Atomic flag: true if dict has been destroyed (owner died) */
     _Atomic bool destroyed;

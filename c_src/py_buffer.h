@@ -82,6 +82,8 @@ typedef struct {
     ssize_t content_length;   /**< Expected total size, -1 for chunked */
     pthread_mutex_t mutex;    /**< Mutex for thread-safe access */
     pthread_cond_t data_ready; /**< Condition for blocking reads */
+    bool mutex_initialized;   /**< Partial-construction guard */
+    bool cond_initialized;    /**< Partial-construction guard */
     bool eof;                 /**< End of data flag (close called) */
     bool closed;              /**< Buffer closed flag */
     int view_count;           /**< Active Python buffer view count */

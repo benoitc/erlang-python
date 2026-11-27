@@ -63,6 +63,7 @@
     test_shared_dict_types/1,
     test_shared_dict_process_death/1,
     test_shared_dict_python_access/1,
+    test_shared_dict_reentrant_pickle/1,
     test_shared_dict_destroy/1,
     %% SharedDict concurrent tests
     test_shared_dict_concurrent_same_key/1,
@@ -126,6 +127,7 @@ all() ->
         test_shared_dict_types,
         test_shared_dict_process_death,
         test_shared_dict_python_access,
+        test_shared_dict_reentrant_pickle,
         test_shared_dict_destroy,
         %% SharedDict concurrent tests
         test_shared_dict_concurrent_same_key,
@@ -1375,6 +1377,27 @@ test_shared_dict_python_access(_Config) ->
     undefined = py:shared_dict_get(SD, <<"python_key">>),
 
     ct:pal("SharedDict Python access test passed~n"),
+    ok.
+
+%% Pickle may execute user code. It must run without the native table lock,
+%% otherwise the nested write below deadlocks on the same SharedDict.
+test_shared_dict_reentrant_pickle(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+    {ok, _} = py:eval(
+        <<"(globals().__setitem__('_reentrant_sd_handle', handle), None)[-1]">>,
+        #{<<"handle">> => SD}
+    ),
+    ok = py:exec(<<
+        "from erlang import SharedDict\n"
+        "_reentrant_sd = SharedDict(_reentrant_sd_handle)\n"
+        "class _ReentrantPickle:\n"
+        "    def __reduce__(self):\n"
+        "        _reentrant_sd['inner'] = 7\n"
+        "        return (dict, ())\n"
+        "_reentrant_sd['outer'] = _ReentrantPickle()\n"
+    >>),
+    7 = py:shared_dict_get(SD, <<"inner">>),
+    #{} = py:shared_dict_get(SD, <<"outer">>),
     ok.
 
 %% Test explicit SharedDict destroy

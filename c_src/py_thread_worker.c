@@ -310,7 +310,12 @@ static thread_worker_t *create_thread_worker(void) {
         (void)fcntl(tw->response_pipe[1], F_SETFL, wflags | O_NONBLOCK);
     }
 
-    pthread_mutex_init(&tw->mutex, NULL);
+    if (pthread_mutex_init(&tw->mutex, NULL) != 0) {
+        close(tw->response_pipe[0]);
+        close(tw->response_pipe[1]);
+        enif_free(tw);
+        return NULL;
+    }
 
     /* Add to pool */
     tw->next = g_thread_pool_head;
@@ -716,6 +721,10 @@ static ERL_NIF_TERM nif_thread_worker_write_with_id(ErlNifEnv *env, int argc,
     if (!enif_inspect_binary(env, argv[2], &response)) {
         return make_error(env, "invalid_response");
     }
+    if (response.size > UINT32_MAX ||
+        response.size > SIZE_MAX - sizeof(callback_id) - sizeof(uint32_t)) {
+        return make_error(env, "response_too_large");
+    }
 
     size_t total = sizeof(callback_id) + sizeof(uint32_t) + response.size;
     char  stack_buf[THREAD_WORKER_STACK_FRAME_LIMIT];
@@ -810,6 +819,10 @@ static ERL_NIF_TERM nif_async_callback_response(ErlNifEnv *env, int argc,
     }
     if (!enif_inspect_binary(env, argv[2], &response)) {
         return make_error(env, "invalid_response");
+    }
+    if (response.size > UINT32_MAX ||
+        response.size > SIZE_MAX - sizeof(callback_id) - sizeof(uint32_t)) {
+        return make_error(env, "response_too_large");
     }
 
     size_t total = sizeof(callback_id) + sizeof(uint32_t) + response.size;

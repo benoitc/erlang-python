@@ -359,6 +359,15 @@ static void cleanup_callback_registry(void) {
  * @param kwargs_term Original kwargs term
  * @return suspended_context_state_t* or NULL on error
  */
+static void release_failed_suspended_context_state(
+    suspended_context_state_t *state) {
+    /* Constructors run with the owning interpreter's GIL.  Clear the Python
+     * reference here because the resource destructor may run on a scheduler
+     * thread whose current thread state belongs to another interpreter. */
+    Py_CLEAR(state->callback_args);
+    enif_release_resource(state);
+}
+
 static suspended_context_state_t *create_suspended_context_state_for_call(
     ErlNifEnv *env,
     py_context_t *ctx,
@@ -377,6 +386,7 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
 
     /* Initialize to zero */
     memset(state, 0, sizeof(suspended_context_state_t));
+    atomic_fetch_add(&g_counters.suspended_created, 1);
 
     state->ctx = ctx;
     enif_keep_resource(ctx);  /* Keep ctx alive while suspended state exists */
@@ -390,7 +400,7 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
     /* Copy callback function name */
     state->callback_func_name = enif_alloc(tl_pending_func_name_len + 1);
     if (state->callback_func_name == NULL) {
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
     memcpy(state->callback_func_name, tl_pending_func_name, tl_pending_func_name_len);
@@ -404,29 +414,20 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
     /* Create environment to hold copied terms */
     state->orig_env = enif_alloc_env();
     if (state->orig_env == NULL) {
-        Py_DECREF(state->callback_args);
-        enif_free(state->callback_func_name);
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
 
     /* Copy module binary */
     if (!enif_alloc_binary(module_bin->size, &state->orig_module)) {
-        enif_free_env(state->orig_env);
-        Py_DECREF(state->callback_args);
-        enif_free(state->callback_func_name);
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
     memcpy(state->orig_module.data, module_bin->data, module_bin->size);
 
     /* Copy function binary */
     if (!enif_alloc_binary(func_bin->size, &state->orig_func)) {
-        enif_release_binary(&state->orig_module);
-        enif_free_env(state->orig_env);
-        Py_DECREF(state->callback_args);
-        enif_free(state->callback_func_name);
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
     memcpy(state->orig_func.data, func_bin->data, func_bin->size);
@@ -435,7 +436,6 @@ static suspended_context_state_t *create_suspended_context_state_for_call(
     state->orig_args = enif_make_copy(state->orig_env, args_term);
     state->orig_kwargs = enif_make_copy(state->orig_env, kwargs_term);
 
-    atomic_fetch_add(&g_counters.suspended_created, 1);
     return state;
 }
 
@@ -469,6 +469,7 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
 
     /* Initialize to zero */
     memset(state, 0, sizeof(suspended_context_state_t));
+    atomic_fetch_add(&g_counters.suspended_created, 1);
 
     state->ctx = ctx;
     enif_keep_resource(ctx);  /* Keep ctx alive while suspended state exists */
@@ -482,7 +483,7 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
     /* Copy callback function name */
     state->callback_func_name = enif_alloc(tl_pending_func_name_len + 1);
     if (state->callback_func_name == NULL) {
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
     memcpy(state->callback_func_name, tl_pending_func_name, tl_pending_func_name_len);
@@ -496,18 +497,13 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
     /* Create environment to hold copied terms */
     state->orig_env = enif_alloc_env();
     if (state->orig_env == NULL) {
-        Py_DECREF(state->callback_args);
-        enif_free(state->callback_func_name);
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
 
     /* Copy code binary */
     if (!enif_alloc_binary(code_bin->size, &state->orig_code)) {
-        enif_free_env(state->orig_env);
-        Py_DECREF(state->callback_args);
-        enif_free(state->callback_func_name);
-        enif_release_resource(state);
+        release_failed_suspended_context_state(state);
         return NULL;
     }
     memcpy(state->orig_code.data, code_bin->data, code_bin->size);
@@ -515,7 +511,6 @@ static suspended_context_state_t *create_suspended_context_state_for_eval(
     /* Copy locals to our environment */
     state->orig_locals = enif_make_copy(state->orig_env, locals_term);
 
-    atomic_fetch_add(&g_counters.suspended_created, 1);
     return state;
 }
 
@@ -535,7 +530,12 @@ static ERL_NIF_TERM build_suspended_context_result(ErlNifEnv *env, suspended_con
 
     ERL_NIF_TERM func_name_term;
     unsigned char *fn_buf = enif_make_new_binary(env, tl_pending_func_name_len, &func_name_term);
-    memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
+    if (fn_buf == NULL && tl_pending_func_name_len > 0) {
+        return make_error(env, "alloc_failed");
+    }
+    if (tl_pending_func_name_len > 0) {
+        memcpy(fn_buf, tl_pending_func_name, tl_pending_func_name_len);
+    }
 
     ERL_NIF_TERM args_term = py_to_term(env, tl_pending_args);
 
@@ -1801,7 +1801,13 @@ static PyObject *erlang_call_impl(PyObject *self, PyObject *args) {
         ERL_NIF_TERM func_term;
         {
             unsigned char *buf = enif_make_new_binary(msg_env, func_name_len, &func_term);
-            memcpy(buf, func_name, func_name_len);
+            if (buf == NULL && func_name_len > 0) {
+                enif_free_env(msg_env);
+                Py_DECREF(call_args);
+                PyErr_SetString(PyExc_MemoryError, "Failed to allocate callback name");
+                return NULL;
+            }
+            if (func_name_len > 0) memcpy(buf, func_name, func_name_len);
         }
 
         ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
@@ -2043,6 +2049,7 @@ typedef struct {
      * insert under the lock.
      */
     pthread_mutex_t async_futures_mutex;
+    bool async_futures_mutex_initialized;
     bool pipe_initialized;
 
     /* Set on hard read error (EIO/EBADF/EOF mid-frame). New
@@ -3438,8 +3445,10 @@ static void erlang_module_free(void *module) {
     Py_XDECREF(state->async_pending_futures);
     state->async_pending_futures = NULL;
 
-    /* Always destroy mutex - it was always initialized in create_erlang_module */
-    pthread_mutex_destroy(&state->async_futures_mutex);
+    if (state->async_futures_mutex_initialized) {
+        pthread_mutex_destroy(&state->async_futures_mutex);
+        state->async_futures_mutex_initialized = false;
+    }
     state->pipe_initialized = false;
 }
 
@@ -3518,7 +3527,14 @@ static int create_erlang_module(void) {
         state->async_callback_pipe[0] = -1;
         state->async_callback_pipe[1] = -1;
         state->async_pending_futures = NULL;
-        pthread_mutex_init(&state->async_futures_mutex, NULL);
+        state->async_futures_mutex_initialized = false;
+        if (pthread_mutex_init(&state->async_futures_mutex, NULL) != 0) {
+            Py_DECREF(module);
+            PyErr_SetString(PyExc_RuntimeError,
+                            "failed to initialize async callback mutex");
+            return -1;
+        }
+        state->async_futures_mutex_initialized = true;
         state->pipe_initialized = false;
     }
 
