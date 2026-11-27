@@ -66,7 +66,7 @@ test_session_churn_no_leak(Config) ->
                 {done, self(),
                     case I rem 4 of
                         0 -> churn(Spawn, Deadline, 0, []);
-                        1 -> rchurn(Reimport, Deadline, 0, []);
+                        1 -> rchurn(Reimport, Deadline, 0, [], ?config(priv_dir, Config));
                         _ -> churn(Fork, Deadline, 0, [])
                     end}
         end)
@@ -121,7 +121,7 @@ churn(T, Deadline, N, Errs) ->
 
 %% A re-import session: several calls on one fresh state, then closed,
 %% timed out, or abandoned by an owner that crashes
-rchurn(T, Deadline, N, Errs) ->
+rchurn(T, Deadline, N, Errs, PrivDir) ->
     case erlang:monotonic_time(millisecond) < Deadline of
         false ->
             {N, Errs};
@@ -138,12 +138,9 @@ rchurn(T, Deadline, N, Errs) ->
                         expect([{ok, 1}, {ok, 2}, {ok, 3}], R);
                     2 ->
                         {ok, S} = py_session:new(T),
-                        %% Keep the operation far beyond the deadline so ASan
-                        %% scheduler overhead cannot let it finish first.
-                        R = py_context:call(S, py_test_reimport, sleep, [1], #{}, 50),
-                        {ok, 1} = py_context:call(S, py_test_reimport, bump, []),
+                        {R, Bump} = timed_out_call(S, PrivDir),
                         ok = py_session:close(S),
-                        expect({error, timeout}, R);
+                        expect({{error, timeout}, {ok, 1}}, {R, Bump});
                     3 ->
                         Self = self(),
                         {Owner, Mon} = spawn_monitor(fun() ->
@@ -168,8 +165,48 @@ rchurn(T, Deadline, N, Errs) ->
                 case Got of
                     ok -> Errs;
                     Bad -> [Bad | Errs]
-                end
+                end,
+                PrivDir
             )
+    end.
+
+timed_out_call(S, PrivDir) ->
+    Base = "soak_timeout_" ++ integer_to_list(erlang:unique_integer([positive])),
+    Started = filename:join(PrivDir, Base ++ ".started"),
+    Release = filename:join(PrivDir, Base ++ ".release"),
+    Self = self(),
+    Caller = spawn(fun() ->
+        R = py_context:call(
+            S,
+            py_test_reimport,
+            wait_for_release,
+            [list_to_binary(Started), list_to_binary(Release)],
+            #{},
+            50
+        ),
+        Self ! {timeout_result, self(), R}
+    end),
+    ok = wait_file(Started, 500),
+    R =
+        receive
+            {timeout_result, Caller, Result} -> Result
+        after 10000 -> timeout_result_missing
+        end,
+    ok = file:write_file(Release, <<>>),
+    Bump = py_context:call(S, py_test_reimport, bump, []),
+    file:delete(Started),
+    file:delete(Release),
+    {R, Bump}.
+
+wait_file(_Path, 0) ->
+    {error, python_call_did_not_start};
+wait_file(Path, N) ->
+    case filelib:is_file(Path) of
+        true ->
+            ok;
+        false ->
+            timer:sleep(20),
+            wait_file(Path, N - 1)
     end.
 
 wait_freed(Ctx, 0) ->

@@ -40,6 +40,10 @@
 
 ### Fixed
 
+- Closing a re-import session after a call timed out could wait behind the
+  Python code that was still running. After five seconds the session and its
+  linked owner were killed. Closing now returns without waiting for Python,
+  and its state is freed after the running call finishes.
 - Shared dictionaries could deadlock the node when Erlang and Python used
   one at the same time, or when pickling a value accessed the same dictionary.
   Their stored values are now independent of any Python interpreter, so they

@@ -60,6 +60,7 @@
     test_rsession_concurrent/1,
     test_rsession_cleanup/1,
     test_rsession_timeout/1,
+    test_rsession_close_during_timed_out_call/1,
     test_rsession_context_died/1,
     test_rsession_unsupported/1,
     test_rsession_threads_see_context/1,
@@ -116,6 +117,7 @@ groups() ->
         test_rsession_concurrent,
         test_rsession_cleanup,
         test_rsession_timeout,
+        test_rsession_close_during_timed_out_call,
         test_rsession_context_died,
         test_rsession_unsupported,
         test_rsession_threads_see_context,
@@ -861,6 +863,62 @@ test_rsession_timeout(Config) ->
     py_session:close(S),
     py_session:close(Other).
 
+%% Closing must not wait behind Python that kept running after its caller
+%% timed out. In particular, stop's five-second fallback must not kill the
+%% session and the owner linked to it.
+test_rsession_close_during_timed_out_call(Config) ->
+    T = rtemplate(Config, #{contexts => 1}),
+    #{contexts := [Ctx]} = py_session:info(T),
+    {Started, Release} = gate_paths(Config, "close_timeout"),
+    Self = self(),
+    {Owner, OwnerMon} = spawn_monitor(fun() ->
+        {ok, S0} = py_session:new(T),
+        Self ! {session, self(), S0},
+        receive
+            close -> Self ! {close_result, self(), py_session:close(S0)}
+        end
+    end),
+    S =
+        receive
+            {session, Owner, S0} -> S0
+        after 10000 -> ct:fail(no_session)
+        end,
+    Caller = spawn(fun() ->
+        R = py_context:call(
+            S,
+            ?RMOD,
+            wait_for_release,
+            [list_to_binary(Started), list_to_binary(Release)],
+            #{},
+            50
+        ),
+        Self ! {call_result, self(), R}
+    end),
+    try
+        ok = wait_file(Started, 500),
+        receive
+            {call_result, Caller, {error, timeout}} -> ok
+        after 10000 -> ct:fail(call_did_not_time_out)
+        end,
+        Owner ! close,
+        receive
+            {close_result, Owner, ok} -> ok;
+            {'DOWN', OwnerMon, process, Owner, killed} -> ct:fail(owner_killed)
+        after 3000 -> ct:fail(close_blocked)
+        end
+    after
+        ok = file:write_file(Release, <<>>)
+    end,
+    receive
+        {'DOWN', OwnerMon, process, Owner, normal} -> ok
+    after 10000 -> ct:fail(owner_did_not_exit)
+    end,
+    ok = wait_count(fun() -> session_count(Ctx) end, 0, 500),
+    0 = wait_rsessions(T, 0, 500),
+    file:delete(Started),
+    file:delete(Release),
+    ok.
+
 %% The context under a session goes: the session answers with that until
 %% closed, and does not take its linked owner down.
 test_rsession_context_died(Config) ->
@@ -956,6 +1014,22 @@ wait_rsessions(T, Want, N) ->
         _ ->
             timer:sleep(20),
             wait_rsessions(T, Want, N - 1)
+    end.
+
+gate_paths(Config, Label) ->
+    Base = Label ++ "_" ++ integer_to_list(erlang:unique_integer([positive])),
+    Dir = ?config(priv_dir, Config),
+    {filename:join(Dir, Base ++ ".started"), filename:join(Dir, Base ++ ".release")}.
+
+wait_file(_Path, 0) ->
+    ct:fail(python_call_did_not_start);
+wait_file(Path, N) ->
+    case filelib:is_file(Path) of
+        true ->
+            ok;
+        false ->
+            timer:sleep(20),
+            wait_file(Path, N - 1)
     end.
 
 test_reimport_refresh(Config) ->
