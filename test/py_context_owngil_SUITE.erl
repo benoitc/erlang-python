@@ -55,7 +55,8 @@
 %% Feature tests
 -export([
     test_owngil_state_persistence/1,
-    test_owngil_module_import/1
+    test_owngil_module_import/1,
+    test_owngil_shared_dict/1
 ]).
 
 all() ->
@@ -95,7 +96,8 @@ groups() ->
         ]},
         {features, [sequence], [
             test_owngil_state_persistence,
-            test_owngil_module_import
+            test_owngil_module_import,
+            test_owngil_shared_dict
         ]}
     ].
 
@@ -377,4 +379,23 @@ test_owngil_module_import(_Config) ->
     ok = py_context:exec(Ctx, <<"import json">>),
     {ok, <<"{\"a\": 1}">>} = py_context:eval(Ctx, <<"json.dumps({'a': 1})">>, #{}),
 
+    py_context:stop(Ctx).
+
+%% @doc SharedDict stores no interpreter-owned objects and is therefore safe
+%% to use from an OWN_GIL subinterpreter and from Erlang in either direction.
+test_owngil_shared_dict(_Config) ->
+    {ok, SD} = py:shared_dict_new(),
+    ok = py:shared_dict_set(SD, <<"from_erlang">>, 41),
+    {ok, Ctx} = py_context:start_link(1, owngil),
+    {ok, 41} = py_context:eval(
+        Ctx,
+        <<"__import__('erlang').SharedDict(handle)['from_erlang']">>,
+        #{<<"handle">> => SD}
+    ),
+    {ok, true} = py_context:eval(
+        Ctx,
+        <<"(__import__('erlang').SharedDict(handle).__setitem__('from_owngil', 42), True)[1]">>,
+        #{<<"handle">> => SD}
+    ),
+    42 = py:shared_dict_get(SD, <<"from_owngil">>),
     py_context:stop(Ctx).

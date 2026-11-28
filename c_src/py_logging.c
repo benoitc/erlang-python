@@ -147,15 +147,19 @@ static PyObject *erlang_log_impl(PyObject *self, PyObject *args) {
 
     ERL_NIF_TERM logger_term;
     unsigned char *logger_buf = enif_make_new_binary(msg_env, logger_name_len, &logger_term);
-    if (logger_buf != NULL) {
-        memcpy(logger_buf, logger_name, logger_name_len);
+    if (logger_buf == NULL && logger_name_len > 0) {
+        enif_free_env(msg_env);
+        Py_RETURN_NONE;
     }
+    if (logger_name_len > 0) memcpy(logger_buf, logger_name, logger_name_len);
 
     ERL_NIF_TERM message_term;
     unsigned char *msg_buf = enif_make_new_binary(msg_env, message_len, &message_term);
-    if (msg_buf != NULL) {
-        memcpy(msg_buf, message, message_len);
+    if (msg_buf == NULL && message_len > 0) {
+        enif_free_env(msg_env);
+        Py_RETURN_NONE;
     }
+    if (message_len > 0) memcpy(msg_buf, message, message_len);
 
     /* Convert metadata dict to Erlang map */
     ERL_NIF_TERM meta_term = py_to_term(msg_env, metadata);
@@ -223,9 +227,11 @@ static PyObject *erlang_trace_start_impl(PyObject *self, PyObject *args) {
 
     ERL_NIF_TERM name_term;
     unsigned char *name_buf = enif_make_new_binary(msg_env, name_len, &name_term);
-    if (name_buf != NULL) {
-        memcpy(name_buf, name, name_len);
+    if (name_buf == NULL && name_len > 0) {
+        enif_free_env(msg_env);
+        Py_RETURN_NONE;
     }
+    if (name_len > 0) memcpy(name_buf, name, name_len);
 
     ERL_NIF_TERM attrs_term = py_to_term(msg_env, attrs);
 
@@ -331,9 +337,11 @@ static PyObject *erlang_trace_event_impl(PyObject *self, PyObject *args) {
 
     ERL_NIF_TERM name_term;
     unsigned char *name_buf = enif_make_new_binary(msg_env, name_len, &name_term);
-    if (name_buf != NULL) {
-        memcpy(name_buf, name, name_len);
+    if (name_buf == NULL && name_len > 0) {
+        enif_free_env(msg_env);
+        Py_RETURN_NONE;
     }
+    if (name_len > 0) memcpy(name_buf, name, name_len);
 
     ERL_NIF_TERM attrs_term = py_to_term(msg_env, attrs);
 

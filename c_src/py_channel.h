@@ -89,6 +89,10 @@ typedef struct {
     /** @brief Condition variable for blocking receives */
     pthread_cond_t data_cond;
 
+    /** @brief Partial-construction guards for synchronization objects */
+    bool mutex_initialized;
+    bool cond_initialized;
+
     /** @brief Event loop for async waiter (ref-counted via enif_keep_resource) */
     struct erlang_event_loop *waiter_loop;
 

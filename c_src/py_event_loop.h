@@ -337,6 +337,10 @@ typedef struct erlang_event_loop {
     /** @brief Condition variable for event notification */
     pthread_cond_t event_cond;
 
+    /** @brief Partial-construction guards for base synchronization objects */
+    bool mutex_initialized;
+    bool event_cond_initialized;
+
     /** @brief Counter for generating unique callback IDs */
     _Atomic uint64_t next_callback_id;
 
@@ -431,6 +435,12 @@ typedef struct erlang_event_loop {
 
     /** @brief Whether task_queue has been initialized */
     bool task_queue_initialized;
+
+    /** @brief Partial-construction guard for the environment pool mutex */
+    bool env_pool_mutex_initialized;
+
+    /** @brief Partial-construction guard for the namespace registry mutex */
+    bool namespaces_mutex_initialized;
 
     /** @brief Atomic counter for pending tasks */
     _Atomic uint_fast64_t task_count;

@@ -417,12 +417,14 @@ cleanup_native:
     loop->shutdown = true;
 
     /* Wake up any waiting threads */
-    pthread_mutex_lock(&loop->mutex);
-    pthread_cond_broadcast(&loop->event_cond);
-    pthread_mutex_unlock(&loop->mutex);
+    if (loop->mutex_initialized && loop->event_cond_initialized) {
+        pthread_mutex_lock(&loop->mutex);
+        pthread_cond_broadcast(&loop->event_cond);
+        pthread_mutex_unlock(&loop->mutex);
+    }
 
     /* Clear pending events (returns them to freelist) */
-    event_loop_clear_pending(loop);
+    if (loop->mutex_initialized) event_loop_clear_pending(loop);
 
     /* Free the freelist itself (Phase 7: clear freelist on destruction) */
     pending_event_t *freelist_item = loop->event_freelist;
@@ -452,7 +454,10 @@ cleanup_native:
         }
     }
     loop->env_pool_count = 0;
-    pthread_mutex_destroy(&loop->env_pool_mutex);
+    if (loop->env_pool_mutex_initialized) {
+        pthread_mutex_destroy(&loop->env_pool_mutex);
+        loop->env_pool_mutex_initialized = false;
+    }
 
     /* Release Python loop reference if held */
     if (loop->py_loop_valid && loop->py_loop != NULL) {
@@ -496,7 +501,8 @@ cleanup_native:
      * Just free the native structs without Py_DECREF - Python objects will be
      * cleaned up when the interpreter is destroyed.
      */
-    if (runtime_is_running() && loop->interp_id == 0 &&
+    if (loop->namespaces_mutex_initialized &&
+        runtime_is_running() && loop->interp_id == 0 &&
         PyGILState_GetThisThreadState() == NULL &&
         !PyGILState_Check()) {
         /* Main interpreter: GIL first, then mutex */
@@ -528,7 +534,7 @@ cleanup_native:
 
         pthread_mutex_unlock(&loop->namespaces_mutex);
         PyGILState_Release(gstate);
-    } else {
+    } else if (loop->namespaces_mutex_initialized) {
         /* Subinterpreter or runtime not running. Namespaces created in the
          * subinterpreter went (or go) with it; those created in the main
          * interpreter (event_loop_exec/eval) are released under the main
@@ -575,11 +581,20 @@ cleanup_native:
 
         pthread_mutex_unlock(&loop->namespaces_mutex);
     }
-    pthread_mutex_destroy(&loop->namespaces_mutex);
+    if (loop->namespaces_mutex_initialized) {
+        pthread_mutex_destroy(&loop->namespaces_mutex);
+        loop->namespaces_mutex_initialized = false;
+    }
 
     /* Destroy synchronization primitives */
-    pthread_mutex_destroy(&loop->mutex);
-    pthread_cond_destroy(&loop->event_cond);
+    if (loop->event_cond_initialized) {
+        pthread_cond_destroy(&loop->event_cond);
+        loop->event_cond_initialized = false;
+    }
+    if (loop->mutex_initialized) {
+        pthread_mutex_destroy(&loop->mutex);
+        loop->mutex_initialized = false;
+    }
 }
 
 /**
@@ -1185,17 +1200,16 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
         enif_release_resource(loop);
         return make_error(env, "mutex_init_failed");
     }
+    loop->mutex_initialized = true;
 
     if (pthread_cond_init(&loop->event_cond, NULL) != 0) {
-        pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
         return make_error(env, "cond_init_failed");
     }
+    loop->event_cond_initialized = true;
 
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
         return make_error(env, "env_alloc_failed");
     }
@@ -1213,18 +1227,11 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     /* Initialize async task queue (uvloop-inspired) */
     loop->task_queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
     if (loop->task_queue == NULL) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         return make_error(env, "task_queue_alloc_failed");
     }
 
     if (pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
-        enif_ioq_destroy(loop->task_queue);
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         return make_error(env, "task_queue_mutex_init_failed");
     }
@@ -1249,28 +1256,19 @@ ERL_NIF_TERM nif_event_loop_new(ErlNifEnv *env, int argc,
     memset(loop->env_pool, 0, sizeof(loop->env_pool));
     loop->env_pool_count = 0;
     if (pthread_mutex_init(&loop->env_pool_mutex, NULL) != 0) {
-        pthread_mutex_destroy(&loop->task_queue_mutex);
-        enif_ioq_destroy(loop->task_queue);
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         return make_error(env, "env_pool_mutex_init_failed");
     }
+    loop->env_pool_mutex_initialized = true;
 
     /* Initialize per-process namespace registry */
     loop->namespaces_head = NULL;
     loop->pid_env_head = NULL;
     if (pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
-        pthread_mutex_destroy(&loop->env_pool_mutex);
-        pthread_mutex_destroy(&loop->task_queue_mutex);
-        enif_ioq_destroy(loop->task_queue);
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         return make_error(env, "namespaces_mutex_init_failed");
     }
+    loop->namespaces_mutex_initialized = true;
 
     /* Create result */
     ERL_NIF_TERM loop_term = enif_make_resource(env, loop);
@@ -4075,7 +4073,14 @@ ERL_NIF_TERM nif_loop_import_function(ErlNifEnv *env, int argc,
     }
 
     /* Build cache key "module.func" */
-    size_t key_len = module_bin.size + 1 + func_bin.size + 1;
+    if (module_bin.size > SIZE_MAX - 2 ||
+        func_bin.size > SIZE_MAX - module_bin.size - 2) {
+        PyGILState_Release(gstate);
+        enif_free(module_name);
+        enif_free(func_name);
+        return make_error(env, "name_too_long");
+    }
+    size_t key_len = module_bin.size + func_bin.size + 2;
     char *cache_key = enif_alloc(key_len);
     if (cache_key == NULL) {
         PyGILState_Release(gstate);
@@ -4332,6 +4337,11 @@ ERL_NIF_TERM nif_loop_import_list(ErlNifEnv *env, int argc,
                         size_t key_len = strlen(key_str);
                         ERL_NIF_TERM mod_bin;
                         unsigned char *buf = enif_make_new_binary(env, key_len, &mod_bin);
+                        if (buf == NULL && key_len > 0) {
+                            Py_DECREF(keys);
+                            PyGILState_Release(gstate);
+                            return make_error(env, "alloc_failed");
+                        }
                         memcpy(buf, key_str, key_len);
 
                         /* Start with empty function list */
@@ -4357,11 +4367,21 @@ ERL_NIF_TERM nif_loop_import_list(ErlNifEnv *env, int argc,
                             /* Create module binary */
                             ERL_NIF_TERM mod_bin;
                             unsigned char *mod_buf = enif_make_new_binary(env, mod_len, &mod_bin);
+                            if (mod_buf == NULL && mod_len > 0) {
+                                Py_DECREF(keys);
+                                PyGILState_Release(gstate);
+                                return make_error(env, "alloc_failed");
+                            }
                             memcpy(mod_buf, key_str, mod_len);
 
                             /* Create function binary */
                             ERL_NIF_TERM func_bin;
                             unsigned char *func_buf = enif_make_new_binary(env, func_len, &func_bin);
+                            if (func_buf == NULL && func_len > 0) {
+                                Py_DECREF(keys);
+                                PyGILState_Release(gstate);
+                                return make_error(env, "alloc_failed");
+                            }
                             memcpy(func_buf, func_str, func_len);
 
                             /* Get existing function list for this module */
@@ -5515,6 +5535,10 @@ ERL_NIF_TERM nif_recvfrom_test_udp(ErlNifEnv *env, int argc,
     ERL_NIF_TERM host_bin;
     size_t host_len = strlen(host_str);
     unsigned char *host_buf = enif_make_new_binary(env, host_len, &host_bin);
+    if (host_buf == NULL && host_len > 0) {
+        enif_release_binary(&bin);
+        return make_error(env, "alloc_failed");
+    }
     memcpy(host_buf, host_str, host_len);
 
     int from_port = ntohs(from_addr.sin_port);
@@ -5954,7 +5978,11 @@ ERL_NIF_TERM nif_reactor_on_read_ready(ErlNifEnv *env, int argc,
         if (str != NULL) {
             size_t len = strlen(str);
             unsigned char *buf = enif_make_new_binary(env, len, &action);
-            memcpy(buf, str, len);
+            if (buf != NULL || len == 0) {
+                if (len > 0) memcpy(buf, str, len);
+            } else {
+                action = enif_make_atom(env, "unknown");
+            }
         } else {
             action = enif_make_atom(env, "unknown");
         }
@@ -6035,7 +6063,11 @@ ERL_NIF_TERM nif_reactor_on_write_ready(ErlNifEnv *env, int argc,
         if (str != NULL) {
             size_t len = strlen(str);
             unsigned char *buf = enif_make_new_binary(env, len, &action);
-            memcpy(buf, str, len);
+            if (buf != NULL || len == 0) {
+                if (len > 0) memcpy(buf, str, len);
+            } else {
+                action = enif_make_atom(env, "unknown");
+            }
         } else {
             action = enif_make_atom(env, "unknown");
         }
@@ -6482,7 +6514,11 @@ ERL_NIF_TERM owngil_reactor_on_read_ready(ErlNifEnv *env, int fd, void *buffer_p
         if (str != NULL) {
             size_t len = strlen(str);
             unsigned char *buf = enif_make_new_binary(env, len, &action);
-            memcpy(buf, str, len);
+            if (buf != NULL || len == 0) {
+                if (len > 0) memcpy(buf, str, len);
+            } else {
+                action = enif_make_atom(env, "unknown");
+            }
         } else {
             action = enif_make_atom(env, "unknown");
         }
@@ -6528,7 +6564,11 @@ ERL_NIF_TERM owngil_reactor_on_write_ready(ErlNifEnv *env, int fd) {
         if (str != NULL) {
             size_t len = strlen(str);
             unsigned char *buf = enif_make_new_binary(env, len, &action);
-            memcpy(buf, str, len);
+            if (buf != NULL || len == 0) {
+                if (len > 0) memcpy(buf, str, len);
+            } else {
+                action = enif_make_atom(env, "unknown");
+            }
         } else {
             action = enif_make_atom(env, "unknown");
         }
@@ -6877,8 +6917,20 @@ static pthread_mutex_t g_fd_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
  * existing resource reference becomes owned by the table entry. */
 static uint64_t fd_reg_add(fd_resource_t *res) {
     pthread_mutex_lock(&g_fd_reg_mutex);
+    if (g_fd_reg_next_id == 0) {
+        pthread_mutex_unlock(&g_fd_reg_mutex);
+        return 0;
+    }
     if (g_fd_reg_len == g_fd_reg_cap) {
+        if (g_fd_reg_cap > SIZE_MAX / 2) {
+            pthread_mutex_unlock(&g_fd_reg_mutex);
+            return 0;
+        }
         size_t ncap = g_fd_reg_cap ? g_fd_reg_cap * 2 : 16;
+        if (ncap > SIZE_MAX / sizeof(*g_fd_reg)) {
+            pthread_mutex_unlock(&g_fd_reg_mutex);
+            return 0;
+        }
         fd_reg_entry_t *n = enif_realloc(g_fd_reg, ncap * sizeof(*n));
         if (n == NULL) {
             pthread_mutex_unlock(&g_fd_reg_mutex);
@@ -6888,7 +6940,6 @@ static uint64_t fd_reg_add(fd_resource_t *res) {
         g_fd_reg_cap = ncap;
     }
     uint64_t id = g_fd_reg_next_id++;
-    if (id == 0) id = g_fd_reg_next_id++;  /* never hand out 0 */
     g_fd_reg[g_fd_reg_len].id = id;
     g_fd_reg[g_fd_reg_len].res = res;
     g_fd_reg_len++;
@@ -7418,18 +7469,17 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize mutex");
         return NULL;
     }
+    loop->mutex_initialized = true;
 
     if (pthread_cond_init(&loop->event_cond, NULL) != 0) {
-        pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize condition variable");
         return NULL;
     }
+    loop->event_cond_initialized = true;
 
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate message environment");
         return NULL;
@@ -7448,19 +7498,12 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     /* Initialize async task queue (uvloop-inspired) */
     loop->task_queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
     if (loop->task_queue == NULL) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate task queue");
         return NULL;
     }
 
     if (pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
-        enif_ioq_destroy(loop->task_queue);
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize task queue mutex");
         return NULL;
@@ -7494,9 +7537,6 @@ static PyObject *py_loop_new(PyObject *self, PyObject *args) {
     /* Create a capsule wrapping the loop pointer */
     PyObject *capsule = PyCapsule_New(loop, LOOP_CAPSULE_NAME, loop_capsule_destructor);
     if (capsule == NULL) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
-        enif_free_env(loop->msg_env);
         enif_release_resource(loop);
         return NULL;
     }
@@ -8578,17 +8618,16 @@ int create_default_event_loop(ErlNifEnv *env) {
         enif_release_resource(loop);
         return -1;
     }
+    loop->mutex_initialized = true;
 
     if (pthread_cond_init(&loop->event_cond, NULL) != 0) {
-        pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
         return -1;
     }
+    loop->event_cond_initialized = true;
 
     loop->msg_env = enif_alloc_env();
     if (loop->msg_env == NULL) {
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
         enif_release_resource(loop);
         return -1;
     }
@@ -8605,15 +8644,11 @@ int create_default_event_loop(ErlNifEnv *env) {
      * nif_event_loop_new: a default loop must accept submit_task too, since
      * OWN_GIL contexts only ever have this loop. */
     loop->task_queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
-    if (loop->task_queue == NULL ||
-        pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
-        if (loop->task_queue != NULL) {
-            enif_ioq_destroy(loop->task_queue);
-            loop->task_queue = NULL;
-        }
-        enif_free_env(loop->msg_env);
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
+    if (loop->task_queue == NULL) {
+        enif_release_resource(loop);
+        return -1;
+    }
+    if (pthread_mutex_init(&loop->task_queue_mutex, NULL) != 0) {
         enif_release_resource(loop);
         return -1;
     }
@@ -8625,18 +8660,16 @@ int create_default_event_loop(ErlNifEnv *env) {
     loop->py_cache_valid = false;
     loop->callable_cache_count = 0;
     loop->env_pool_count = 0;
-    if (pthread_mutex_init(&loop->env_pool_mutex, NULL) != 0 ||
-        pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
-        pthread_mutex_destroy(&loop->task_queue_mutex);
-        loop->task_queue_initialized = false;
-        enif_ioq_destroy(loop->task_queue);
-        loop->task_queue = NULL;
-        enif_free_env(loop->msg_env);
-        pthread_cond_destroy(&loop->event_cond);
-        pthread_mutex_destroy(&loop->mutex);
+    if (pthread_mutex_init(&loop->env_pool_mutex, NULL) != 0) {
         enif_release_resource(loop);
         return -1;
     }
+    loop->env_pool_mutex_initialized = true;
+    if (pthread_mutex_init(&loop->namespaces_mutex, NULL) != 0) {
+        enif_release_resource(loop);
+        return -1;
+    }
+    loop->namespaces_mutex_initialized = true;
     loop->namespaces_head = NULL;
     loop->pid_env_head = NULL;
 

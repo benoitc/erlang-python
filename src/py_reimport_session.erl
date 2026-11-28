@@ -194,7 +194,10 @@ handle_info({cancel_ctrl, _MRef}, St) ->
 %% ---- lifecycle -------------------------------------------------------------
 
 handle_info({stop, From, MRef}, St) ->
-    close_session(St),
+    %% A timed-out call can still be running in the shared context. Queue the
+    %% cleanup behind it, but do not wait: a synchronous close could block
+    %% until py_context:stop/1 kills this linked process and its owner.
+    close_session_async(St),
     From ! {MRef, ok},
     {stop, normal, St#st{exited = closed}};
 handle_info({'DOWN', Mon, process, _Ctx, Reason}, #st{ctx_mon = Mon, pending = Pending} = St) ->
@@ -213,7 +216,7 @@ handle_info(_Other, St) ->
     {noreply, St}.
 
 terminate(_Reason, St) ->
-    close_session(St),
+    close_session_async(St),
     try
         ets:delete(?REF_TAB, self())
     catch
@@ -244,9 +247,12 @@ forward(From, MRef, Fun, Args, #st{ctx = Ctx, sid = Sid, pending = Pending} = St
 reply(exec, {ok, _}) -> ok;
 reply(_Kind, Reply) -> Reply.
 
-%% Idempotent on the Python side; nothing to do once the context is gone
-close_session(#st{exited = undefined, ctx = Ctx, sid = Sid}) ->
-    _ = py_context:call(Ctx, ?IMPL, session_close, [Sid], #{}, 5000),
+%% Requests from this process reach the context in order, so cleanup runs
+%% after any call that the session already forwarded. The reply can be sent
+%% to this process after it has exited; the template monitor is the fallback
+%% if the session is killed before terminate/2 can queue this request.
+close_session_async(#st{exited = undefined, ctx = Ctx, sid = Sid}) ->
+    Ctx ! {call, self(), make_ref(), ?IMPL, <<"session_close">>, [Sid], #{}},
     ok;
-close_session(_St) ->
+close_session_async(_St) ->
     ok.

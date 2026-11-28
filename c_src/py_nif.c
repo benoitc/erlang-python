@@ -1005,6 +1005,7 @@ static ERL_NIF_TERM nif_version(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     ERL_NIF_TERM version_bin;
 
     unsigned char *buf = enif_make_new_binary(env, strlen(version), &version_bin);
+    if (buf == NULL) return make_error(env, "alloc_failed");
     memcpy(buf, version, strlen(version));
 
     return enif_make_tuple2(env, ATOM_OK, version_bin);
@@ -2545,7 +2546,12 @@ static PyObject *ctx_call_erlang_inline(py_context_t *ctx, const char *func_name
     }
     ERL_NIF_TERM name_term;
     unsigned char *name_buf = enif_make_new_binary(msg_env, func_name_len, &name_term);
-    memcpy(name_buf, func_name, func_name_len);
+    if (name_buf == NULL && func_name_len > 0) {
+        enif_free_env(msg_env);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate callback name");
+        return NULL;
+    }
+    if (func_name_len > 0) memcpy(name_buf, func_name, func_name_len);
     ERL_NIF_TERM args_term = py_to_term(msg_env, call_args);
     ERL_NIF_TERM msg = enif_make_tuple4(msg_env,
         enif_make_atom(msg_env, "py_callback"),
@@ -3618,6 +3624,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     }
 
     /* Initialize fields */
+    memset(ctx, 0, sizeof(*ctx));
     ctx->interp_id = atomic_fetch_add(&g_context_id_counter, 1);
     atomic_init(&ctx->env_gc_head, NULL);
     ctx->is_subinterp = use_owngil;
@@ -3667,8 +3674,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     if (use_owngil) {
         /* OWN_GIL mode: create dedicated pthread with OWN_GIL subinterpreter */
         if (owngil_context_init(ctx) != 0) {
-            close(ctx->callback_pipe[0]);
-            close(ctx->callback_pipe[1]);
+            close_pipe_pair(ctx->callback_pipe);
             enif_release_resource(ctx);
             return make_error(env, "owngil_init_failed");
         }
@@ -3683,8 +3689,7 @@ static ERL_NIF_TERM nif_context_create(ErlNifEnv *env, int argc, const ERL_NIF_T
     /* Worker mode: create dedicated pthread with main interpreter
      * This provides stable thread affinity for numpy/torch/tensorflow */
     if (worker_context_init(ctx) != 0) {
-        close(ctx->callback_pipe[0]);
-        close(ctx->callback_pipe[1]);
+        close_pipe_pair(ctx->callback_pipe);
         enif_release_resource(ctx);
         return make_error(env, "worker_init_failed");
     }

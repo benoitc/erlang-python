@@ -75,8 +75,14 @@ void py_buffer_resource_dtor(ErlNifEnv *env, void *obj) {
     (void)env;
     py_buffer_resource_t *buf = (py_buffer_resource_t *)obj;
 
-    pthread_mutex_destroy(&buf->mutex);
-    pthread_cond_destroy(&buf->data_ready);
+    if (buf->cond_initialized) {
+        pthread_cond_destroy(&buf->data_ready);
+        buf->cond_initialized = false;
+    }
+    if (buf->mutex_initialized) {
+        pthread_mutex_destroy(&buf->mutex);
+        buf->mutex_initialized = false;
+    }
 
     if (buf->data != NULL) {
         enif_free(buf->data);
@@ -94,6 +100,7 @@ py_buffer_resource_t *py_buffer_alloc(ssize_t content_length) {
     if (resource == NULL) {
         return NULL;
     }
+    memset(resource, 0, sizeof(*resource));
 
     /* Determine initial capacity */
     size_t capacity;
@@ -118,17 +125,16 @@ py_buffer_resource_t *py_buffer_alloc(ssize_t content_length) {
     resource->view_count = 0;
 
     if (pthread_mutex_init(&resource->mutex, NULL) != 0) {
-        enif_free(resource->data);
         enif_release_resource(resource);
         return NULL;
     }
+    resource->mutex_initialized = true;
 
     if (pthread_cond_init(&resource->data_ready, NULL) != 0) {
-        pthread_mutex_destroy(&resource->mutex);
-        enif_free(resource->data);
         enif_release_resource(resource);
         return NULL;
     }
+    resource->cond_initialized = true;
 
     return resource;
 }
@@ -163,6 +169,10 @@ int py_buffer_write(py_buffer_resource_t *buf, const unsigned char *data, size_t
         /* Calculate new capacity */
         size_t new_capacity = buf->capacity;
         while (new_capacity < required) {
+            if (new_capacity > SIZE_MAX / PY_BUFFER_GROW_FACTOR) {
+                pthread_mutex_unlock(&buf->mutex);
+                return -1;
+            }
             new_capacity *= PY_BUFFER_GROW_FACTOR;
         }
 
@@ -601,6 +611,12 @@ static PyObject *PyBuffer_readlines(PyBufferObject *self, PyObject *args) {
         }
         Py_DECREF(line);
 
+        if (line_len > PY_SSIZE_T_MAX - total_size) {
+            Py_DECREF(empty_args);
+            Py_DECREF(lines);
+            PyErr_SetString(PyExc_OverflowError, "readlines result is too large");
+            return NULL;
+        }
         total_size += line_len;
 
         /* Check hint */

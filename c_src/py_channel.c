@@ -70,9 +70,15 @@ void channel_resource_dtor(ErlNifEnv *env, void *obj) {
     }
 
     /* Wake any threads waiting on the condition before destroying */
-    pthread_cond_broadcast(&channel->data_cond);
-    pthread_cond_destroy(&channel->data_cond);
-    pthread_mutex_destroy(&channel->mutex);
+    if (channel->cond_initialized) {
+        pthread_cond_broadcast(&channel->data_cond);
+        pthread_cond_destroy(&channel->data_cond);
+        channel->cond_initialized = false;
+    }
+    if (channel->mutex_initialized) {
+        pthread_mutex_destroy(&channel->mutex);
+        channel->mutex_initialized = false;
+    }
 }
 
 py_channel_t *channel_alloc(size_t max_size) {
@@ -85,6 +91,7 @@ py_channel_t *channel_alloc(size_t max_size) {
     if (channel == NULL) {
         return NULL;
     }
+    memset(channel, 0, sizeof(*channel));
 
     channel->queue = enif_ioq_create(ERL_NIF_IOQ_NORMAL);
     if (channel->queue == NULL) {
@@ -103,17 +110,16 @@ py_channel_t *channel_alloc(size_t max_size) {
     channel->channel_id = atomic_fetch_add(&g_channel_id_counter, 1);
 
     if (pthread_mutex_init(&channel->mutex, NULL) != 0) {
-        enif_ioq_destroy(channel->queue);
         enif_release_resource(channel);
         return NULL;
     }
+    channel->mutex_initialized = true;
 
     if (pthread_cond_init(&channel->data_cond, NULL) != 0) {
-        pthread_mutex_destroy(&channel->mutex);
-        enif_ioq_destroy(channel->queue);
         enif_release_resource(channel);
         return NULL;
     }
+    channel->cond_initialized = true;
 
     return channel;
 }
@@ -127,7 +133,9 @@ int channel_send(py_channel_t *channel, const unsigned char *data, size_t size) 
     }
 
     /* Check backpressure */
-    if (channel->max_size > 0 && channel->current_size + size > channel->max_size) {
+    if (size > SIZE_MAX - channel->current_size ||
+        (channel->max_size > 0 &&
+         channel->current_size + size > channel->max_size)) {
         pthread_mutex_unlock(&channel->mutex);
         return 1;  /* Busy - backpressure */
     }
@@ -211,7 +219,9 @@ int channel_send_owned_binary(py_channel_t *channel, ErlNifBinary *bin) {
     }
 
     /* Check backpressure */
-    if (channel->max_size > 0 && channel->current_size + bin->size > channel->max_size) {
+    if (bin->size > SIZE_MAX - channel->current_size ||
+        (channel->max_size > 0 &&
+         channel->current_size + bin->size > channel->max_size)) {
         enif_release_binary(bin);
         pthread_mutex_unlock(&channel->mutex);
         return 1;  /* Busy - backpressure */

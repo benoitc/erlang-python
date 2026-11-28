@@ -79,6 +79,7 @@ reactor_buffer_resource_t *reactor_buffer_alloc(size_t capacity) {
     if (resource == NULL) {
         return NULL;
     }
+    memset(resource, 0, sizeof(*resource));
 
     resource->data = enif_alloc(capacity);
     if (resource->data == NULL) {

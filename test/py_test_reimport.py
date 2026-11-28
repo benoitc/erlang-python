@@ -1,7 +1,10 @@
 """Imported again in every re-import run (py_session_SUITE reimport groups)."""
 
 import json
+import os
 import pickle
+import pathlib
+import time
 import typing
 from dataclasses import dataclass
 
@@ -70,9 +73,18 @@ def whoami():
 
 
 def sleep(seconds):
-    import time
     time.sleep(seconds)
     return 'slept'
+
+
+def wait_for_release(started_path, release_path):
+    """Tell Erlang the call is running, then hold its context until released."""
+    started_path = os.fsdecode(started_path)
+    release_path = os.fsdecode(release_path)
+    pathlib.Path(started_path).touch()
+    while not os.path.exists(release_path):
+        time.sleep(0.01)
+    return 'released'
 
 
 def bump_via_callback(session):

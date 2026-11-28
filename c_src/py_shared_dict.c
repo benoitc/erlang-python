@@ -1,825 +1,546 @@
-/*
- * Copyright 2026 Benoit Chesneau
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+/* Copyright 2026 Benoit Chesneau. Licensed under the Apache License, Version 2.0. */
 
 /**
- * py_shared_dict.c - SharedDict implementation for Erlang-Python bridge
+ * Native storage for SharedDict.
  *
- * This file implements process-scoped shared dictionaries that allow
- * Python code running in different contexts to share data safely.
- *
- * Features:
- * - Process-scoped: owned by an Erlang process, destroyed when process dies
- * - Thread-safe: mutex-protected operations
- * - Cross-interpreter safe: values stored as pickled bytes
+ * Only byte strings cross interpreters. Pickling and unpickling happen before
+ * or after the table lock, never while it is held. Consequently Python code
+ * runs under its own interpreter's GIL and cannot invert the GIL/table-lock
+ * order or re-enter a locked dictionary from pickle callbacks.
  */
 
-/* ============================================================================
- * Resource Callbacks
- * ============================================================================ */
+typedef struct { unsigned char *data; size_t len; } shared_dict_bytes_t;
+typedef struct { unsigned char *data; size_t len; } shared_dict_key_t;
 
-/**
- * @brief Destructor for py_shared_dict_t
- *
- * Called when the resource is garbage collected.
- * Cleans up the monitor, Python dict, and mutex.
- */
+static uint64_t shared_dict_hash(const unsigned char *key, size_t len) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (size_t i = 0; i < len; i++) {
+        hash ^= key[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static unsigned char *shared_dict_value(py_shared_dict_entry_t *entry) {
+    return entry->data + entry->key_len;
+}
+
+static py_shared_dict_entry_t *shared_dict_find_locked(
+        py_shared_dict_t *sd, const unsigned char *key, size_t key_len,
+        py_shared_dict_entry_t ***link_out) {
+    size_t bucket = (size_t)(shared_dict_hash(key, key_len) % PY_SHARED_DICT_BUCKETS);
+    py_shared_dict_entry_t **link = &sd->buckets[bucket];
+    while (*link != NULL) {
+        py_shared_dict_entry_t *entry = *link;
+        if (entry->key_len == key_len &&
+            (key_len == 0 || memcmp(entry->data, key, key_len) == 0)) {
+            if (link_out != NULL) *link_out = link;
+            return entry;
+        }
+        link = &entry->next;
+    }
+    if (link_out != NULL) *link_out = link;
+    return NULL;
+}
+
+static py_shared_dict_entry_t *shared_dict_entry_new(
+        const unsigned char *key, size_t key_len,
+        const unsigned char *value, size_t value_len) {
+    if (key_len > SIZE_MAX - value_len ||
+        sizeof(py_shared_dict_entry_t) > SIZE_MAX - key_len - value_len) return NULL;
+    py_shared_dict_entry_t *entry = enif_alloc(
+        sizeof(*entry) + key_len + value_len);
+    if (entry == NULL) return NULL;
+    entry->next = NULL;
+    entry->key_len = key_len;
+    entry->value_len = value_len;
+    if (key_len > 0) memcpy(entry->data, key, key_len);
+    if (value_len > 0) memcpy(entry->data + key_len, value, value_len);
+    return entry;
+}
+
+static void shared_dict_free_entries(py_shared_dict_entry_t *entry) {
+    while (entry != NULL) {
+        py_shared_dict_entry_t *next = entry->next;
+        enif_free(entry);
+        entry = next;
+    }
+}
+
+static py_shared_dict_entry_t *shared_dict_detach_all_locked(py_shared_dict_t *sd) {
+    py_shared_dict_entry_t *head = NULL;
+    for (size_t i = 0; i < PY_SHARED_DICT_BUCKETS; i++) {
+        py_shared_dict_entry_t *entry = sd->buckets[i];
+        while (entry != NULL) {
+            py_shared_dict_entry_t *next = entry->next;
+            entry->next = head;
+            head = entry;
+            entry = next;
+        }
+        sd->buckets[i] = NULL;
+    }
+    sd->size = 0;
+    return head;
+}
+
+static void shared_dict_destroy_contents(py_shared_dict_t *sd) {
+    if (!sd->mutex_initialized) return;
+    pthread_mutex_lock(&sd->mutex);
+    atomic_store(&sd->destroyed, true);
+    py_shared_dict_entry_t *entries = shared_dict_detach_all_locked(sd);
+    pthread_mutex_unlock(&sd->mutex);
+    shared_dict_free_entries(entries);
+}
+
+static int shared_dict_store(py_shared_dict_t *sd,
+                             const unsigned char *key, size_t key_len,
+                             const unsigned char *value, size_t value_len) {
+    py_shared_dict_entry_t *new_entry = shared_dict_entry_new(
+        key, key_len, value, value_len);
+    if (new_entry == NULL) return -1;
+    pthread_mutex_lock(&sd->mutex);
+    if (atomic_load(&sd->destroyed)) {
+        pthread_mutex_unlock(&sd->mutex);
+        enif_free(new_entry);
+        return 1;
+    }
+    py_shared_dict_entry_t **link;
+    py_shared_dict_entry_t *old = shared_dict_find_locked(sd, key, key_len, &link);
+    new_entry->next = old != NULL ? old->next : NULL;
+    *link = new_entry;
+    if (old == NULL) sd->size++;
+    pthread_mutex_unlock(&sd->mutex);
+    if (old != NULL) enif_free(old);
+    return 0;
+}
+
+/* 1 found, 0 absent, -1 destroyed, -2 allocation failure. */
+static int shared_dict_copy_value(py_shared_dict_t *sd,
+                                  const unsigned char *key, size_t key_len,
+                                  shared_dict_bytes_t *out) {
+    out->data = NULL;
+    out->len = 0;
+    pthread_mutex_lock(&sd->mutex);
+    if (atomic_load(&sd->destroyed)) {
+        pthread_mutex_unlock(&sd->mutex);
+        return -1;
+    }
+    py_shared_dict_entry_t *entry = shared_dict_find_locked(sd, key, key_len, NULL);
+    if (entry == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return 0;
+    }
+    unsigned char *copy = enif_alloc(entry->value_len > 0 ? entry->value_len : 1);
+    if (copy == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return -2;
+    }
+    if (entry->value_len > 0) memcpy(copy, shared_dict_value(entry), entry->value_len);
+    out->data = copy;
+    out->len = entry->value_len;
+    pthread_mutex_unlock(&sd->mutex);
+    return 1;
+}
+
+static int shared_dict_delete(py_shared_dict_t *sd,
+                              const unsigned char *key, size_t key_len) {
+    pthread_mutex_lock(&sd->mutex);
+    if (atomic_load(&sd->destroyed)) {
+        pthread_mutex_unlock(&sd->mutex);
+        return -1;
+    }
+    py_shared_dict_entry_t **link;
+    py_shared_dict_entry_t *entry = shared_dict_find_locked(sd, key, key_len, &link);
+    if (entry != NULL) {
+        *link = entry->next;
+        sd->size--;
+    }
+    pthread_mutex_unlock(&sd->mutex);
+    if (entry != NULL) enif_free(entry);
+    return entry != NULL ? 1 : 0;
+}
+
+static PyObject *shared_dict_pickle_dumps(PyObject *value) {
+    PyObject *pickle = PyImport_ImportModule("pickle");
+    if (pickle == NULL) return NULL;
+    PyObject *dumps = PyObject_GetAttrString(pickle, "dumps");
+    Py_DECREF(pickle);
+    if (dumps == NULL) return NULL;
+    PyObject *result = PyObject_CallFunctionObjArgs(dumps, value, NULL);
+    Py_DECREF(dumps);
+    return result;
+}
+
+static PyObject *shared_dict_pickle_loads(const unsigned char *data, size_t len) {
+    if (len > (size_t)PY_SSIZE_T_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "stored SharedDict value is too large");
+        return NULL;
+    }
+    PyObject *bytes = PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)len);
+    if (bytes == NULL) return NULL;
+    PyObject *pickle = PyImport_ImportModule("pickle");
+    if (pickle == NULL) { Py_DECREF(bytes); return NULL; }
+    PyObject *loads = PyObject_GetAttrString(pickle, "loads");
+    Py_DECREF(pickle);
+    if (loads == NULL) { Py_DECREF(bytes); return NULL; }
+    PyObject *result = PyObject_CallFunctionObjArgs(loads, bytes, NULL);
+    Py_DECREF(loads);
+    Py_DECREF(bytes);
+    return result;
+}
+
+static int shared_dict_snapshot_keys(py_shared_dict_t *sd,
+                                     shared_dict_key_t **keys_out,
+                                     size_t *count_out) {
+    *keys_out = NULL;
+    *count_out = 0;
+    pthread_mutex_lock(&sd->mutex);
+    if (atomic_load(&sd->destroyed)) {
+        pthread_mutex_unlock(&sd->mutex);
+        return -1;
+    }
+    if (sd->size > SIZE_MAX / sizeof(shared_dict_key_t)) {
+        pthread_mutex_unlock(&sd->mutex);
+        return -2;
+    }
+    shared_dict_key_t *keys = sd->size > 0
+        ? enif_alloc(sd->size * sizeof(*keys)) : NULL;
+    if (sd->size > 0 && keys == NULL) {
+        pthread_mutex_unlock(&sd->mutex);
+        return -2;
+    }
+    size_t count = 0;
+    for (size_t i = 0; i < PY_SHARED_DICT_BUCKETS; i++) {
+        for (py_shared_dict_entry_t *entry = sd->buckets[i];
+             entry != NULL; entry = entry->next) {
+            unsigned char *copy = enif_alloc(entry->key_len > 0 ? entry->key_len : 1);
+            if (copy == NULL) {
+                for (size_t j = 0; j < count; j++) enif_free(keys[j].data);
+                enif_free(keys);
+                pthread_mutex_unlock(&sd->mutex);
+                return -2;
+            }
+            if (entry->key_len > 0) memcpy(copy, entry->data, entry->key_len);
+            keys[count].data = copy;
+            keys[count].len = entry->key_len;
+            count++;
+        }
+    }
+    pthread_mutex_unlock(&sd->mutex);
+    *keys_out = keys;
+    *count_out = count;
+    return 0;
+}
+
+static void shared_dict_free_keys(shared_dict_key_t *keys, size_t count) {
+    for (size_t i = 0; i < count; i++) enif_free(keys[i].data);
+    enif_free(keys);
+}
+
+/* Resource callback. */
 static void shared_dict_destructor(ErlNifEnv *env, void *obj) {
-    py_shared_dict_t *sd = (py_shared_dict_t *)obj;
-
-    /* Demonitor if still active */
+    py_shared_dict_t *sd = obj;
     if (sd->monitor_active && env != NULL) {
         enif_demonitor_process(env, sd, &sd->monitor);
         sd->monitor_active = false;
     }
-
-    /* Clear Python dict if runtime is still running */
-    if (runtime_is_running() && sd->dict != NULL) {
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        Py_CLEAR(sd->dict);
-        PyGILState_Release(gstate);
+    shared_dict_destroy_contents(sd);
+    if (sd->mutex_initialized) {
+        pthread_mutex_destroy(&sd->mutex);
+        sd->mutex_initialized = false;
     }
-
-    /* Destroy mutex */
-    pthread_mutex_destroy(&sd->mutex);
 }
 
-/* ============================================================================
- * NIF Functions
- * ============================================================================ */
-
-/**
- * @brief Create a new process-scoped SharedDict
- *
- * Creates a SharedDict owned by the calling process. The dict is automatically
- * destroyed when the owning process terminates.
- *
- * @return {ok, Reference} on success, {error, Reason} on failure
- */
+/* Erlang NIFs. */
 static ERL_NIF_TERM nif_shared_dict_new(ErlNifEnv *env, int argc,
                                          const ERL_NIF_TERM argv[]) {
-    (void)argc;
-    (void)argv;
-
+    (void)argc; (void)argv;
     RUNTIME_CHECK_ERROR(env);
-
-    /* Allocate resource */
     py_shared_dict_t *sd = enif_alloc_resource(
-        PY_SHARED_DICT_RESOURCE_TYPE, sizeof(py_shared_dict_t));
-    if (sd == NULL) {
-        return make_error_atom(env, "alloc_failed");
-    }
-
-    /* Initialize fields */
-    memset(sd, 0, sizeof(py_shared_dict_t));
+        PY_SHARED_DICT_RESOURCE_TYPE, sizeof(*sd));
+    if (sd == NULL) return make_error_atom(env, "alloc_failed");
+    memset(sd, 0, sizeof(*sd));
     atomic_store(&sd->destroyed, false);
-    pthread_mutex_init(&sd->mutex, NULL);
-
-    /* Create Python dict for storage */
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    sd->dict = PyDict_New();
-    if (sd->dict == NULL) {
-        PyGILState_Release(gstate);
-        pthread_mutex_destroy(&sd->mutex);
+    if (pthread_mutex_init(&sd->mutex, NULL) != 0) {
         enif_release_resource(sd);
-        return make_error_atom(env, "dict_alloc_failed");
+        return make_error_atom(env, "mutex_init_failed");
     }
-    PyGILState_Release(gstate);
-
-    /* SharedDict is GC-scoped: the resource destructor runs once the
-     * last term reference is dropped (or at process exit), at which
-     * point the underlying Python dict is cleared. There is no
-     * per-process monitor — callers that want eager release must call
-     * shared_dict_destroy/1 explicitly. */
-    sd->monitor_active = false;
-
-    /* Create reference term and release our reference */
+    sd->mutex_initialized = true;
     ERL_NIF_TERM ref = enif_make_resource(env, sd);
     enif_release_resource(sd);
-
     return enif_make_tuple2(env, ATOM_OK, ref);
 }
 
-/**
- * @brief Get a value from SharedDict
- *
- * @param Handle SharedDict reference
- * @param Key Binary key
- * @param Default Default value if key not found
- * @return Value or Default, badarg if destroyed
- */
 static ERL_NIF_TERM nif_shared_dict_get(ErlNifEnv *env, int argc,
                                          const ERL_NIF_TERM argv[]) {
     (void)argc;
-
     py_shared_dict_t *sd;
     GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
     CHECK_NOT_DESTROYED(env, sd);
-
-    /* Get key as binary */
-    ErlNifBinary key_bin;
-    INSPECT_BINARY_OR_BADARG(env, argv[1], key_bin);
-
-    /* Lock and access dict */
-    pthread_mutex_lock(&sd->mutex);
-
-    /* Check destroyed again after acquiring lock */
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
-    }
-
+    ErlNifBinary key;
+    INSPECT_BINARY_OR_BADARG(env, argv[1], key);
+    shared_dict_bytes_t stored;
+    int found = shared_dict_copy_value(sd, key.data, key.size, &stored);
+    if (found == 0) return argv[2];
+    if (found == -1) return enif_make_badarg(env);
+    if (found == -2) return make_error_atom(env, "alloc_failed");
     PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Create Python key from binary */
-    PyObject *py_key = PyBytes_FromStringAndSize((char *)key_bin.data, key_bin.size);
-    if (py_key == NULL) {
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
-    }
-
-    /* Look up value (pickled bytes) */
-    PyObject *pickled = PyDict_GetItem(sd->dict, py_key);
-    Py_DECREF(py_key);
-
-    if (pickled == NULL) {
-        /* Key not found, return default */
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return argv[2];  /* Return default */
-    }
-
-    /* Unpickle the value */
-    PyObject *pickle_mod = PyImport_ImportModule("pickle");
-    if (pickle_mod == NULL) {
-        PyErr_Clear();
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return make_error_atom(env, "pickle_unavailable");
-    }
-
-    PyObject *loads = PyObject_GetAttrString(pickle_mod, "loads");
-    Py_DECREF(pickle_mod);
-    if (loads == NULL) {
-        PyErr_Clear();
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return make_error_atom(env, "pickle_loads_unavailable");
-    }
-
-    PyObject *value = PyObject_CallFunctionObjArgs(loads, pickled, NULL);
-    Py_DECREF(loads);
-
+    PyObject *value = shared_dict_pickle_loads(stored.data, stored.len);
+    enif_free(stored.data);
     if (value == NULL) {
         PyErr_Clear();
         PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
         return make_error_atom(env, "unpickle_failed");
     }
-
-    /* Convert Python value to Erlang term */
     ERL_NIF_TERM result = py_to_term(env, value);
     Py_DECREF(value);
-
     PyGILState_Release(gstate);
-    pthread_mutex_unlock(&sd->mutex);
-
     return result;
 }
 
-/**
- * @brief Set a value in SharedDict
- *
- * @param Handle SharedDict reference
- * @param Key Binary key
- * @param Value Erlang term value (will be pickled)
- * @return ok on success, badarg if destroyed
- */
 static ERL_NIF_TERM nif_shared_dict_set(ErlNifEnv *env, int argc,
                                          const ERL_NIF_TERM argv[]) {
     (void)argc;
-
     py_shared_dict_t *sd;
     GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
     CHECK_NOT_DESTROYED(env, sd);
-
-    /* Get key as binary */
-    ErlNifBinary key_bin;
-    INSPECT_BINARY_OR_BADARG(env, argv[1], key_bin);
-
-    /* Lock and access dict */
-    pthread_mutex_lock(&sd->mutex);
-
-    /* Check destroyed again after acquiring lock */
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
-    }
-
+    ErlNifBinary key;
+    INSPECT_BINARY_OR_BADARG(env, argv[1], key);
     PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Convert Erlang term to Python object */
-    PyObject *py_value = term_to_py(env, argv[2]);
-    if (py_value == NULL) {
-        PyErr_Clear();
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return make_error_atom(env, "term_conversion_failed");
-    }
-
-    /* Pickle the value for cross-interpreter safety */
-    PyObject *pickle_mod = PyImport_ImportModule("pickle");
-    if (pickle_mod == NULL) {
-        PyErr_Clear();
-        Py_DECREF(py_value);
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return make_error_atom(env, "pickle_unavailable");
-    }
-
-    PyObject *dumps = PyObject_GetAttrString(pickle_mod, "dumps");
-    Py_DECREF(pickle_mod);
-    if (dumps == NULL) {
-        PyErr_Clear();
-        Py_DECREF(py_value);
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return make_error_atom(env, "pickle_dumps_unavailable");
-    }
-
-    PyObject *pickled = PyObject_CallFunctionObjArgs(dumps, py_value, NULL);
-    Py_DECREF(dumps);
-    Py_DECREF(py_value);
-
+    PyObject *value = term_to_py(env, argv[2]);
+    PyObject *pickled = value != NULL ? shared_dict_pickle_dumps(value) : NULL;
+    Py_XDECREF(value);
     if (pickled == NULL) {
         PyErr_Clear();
         PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
         return make_error_atom(env, "pickle_failed");
     }
-
-    /* Create Python key from binary */
-    PyObject *py_key = PyBytes_FromStringAndSize((char *)key_bin.data, key_bin.size);
-    if (py_key == NULL) {
+    char *data;
+    Py_ssize_t len;
+    if (PyBytes_AsStringAndSize(pickled, &data, &len) < 0) {
         Py_DECREF(pickled);
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
-    }
-
-    /* Store pickled value in dict */
-    int set_result = PyDict_SetItem(sd->dict, py_key, pickled);
-    Py_DECREF(py_key);
-    Py_DECREF(pickled);
-
-    if (set_result < 0) {
         PyErr_Clear();
         PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return make_error_atom(env, "dict_set_failed");
+        return make_error_atom(env, "pickle_failed");
     }
-
+    int result = shared_dict_store(sd, key.data, key.size,
+                                   (unsigned char *)data, (size_t)len);
+    Py_DECREF(pickled);
     PyGILState_Release(gstate);
-    pthread_mutex_unlock(&sd->mutex);
-
+    if (result == 1) return enif_make_badarg(env);
+    if (result < 0) return make_error_atom(env, "alloc_failed");
     return ATOM_OK;
 }
 
-/**
- * @brief Delete a key from SharedDict
- *
- * @param Handle SharedDict reference
- * @param Key Binary key
- * @return ok on success (even if key didn't exist), badarg if destroyed
- */
 static ERL_NIF_TERM nif_shared_dict_del(ErlNifEnv *env, int argc,
                                          const ERL_NIF_TERM argv[]) {
     (void)argc;
-
     py_shared_dict_t *sd;
     GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
     CHECK_NOT_DESTROYED(env, sd);
-
-    /* Get key as binary */
-    ErlNifBinary key_bin;
-    INSPECT_BINARY_OR_BADARG(env, argv[1], key_bin);
-
-    /* Lock and access dict */
-    pthread_mutex_lock(&sd->mutex);
-
-    /* Check destroyed again after acquiring lock */
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
-    }
-
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Create Python key from binary */
-    PyObject *py_key = PyBytes_FromStringAndSize((char *)key_bin.data, key_bin.size);
-    if (py_key == NULL) {
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
-    }
-
-    /* Delete key (ignore if not found) */
-    PyDict_DelItem(sd->dict, py_key);
-    PyErr_Clear();  /* Clear KeyError if key didn't exist */
-    Py_DECREF(py_key);
-
-    PyGILState_Release(gstate);
-    pthread_mutex_unlock(&sd->mutex);
-
-    return ATOM_OK;
+    ErlNifBinary key;
+    INSPECT_BINARY_OR_BADARG(env, argv[1], key);
+    return shared_dict_delete(sd, key.data, key.size) < 0
+        ? enif_make_badarg(env) : ATOM_OK;
 }
 
-/**
- * @brief Get all keys from SharedDict
- *
- * @param Handle SharedDict reference
- * @return List of binary keys, badarg if destroyed
- */
 static ERL_NIF_TERM nif_shared_dict_keys(ErlNifEnv *env, int argc,
                                           const ERL_NIF_TERM argv[]) {
     (void)argc;
-
     py_shared_dict_t *sd;
     GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
     CHECK_NOT_DESTROYED(env, sd);
-
-    /* Lock and access dict */
-    pthread_mutex_lock(&sd->mutex);
-
-    /* Check destroyed again after acquiring lock */
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_badarg(env);
+    shared_dict_key_t *keys;
+    size_t count;
+    int snapshot = shared_dict_snapshot_keys(sd, &keys, &count);
+    if (snapshot == -1) return enif_make_badarg(env);
+    if (snapshot == -2) return make_error_atom(env, "alloc_failed");
+    if (count > UINT_MAX || count > SIZE_MAX / sizeof(ERL_NIF_TERM)) {
+        shared_dict_free_keys(keys, count);
+        return make_error_atom(env, "too_many_keys");
     }
-
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    /* Get keys */
-    PyObject *keys = PyDict_Keys(sd->dict);
-    if (keys == NULL) {
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_list(env, 0);
+    ERL_NIF_TERM *terms = count > 0 ? enif_alloc(count * sizeof(*terms)) : NULL;
+    if (count > 0 && terms == NULL) {
+        shared_dict_free_keys(keys, count);
+        return make_error_atom(env, "alloc_failed");
     }
-
-    Py_ssize_t len = PyList_Size(keys);
-    ERL_NIF_TERM *key_terms = enif_alloc(sizeof(ERL_NIF_TERM) * len);
-    if (key_terms == NULL) {
-        Py_DECREF(keys);
-        PyGILState_Release(gstate);
-        pthread_mutex_unlock(&sd->mutex);
-        return enif_make_list(env, 0);
-    }
-
-    for (Py_ssize_t i = 0; i < len; i++) {
-        PyObject *py_key = PyList_GetItem(keys, i);
-        if (PyBytes_Check(py_key)) {
-            char *data;
-            Py_ssize_t size;
-            PyBytes_AsStringAndSize(py_key, &data, &size);
-            ERL_NIF_TERM bin;
-            unsigned char *buf = enif_make_new_binary(env, size, &bin);
-            if (buf != NULL) {
-                memcpy(buf, data, size);
-                key_terms[i] = bin;
-            } else {
-                key_terms[i] = enif_make_atom(env, "error");
-            }
-        } else {
-            key_terms[i] = enif_make_atom(env, "error");
+    for (size_t i = 0; i < count; i++) {
+        unsigned char *buf = enif_make_new_binary(env, keys[i].len, &terms[i]);
+        if (buf == NULL && keys[i].len > 0) {
+            enif_free(terms);
+            shared_dict_free_keys(keys, count);
+            return make_error_atom(env, "alloc_failed");
         }
+        if (keys[i].len > 0) memcpy(buf, keys[i].data, keys[i].len);
     }
-
-    ERL_NIF_TERM result = enif_make_list_from_array(env, key_terms, len);
-    enif_free(key_terms);
-    Py_DECREF(keys);
-
-    PyGILState_Release(gstate);
-    pthread_mutex_unlock(&sd->mutex);
-
+    ERL_NIF_TERM result = enif_make_list_from_array(env, terms, (unsigned)count);
+    enif_free(terms);
+    shared_dict_free_keys(keys, count);
     return result;
 }
 
-/**
- * @brief Explicitly destroy a SharedDict.
- *
- * Marks the SharedDict as destroyed and clears its Python dict.
- * This is idempotent - calling on an already-destroyed dict returns ok.
- *
- * @param Handle SharedDict reference
- * @return ok atom
- */
 static ERL_NIF_TERM nif_shared_dict_destroy(ErlNifEnv *env, int argc,
                                              const ERL_NIF_TERM argv[]) {
     (void)argc;
-
     py_shared_dict_t *sd;
     GET_RESOURCE_OR_BADARG(env, argv[0], PY_SHARED_DICT_RESOURCE_TYPE, &sd);
-
-    /* Check if already destroyed - idempotent */
-    if (atomic_load(&sd->destroyed)) {
-        return ATOM_OK;
-    }
-
-    /* Mark as destroyed */
-    atomic_store(&sd->destroyed, true);
-
-    /* Clear the Python dict */
-    pthread_mutex_lock(&sd->mutex);
-    if (sd->dict != NULL && runtime_is_running()) {
-        PyGILState_STATE gstate = PyGILState_Ensure();
-        Py_CLEAR(sd->dict);
-        PyGILState_Release(gstate);
-    }
-    sd->dict = NULL;
-    pthread_mutex_unlock(&sd->mutex);
-
+    shared_dict_destroy_contents(sd);
     return ATOM_OK;
 }
 
-/* ============================================================================
- * Python Methods
- * ============================================================================
- * These functions implement the Python-side API for SharedDict, allowing
- * Python code to access process-scoped shared dictionaries.
- */
-
-/**
- * Extract py_shared_dict_t* from a PyCapsule.
- * Returns NULL and sets exception on error.
- */
+/* Python methods. The caller already holds its own interpreter's GIL. */
 static py_shared_dict_t *get_shared_dict_from_capsule(PyObject *capsule) {
     if (!PyCapsule_IsValid(capsule, "py_shared_dict")) {
         PyErr_SetString(PyExc_TypeError, "Invalid SharedDict handle");
         return NULL;
     }
-    py_shared_dict_t *sd = (py_shared_dict_t *)PyCapsule_GetPointer(capsule, "py_shared_dict");
-    if (sd == NULL) {
-        PyErr_SetString(PyExc_ValueError, "SharedDict handle is NULL");
-        return NULL;
-    }
-    if (atomic_load(&sd->destroyed)) {
+    py_shared_dict_t *sd = PyCapsule_GetPointer(capsule, "py_shared_dict");
+    if (sd != NULL && atomic_load(&sd->destroyed)) {
         PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
         return NULL;
     }
     return sd;
 }
 
-/**
- * Python implementation of SharedDict.get(key, default=None)
- * Usage: erlang._shared_dict_get(handle, key)
- */
 static PyObject *py_shared_dict_get_impl(PyObject *self, PyObject *args) {
     (void)self;
     PyObject *handle;
     const char *key;
     Py_ssize_t key_len;
-
-    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) {
-        return NULL;
-    }
-
+    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) return NULL;
     py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
     if (sd == NULL) return NULL;
-
-    pthread_mutex_lock(&sd->mutex);
-
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
+    shared_dict_bytes_t stored;
+    int found = shared_dict_copy_value(sd, (unsigned char *)key, (size_t)key_len, &stored);
+    if (found == 0) Py_RETURN_NONE;
+    if (found == -1) {
         PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
         return NULL;
     }
-
-    /* Create Python key from bytes */
-    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
-    if (py_key == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    /* Look up pickled value */
-    PyObject *pickled = PyDict_GetItem(sd->dict, py_key);
-    Py_DECREF(py_key);
-
-    if (pickled == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        Py_RETURN_NONE;
-    }
-
-    /* Unpickle the value */
-    PyObject *pickle_mod = PyImport_ImportModule("pickle");
-    if (pickle_mod == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    PyObject *loads = PyObject_GetAttrString(pickle_mod, "loads");
-    Py_DECREF(pickle_mod);
-    if (loads == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    PyObject *value = PyObject_CallFunctionObjArgs(loads, pickled, NULL);
-    Py_DECREF(loads);
-
-    pthread_mutex_unlock(&sd->mutex);
+    if (found == -2) return PyErr_NoMemory();
+    PyObject *value = shared_dict_pickle_loads(stored.data, stored.len);
+    enif_free(stored.data);
     return value;
 }
 
-/**
- * Python implementation of SharedDict.set(key, value)
- * Usage: erlang._shared_dict_set(handle, key, value)
- */
 static PyObject *py_shared_dict_set_impl(PyObject *self, PyObject *args) {
     (void)self;
-    PyObject *handle;
+    PyObject *handle, *value;
     const char *key;
     Py_ssize_t key_len;
-    PyObject *value;
-
-    if (!PyArg_ParseTuple(args, "Os#O", &handle, &key, &key_len, &value)) {
-        return NULL;
-    }
-
+    if (!PyArg_ParseTuple(args, "Os#O", &handle, &key, &key_len, &value)) return NULL;
     py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
     if (sd == NULL) return NULL;
-
-    pthread_mutex_lock(&sd->mutex);
-
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
+    PyObject *pickled = shared_dict_pickle_dumps(value);
+    if (pickled == NULL) return NULL;
+    char *data;
+    Py_ssize_t len;
+    if (PyBytes_AsStringAndSize(pickled, &data, &len) < 0) {
+        Py_DECREF(pickled);
+        return NULL;
+    }
+    int result = shared_dict_store(sd, (unsigned char *)key, (size_t)key_len,
+                                   (unsigned char *)data, (size_t)len);
+    Py_DECREF(pickled);
+    if (result == 1) {
         PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
         return NULL;
     }
-
-    /* Pickle the value */
-    PyObject *pickle_mod = PyImport_ImportModule("pickle");
-    if (pickle_mod == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    PyObject *dumps = PyObject_GetAttrString(pickle_mod, "dumps");
-    Py_DECREF(pickle_mod);
-    if (dumps == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    PyObject *pickled = PyObject_CallFunctionObjArgs(dumps, value, NULL);
-    Py_DECREF(dumps);
-    if (pickled == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    /* Create Python key */
-    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
-    if (py_key == NULL) {
-        Py_DECREF(pickled);
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    /* Store in dict */
-    int result = PyDict_SetItem(sd->dict, py_key, pickled);
-    Py_DECREF(py_key);
-    Py_DECREF(pickled);
-
-    pthread_mutex_unlock(&sd->mutex);
-
-    if (result < 0) {
-        return NULL;
-    }
+    if (result < 0) return PyErr_NoMemory();
     Py_RETURN_NONE;
 }
 
-/**
- * Python implementation of SharedDict.delete(key)
- * Usage: erlang._shared_dict_del(handle, key)
- * Returns True if key existed, False otherwise
- */
 static PyObject *py_shared_dict_del_impl(PyObject *self, PyObject *args) {
     (void)self;
     PyObject *handle;
     const char *key;
     Py_ssize_t key_len;
-
-    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) {
-        return NULL;
-    }
-
+    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) return NULL;
     py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
     if (sd == NULL) return NULL;
-
-    pthread_mutex_lock(&sd->mutex);
-
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
+    int result = shared_dict_delete(sd, (unsigned char *)key, (size_t)key_len);
+    if (result < 0) {
         PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
         return NULL;
     }
-
-    /* Create Python key */
-    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
-    if (py_key == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    /* Check if key exists */
-    int exists = PyDict_Contains(sd->dict, py_key);
-    if (exists > 0) {
-        PyDict_DelItem(sd->dict, py_key);
-        PyErr_Clear();
-    }
-    Py_DECREF(py_key);
-
-    pthread_mutex_unlock(&sd->mutex);
-
-    if (exists > 0) {
-        Py_RETURN_TRUE;
-    }
-    Py_RETURN_FALSE;
+    return PyBool_FromLong(result);
 }
 
-/**
- * Python implementation of SharedDict.contains(key)
- * Usage: erlang._shared_dict_contains(handle, key)
- */
 static PyObject *py_shared_dict_contains_impl(PyObject *self, PyObject *args) {
     (void)self;
     PyObject *handle;
     const char *key;
     Py_ssize_t key_len;
-
-    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) {
-        return NULL;
-    }
-
+    if (!PyArg_ParseTuple(args, "Os#", &handle, &key, &key_len)) return NULL;
     py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
     if (sd == NULL) return NULL;
-
     pthread_mutex_lock(&sd->mutex);
-
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
+    bool destroyed = atomic_load(&sd->destroyed);
+    bool found = !destroyed && shared_dict_find_locked(
+        sd, (unsigned char *)key, (size_t)key_len, NULL) != NULL;
+    pthread_mutex_unlock(&sd->mutex);
+    if (destroyed) {
         PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
         return NULL;
     }
-
-    /* Create Python key */
-    PyObject *py_key = PyBytes_FromStringAndSize(key, key_len);
-    if (py_key == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
-    }
-
-    int exists = PyDict_Contains(sd->dict, py_key);
-    Py_DECREF(py_key);
-
-    pthread_mutex_unlock(&sd->mutex);
-
-    if (exists > 0) {
-        Py_RETURN_TRUE;
-    } else if (exists == 0) {
-        Py_RETURN_FALSE;
-    } else {
-        return NULL;  /* Error occurred */
-    }
+    return PyBool_FromLong(found);
 }
 
-/**
- * Python implementation of SharedDict.destroy()
- * Usage: erlang._shared_dict_destroy(handle)
- *
- * Explicitly destroys the SharedDict, invalidating all references.
- * This is idempotent - calling on already-destroyed dict returns None.
- */
 static PyObject *py_shared_dict_destroy_impl(PyObject *self, PyObject *args) {
     (void)self;
     PyObject *capsule;
-
-    if (!PyArg_ParseTuple(args, "O", &capsule)) {
-        return NULL;
-    }
-
+    if (!PyArg_ParseTuple(args, "O", &capsule)) return NULL;
     if (!PyCapsule_IsValid(capsule, "py_shared_dict")) {
         PyErr_SetString(PyExc_TypeError, "Invalid SharedDict handle");
         return NULL;
     }
-
-    py_shared_dict_t *sd = (py_shared_dict_t *)PyCapsule_GetPointer(capsule, "py_shared_dict");
-    if (sd == NULL) {
-        PyErr_SetString(PyExc_ValueError, "SharedDict handle is NULL");
-        return NULL;
-    }
-
-    /* If already destroyed, return None (idempotent) */
-    if (atomic_load(&sd->destroyed)) {
-        Py_RETURN_NONE;
-    }
-
-    /* Mark as destroyed */
-    atomic_store(&sd->destroyed, true);
-
-    /* Clear the Python dict */
-    pthread_mutex_lock(&sd->mutex);
-    Py_CLEAR(sd->dict);
-    pthread_mutex_unlock(&sd->mutex);
-
+    py_shared_dict_t *sd = PyCapsule_GetPointer(capsule, "py_shared_dict");
+    if (sd == NULL) return NULL;
+    shared_dict_destroy_contents(sd);
     Py_RETURN_NONE;
 }
 
-/**
- * Python implementation of SharedDict.keys()
- * Usage: erlang._shared_dict_keys(handle)
- */
 static PyObject *py_shared_dict_keys_impl(PyObject *self, PyObject *args) {
     (void)self;
     PyObject *handle;
-
-    if (!PyArg_ParseTuple(args, "O", &handle)) {
-        return NULL;
-    }
-
+    if (!PyArg_ParseTuple(args, "O", &handle)) return NULL;
     py_shared_dict_t *sd = get_shared_dict_from_capsule(handle);
     if (sd == NULL) return NULL;
-
-    pthread_mutex_lock(&sd->mutex);
-
-    if (atomic_load(&sd->destroyed) || sd->dict == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
+    shared_dict_key_t *keys;
+    size_t count;
+    int snapshot = shared_dict_snapshot_keys(sd, &keys, &count);
+    if (snapshot == -1) {
         PyErr_SetString(PyExc_RuntimeError, "SharedDict has been destroyed");
         return NULL;
     }
-
-    /* Get keys and decode them to strings */
-    PyObject *keys = PyDict_Keys(sd->dict);
-    if (keys == NULL) {
-        pthread_mutex_unlock(&sd->mutex);
-        return NULL;
+    if (snapshot == -2) return PyErr_NoMemory();
+    if (count > (size_t)PY_SSIZE_T_MAX) {
+        shared_dict_free_keys(keys, count);
+        return PyErr_NoMemory();
     }
-
-    Py_ssize_t len = PyList_Size(keys);
-    PyObject *result = PyList_New(len);
+    PyObject *result = PyList_New((Py_ssize_t)count);
     if (result == NULL) {
-        Py_DECREF(keys);
-        pthread_mutex_unlock(&sd->mutex);
+        shared_dict_free_keys(keys, count);
         return NULL;
     }
-
-    for (Py_ssize_t i = 0; i < len; i++) {
-        PyObject *py_key = PyList_GetItem(keys, i);
-        if (PyBytes_Check(py_key)) {
-            /* Decode bytes to string */
-            PyObject *str_key = PyUnicode_DecodeUTF8(
-                PyBytes_AS_STRING(py_key),
-                PyBytes_GET_SIZE(py_key),
-                "replace");
-            if (str_key == NULL) {
-                Py_DECREF(result);
-                Py_DECREF(keys);
-                pthread_mutex_unlock(&sd->mutex);
-                return NULL;
-            }
-            PyList_SET_ITEM(result, i, str_key);
-        } else {
-            Py_INCREF(py_key);
-            PyList_SET_ITEM(result, i, py_key);
+    for (size_t i = 0; i < count; i++) {
+        PyObject *key = PyUnicode_DecodeUTF8(
+            (const char *)keys[i].data, (Py_ssize_t)keys[i].len, "replace");
+        if (key == NULL) {
+            Py_DECREF(result);
+            shared_dict_free_keys(keys, count);
+            return NULL;
         }
+        PyList_SET_ITEM(result, (Py_ssize_t)i, key);
     }
-
-    Py_DECREF(keys);
-    pthread_mutex_unlock(&sd->mutex);
+    shared_dict_free_keys(keys, count);
     return result;
 }
 
-/* NIF table entries of this file; py_nif.c concatenates them into nif_funcs[].
- * Flags: ERL_NIF_DIRTY_JOB_* for anything that can block or run Python. */
 #define PY_SHARED_DICT_NIFS \
     {"shared_dict_new", 0, nif_shared_dict_new, 0}, \
     {"shared_dict_get", 3, nif_shared_dict_get, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
     {"shared_dict_set", 3, nif_shared_dict_set, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
     {"shared_dict_del", 2, nif_shared_dict_del, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
     {"shared_dict_keys", 1, nif_shared_dict_keys, ERL_NIF_DIRTY_JOB_IO_BOUND}, \
-    {"shared_dict_destroy", 1, nif_shared_dict_destroy, 0}
+    {"shared_dict_destroy", 1, nif_shared_dict_destroy, ERL_NIF_DIRTY_JOB_IO_BOUND}
